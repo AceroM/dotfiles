@@ -19,9 +19,27 @@ install_gh() {
     echo "GitHub CLI (gh) installed successfully."
 }
 
+install_yazi() {
+    if command -v yazi &> /dev/null; then
+        echo "Yazi is already installed."
+        return
+    fi
+
+    echo "Installing Yazi..."
+    if ! command -v cargo &> /dev/null; then
+        echo "Rust is required to install Yazi. Installing Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+    fi
+
+    cargo install --locked yazi-fm
+    echo "Yazi installed successfully."
+}
+
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     if command -v apt &> /dev/null; then
         install_gh
+        install_yazi
         stow .
     else
         echo "Unsupported Linux distribution."
