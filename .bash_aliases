@@ -25,6 +25,7 @@ alias nv="n .env"
 alias nr="n README.md"
 
 # git
+alias gpo="git push --set-upstream origin"
 alias gco="git checkout"
 alias gst="git status"
 alias gl="git pull"
