@@ -1,0 +1,16 @@
+AllCops:
+  NewCops: enable
+Layout/EmptyLineAfterGuardClause:
+  Enabled: false
+Layout/LineLength:
+  Enabled: false
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+Style/HashLikeCase:
+  Enabled: false
+Metrics/BlockLength:
+  Enabled: false
+Style/SpecialGlobalVars:
+  Enabled: false
+Style/Documentation:
+  Enabled: false
