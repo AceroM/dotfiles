@@ -7,9 +7,8 @@ alias sc="cd packages/scripts"
 alias f="n \$(fzf)"
 alias eb="n ~/.bashrc"
 alias ek="n ~/.config/kitty/kitty.conf"
-alias en="cd ~/.config/nvim"
-alias ec="cd ~/.config/nvim && n lua/plugins/completions.lua"
-alias ej="cd ~/.config/zellij"
+alias en="cd ~/dotfiles/.config/nvim"
+alias ec="cd ~/dotfiles/.config/nvim && n lua/plugins/completions.lua"
 
 # quick commands
 alias l="clear"
