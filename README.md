@@ -8,6 +8,12 @@ cd dotfiles
 ./install.sh
 ```
 
+## Programs
+
+- Kitty
+- Neovim
+- Yazi
+
 ## Credits
 
 - [Omakub](https://omakub.org/) - Setup ubuntu
