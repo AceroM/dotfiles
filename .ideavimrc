@@ -1,0 +1,160 @@
+" Key remaps
+nnoremap L $
+nnoremap H ^
+nnoremap Y ddO
+nnoremap K vt
+nnoremap S v$h
+nnoremap <c-j> <c-e>
+nnoremap <c-k> <c-y>
+
+" Intellij vim plugin settings
+let mapleader=" "
+set noerrorbells
+set visualbell
+set nocompatible
+set tabstop=2 shiftwidth=2 softtabstop=2 smarttab
+set relativenumber
+set number
+set hlsearch
+set guicursor=
+set smartcase
+set noswapfile
+set tabstop=2 softtabstop=2 expandtab shiftwidth=2 smarttab
+set noshowmatch
+set nobackup
+set nowrap
+set surround
+set termguicolors
+set scrolloff=7
+set cmdheight=2
+set updatetime=50
+set colorcolumn=80
+set timeout ttimeout         " separate mapping and keycode timeouts
+set timeoutlen=500           " mapping timeout 500ms  (adjust for preference)
+set ttimeoutlen=20           " keycode timeout 20ms
+
+" remapping
+nnoremap <leader>c $d0s
+nnoremap <leader>w :w<cr>
+nnoremap <leader>q :q!<cr>
+nnoremap <leader>a :qa!<cr>
+nnoremap <leader>n :noh<cr>
+
+nnremap <leader>s :s/\<<C-r><C-w>\>/
+nnoremap <leader>sg :%s/\<<C-r><C-w>\>/
+
+nnoremap [q :cprev<enter>
+nnoremap ]q :cnext<enter>
+
+" select in things
+nnoremap <leader>' _f'f'vi'
+nnoremap <leader>" _f"f"vi"
+nnoremap <leader>) _f)vi)
+nnoremap <leader>} _f}vi}
+nnoremap <leader>] _f]vi]
+nnoremap <leader>` _f`vi`
+nnoremap <leader>> _f>lct<
+
+" replace stuff down
+nnoremap <leader>1j 1jyy1kp
+nnoremap <leader>2<leader>j 2jyy2kP
+nnoremap <leader>3j 3jyy3kp
+nnoremap <leader>4j 4jyy4kp
+nnoremap <leader>5j 5jyy5kp
+nnoremap <leader>6j 6jyy6kp
+nnoremap <leader>7j 7jyy7kp
+nnoremap <leader>8j 8jyy8kp
+nnoremap <leader>9j 9jyy9kp
+nnoremap <leader>10j 10jyy10kp
+nnoremap <leader>11j 11jyy11kp
+nnoremap <leader>12j 12jyy12kp
+nnoremap <leader>13j 13jyy13kp
+nnoremap <leader>14j 14jyy14kp
+nnoremap <leader>15j 15jyy15kp
+nnoremap <leader>16j 16jyy16kp
+nnoremap <leader>17j 17jyy17kp
+nnoremap <leader>18j 18jyy18kp
+nnoremap <leader>19j 19jyy19kp
+nnoremap <leader>20j 20jyy20kp
+nnoremap <leader>21j 21jyy21kp
+nnoremap <leader>22j 22jyy22kp
+nnoremap <leader>23j 23jyy23kp
+nnoremap <leader>24j 24jyy24kp
+nnoremap <leader>25j 25jyy25kp
+nnoremap <leader>26j 26jyy26kp
+nnoremap <leader>27j 27jyy27kp
+nnoremap <leader>28j 28jyy28kp
+nnoremap <leader>29j 29jyy29kp
+nnoremap <leader>30j 30jyy30kp
+nnoremap <leader>31j 31jyy31kp
+nnoremap <leader>32j 32jyy32kp
+nnoremap <leader>33j 33jyy33kp
+nnoremap <leader>34j 34jyy34kp
+nnoremap <leader>35j 35jyy35kp
+nnoremap <leader>36j 36jyy36kp
+nnoremap <leader>37j 37jyy37kp
+nnoremap <leader>38j 38jyy38kp
+nnoremap <leader>39j 39jyy39kp
+nnoremap <leader>40j 40jyy40kp
+nnoremap <leader>41j 41jyy41kp
+nnoremap <leader>42j 42jyy42kp
+nnoremap <leader>43j 43jyy43kp
+nnoremap <leader>44j 44jyy44kp
+nnoremap <leader>45j 45jyy45kp
+nnoremap <leader>46j 46jyy46kp
+nnoremap <leader>47j 47jyy47kp
+nnoremap <leader>48j 48jyy48kp
+nnoremap <leader>49j 49jyy49kp
+nnoremap <leader>50j 50jyy50kp
+
+" replace stuff up
+nnoremap <leader>1k 1kyy1jp
+nnoremap <leader>2k 2kyy2jp
+nnoremap <leader>3k 3kyy3jp
+nnoremap <leader>4k 4kyy4jp
+nnoremap <leader>5k 5kyy5jp
+nnoremap <leader>6k 6kyy6jp
+nnoremap <leader>7k 7kyy7jp
+nnoremap <leader>8k 8kyy8jp
+nnoremap <leader>9k 9kyy9jp
+nnoremap <leader>10k 10kyy10jp
+nnoremap <leader>11k 11kyy11jp
+nnoremap <leader>12k 12kyy12jp
+nnoremap <leader>13k 13kyy13jp
+nnoremap <leader>14k 14kyy14jp
+nnoremap <leader>15k 15kyy15jp
+nnoremap <leader>16k 16kyy16jp
+nnoremap <leader>17k 17kyy17jp
+nnoremap <leader>18k 18kyy18jp
+nnoremap <leader>19k 19kyy19jp
+nnoremap <leader>20k 20kyy20jp
+nnoremap <leader>21k 21kyy21jp
+nnoremap <leader>22k 22kyy22jp
+nnoremap <leader>23k 23kyy23jp
+nnoremap <leader>24k 24kyy24jp
+nnoremap <leader>25k 25kyy25jp
+nnoremap <leader>26k 26kyy26jp
+nnoremap <leader>27k 27kyy27jp
+nnoremap <leader>28k 28kyy28jp
+nnoremap <leader>29k 29kyy29jp
+nnoremap <leader>30k 30kyy30jp
+nnoremap <leader>31k 31kyy31jp
+nnoremap <leader>32k 32kyy32jp
+nnoremap <leader>33k 33kyy33jp
+nnoremap <leader>34k 34kyy34jp
+nnoremap <leader>35k 35kyy35jp
+nnoremap <leader>36k 36kyy36jp
+nnoremap <leader>37k 37kyy37jp
+nnoremap <leader>38k 38kyy38jp
+nnoremap <leader>39k 39kyy39jp
+noremap <leader>40k 40kyy40jp
+nnoremap <leader>41k 41kyy41jp
+nnoremap <leader>42k 42kyy42jp
+nnoremap <leader>43k 43kyy43jp
+nnoremap <leader>44k 44kyy44jp
+nnoremap <leader>45k 45kyy45jp
+nnoremap <leader>46k 46kyy46jp
+nnoremap <leader>47k 47kyy47jp
+nnoremap <leader>48k 48kyy48jp
+nnoremap <leader>49k 49kyy49jp
+nnoremap <leader>50k 50kyy50jp
