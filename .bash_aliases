@@ -29,6 +29,7 @@ alias gco="git checkout"
 alias gst="git status"
 alias gl="git pull"
 alias gcl="git clone"
+alias gpo="git push --set-upstream origin"
 
 # node
 alias ns="npm start"
