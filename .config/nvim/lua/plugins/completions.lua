@@ -454,7 +454,7 @@ return {
 					})
 				),
 				s(
-					{ trig = ",.", name = "React Tag <>" },
+					{ trig = "m,", name = "React Tag <>" },
 					fmt("<{}>{}</{}>", {
 						i(1, "div"),
 						i(2),
