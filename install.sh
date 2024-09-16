@@ -36,10 +36,37 @@ install_yazi() {
     echo "Yazi installed successfully."
 }
 
+install_datagrip() {
+    if command -v datagrip &> /dev/null; then
+        echo "DataGrip is already installed."
+        return
+    fi
+
+    echo "Installing DataGrip..."
+    sudo snap install datagrip --classic
+    echo "DataGrip installed successfully."
+}
+
+install_autokey() {
+    if command -v autokey-gtk &> /dev/null; then
+        echo "AutoKey is already installed."
+        return
+    fi
+
+    echo "Installing AutoKey..."
+    sudo apt update
+    sudo apt install -y python3-dbus python3-pyinotify python3-xlib wmctrl
+    sudo apt install -y python3-gi gir1.2-gtk-3.0 gir1.2-gtksource-3.0 gir1.2-appindicator3-0.1 gir1.2-glib-2.0 gir1.2-notify-0.7 zenity
+    sudo apt install -y autokey-gtk
+    echo "AutoKey installed successfully."
+}
+
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     if command -v apt &> /dev/null; then
         install_gh
         install_yazi
+        install_datagrip
+        install_autokey
         stow .
     else
         echo "Unsupported Linux distribution."

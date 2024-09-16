@@ -13,6 +13,7 @@ cd dotfiles
 - Kitty
 - Neovim
 - Yazi
+- Autokey - For shortcut keys in Linux
 
 ## Credits
 
