@@ -141,6 +141,19 @@ return {
         priority = 9999,
       })
       local js_snippets = {
+        s("rcn", {
+          t("export function "),
+          i(1),
+          t("({"),
+          t({ "", "  className,", "  ...props" }),
+          t('}: React.ComponentPropsWithoutRef<"div">) {'),
+          t({ "", "  return (" }),
+          t({ "", '    <div {...props} className={cn(className, "' }),
+          i(2),
+          t({ '")} />' }),
+          t({ "", "  );" }),
+          t({ "", "}" }),
+        }),
         s("bk ", { t("block") }),
         s("hd ", { t("hidden") }),
         s("mlg", { t("max-lg:") }),
