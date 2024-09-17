@@ -64,7 +64,7 @@ return {
 				builtin.live_grep({ cwd = utils.buffer_dir() })
 			end, { desc = "Grep in current directory" })
 			vim.keymap.set("n", "<c-l>", builtin.find_files, { desc = "[S]earch [F]iles" })
-			vim.keymap.set("n", "<c-;>", builtin.lsp_document_symbols, { desc = "[S]earch [S]ymbols" })
+			-- vim.keymap.set("n", "<c-;>", builtin.lsp_document_symbols, { desc = "[S]earch [S]ymbols" })
 			vim.keymap.set("n", "<c-space>", builtin.oldfiles, {})
 			vim.keymap.set("n", "<leader>si", builtin.lsp_references, { desc = "[S]earch [I]mplementations" })
 			-- vim.keymap.set("n", "<leader>sf", builtin.find_files, { desc = "[S]earch [F]iles" })
