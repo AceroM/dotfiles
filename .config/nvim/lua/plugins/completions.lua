@@ -477,7 +477,7 @@ return {
 				),
 				s("imr", { t("import * as React from 'react'") }),
 				s("ds=", { t('data-slot="'), i(1), t('"') }),
-				s("ds-", { t('data-[slot="'), i(1), t('"]:'), i(2) }),
+				s("ds-", { t("data-[slot="), i(1), t("]:"), i(2) }),
 				s(
 					{ trig = "imd", name = "import as" },
 					fmt('import * as {} from "{}"', {
