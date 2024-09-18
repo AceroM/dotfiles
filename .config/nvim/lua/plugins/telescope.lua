@@ -51,7 +51,7 @@ return {
 			local utils = require("telescope.utils")
 			vim.keymap.set("n", "<leader>b", builtin.buffers, {})
 			vim.keymap.set("n", "<leader>fh", builtin.help_tags, {})
-			vim.keymap.set("n", "<C-p>", builtin.find_files, {})
+			-- vim.keymap.set("n", "<C-p>", builtin.find_files, {})
 			-- vim.keymap.set("v", "<C-p>", function()
 			--   local saved_reg = vim.fn.getreg('"')
 			--   vim.cmd('noau normal! "vy')
