@@ -9,19 +9,25 @@ return {
   keys = {
     { "<C-n>", "<Cmd>Neotree toggle<CR>" },
   },
-  opts = {
-    auto_expand_width = true,
-    event_handlers = {
-      event = "neo_tree_buffer_enter",
-      handler = function()
-        vim.opt_local.relativenumber = true
-        vim.cmd("set rnu")
-      end,
-    },
-  },
   config = function()
     require("neo-tree").setup({
+      auto_expand_width = true,
       position = "float",
+      event_handlers = {
+        {
+          event = "file_opened",
+          handler = function()
+            require("neo-tree.command").execute({ action = "focus" })
+          end,
+        },
+        {
+          event = "neo_tree_buffer_enter",
+          handler = function()
+            vim.opt_local.relativenumber = true
+            vim.cmd("set rnu")
+          end,
+        },
+      },
       filesystem = {
         follow_current_file = true,
         use_libuv_file_watcher = true,
