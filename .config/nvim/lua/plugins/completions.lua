@@ -224,7 +224,7 @@ return {
 				s("tece", { t("text-center") }),
 				s("sro", { t("sr-only") }),
 				s("d-", { t("data-["), i(1), t("]:") }),
-				s("h-", { t("has-["), i(1), t("]:") }),
+				s("hs-", { t("has-["), i(1), t("]:") }),
 				s("r-", { t("ring-") }),
 				s("rg-", { t("ring-gray-") }),
 				s("bob", { t("border-b") }),
