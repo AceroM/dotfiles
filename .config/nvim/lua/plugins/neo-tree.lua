@@ -11,8 +11,22 @@ return {
 	},
 	config = function()
 		require("neo-tree").setup({
-			position = "float",
-			width = 30,
+			window = {
+				position = "left",
+				width = 30,
+				-- mapping_options = {
+				-- 	noremap = true,
+				-- 	nowait = true,
+				-- },
+				-- mappings = {
+				-- 	["h"] = "parent_or_close",
+				-- 	["l"] = "child_or_open",
+				-- 	["o"] = "system_open",
+				-- 	["S"] = "open_split",
+				-- 	["s"] = "open_vsplit",
+				-- 	["t"] = "open_tabnew",
+				-- },
+			},
 			event_handlers = {
 				{
 					event = "file_opened",
