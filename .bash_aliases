@@ -11,7 +11,7 @@ alias en="cd ~/dotfiles/.config/nvim"
 alias ec="cd ~/dotfiles/.config/nvim && n lua/plugins/completions.lua"
 
 # quick commands
-alias l="clear"
+alias l="printf '\033[2J\033[3J\033[1;1H'"
 alias y="yazi"
 alias sb="source ~/.bashrc"
 alias lg="lazygit"
