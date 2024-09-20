@@ -264,6 +264,7 @@ return {
         s("pen ", { t("pointer-events-none") }),
       }
       local js_snippets = {
+        s("tne", { t("throw new Error("), i(1), t(")") }),
         s("rcn", {
           t("function "),
           i(1),
