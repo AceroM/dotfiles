@@ -42,6 +42,9 @@ alias nss="npx sst secret set"
 alias nsl="npx sst secret list"
 alias nsd="npx sst deploy"
 
+# postgres
+alias start_pg="sudo systemctl start postgresql.service"
+
 # rails
 alias bi="bundle i"
 alias ba="bundle add"
