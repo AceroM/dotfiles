@@ -14,18 +14,6 @@ return {
 			window = {
 				position = "left",
 				width = 30,
-				-- mapping_options = {
-				-- 	noremap = true,
-				-- 	nowait = true,
-				-- },
-				-- mappings = {
-				-- 	["h"] = "parent_or_close",
-				-- 	["l"] = "child_or_open",
-				-- 	["o"] = "system_open",
-				-- 	["S"] = "open_split",
-				-- 	["s"] = "open_vsplit",
-				-- 	["t"] = "open_tabnew",
-				-- },
 			},
 			event_handlers = {
 				{
@@ -43,7 +31,9 @@ return {
 				},
 			},
 			filesystem = {
-				follow_current_file = true,
+				follow_current_file = {
+          enabled = true
+        },
 				use_libuv_file_watcher = true,
 				cwd_target = {
 					sidebar = "tab",
