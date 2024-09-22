@@ -166,3 +166,9 @@ vim.keymap.set("t", "<C-\\><C-k>", "<C-\\><C-n><C-w>k", { noremap = true, silent
 vim.keymap.set("t", "<C-\\><C-h>", "<C-\\><C-n><C-w>h", { noremap = true, silent = true })
 vim.keymap.set("t", "<C-\\><C-l>", "<C-\\><C-n><C-w>l", { noremap = true, silent = true })
 vim.keymap.set("t", "<Esc>", "<C-\\><C-n>", { noremap = true, silent = true })
+
+-- Current working file
+vim.api.nvim_create_user_command("cwf", function()
+	local path = vim.api.nvim_buf_get_name(0)
+	os.execute("open -R " .. path)
+end, {})
