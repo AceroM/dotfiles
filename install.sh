@@ -73,6 +73,23 @@ install_fd() {
     echo "fd-find installed successfully."
 }
 
+install_delta() {
+    if command -v delta &> /dev/null; then
+        echo "delta is already installed."
+        return
+    fi
+
+    echo "Installing delta..."
+    if ! command -v cargo &> /dev/null; then
+        echo "Rust is required to install delta. Installing Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+    fi
+
+    cargo install git-delta
+    echo "delta installed successfully."
+}
+
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     if command -v apt &> /dev/null; then
         install_gh
@@ -80,6 +97,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         install_datagrip
         install_autokey
         install_fd
+        install_delta
         stow .
     else
         echo "Unsupported Linux distribution."
