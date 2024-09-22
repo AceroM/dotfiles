@@ -61,12 +61,25 @@ install_autokey() {
     echo "AutoKey installed successfully."
 }
 
+install_fd() {
+    if command -v fdfind &> /dev/null; then
+        echo "fd-find is already installed."
+        return
+    fi
+
+    echo "Installing fd-find..."
+    sudo apt update
+    sudo apt install -y fd-find
+    echo "fd-find installed successfully."
+}
+
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     if command -v apt &> /dev/null; then
         install_gh
         install_yazi
         install_datagrip
         install_autokey
+        install_fd
         stow .
     else
         echo "Unsupported Linux distribution."
