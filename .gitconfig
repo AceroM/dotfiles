@@ -1,0 +1,25 @@
+[alias]
+  di = diff
+	co = checkout
+	br = branch
+	ci = commit
+	st = status
+  pu = push
+  pl = pull
+  cl = clone
+[pull]
+	rebase = true
+[user]
+	email = miguelacero528@gmail.com
+	name = Miguel Acero
+[core]
+	excludesfile = /home/miguel/.gitignore_global
+  pager = delta
+[interactive]
+  diffFilter = delta --color-only
+[delta]
+  navigate = true
+[merge]
+  conflictstyle = diff3
+[diff]
+  colorMoved = default
