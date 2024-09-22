@@ -22,11 +22,17 @@ return {
   },
   {
     "neovim/nvim-lspconfig",
+    lazy = false,
     dependencies = {
       "SmiteshP/nvim-navbuddy",
       dependencies = {
         "SmiteshP/nvim-navic",
         "MunifTanjim/nui.nvim",
+ "williamboman/mason.nvim", "williamboman/mason-lspconfig.nvim" ,
+      },
+      event = {
+        cmd = { "LspInfo", "LspInstall", "LspUninstall" },
+        "InsertEnter",
       },
       opts = { lsp = { auto_attach = true } },
     },
