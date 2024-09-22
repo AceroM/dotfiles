@@ -42,6 +42,7 @@ return {
 				window = {
 					mappings = {
 						["o"] = "system_open",
+						["z"] = "none", -- Unset the "z" mapping
 					},
 				},
 			},
