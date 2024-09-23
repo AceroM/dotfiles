@@ -102,11 +102,11 @@ return {
 
 			local keymap = vim.keymap.set
 			local opts = { noremap = true, silent = true }
-			keymap("v", "<leader>G", function()
+			keymap("v", "<c-g>", function()
 				local text = vim.getVisualSelection()
 				builtin.live_grep({ default_text = text })
 			end, opts)
-			keymap("v", "<leader>F", function()
+			keymap("v", "<c-p>", function()
 				local text = vim.getVisualSelection()
 				builtin.find_files({ default_text = text })
 			end, opts)
