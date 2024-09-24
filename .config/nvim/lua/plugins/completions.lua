@@ -372,6 +372,7 @@ return {
 				s("CG ", { t({ "<CheckboxGroup>" }), i(1), t({ "</CheckboxGroup>" }) }),
 				s("CF ", { t({ "<CheckboxField>" }), i(1), t({ "</CheckboxField>" }) }),
 				s("S ", { t({ "<Select>" }), i(1), t({ "</Select>" }) }),
+				s("M ", { t({ "<Modal>" }), i(1), t({ "</Modal>" }) }),
 				s("DS ", { t({ "<Description>" }), i(1), t({ "</Description>" }) }),
 				s("DSL ", { t({ "<DescriptionList>" }), i(1), t({ "</DescriptionList>" }) }),
 				s("DST ", { t({ "<DescriptionTerm>" }), i(1), t({ "</DescriptionTerm>" }) }),
