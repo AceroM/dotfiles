@@ -46,6 +46,9 @@ return {
 			end, { silent = true })
 			ls.config.setup({ enable_autosnippets = true })
 			ls.add_snippets("all", {
+				s("S ", { t("<Select>"), i(1), t("</Select>") }),
+				s("B ", { t("<Button>"), i(1), t("</Button>") }),
+				s("D ", { t("<Dialog>"), i(1), t("</Dialog>") }),
 				s("dq", { t('"'), i(1), t('": "'), i(2), t('",') }),
 				s(",/", { t("<"), i(1), t(" />") }),
 				s("l8", { t("http://localhost:8080") }),
