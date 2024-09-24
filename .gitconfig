@@ -7,6 +7,8 @@
   pu = push
   pl = pull
   cl = clone
+  fe = fetch
+  re = remote
   sta = stash
 [pull]
 	rebase = true
