@@ -265,6 +265,8 @@ return {
         s("pen ", { t("pointer-events-none") }),
       }
       local js_snippets = {
+        s("csg", { t('createServerFn("GET", async () => {'), t({ "", "  " }), i(1), t({ "", "})" }) }),
+        s("csp", { t('createServerFn("POST", async () => {'), t({ "", "  " }), i(1), t({ "", "})" }) }),
         s("tne", { t("throw new Error("), i(1), t(")") }),
         s("rcn", {
           t("function "),
