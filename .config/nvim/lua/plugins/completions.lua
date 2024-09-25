@@ -46,6 +46,7 @@ return {
 			end, { silent = true })
 			ls.config.setup({ enable_autosnippets = true })
 			ls.add_snippets("all", {
+				s("onp", { t("onPress={() => "), i(1), t({ "})" }) }),
 				s("S ", { t("<Select>"), i(1), t("</Select>") }),
 				s("B ", { t("<Button>"), i(1), t("</Button>") }),
 				s("D ", { t("<Dialog>"), i(1), t("</Dialog>") }),
@@ -57,7 +58,6 @@ return {
 				s("aj,", { t("accept: application/json") }),
 				s("aa,", { t("authorization: {{AUTH}}") }),
 				s("mgm", { t("miguelacero528@gmail.com") }),
-				-- s("m,", { t("{% "), i(1), t(" /%}") }),
 				s("jstr", { t("JSON.stringify("), i(1), t(")") }),
 				s("jpar", { t("JSON.parse("), i(1), t(")") }),
 				s("jstn", { t("JSON.stringify("), i(1), t(", null, 2)") }),
