@@ -141,7 +141,7 @@ vim.api.nvim_create_autocmd("TabLeave", {
 		vim.g.lasttab = vim.fn.tabpagenr()
 	end,
 })
-vim.keymap.set({ "n", "v" }, "<c-m>", ":-tabmove<CR>", { silent = true })
+-- vim.keymap.set({ "n", "v" }, "<c-m>", ":-tabmove<CR>", { silent = true })
 vim.keymap.set({ "n", "v" }, "<c-,>", ":+tabmove<CR>", { silent = true })
 vim.keymap.set({ "n", "v" }, "<c-.>", vim.lsp.buf.code_action, { silent = true, noremap = true })
 vim.keymap.set({ "n", "v" }, "<c-'>", function()

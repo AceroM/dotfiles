@@ -13,7 +13,7 @@ return {
 			},
 		})
 		keymap("n", "<leader>ro", ":TSToolsOrganizeImports<CR>", opts)
-		keymap("n", "<leader>ru", ":TSToolsRemoveUnusedImports<CR>", opts)
+		keymap("n", "<c-m>", ":TSToolsRemoveUnusedImports<CR>", opts)
 		keymap("n", "<c-l>", ":TSToolsAddMissingImports<CR>", opts)
 	end,
 }
