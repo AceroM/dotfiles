@@ -1,5 +1,5 @@
 # directories
-alias pc="cd packages/core"
+alias pr="cd packages/core"
 alias pf="cd packages/functions"
 alias fe="cd packages/frontend"
 alias pd="cd packages/demo"
@@ -13,6 +13,8 @@ alias ec="cd ~/dotfiles/.config/nvim && n lua/plugins/completions.lua"
 
 # quick commands
 alias l="printf '\033[2J\033[3J\033[1;1H'"
+alias lc="litecli"
+alias pc="pgcli"
 alias y="yazi"
 alias sb="source ~/.bashrc"
 alias lg="lazygit"
@@ -20,7 +22,6 @@ alias ld="lazydocker"
 alias set_clip="xclip -selection c"
 alias get_clip="xclip -selection c -o"
 alias np="n package.json"
-alias ng="n .gitignore"
 alias nv="n .env"
 alias nr="n README.md"
 
@@ -48,6 +49,7 @@ alias bi="bundle i"
 alias ba="bundle add"
 alias os="clear && overmind start -f Procfile.dev"
 alias oc="overmind connect web"
+alias ng="n Gemfile"
 
 # doppler
 alias dp="doppler"
