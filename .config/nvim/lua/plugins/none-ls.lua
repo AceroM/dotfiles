@@ -15,7 +15,7 @@ return {
 						return utils.root_has_file({ ".eslintrc.js", ".eslintrc.cjs", "eslint.config.js" })
 					end,
 				}),
-				null_ls.builtins.formatting.rubocop,
+				-- null_ls.builtins.formatting.rubocop,
 				null_ls.builtins.formatting.stylua,
 				null_ls.builtins.formatting.prettierd,
 			},
