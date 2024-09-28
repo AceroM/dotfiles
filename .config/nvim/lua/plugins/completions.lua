@@ -611,6 +611,7 @@ return {
         priority = 9999,
       })
       ls.add_snippets("ruby", {
+        s("rq", { t('require "'), i(1), t('"') }),
         s("s,", { t("span do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
         s("s.", { t('span(class: "'), i(1), t('")') }),
         s("n,", { t("nav do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
