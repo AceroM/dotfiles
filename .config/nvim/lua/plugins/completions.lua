@@ -541,6 +541,12 @@ return {
 				key = "eruby_tailwind",
 				priority = 9999,
 			})
+			ls.add_snippets("ruby", tailwind_snippets, {
+				autotrigger = true,
+				type = "autosnippets",
+				key = "eruby_tailwind",
+				priority = 9999,
+			})
 			ls.add_snippets("css", {
 				s("hc", { t("height: fit-content;") }),
 				s("wc", { t("width: fit-content;") }),
