@@ -50,8 +50,4 @@ alias os="clear && overmind start -f Procfile.dev"
 alias oc="overmind connect web"
 
 # doppler
-alias dr="doppler run"
-alias ds="doppler secrets"
-alias dp="doppler setup"
-alias dsg="doppler secrets get"
-alias dss="doppler secrets set"
+alias dp="doppler"
