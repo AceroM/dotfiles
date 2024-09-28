@@ -63,13 +63,6 @@ return {
 						size = 10,
 					},
 				},
-				-- layouts = {
-				--   {
-				--     elements = { { id = "console", size = 1 } },
-				--     size = 30,
-				--     position = "right",
-				--   },
-				-- },
 				floating = {
 					max_height = nil,
 					max_width = nil,
