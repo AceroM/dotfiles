@@ -508,7 +508,7 @@ return {
 				s("och", { t("onChange") }),
 				s("em ", { t("export module "), i(1), t(" {"), t({ "", "\t" }), i(2), t({ "", "}" }) }),
 			}
-			local filetypes = { "javascriptreact", "typescriptreact", "javascript", "typescript", "ruby" }
+			local filetypes = { "javascriptreact", "typescriptreact", "javascript", "typescript" }
 			for _, filetype in ipairs(filetypes) do
 				ls.add_snippets(filetype, js_snippets, {
 					autotrigger = true,
