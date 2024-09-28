@@ -508,7 +508,7 @@ return {
 				s("och", { t("onChange") }),
 				s("em ", { t("export module "), i(1), t(" {"), t({ "", "\t" }), i(2), t({ "", "}" }) }),
 			}
-			local filetypes = { "javascriptreact", "typescriptreact", "javascript", "typescript" }
+			local filetypes = { "javascriptreact", "typescriptreact", "javascript", "typescript", "ruby" }
 			for _, filetype in ipairs(filetypes) do
 				ls.add_snippets(filetype, js_snippets, {
 					autotrigger = true,
@@ -625,7 +625,7 @@ return {
 				s("p,", { t("p do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
 				s("d,", { t("div do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
 				s("e;", { t("each do |"), i(1), t("|"), t({ "", "  " }), i(2), t({ "", "end" }) }),
-				s("df", { t("do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
+				s("dj", { t("do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
 				s("d;", { t("do |"), i(1), t("|"), t({ "", "  " }), i(2), t({ "", "end" }) }),
 				s("rf ", { t("rescue_from ") }),
 				s("rb ", { t("redirect_back ") }),
@@ -639,7 +639,7 @@ return {
 				s("bt ", { t("belongs_to :"), i(1), t(", optional: true") }),
 				s("aa ", { t("after_action :"), i(1) }),
 				s("r ", { t("return "), i(1) }),
-				s("rd ", { t("render "), i(1) }),
+				s("rd", { t("render "), i(1) }),
 				s("ri ", { t("render inertia: "), i(1) }),
 				s("pv ", { t("private "), t({ "", "" }) }),
 				s("pr ", { t("protected "), t({ "", "" }) }),
