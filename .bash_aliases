@@ -24,6 +24,7 @@ alias get_clip="xclip -selection c -o"
 alias np="n package.json"
 alias nv="n .env"
 alias nr="n README.md"
+alias fm="foreman"
 
 # node
 alias ns="npm start"
