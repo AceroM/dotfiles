@@ -611,7 +611,7 @@ return {
 				priority = 9999,
 			})
 			ls.add_snippets("ruby", {
-				s("di", { t("def initialize("), i(1), t(")"), t({ "", "  " }), i(2), t({ "", "end" }) }),
+				s("di ", { t("def initialize("), i(1), t(")"), t({ "", "  " }), i(2), t({ "", "end" }) }),
 				s("rq", { t('require "'), i(1), t('"') }),
 				s("s,", { t("span do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
 				s("s.", { t('span(class: "'), i(1), t('")') }),
@@ -627,7 +627,7 @@ return {
 				s("p,", { t("p do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
 				s("d,", { t("div do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
 				s("e;", { t("each do |"), i(1), t("|"), t({ "", "  " }), i(2), t({ "", "end" }) }),
-				s("dj", { t("do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
+				s("do", { t("do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
 				s("d;", { t("do |"), i(1), t("|"), t({ "", "  " }), i(2), t({ "", "end" }) }),
 				s("rf ", { t("rescue_from ") }),
 				s("rb ", { t("redirect_back ") }),
