@@ -45,8 +45,7 @@ alias start_pg="sudo systemctl start postgresql.service"
 alias k="kamal"
 
 # rails
-alias bi="bundle i"
-alias ba="bundle add"
+alias bd="bundle"
 alias os="clear && overmind start -f Procfile.dev"
 alias oc="overmind connect web"
 alias ng="n Gemfile"
