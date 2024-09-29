@@ -37,6 +37,7 @@
   "nvim-px-to-rem": { "branch": "main", "commit": "92c812bbc2f2ac2869c02d816c5e7c9843d9e06a" },
   "nvim-spectre": { "branch": "master", "commit": "ba7fb777edff6c1fbbeffd343e113af64c04e90a" },
   "nvim-treesitter": { "branch": "master", "commit": "20b5cbfa92cac93ab78f3fefeb6169e4ea303189" },
+  "nvim-treesitter-textobjects": { "branch": "master", "commit": "4a2d05ec24eaa6b655c7d19092a3b6c0219d46b9" },
   "nvim-ts-context-commentstring": { "branch": "main", "commit": "375c2d86cee6674afd75b4f727ce3a80065552f7" },
   "nvim-web-devicons": { "branch": "master", "commit": "26220156aafb198b2de6a4cf80c1b120a3768da0" },
   "oil.nvim": { "branch": "master", "commit": "1360be5fda9c67338331abfcd80de2afbb395bcd" },
