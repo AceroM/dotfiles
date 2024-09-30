@@ -4,10 +4,12 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+  s("rfw", { t("render_form_with ") }),
   s("fw", { t("form_with ") }),
   s("c:", { t('class: "'), i(1), t('"') }),
   s("c=", { t('class="'), i(1), t('"') }),
   s("dv", { t("data-"), i(1), t('-value="'), i(2), t('"') }),
+  s("dn", { t('data-action="'), i(1), t('"') }),
   s("d;", { t("<%= "), i(1), t(" do %>"), t({ "", "<% end %>" }) }),
   s("; ", { t("<%= "), i(1), t({ " %>" }) }),
   s("lt ", { t("<%= link_to "), i(1), t({ " %>" }) }),
