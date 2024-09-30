@@ -16,6 +16,18 @@ end
 
 vim.opt.rtp:prepend(lazypath)
 
+vim.api.nvim_create_autocmd("BufWritePre", {
+  pattern = "*.erb",
+  callback = function()
+    local win = vim.api.nvim_get_current_win()
+    local cursor = vim.api.nvim_win_get_cursor(win)
+    local view = vim.fn.winsaveview()
+    vim.cmd("normal! gg=G")
+    vim.fn.winrestview(view)
+    vim.api.nvim_win_set_cursor(win, cursor)
+  end,
+})
+
 require("mappings")
 require("lazy").setup({
   defaults = { lazy = true },
