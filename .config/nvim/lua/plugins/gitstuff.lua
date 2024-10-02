@@ -10,7 +10,7 @@ return {
 		"lewis6991/gitsigns.nvim",
 		event = "BufRead",
 		config = function()
-			require("gitsigns").setup()
+			require("gitsigns").setup({ sign_column = false })
 			vim.keymap.set("n", "<leader>gp", ":Gitsigns preview_hunk<CR>")
 			vim.keymap.set("n", "]x", ":Gitsigns next_hunk<CR>")
 			vim.keymap.set("n", "[x", ":Gitsigns prev_hunk<CR>")

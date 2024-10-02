@@ -4,6 +4,7 @@ return {
 	event = "BufRead",
 	dependencies = {
 		"nvim-treesitter/nvim-treesitter-textobjects",
+		"tree-sitter/tree-sitter-embedded-template",
 	},
 	config = function()
 		local config = require("nvim-treesitter.configs")

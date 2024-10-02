@@ -6,7 +6,7 @@ local i = ls.insert_node
 return {
 	s("rfw", { t("render_form_with ") }),
 	s("fw", { t("form_with ") }),
-	s("cf", { t("content_for ") }),
+	s("cf", { t("content_for") }),
 	s("c:", { t('class: "'), i(1), t('"') }),
 	s("c=", { t('class="'), i(1), t('"') }),
 	s("dv", { t("data-"), i(1), t('-value="'), i(2), t('"') }),
