@@ -4,6 +4,8 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+	s("rd", { t("render ") }),
+	s("rp", { t("render partial: ") }),
 	s("rfw", { t("render_form_with ") }),
 	s("fw", { t("form_with ") }),
 	s("cf", { t("content_for") }),
