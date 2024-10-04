@@ -14,6 +14,7 @@ vim.opt.foldcolumn = "0"
 vim.opt.foldtext = ""
 vim.opt.foldenable = false
 vim.opt.foldlevel = 99
+vim.opt.signcolumn = "yes:1"
 vim.keymap.set("n", "-", vim.cmd.Ex)
 vim.keymap.set("v", "//", "y/\\V<C-R>=escape(@\", '/\\')<CR><CR>", { noremap = true })
 vim.keymap.set("n", "<BS>", '"_dd')

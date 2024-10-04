@@ -86,7 +86,6 @@ return {
 	}),
 	s("eh ", { t("export const "), i(1), t(": Handler = async () => {"), t({ "", "\t" }), i(2), t({ "", "}" }) }),
 	s("r=", { t("rules={{required: true}}") }),
-	s("c=", { t("control={control}") }),
 	s("ons=", { t("onSubmit = React.useCallback(handleSubmit((data) => mutate(data)), [])") }),
 	s("os=", { t("onSubmit={onSubmit}") }),
 	s("oc=", { t("onClose={onClose}") }),
@@ -223,7 +222,7 @@ return {
 	s("ai:", { t("alignItems: "), i(1), t(";") }),
 	s(";l", { t(": {"), i(1), t("},") }),
 	s("g:", { t("gap: "), i(1), t(";") }),
-	s("cl ", { t('className="'), i(1), t('"') }),
+	s("c=", { t('className="'), i(1), t('"') }),
 	s("fi ", { t("if ("), i(1), t(") {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 	s("fil ", { t("if ("), i(1), t(".length "), i(2), t({ ") {" }), t({ "", "}" }) }),
 	s("rfn", {
