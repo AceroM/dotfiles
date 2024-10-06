@@ -4,7 +4,6 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
-  s("in ", { t("include ") }),
   s("r_", { t("render_") }),
   s("rlt", { t("render_link_to ") }),
   s("rbt", { t("render_button_to ") }),
