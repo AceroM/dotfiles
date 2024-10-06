@@ -4,6 +4,7 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+	s("ts:", { t("turbo_stream: ") }),
 	s("di ", { t("def initialize("), i(1), t(")"), t({ "", "  " }), i(2), t({ "", "end" }) }),
 	s("rq", { t('require "'), i(1), t('"') }),
 	s("s,", { t("span do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
