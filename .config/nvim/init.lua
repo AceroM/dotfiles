@@ -17,7 +17,7 @@ end
 vim.opt.rtp:prepend(lazypath)
 
 vim.api.nvim_create_autocmd("BufWritePre", {
-	pattern = { "*.erb", "*.rb" },
+	pattern = { "*.erb", "*.rb", "*.rake", "Gemfile", "*.gemspec" },
 	callback = function()
 		local win = vim.api.nvim_get_current_win()
 		local cursor = vim.api.nvim_win_get_cursor(win)
