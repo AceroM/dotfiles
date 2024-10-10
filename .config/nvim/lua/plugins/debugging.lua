@@ -21,6 +21,7 @@ return {
   },
   {
     "mfussenegger/nvim-dap",
+    event = "BufRead",
     dependencies = {
       "nvim-neotest/nvim-nio",
       "rcarriga/nvim-dap-ui",
@@ -45,7 +46,11 @@ return {
             elements = {
               {
                 id = "scopes",
-                size = 1,
+                size = 0.5,
+              },
+              {
+                id = "repl",
+                size = 0.5,
               },
             },
             position = "right",
@@ -62,13 +67,6 @@ return {
             size = 10,
           },
         },
-        -- layouts = {
-        --   {
-        --     elements = { { id = "console", size = 1 } },
-        --     size = 30,
-        --     position = "right",
-        --   },
-        -- },
         floating = {
           max_height = nil,
           max_width = nil,
@@ -154,6 +152,17 @@ return {
           {
             type = "pwa-node",
             request = "launch",
+            name = "Npm Run Script",
+            runtimeExecutable = "npm",
+            runtimeArgs = { "run", "scripts:main" },
+            rootPath = "${workspaceFolder}",
+            cwd = "${workspaceFolder}",
+            console = "integratedTerminal",
+            internalConsoleOptions = "neverOpen",
+          },
+          {
+            type = "pwa-node",
+            request = "launch",
             name = "Ruby Server",
             runtimeExecutable = "npm",
             runtimeArgs = {
@@ -168,8 +177,8 @@ return {
           {
             type = "pwa-node",
             request = "launch",
-            name = "Ruby Server Test",
-            runtimeExecutable = "doppler",
+            name = "Npm Test",
+            runtimeExecutable = "npm",
             runtimeArgs = { "run", "test" },
             rootPath = "${workspaceFolder}",
             cwd = "${workspaceFolder}",
@@ -193,17 +202,6 @@ return {
             name = "Bun Development",
             runtimeExecutable = "bun",
             runtimeArgs = { "run", "dev" },
-            rootPath = "${workspaceFolder}",
-            cwd = "${workspaceFolder}",
-            console = "integratedTerminal",
-            internalConsoleOptions = "neverOpen",
-          },
-          {
-            type = "pwa-node",
-            request = "launch",
-            name = "Systems Development",
-            runtimeExecutable = "npm",
-            runtimeArgs = { "run", "systems-dev" },
             rootPath = "${workspaceFolder}",
             cwd = "${workspaceFolder}",
             console = "integratedTerminal",

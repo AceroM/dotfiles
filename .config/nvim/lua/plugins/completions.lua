@@ -265,6 +265,7 @@ return {
 				s("pen ", { t("pointer-events-none") }),
 			}
 			local js_snippets = {
+				s("imu", { t("import {"), i(1), t('} from "ui"') }),
 				s("csg", { t('createServerFn("GET", async () => {'), t({ "", "  " }), i(1), t({ "", "})" }) }),
 				s("csp", { t('createServerFn("POST", async () => {'), t({ "", "  " }), i(1), t({ "", "})" }) }),
 				s("tne", { t("throw new Error("), i(1), t(")") }),
@@ -304,7 +305,6 @@ return {
 					t(")} />"),
 				}),
 				s("r=", { t("rules={{required: true}}") }),
-				s("c=", { t("control={control}") }),
 				s("IF ", {
 					t('<Input type="'),
 					i(1),
@@ -526,7 +526,7 @@ return {
 				s("ai:", { t("alignItems: "), i(1), t(";") }),
 				s(";l", { t(": {"), i(1), t("},") }),
 				s("g:", { t("gap: "), i(1), t(";") }),
-				s("cl ", { t('className="'), i(1), t('"') }),
+				s("c=", { t('className="'), i(1), t('"') }),
 				s("fi ", { t("if ("), i(1), t(") {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 				s("fil ", { t("if ("), i(1), t(".length "), i(2), t({ ") {" }), t({ "", "}" }) }),
 				s("rfn", {
