@@ -6,6 +6,7 @@ vim.cmd("set tabstop=2")
 vim.cmd("set softtabstop=2")
 vim.cmd("set shiftwidth=2")
 vim.cmd("set expandtab")
+vim.opt.signcolumn = "no"
 vim.opt.swapfile = false
 vim.opt.splitright = true
 vim.opt.foldmethod = "expr"
