@@ -16,6 +16,18 @@ end
 
 vim.opt.rtp:prepend(lazypath)
 
+vim.api.nvim_create_autocmd("BufWritePre", {
+	pattern = { "*.erb", "*.rb", "*.rake", "Gemfile", "*.gemspec" },
+	callback = function()
+		local win = vim.api.nvim_get_current_win()
+		local cursor = vim.api.nvim_win_get_cursor(win)
+		local view = vim.fn.winsaveview()
+		vim.cmd("normal! gg=G")
+		vim.fn.winrestview(view)
+		vim.api.nvim_win_set_cursor(win, cursor)
+	end,
+})
+
 require("mappings")
 require("lazy").setup({
 	defaults = { lazy = true },
@@ -23,7 +35,13 @@ require("lazy").setup({
 		{ import = "plugins" },
 	},
 	install = { colorscheme = { "ayu" } },
-	checker = { enabled = true },
+	checker = {
+		enabled = false,
+		concurrency = nil,
+		notify = true,
+		frequency = 3600,
+		check_pinned = false,
+	},
 	ui = { border = "rounded" },
 	performance = {
 		cache = {
