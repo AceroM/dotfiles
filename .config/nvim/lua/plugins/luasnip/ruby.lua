@@ -4,6 +4,11 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+	s("t.s", { t("t.string :") }),
+	s("t.t", { t("t.text :") }),
+	s("t.r", { t("t.references :") }),
+	s("t.b", { t("t.boolean :") }),
+	s("t.i", { t("t.integer :") }),
 	s("in ", { t("include ") }),
 	s("ts:", { t("turbo_stream: ") }),
 	s("di ", { t("def initialize("), i(1), t(")"), t({ "", "  " }), i(2), t({ "", "end" }) }),
