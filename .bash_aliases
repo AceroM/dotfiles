@@ -51,6 +51,8 @@ alias bd="bundle"
 alias os="clear && overmind start -f Procfile.dev"
 alias oc="overmind connect web"
 alias ng="n Gemfile"
+alias fmr="foreman start -f Procfile.dev \"css=1,guard=1,jobs=1\""
+alias fmb="foreman start -f Procfile.dev \"js=1,css=1,job=1\""
 
 # doppler
 alias dp="doppler"

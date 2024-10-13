@@ -4,6 +4,7 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+  s("c_", { t("card_") }),
   s("t_", { t("tooltip_") }),
   s("p_", { t("popover_") }),
   s("lb_", { t("listbox_") }),
