@@ -4,6 +4,12 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+  s("c_", { t("card_") }),
+  s("t_", { t("tooltip_") }),
+  s("p_", { t("popover_") }),
+  s("lb_", { t("listbox_") }),
+  s("dr_", { t("dropdown_") }),
+  s("d_", { t("dialog_") }),
   s("r_", { t("render_") }),
   s("rlt", { t("render_link_to ") }),
   s("rbt", { t("render_button_to ") }),
@@ -22,6 +28,7 @@ return {
   s("dn", { t('data-action="'), i(1), t('"') }),
   s("d;", { t("<% "), i(1), t(" do %>"), t({ "", "<% end %>" }) }),
   s("f;", { t("<%= "), i(1), t(" do %>"), t({ "", "<% end %>" }) }),
+  s("c;", { t("<%= "), i(1), t(" do |"), i(2), t("| %>"), t({ "", "<% end %>" }) }),
   s("a;", { t("<% "), i(1), t({ " %>" }) }),
   s("s;", { t("<%= "), i(1), t({ " %>" }) }),
   s("fi ", { t("<% if "), i(1), t({ " %>", "<% end %>" }) }),
