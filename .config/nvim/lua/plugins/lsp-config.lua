@@ -12,6 +12,7 @@ return {
 		config = function()
 			require("mason-lspconfig").setup({
 				ensure_installed = {
+					"astro",
 					"ruby_lsp",
 					"html",
 					"cssls",
@@ -81,6 +82,7 @@ return {
 				},
 			})
 			lspconfig.lua_ls.setup({ capabilities = capabilities })
+			lspconfig.astro.setup({ capabilities = capabilities })
 			lspconfig.html.setup({ capabilities = capabilities })
 			lspconfig.ruby_lsp.setup({
 				capabilities = capabilities,
