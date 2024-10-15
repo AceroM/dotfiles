@@ -164,6 +164,7 @@ return {
 	s("ojk", { t("Object.keys("), i(1), t(")") }),
 	s("oje", { t("Object.entries("), i(1), t(")") }),
 	s("im;", { t('import { motion } from "framer-motion"') }),
+	s("id;", { t('import { eq } from "drizzle-orm"') }),
 	s("iz;", { t('import { z } from "zod"') }),
 	s("il;", { t('import { Link } from "@tanstack/react-router"') }),
 	s("if;", {
