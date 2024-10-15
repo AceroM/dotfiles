@@ -44,7 +44,7 @@ return {
   s("ind ", { t("included do"), t({ "", "  " }), i(1), t({ "", "end" }) }),
   s("sba:", { t("skip_before_action :"), i(1) }),
   s("ba:", { t("before_action :"), i(1) }),
-  s("bt:", { t("belongs_to :"), i(1), t(", optional: true") }),
+  s("bt:", { t("belongs_to :") }),
   s("aa:", { t("after_action :"), i(1) }),
   s("r ", { t("return "), i(1) }),
   s("rd", { t("render "), i(1) }),
@@ -60,5 +60,7 @@ return {
   s("aw:", { t("attr_writer :") }),
   s("ae ", { t("assert_equal ") }),
   s("d ", { t("def "), i(1), t({ "  ", "end" }) }),
-  s("hm:", { t("has_many :"), i(1), t(", dependent: :destroy") }),
+  s("hm:", { t("has_many :") }),
+  s("d:", { t("dependent: :destroy") }),
+  s("a:", { t("as: :") }),
 }

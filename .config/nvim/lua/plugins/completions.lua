@@ -35,6 +35,7 @@ return {
 			end, { silent = true })
 			ls.config.setup({ enable_autosnippets = true })
 			local tailwind_snippets = require("plugins.luasnip.tailwind")
+			local astro_snippets = require("plugins.luasnip.astro")
 			local css_snippets = require("plugins.luasnip.css")
 			local ruby_snippets = require("plugins.luasnip.ruby")
 			local eruby_snippets = require("plugins.luasnip.eruby")
@@ -63,6 +64,12 @@ return {
 					priority = 9999,
 				})
 			end
+			ls.add_snippets("astro", astro_snippets, {
+				autotrigger = true,
+				type = "autosnippets",
+				key = "astro",
+				priority = 9999,
+			})
 			for _, filetype in ipairs({
 				"javascriptreact",
 				"typescriptreact",
@@ -70,6 +77,7 @@ return {
 				"typescript",
 				"ruby",
 				"eruby",
+				"astro",
 			}) do
 				ls.add_snippets(filetype, tailwind_snippets, {
 					autotrigger = true,
