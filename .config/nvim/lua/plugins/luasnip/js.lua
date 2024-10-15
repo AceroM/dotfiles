@@ -23,6 +23,8 @@ return {
 			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
 		})
 	),
+	s("os=", { t("onSubmit={"), i(1), t("}") }),
+	s("oc=", { t("onClick={"), i(1), t("}") }),
 	s("ar,", { t("() => {"), t({ "", "  " }), i(1), t({ "", "}" }) }),
 	s("ac,", { t("async () => {"), t({ "", "  " }), i(1), t({ "", "}" }) }),
 	s("ah,", { t("async (c) => {"), t({ "", "  " }), i(1), t({ "", "}" }) }),
@@ -49,16 +51,16 @@ return {
 	s("H ", { t("<Heading>"), i(1), t("</Heading>") }),
 	s("M ", { t("<Modal>"), i(1), t("</Modal>") }),
 	s("D ", { t("<Dialog>"), i(1), t("</Dialog>") }),
-	s("csg", {
-		t('createServerFn("GET", async () => {'),
-		t({ "", "  await useUser()", "  " }),
+	s("sg;", {
+		t('createServerFn("GET", async ('),
 		i(1),
+		t(") => {"),
 		t({ "", "})" }),
 	}),
-	s("csp", {
-		t('createServerFn("POST", async () => {'),
-		t({ "", "  await useUser()", "  " }),
+	s("sp;", {
+		t('createServerFn("POST", async ('),
 		i(1),
+		t(") => {"),
 		t({ "", "})" }),
 	}),
 	s("tne", { t("throw new Error("), i(1), t(")") }),
@@ -96,7 +98,6 @@ return {
 	s("int ", { t("integration_connection") }),
 	s("int.", { t("integration_connection.") }),
 	s("int,", { t("integration_connection,") }),
-	s("imm", { t("import * as R from 'remeda'") }),
 	s("TT ", { t("<Tooltip>"), i(1), t("</Tooltip>") }),
 	s("ise", { t("isError "), i(1) }),
 	s("ah ", { t("ApiHandler(async (_evt) => {"), t({ "", "  " }), i(1), t({ "", "})" }) }),
@@ -162,8 +163,15 @@ return {
 	s("ojv", { t("Object.values("), i(1), t(")") }),
 	s("ojk", { t("Object.keys("), i(1), t(")") }),
 	s("oje", { t("Object.entries("), i(1), t(")") }),
-	s("imf", { t('import { motion } from "framer-motion"') }),
-	s("imi", { t('import { Text } from "components"') }),
+	s("im;", { t('import { motion } from "framer-motion"') }),
+	s("iz;", { t('import { z } from "zod"') }),
+	s("il;", { t('import { Link } from "@tanstack/react-router"') }),
+	s("if;", {
+		t('import { useMutation } from "@tanstack/react-query"'),
+		t({ "", 'import { useForm } from "@tanstack/react-form";' }),
+		t({ "", 'import { zodValidator } from "@tanstack/zod-form-adapter";' }),
+	}),
+	s("iu;", { t("import { "), i(1), t(' } from "ui";') }),
 	s(
 		{ trig = "frl", name = "for loop" },
 		fmt("for (let {} = 0; {} < {}; {}++)", {
@@ -171,13 +179,6 @@ return {
 			l(l._1, 1),
 			i(2, "value"),
 			l(l._1, 1),
-		})
-	),
-	s(
-		{ trig = "imc", name = "import React Component" },
-		fmt("import * as {} from 'components/{}'", {
-			i(1, "value"),
-			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
 		})
 	),
 	s(
@@ -205,7 +206,6 @@ return {
 			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
 		})
 	),
-	s("imu", { t("import { "), i(1), t(' } from "ui";') }),
 	s("eaf ", { t("export async function "), i(1), t("() {"), t({ "", "}" }) }),
 	s("ef ", { t("export function "), i(1), t("() {"), t({ "", "}" }) }),
 	s("ec ", { t("export const ") }),
@@ -214,7 +214,6 @@ return {
 	s("asf ", { t("async function "), i(1), t({ "() {", "}" }) }),
 	s("pnv", { t("process.env.") }),
 	s("rns", t("const styles = StyleSheet.create({"), i(1), t({ "  ", "});" })),
-	s("oc ", { t("onClick={() => "), i(1), t({ "}" }) }),
 	s("ocl", { t("onClick={("), i(1), t({ ") => {", "  " }), i(2), t({ "", "}}" }) }),
 	s("s,.", { t("style={styles."), i(1), t("}") }),
 	s("fd:", { t("flexDirection: "), i(1), t(";") }),
@@ -240,8 +239,8 @@ return {
 		i(1),
 		t({ "", "}" }),
 	}),
-	s("m(", { t("map(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", "))" }) }),
-	s("m{", { t("map(("), i(1), t(") => {"), t({ "", "  " }), i(2), t({ "", "})" }) }),
+	s("m(", { t("map(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", ")" }) }),
+	s("m{", { t("map(("), i(1), t(") => {"), t({ "", "  " }), i(2), t({ "", ")" }) }),
 	s("f(", { t("filter(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", "))" }) }),
 	s("f{", { t("filter(("), i(1), t(") => {"), t({ "", "  " }), i(2), t({ "", "})" }) }),
 	s("t(", { t("then(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", "))" }) }),
