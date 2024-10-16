@@ -15,11 +15,44 @@ end
 
 return {
 	s(
-		{ trig = "rus ", name = "useState" },
+		{ trig = "jk", name = "React Tag <>" },
+		fmt("<{}>{}</{}>", {
+			i(1, "div"),
+			i(2),
+			l(l._1, 1),
+		})
+	),
+	s(
+		{ trig = "j;", name = "React Tag with props <>" },
+		fmt("<{} {}>{}</{}>", {
+			i(1, "div"),
+			i(2),
+			i(3),
+			l(l._1, 1),
+		})
+	),
+	s(
+		{ trig = "us;", name = "useState" },
 		fmt("const [{}, set{setter}] = React.useState{}({})", {
 			i(1, "value"),
 			i(0),
 			i(2, "{InitialValue}"),
+			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
+		})
+	),
+	s(
+		{ trig = "usf;", name = "useState false" },
+		fmt("const [{}, set{setter}] = React.useState{}(false)", {
+			i(1, "value"),
+			i(0),
+			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
+		})
+	),
+	s(
+		{ trig = "usn;", name = "useState null" },
+		fmt("const [{}, set{setter}] = React.useState{}(null)", {
+			i(1, "value"),
+			i(0),
 			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
 		})
 	),
@@ -100,13 +133,13 @@ return {
 	s("int,", { t("integration_connection,") }),
 	s("TT ", { t("<Tooltip>"), i(1), t("</Tooltip>") }),
 	s("ise", { t("isError "), i(1) }),
-	s("ah ", { t("ApiHandler(async (_evt) => {"), t({ "", "  " }), i(1), t({ "", "})" }) }),
+	s("ah;", { t("ApiHandler(async (_evt) => {"), t({ "", "  " }), i(1), t({ "", "})" }) }),
 	s("ldr", { t('<div className="ldr '), i(1), t('" />') }),
-	s("ds ", { t("db.select("), i(1), t(")") }),
-	s("sf ", { t("db.select().from("), i(1), t(")") }),
-	s("di ", { t("db.insert("), i(1), t(")") }),
-	s("du ", { t("db.update("), i(1), t(")") }),
-	s("dd ", { t("db.delete("), i(1), t(")") }),
+	s("ds;", { t("db.select("), i(1), t(")") }),
+	s("sf;", { t("db.select().from("), i(1), t(")") }),
+	s("di;", { t("db.insert("), i(1), t(")") }),
+	s("du;", { t("db.update("), i(1), t(")") }),
+	s("dd;", { t("db.delete("), i(1), t(")") }),
 	s(".lj", { t(".leftJoin("), i(1), t(")") }),
 	s(".rj", { t(".rightJoin("), i(1), t(")") }),
 	s(".ij", { t(".innerJoin("), i(1), t(")") }),
@@ -114,25 +147,21 @@ return {
 	s(".ob ", { t(".orderBy("), i(1), t(")") }),
 	s(".obd ", { t(".orderBy(desc("), i(1), t("))") }),
 	s(".oba ", { t(".orderBy(asc"), i(1), t("))") }),
-	s(".l ", { t(".limit("), i(1), t(")") }),
-	s(".f ", { t(".from("), i(1), t(")") }),
-	s(".v ", { t(".values("), i(1), t(")") }),
-	s(".s ", { t(".set({"), i(1), t("})") }),
-	s(".w ", { t(".where("), i(1), t(")") }),
-	s(".fr ", { t(".from("), i(1), t(")") }),
-	s(".we ", { t(".where(eq("), i(1), t("))") }),
-	s(".wa ", { t(".where(inArray("), i(1), t("))") }),
+	s(".l;", { t(".limit("), i(1), t(")") }),
+	s(".f;", { t(".from("), i(1), t(")") }),
+	s(".v;", { t(".values("), i(1), t(")") }),
+	s(".s;", { t(".set({"), i(1), t("})") }),
+	s(".w;", { t(".where("), i(1), t(")") }),
+	s(".we;", { t(".where(eq("), i(1), t("))") }),
+	s(".wa;", { t(".where(inArray("), i(1), t("))") }),
 	s("ch ", { t("columnHelper.accessor("), i(1), t("),") }),
 	s("ha-", { t("has-["), i(1), t("]") }),
 	s("et ", { t("export type ") }),
 	s("ei ", { t("export interface ") }),
 	s("ed ", { t("export default "), i(1) }),
-	s("tr ", { t("then((res) => res.data)") }),
 	s("cln", { t("className") }),
-	s("bn ", { t("<Button>"), i(1), t("</Button>") }),
-	s("bs ", { t("<Button type='submit'>"), i(1), t("</Button>") }),
-	s("rc ", { t("React.createContext("), i(1), t(")") }),
-	s("ru ", { t("React.useContext("), i(1), t(")") }),
+	s("rc;", { t("React.createContext("), i(1), t(")") }),
+	s("ru;", { t("React.useContext("), i(1), t(")") }),
 	s({ trig = "tc ", name = "try catch" }, fmt("try {{\n\t{}\n}} catch (err) {{\n\t\n}}", { i(0) })),
 	s("vr", { t("var(--"), i(1), t(")") }),
 	s("r ", { t("return ") }),
@@ -147,12 +176,12 @@ return {
 	s("leq", { i(1), t(".length === 0 "), i(2) }),
 	s({ trig = "uc ", name = "useCallback" }, fmt("React.useCallback(({}) => {}, [])", { i(1), i(2) })),
 	s({ trig = "um ", name = "useMemo" }, fmt("React.useMemo(() => {}, [{}])", { i(1), i(2) })),
-	s("ue ", { t("React.useEffect(() => {"), t({ "", "  " }), i(2), t({ "", "}, [" }), i(1), t({ "])" }) }),
-	s("ur ", { t("React.useRef("), i(1), t(")") }),
-	s("ud ", { t("React.useReducer("), i(1), t(")") }),
+	s("ue;", { t("React.useEffect(() => {"), t({ "", "  " }), i(2), t({ "", "}, [" }), i(1), t({ "])" }) }),
+	s("ur;", { t("React.useRef("), i(1), t(")") }),
+	s("ud;", { t("React.useReducer("), i(1), t(")") }),
 	s("aia", { t("Array.isArray("), i(1), t(")") }),
-	s("uv ", { t("utility.validate("), i(1), t(")") }),
-	s("er ", { t("exports."), i(1), t(" = async (req, res) => {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
+	s("uv;", { t("utility.validate("), i(1), t(")") }),
+	s("er;", { t("exports."), i(1), t(" = async (req, res) => {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 	s("cb ", { t("const ["), i(1), t("] = "), i(2) }),
 	s("cd ", { t("const { "), i(1), t(" } = "), i(2) }),
 	s("ts/", { t("// @ts-ignore") }),
@@ -164,6 +193,7 @@ return {
 	s("ojk", { t("Object.keys("), i(1), t(")") }),
 	s("oje", { t("Object.entries("), i(1), t(")") }),
 	s("im;", { t('import { motion } from "framer-motion"') }),
+	s("ij;", { t('import dayjs from "dayjs"') }),
 	s("id;", { t('import { eq } from "drizzle-orm"') }),
 	s("iz;", { t('import { z } from "zod"') }),
 	s("il;", { t('import { Link } from "@tanstack/react-router"') }),
@@ -173,32 +203,6 @@ return {
 		t({ "", 'import { zodValidator } from "@tanstack/zod-form-adapter";' }),
 	}),
 	s("iu;", { t("import { "), i(1), t(' } from "ui";') }),
-	s(
-		{ trig = "frl", name = "for loop" },
-		fmt("for (let {} = 0; {} < {}; {}++)", {
-			i(1, "key"),
-			l(l._1, 1),
-			i(2, "value"),
-			l(l._1, 1),
-		})
-	),
-	s(
-		{ trig = "jk", name = "React Tag <>" },
-		fmt("<{}>{}</{}>", {
-			i(1, "div"),
-			i(2),
-			l(l._1, 1),
-		})
-	),
-	s(
-		{ trig = "j;", name = "React Tag with props <>" },
-		fmt("<{} {}>{}</{}>", {
-			i(1, "div"),
-			i(2),
-			i(3),
-			l(l._1, 1),
-		})
-	),
 	s("ir;", { t("import * as React from 'react'") }),
 	s("ds=", { t('data-slot="'), i(1), t('"') }),
 	s("ds-", { t("data-[slot="), i(1), t("]:"), i(2) }),
@@ -234,7 +238,7 @@ return {
 	s("c=", { t('className="'), i(1), t('"') }),
 	s("fi ", { t("if ("), i(1), t(") {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 	s("fil ", { t("if ("), i(1), t(".length "), i(2), t({ ") {" }), t({ "", "}" }) }),
-	s("rfn", {
+	s("rf;", {
 		t("export function "),
 		f(function(args, snip)
 			local filename = snip.env.TM_FILENAME_BASE or ""
@@ -274,7 +278,7 @@ return {
 	s("b.", { t('<button className="'), i(1), t('">'), i(2), t("</button>") }),
 	s("s.", { t('<span className="'), i(1), t('">'), i(2), t("</span>") }),
 	s("p.", { t('<p className="'), i(1), t('">'), i(2), t("</p>") }),
-	s("V ", { t({ "<View>", "  " }), i(1), t({ "", "</View>" }) }),
+	s("V;", { t({ "<View>", "  " }), i(1), t({ "", "</View>" }) }),
 	s("V.", { t("<View style={styles."), i(1), t("}>"), i(2), t("</View>") }),
 	s("T.", { t("<Text style={styles."), i(1), t("}>"), i(2), t("</Text>") }),
 	s("c ", { t("const "), i(1) }),
