@@ -4,7 +4,7 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
-	s("o:", { t("only %i["), i(1), t("]") }),
+	s("o:", { t("only: %i["), i(1), t("]") }),
 	s("ct:", { t("content_tag :") }),
 	s("c:", { t('class: "'), i(1), t('"') }),
 	s("c_", { t("card_") }),
