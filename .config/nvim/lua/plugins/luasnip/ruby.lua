@@ -4,6 +4,11 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+	s("R.", { t("Rails.") }),
+	s("a.", { t("application.") }),
+	s("c.", { t("credentials.") }),
+	s("c.", { t("routes.") }),
+	s("u_", { t("url_helpers") }),
 	s("o:", { t("only: %i["), i(1), t("]") }),
 	s("ct:", { t("content_tag :") }),
 	s("c:", { t('class: "'), i(1), t('"') }),
@@ -19,7 +24,7 @@ return {
 	s("t.r", { t("t.references :") }),
 	s("t.b", { t("t.boolean :") }),
 	s("t.i", { t("t.integer :") }),
-	s("in ", { t("include ") }),
+	s("i;", { t("include ") }),
 	s("ts:", { t("turbo_stream: ") }),
 	s("di ", { t("def initialize("), i(1), t(")"), t({ "", "  " }), i(2), t({ "", "end" }) }),
 	s("rq", { t('require "'), i(1), t('"') }),

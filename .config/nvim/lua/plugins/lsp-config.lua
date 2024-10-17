@@ -7,6 +7,13 @@ return {
 		end,
 	},
 	{
+		"windwp/nvim-ts-autotag",
+		event = "BufReadPre",
+		config = function()
+			require("nvim-ts-autotag").setup()
+		end,
+	},
+	{
 		"williamboman/mason-lspconfig.nvim",
 		lazy = false,
 		config = function()
