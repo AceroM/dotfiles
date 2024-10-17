@@ -95,7 +95,6 @@ return {
 	s("t6x", { t("text-6xl") }),
 	s("sz", { t("size-") }),
 	s("oj-", { t("object-") }),
-	s("r.", { t("React.") }),
 	s("op ", { t("opacity-") }),
 	s("hc:", { t("has-[:checked]:") }),
 	s("f:", { t("focus:") }),
