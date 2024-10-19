@@ -4,8 +4,6 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
-  s("th:", { t("through: :") }),
-  s("t.d", { t("t.datetime") }),
   s("f.", { t("<%= form."), i(1), t(" %>") }),
   s("R.", { t("Rails.") }),
   s("a.", { t("application.") }),
