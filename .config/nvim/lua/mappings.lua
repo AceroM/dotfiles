@@ -68,6 +68,7 @@ end
 vim.keymap.set("n", "<C-w>t", ":tab split<cr>", { silent = true })
 vim.keymap.set("n", "<C-w>;", move_or_create_vsplit)
 vim.keymap.set("n", "gt", "<cmd>tab split | lua vim.lsp.buf.definition()<CR>", {})
+vim.keymap.set("n", "gv", "<cmd>vsplit | lua vim.lsp.buf.definition()<CR>", {})
 vim.keymap.set("n", "<Tab>", ":tabnext<CR>", { silent = true })
 vim.keymap.set("n", "<S-Tab>", ":tabprevious<CR>", { silent = true })
 vim.keymap.set("n", "<leader>du", ":DBUI<CR>", { silent = true, noremap = true })
