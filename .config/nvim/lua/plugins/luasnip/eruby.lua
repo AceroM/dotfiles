@@ -4,10 +4,13 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+  s("p:", { t("placement: ") }),
+  s("v:", { t("variant: :") }),
   s("aj;", { t("as_json") }),
   s("ty;", { t("to_yaml") }),
+  s("tj;", { t("to_json") }),
   s("u ", { t("unless ") }),
-  s("li'", { t('<%= lucide_icon "'), i(1), t('" %>') }),
+  s("li;", { t('<%= lucide_icon "'), i(1), t('" %>') }),
   s("f.", { t("<%= form."), i(1), t(" %>") }),
   s("R.", { t("Rails.") }),
   s("a.", { t("application.") }),
