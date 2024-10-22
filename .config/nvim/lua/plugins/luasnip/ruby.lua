@@ -6,6 +6,7 @@ local i = ls.insert_node
 return {
   s("aj;", { t("as_json") }),
   s("ty;", { t("to_yaml") }),
+  s("tj;", { t("to_json") }),
   s("u ", { t("unless ") }),
   s("r:", { t("resources :") }),
   s("rs:", { t("resources :") }),
@@ -91,4 +92,6 @@ return {
   s("tu:", { t("touch:") }),
   s("ty:", { t("types: %w["), i(1), t("]") }),
   s("a:", { t("as: :") }),
+  s("at:", { t("attribute: :") }),
+  s("v:", { t("validates: :") }),
 }
