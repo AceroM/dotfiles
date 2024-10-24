@@ -32,6 +32,7 @@ alias ns="npm start"
 alias nd="npm run dev"
 alias vr="npx vitest run"
 alias b="bun"
+alias bb="pnpm run baml-build"
 
 # postgres
 alias start_pg="sudo systemctl start postgresql.service"
