@@ -81,6 +81,7 @@ return {
 	s("onp", { t("onPress={() => "), i(1), t({ "})" }) }),
 	s("S ", { t("<Select>"), i(1), t("</Select>") }),
 	s("B ", { t("<Button>"), i(1), t("</Button>") }),
+	s("I ", { t("<Input "), i(1), t(" />") }),
 	s("H ", { t("<Heading>"), i(1), t("</Heading>") }),
 	s("M ", { t("<Modal>"), i(1), t("</Modal>") }),
 	s("D ", { t("<Dialog>"), i(1), t("</Dialog>") }),
