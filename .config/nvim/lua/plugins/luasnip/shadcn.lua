@@ -9,6 +9,28 @@ return {
 		{ trig = "sf;", name = "shadcn form" },
 		fmt("<Form {{...form}}>\n\t<form onSubmit={{form.handleSubmit}}>\n\t\t{}\n\t</form>\n</Form>", { i(0) })
 	),
+	s(
+		{ trig = "sff;", name = "shadcn form field" },
+		fmt(
+			[[
+<FormField
+  control={{form.control}}
+  name="{}"
+  render={{({{ field }}) => (
+    <FormItem>
+      <FormLabel>{}</FormLabel>
+      <FormControl>
+        <Input placeholder="{}" {{...field}} />
+      </FormControl>
+      <FormDescription>{}</FormDescription>
+      <FormMessage />
+    </FormItem>
+  )}}
+/>
+			]],
+			{ i(1, "fieldName"), i(2, "Label"), i(3, "placeholder"), i(4, "Description") }
+		)
+	),
 	s("ac;", { t("<Accordion>"), i(1), t("</Accordion>") }),
 	s("acc;", { t("<AccordionContent>"), i(1), t("</AccordionContent>") }),
 	s("aci;", { t("<AccordionItem>"), i(1), t("</AccordionItem>") }),
