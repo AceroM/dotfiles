@@ -121,7 +121,7 @@ return {
 	s("br-", { t("border-r-"), i(1) }),
 	s("bb-", { t("border-b-"), i(1) }),
 	s("fr;", { t("flex-row") }),
-	s("cur ", { t("cursor-pointer") }),
+	s("cp;", { t("cursor-pointer") }),
 	s("wsn", { t("whitespace-nowrap") }),
 	s("g1", { t("gap-1") }),
 	s("g-", { t("gap-") }),
