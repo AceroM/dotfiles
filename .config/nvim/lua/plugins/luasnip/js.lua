@@ -15,6 +15,16 @@ end
 
 return {
 	s("fn;", { f(return_filename) }),
+	s("fb;", {
+		f(function(args, snip)
+			local filename = snip.env.TM_FILENAME_BASE or ""
+			local words = {}
+			for word in filename:gmatch("[^-]+") do
+				table.insert(words, word:sub(1, 1):upper() .. word:sub(2))
+			end
+			return table.concat(words)
+		end, {}),
+	}),
 	s(
 		{ trig = "r;", name = "React Tag <>" },
 		fmt("<{}>{}</{}>", {
@@ -57,6 +67,20 @@ return {
 			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
 		})
 	),
+	s(
+		{ trig = "imd", name = "import as" },
+		fmt('import * as {} from "{}"', {
+			i(1, "value"),
+			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
+		})
+	),
+	s(
+		{ trig = "imx", name = "import Radix UI Components" },
+		fmt('import * as {} from "@radix-ui/react-{}"', {
+			i(1, "value"),
+			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
+		})
+	),
 	s("vc'", { t('varchar("'), i(1), t('", { length: 255 })') }),
 	s("os=", { t("onSubmit={"), i(1), t("}") }),
 	s("oc=", { t("onClick={"), i(1), t("}") }),
@@ -65,48 +89,22 @@ return {
 	s("aw ", { t("await ", i(1)) }),
 	s("ac ", { t("async ") }),
 	s("r.", { t("React.") }),
-	s("c>", {
-		t("console.log('"),
-		f(clipboard),
-		t(" :>>', "),
-		f(clipboard),
-		t(");"),
-	}),
+	s("c>", { t("console.log('"), f(clipboard), t(" :>>', "), f(clipboard), t(");") }),
 	s("c(", { t("console.log("), i(1) }),
 	s("r2", { t("return res.status(200).send("), i(1), t(");") }),
 	s("r(", { t("require("), i(1), t('"') }),
 	s("js;", { t("JSON.stringify("), i(1), t(")") }),
 	s("jp;", { t("JSON.parse("), i(1), t(")") }),
 	s("j2;", { t("JSON.stringify("), i(1), t(", null, 2)") }),
-	s("dq", { t('"'), i(1), t('": "'), i(2), t('",') }),
 	s(",/", { t("<"), i(1), t(" />") }),
 	s("op=", { t("onPress={() => "), i(1), t({ "})" }) }),
 	s("te'", { t("throw new Error("), i(1), t(")") }),
 	s("ex ", { t("export ") }),
-	s("ehe ", {
-		t("export const "),
-		i(1),
-		t(": Handler = async (event) => {"),
-		t({ "", "\t" }),
-		i(2),
-		t({ "", "}" }),
-	}),
-	s("eh ", { t("export const "), i(1), t(": Handler = async () => {"), t({ "", "\t" }), i(2), t({ "", "}" }) }),
-	s("r=", { t("rules={{required: true}}") }),
-	s("ons=", { t("onSubmit = React.useCallback(handleSubmit((data) => mutate(data)), [])") }),
+	s("r=", { t("rules={{"), i(1), t("}}") }),
 	s("os=", { t("onSubmit={onSubmit}") }),
 	s("oc=", { t("onClose={onClose}") }),
-	s("uft", { t("const { control, handleSubmit, formState: { errors } } = useForm<any>()") }),
-	s("ia ", { t("inArray("), i(1), t(")") }),
-	s("rfs", { t("fs.readFileSync("), i(1), t(")") }),
-	s("wfs", { t("fs.writeFileSync("), i(1), t(")") }),
-	s("int ", { t("integration_connection") }),
-	s("int.", { t("integration_connection.") }),
-	s("int,", { t("integration_connection,") }),
-	s("TT ", { t("<Tooltip>"), i(1), t("</Tooltip>") }),
-	s("ise", { t("isError "), i(1) }),
-	s("ah;", { t("ApiHandler(async (_evt) => {"), t({ "", "  " }), i(1), t({ "", "})" }) }),
-	s("ldr", { t('<div className="ldr '), i(1), t('" />') }),
+	s("fsr;", { t("fs.readFileSync("), i(1), t(")") }),
+	s("fsw;", { t("fs.writeFileSync("), i(1), t(")") }),
 	s("i(", { t("insert("), i(1) }),
 	s("fr(", { t("from("), i(1) }),
 	s("u(", { t("update("), i(1) }),
@@ -124,14 +122,14 @@ return {
 	s("ij(", { t("innerJoin("), i(1) }),
 	s("fj(", { t("fullJoin("), i(1) }),
 	s("o(", { t("orderBy("), i(1), t(")") }),
-	s("ch ", { t("columnHelper.accessor("), i(1), t("),") }),
+	s("ch(", { t("columnHelper.accessor("), i(1) }),
 	s("ha-", { t("has-["), i(1), t("]") }),
 	s("et ", { t("export type ") }),
 	s("ei ", { t("export interface ") }),
 	s("ed ", { t("export default "), i(1) }),
 	s("cln", { t("className") }),
-	s("rc;", { t("React.createContext("), i(1), t(")") }),
-	s("ru;", { t("React.useContext("), i(1), t(")") }),
+	s("rcc;", { t("React.createContext("), i(1), t(")") }),
+	s("ruc;", { t("React.useContext("), i(1), t(")") }),
 	s({ trig = "tc;", name = "try catch" }, fmt("try {{\n\t{}\n}} catch (err) {{\n\t\n}}", { i(0) })),
 	s("r ", { t("return ") }),
 	s("tnr", { t("throw new RubyError("), i(1), t(")") }),
@@ -140,57 +138,33 @@ return {
 	s("l=", { t("length === "), i(1) }),
 	s("l>", { t("length > "), i(1) }),
 	s("l<", { t("length < "), i(1) }),
-	s("isu", { t("isSuccess "), i(1) }),
-	s("isl", { t("isLoading "), i(1) }),
-	s("lgt", { i(1), t(".length > 0 "), i(2) }),
-	s("llt", { i(1), t(".length < 0 "), i(2) }),
-	s("leq", { i(1), t(".length === 0 "), i(2) }),
+	s("is;", { t("isSuccess"), i(1) }),
+	s("il;", { t("isLoading"), i(1) }),
+	s("ise", { t("isError "), i(1) }),
 	s({ trig = "ruc;", name = "useCallback" }, fmt("React.useCallback(({}) => {}, [])", { i(1), i(2) })),
-	s({ trig = "rm;", name = "useMemo" }, fmt("React.useMemo(() => {}, [{}])", { i(1), i(2) })),
-	s("ue;", { t("React.useEffect(() => {"), t({ "", "  " }), i(2), t({ "", "}, [" }), i(1), t({ "])" }) }),
-	s("ur;", { t("React.useRef("), i(1), t(")") }),
-	s("ud;", { t("React.useReducer("), i(1), t(")") }),
+	s({ trig = "rum;", name = "useMemo" }, fmt("React.useMemo(() => {}, [{}])", { i(1), i(2) })),
+	s("rue;", { t("React.useEffect(() => {"), t({ "", "  " }), i(2), t({ "", "}, [" }), i(1), t({ "])" }) }),
+	s("rur;", { t("React.useRef("), i(1), t(")") }),
+	s("rud;", { t("React.useReducer("), i(1), t(")") }),
 	s("a(", { t("Array.isArray("), i(1) }),
-	s("uv;", { t("utility.validate("), i(1), t(")") }),
-	s("er;", { t("exports."), i(1), t(" = async (req, res) => {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
+	s("e.", { t("exports."), i(1), t(" = async (req, res) => {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 	s("cb ", { t("const ["), i(1), t("] = "), i(2) }),
 	s("cd ", { t("const { "), i(1), t(" } = "), i(2) }),
 	s("ts/", { t("// @ts-ignore") }),
-	s(";9", { t(": () => {"), t({ "", "  " }), i(1), t({ "", "}," }) }),
-	s(";,", { t(": {"), t({ "", "  " }), i(1), t({ "", "}," }) }),
-	s(".tis", { t(".toISOString()") }),
+	s("tis;", { t("toISOString()") }),
 	s("f(", { t("for ("), i(1) }),
-	s("ojv", { t("Object.values("), i(1), t(")") }),
-	s("ojk", { t("Object.keys("), i(1), t(")") }),
-	s("oje", { t("Object.entries("), i(1), t(")") }),
+	s("ov(", { t("Object.values("), i(1) }),
+	s("ok(", { t("Object.keys("), i(1) }),
+	s("oe(", { t("Object.entries("), i(1) }),
 	s("im;", { t('import { motion } from "framer-motion"') }),
 	s("ij;", { t('import dayjs from "dayjs"') }),
 	s("id;", { t('import { eq } from "drizzle-orm"') }),
 	s("iz;", { t('import { z } from "zod"') }),
 	s("il;", { t('import { Link } from "@tanstack/react-router"') }),
-	s("if;", {
-		t('import { useMutation } from "@tanstack/react-query"'),
-		t({ "", 'import { useForm } from "@tanstack/react-form";' }),
-		t({ "", 'import { zodValidator } from "@tanstack/zod-form-adapter";' }),
-	}),
 	s("iu;", { t("import { "), i(1), t(' } from "ui";') }),
 	s("ir;", { t("import * as React from 'react'") }),
 	s("ds=", { t('data-slot="'), i(1), t('"') }),
 	s("ds-", { t("data-[slot="), i(1), t("]:"), i(2) }),
-	s(
-		{ trig = "imd", name = "import as" },
-		fmt('import * as {} from "{}"', {
-			i(1, "value"),
-			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
-		})
-	),
-	s(
-		{ trig = "imx", name = "import Radix UI Components" },
-		fmt('import * as {} from "@radix-ui/react-{}"', {
-			i(1, "value"),
-			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
-		})
-	),
 	s("eaf;", { t("export async function "), i(1), t("() {"), t({ "", "}" }) }),
 	s("edf;", { t("export default function "), i(1), t("() {"), t({ "", "}" }) }),
 	s("edaf;", { t("export default async function "), i(1), t("() {"), t({ "", "}" }) }),
@@ -210,23 +184,7 @@ return {
 	s("c=", { t('className="'), i(1), t('"') }),
 	s("v=", { t('variant="'), i(1), t('"') }),
 	s("c{", { t("className={"), i(1), t("") }),
-	s("fi ", { t("if ("), i(1), t(") {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
-	s("fil ", { t("if ("), i(1), t(".length "), i(2), t({ ") {" }), t({ "", "}" }) }),
-	s("rf;", {
-		t("export function "),
-		f(function(args, snip)
-			local filename = snip.env.TM_FILENAME_BASE or ""
-			local words = {}
-			for word in filename:gmatch("[^-]+") do
-				table.insert(words, word:sub(1, 1):upper() .. word:sub(2))
-			end
-			return table.concat(words)
-		end, {}),
-		t("() {"),
-		t({ "", "  return " }),
-		i(1),
-		t({ "", "}" }),
-	}),
+	s("if(", { t("if ("), i(1), t(") {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 	s("m(", { t("map(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", ")" }) }),
 	s("m{", { t("map(("), i(1), t(") => {"), t({ "", "  " }), i(2), t({ "", ")" }) }),
 	s("fl(", { t("filter(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", ")" }) }),
@@ -244,8 +202,6 @@ return {
 	s("li.", { t('<li className="'), i(1), t('">'), i(2), t("</li>") }),
 	s("it.", { t('<input type="text" className="'), i(1), t('" />') }),
 	s("l,", { t('<label className="label" htmlFor="'), i(1), t('">'), i(2), t("</label>") }),
-	s("tbl", { t({ '<table className="table">', "  " }), i(1), t({ "", "</table>" }) }),
-	s("sl,", { t({ '<select className="select" ' }), i(1), t({ ">", "</select>" }) }),
 	s("op,", { t('<option value="'), i(1), t('">'), i(2), t("</option>") }),
 	s("d.", { t('<div className="'), i(1), t('">'), i(2), t("</div>") }),
 	s("f.", { t('<form className="'), i(1), t('">'), i(2), t("</form>") }),
@@ -257,6 +213,5 @@ return {
 	s("T.", { t("<Text style={styles."), i(1), t("}>"), i(2), t("</Text>") }),
 	s("c ", { t("const "), i(1) }),
 	s("l ", { t("let "), i(1) }),
-	s("och", { t("onChange") }),
 	s("em ", { t("export module "), i(1), t(" {"), t({ "", "\t" }), i(2), t({ "", "}" }) }),
 }
