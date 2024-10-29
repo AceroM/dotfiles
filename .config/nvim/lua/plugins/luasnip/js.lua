@@ -26,7 +26,7 @@ return {
 		end, {}),
 	}),
 	s(
-		{ trig = "r;", name = "React Tag <>" },
+		{ trig = "rt;", name = "React Tag <>" },
 		fmt("<{}>{}</{}>", {
 			i(1, "div"),
 			i(2),
@@ -43,27 +43,11 @@ return {
 		})
 	),
 	s(
-		{ trig = "us;", name = "useState" },
+		{ trig = "rus;", name = "useState" },
 		fmt("const [{}, set{setter}] = React.useState{}({})", {
 			i(1, "value"),
 			i(0),
 			i(2, "{InitialValue}"),
-			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
-		})
-	),
-	s(
-		{ trig = "uf;", name = "useState false" },
-		fmt("const [{}, set{setter}] = React.useState{}(false)", {
-			i(1, "value"),
-			i(0),
-			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
-		})
-	),
-	s(
-		{ trig = "un;", name = "useState null" },
-		fmt("const [{}, set{setter}] = React.useState{}(null)", {
-			i(1, "value"),
-			i(0),
 			setter = l(l._1:sub(1, 1):upper() .. l._1:sub(2, -1), { 1, 2 }),
 		})
 	),
@@ -81,15 +65,19 @@ return {
 			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
 		})
 	),
+	s("uc;", { t('"use client";') }),
+	s("us;", { t('"use server";') }),
+	s("uh;", { t('"use cache";') }),
 	s("vc'", { t('varchar("'), i(1), t('", { length: 255 })') }),
 	s("os=", { t("onSubmit={"), i(1), t("}") }),
 	s("oc=", { t("onClick={"), i(1), t("}") }),
+	s("s'", { t('size="'), i(1), t('"') }),
 	s("ar,", { t("() => {"), t({ "", "  " }), i(1), t({ "", "}" }) }),
 	s("ac;", { t("async () => {"), t({ "", "  " }), i(1), t({ "", "}" }) }),
 	s("aw ", { t("await ", i(1)) }),
 	s("ac ", { t("async ") }),
 	s("r.", { t("React.") }),
-	s("c>", { t("console.log('"), f(clipboard), t(" :>>', "), f(clipboard), t(");") }),
+	s("c:", { t("console.log('"), f(clipboard), t(" :>>', "), f(clipboard), t(");") }),
 	s("c(", { t("console.log("), i(1) }),
 	s("r2", { t("return res.status(200).send("), i(1), t(");") }),
 	s("r(", { t("require("), i(1), t('"') }),
@@ -144,6 +132,7 @@ return {
 	s({ trig = "ruc;", name = "useCallback" }, fmt("React.useCallback(({}) => {}, [])", { i(1), i(2) })),
 	s({ trig = "rum;", name = "useMemo" }, fmt("React.useMemo(() => {}, [{}])", { i(1), i(2) })),
 	s("rue;", { t("React.useEffect(() => {"), t({ "", "  " }), i(2), t({ "", "}, [" }), i(1), t({ "])" }) }),
+	s("ras;", { t("React.useActionState("), i(1), t(")") }),
 	s("rur;", { t("React.useRef("), i(1), t(")") }),
 	s("rud;", { t("React.useReducer("), i(1), t(")") }),
 	s("a(", { t("Array.isArray("), i(1) }),
@@ -182,7 +171,9 @@ return {
 	s(";l", { t(": {"), i(1), t("},") }),
 	s("g:", { t("gap: "), i(1), t(";") }),
 	s("c=", { t('className="'), i(1), t('"') }),
-	s("v=", { t('variant="'), i(1), t('"') }),
+	s("v=", { t('value="'), i(1), t('"') }),
+	s("v{", { t("value={"), i(1) }),
+	s("vr=", { t('variant="'), i(1), t('"') }),
 	s("c{", { t("className={"), i(1), t("") }),
 	s("if(", { t("if ("), i(1), t(") {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 	s("m(", { t("map(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", ")" }) }),
