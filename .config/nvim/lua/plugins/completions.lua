@@ -12,7 +12,7 @@ return {
     lazy = false,
     dependencies = {
       "saadparwaiz1/cmp_luasnip",
-      "rafamadriz/friendly-snippets",
+      -- "rafamadriz/friendly-snippets",
     },
     config = function()
       local ls = require("luasnip")
@@ -41,6 +41,7 @@ return {
       local eruby_snippets = require("plugins.luasnip.eruby")
       local sql_snippets = require("plugins.luasnip.sql")
       local html_snippets = require("plugins.luasnip.html")
+      local shadcn_snippets = require("plugins.luasnip.shadcn")
       local js_snippets = require("plugins.luasnip.js")
       local all_snippets = require("plugins.luasnip.all")
       local lua_snippets = require("plugins.luasnip.lua")
@@ -61,6 +62,12 @@ return {
           autotrigger = true,
           type = "autosnippets",
           key = filetype,
+          priority = 9999,
+        })
+        ls.add_snippets(filetype, shadcn_snippets, {
+          autotrigger = true,
+          type = "autosnippets",
+          key = filetype .. "_shadcn",
           priority = 9999,
         })
       end

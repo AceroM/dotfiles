@@ -1,5 +1,6 @@
 return {
 	"Almo7aya/openingh.nvim",
+	event = "BufRead",
 	config = function()
 		vim.api.nvim_set_keymap("n", "<Leader>gr", ":OpenInGHRepo <CR>", { silent = true, noremap = true })
 		vim.api.nvim_set_keymap("n", "<Leader>go", ":OpenInGHFile <CR>", { silent = true, noremap = true })

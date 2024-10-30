@@ -2,21 +2,20 @@ return {
 	{
 		"tpope/vim-fugitive",
 		event = "BufRead",
-		lazy = false,
 		config = function()
 			vim.keymap.set("n", "<leader>gd", ":Ghdiffsplit<CR>")
 		end,
 	},
-	-- {
-	--   "lewis6991/gitsigns.nvim",
-	--   event = "BufRead",
-	--   config = function()
-	--     require("gitsigns").setup()
-	--     vim.keymap.set("n", "<leader>gp", ":Gitsigns preview_hunk<CR>")
-	--     vim.keymap.set("n", "]x", ":Gitsigns next_hunk<CR>")
-	--     vim.keymap.set("n", "[x", ":Gitsigns prev_hunk<CR>")
-	--   end,
-	-- },
+	{
+		"lewis6991/gitsigns.nvim",
+		lazy = false,
+		config = function()
+			require("gitsigns").setup()
+			vim.keymap.set("n", "<leader>gp", ":Gitsigns preview_hunk<CR>")
+			vim.keymap.set("n", "]x", ":Gitsigns next_hunk<CR>")
+			vim.keymap.set("n", "[x", ":Gitsigns prev_hunk<CR>")
+		end,
+	},
 	{
 		"akinsho/git-conflict.nvim",
 		event = "BufRead",

@@ -1,16 +1,16 @@
 return {
 	{
-		"windwp/nvim-ts-autotag",
-		event = "BufReadPre",
-		config = function()
-			require("nvim-ts-autotag")
-		end,
-	},
-	{
 		"williamboman/mason.nvim",
 		lazy = false,
 		config = function()
 			require("mason").setup()
+		end,
+	},
+	{
+		"windwp/nvim-ts-autotag",
+		event = "BufReadPre",
+		config = function()
+			require("nvim-ts-autotag").setup()
 		end,
 	},
 	{
@@ -43,34 +43,6 @@ return {
 			opts = { lsp = { auto_attach = true } },
 		},
 		config = function()
-			local function add_ruby_deps_command(client, bufnr)
-				vim.api.nvim_buf_create_user_command(bufnr, "ShowRubyDeps", function(opts)
-					local params = vim.lsp.util.make_text_document_params()
-					local showAll = opts.args == "all"
-					client.request("rubyLsp/workspace/dependencies", params, function(error, result)
-						if error then
-							print("Error showing deps: " .. error)
-							return
-						end
-						local qf_list = {}
-						for _, item in ipairs(result) do
-							if showAll or item.dependency then
-								table.insert(qf_list, {
-									text = string.format("%s (%s) - %s", item.name, item.version, item.dependency),
-									filename = item.path,
-								})
-							end
-						end
-						vim.fn.setqflist(qf_list)
-						vim.cmd("copen")
-					end, bufnr)
-				end, {
-					nargs = "?",
-					complete = function()
-						return { "all" }
-					end,
-				})
-			end
 			local capabilities = require("cmp_nvim_lsp").default_capabilities()
 			capabilities.textDocument.foldingRange = {
 				dynamicRegistration = false,
@@ -89,13 +61,13 @@ return {
 				},
 			})
 			lspconfig.lua_ls.setup({ capabilities = capabilities })
-			lspconfig.astro.setup({ capabilities = capabilities })
 			lspconfig.html.setup({ capabilities = capabilities })
 			lspconfig.ruby_lsp.setup({
 				capabilities = capabilities,
-				on_attach = function(client, buffer)
-					add_ruby_deps_command(client, buffer)
-				end,
+				init_options = {
+					formatter = "standard",
+					linters = { "standard" },
+				},
 			})
 			local opts = { noremap = true, silent = true }
 			vim.keymap.set("n", "gd", "<cmd>lua vim.lsp.buf.definition()<cr>", opts)
