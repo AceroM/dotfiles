@@ -1,5 +1,12 @@
 return {
 	{
+		"windwp/nvim-ts-autotag",
+		event = "BufReadPre",
+		config = function()
+			require("nvim-ts-autotag")
+		end,
+	},
+	{
 		"williamboman/mason.nvim",
 		lazy = false,
 		config = function()
