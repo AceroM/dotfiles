@@ -147,7 +147,6 @@ return {
 	s("rur;", { t("React.useRef("), i(1), t(")") }),
 	s("rud;", { t("React.useReducer("), i(1), t(")") }),
 	s("ai(", { t("Array.isArray("), i(1) }),
-	s("e.", { t("exports."), i(1), t(" = async (req, res) => {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
 	s("cb ", { t("const ["), i(1), t("] = "), i(2) }),
 	s("cd ", { t("const { "), i(1), t(" } = "), i(2) }),
 	s("ts/", { t("// @ts-ignore") }),
