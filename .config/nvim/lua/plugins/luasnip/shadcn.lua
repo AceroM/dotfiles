@@ -38,6 +38,9 @@ return {
       { i(1, "fieldName"), i(2, "Label"), i(3, "placeholder"), i(4, "Description") }
     )
   ),
+  s("dl;", { t("<DashboardLayout>"), i(1), t("</DashboardLayout>") }),
+  s("dh;", { t("<DashboardHeader>"), i(1), t("</DashboardHeader>") }),
+  s("dc;", { t("<DashboardContent>"), i(1), t("</DashboardContent>") }),
   s("ac;", { t("<Accordion>"), i(1), t("</Accordion>") }),
   s("acc;", { t("<AccordionContent>"), i(1), t("</AccordionContent>") }),
   s("aci;", { t("<AccordionItem>"), i(1), t("</AccordionItem>") }),
@@ -147,9 +150,9 @@ return {
   s("tbl;", { t("<TabsList>"), i(1), t("</TabsList>") }),
   s("tbg;", { t("<TabsTrigger>"), i(1), t("</TabsTrigger>") }),
   s("t;", { t("<Table>"), i(1), t("</Table>") }),
-  s("tb;", { t("<TableBody>"), i(1), t("</TableBody>") }),
-  s("tr;", { t("<TableRow>"), i(1), t("</TableRow>") }),
-  s("tc;", { t("<TableCell>"), i(1), t("</TableCell>") }),
+  s("tbd;", { t("<TableBody>"), i(1), t("</TableBody>") }),
+  s("tw;", { t("<TableRow>"), i(1), t("</TableRow>") }),
+  s("ti;", { t("<TableCell>"), i(1), t("</TableCell>") }),
   s("th;", { t("<TableHead>"), i(1), t("</TableHead>") }),
   s("thr;", { t("<TableHeader>"), i(1), t("</TableHeader>") }),
   s("l;", { t("<Link>"), i(1), t("</Link>") }),
