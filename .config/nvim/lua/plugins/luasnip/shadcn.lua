@@ -38,7 +38,10 @@ return {
       { i(1, "fieldName"), i(2, "Label"), i(3, "placeholder"), i(4, "Description") }
     )
   ),
-  s("dl;", { t("<DashboardLayout>"), i(1), t("</DashboardLayout>") }),
+  s("dl;", { t("<DescriptionList>"), i(1), t("</DescriptionList>") }),
+  s("dt;", { t("<DescriptionTerm>"), i(1), t("</DescriptionTerm>") }),
+  s("dd;", { t("<DescriptionDetails>"), i(1), t("</DescriptionDetails>") }),
+  s("dly;", { t("<DashboardLayout>"), i(1), t("</DashboardLayout>") }),
   s("dh;", { t("<DashboardHeader>"), i(1), t("</DashboardHeader>") }),
   s("dc;", { t("<DashboardContent>"), i(1), t("</DashboardContent>") }),
   s("ac;", { t("<Accordion>"), i(1), t("</Accordion>") }),
