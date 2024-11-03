@@ -175,6 +175,10 @@ vim.keymap.set("t", "<C-\\><C-h>", "<C-\\><C-n><C-w>h", { noremap = true, silent
 vim.keymap.set("t", "<C-\\><C-l>", "<C-\\><C-n><C-w>l", { noremap = true, silent = true })
 vim.keymap.set("t", "<Esc>", "<C-\\><C-n>", { noremap = true, silent = true })
 
+-- Center screen after jumps
+vim.keymap.set("n", "n", "nzz", { noremap = true, silent = true })
+vim.keymap.set("n", "N", "Nzz", { noremap = true, silent = true })
+
 -- open nautilus/finder on current working file
 vim.api.nvim_create_user_command("Cwf", function()
 	local path = vim.fn.expand("%:p:h")
