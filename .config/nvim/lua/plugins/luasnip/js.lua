@@ -15,7 +15,7 @@ end
 
 return {
 	s("fn;", { f(return_filename) }),
-	s("fb;", {
+	s("fd;", {
 		f(function(args, snip)
 			local filename = snip.env.TM_FILENAME_BASE or ""
 			local words = {}
@@ -74,13 +74,13 @@ return {
 			l(l._1:gsub("([a-z])([A-Z])", "%1-%2"):lower(), { 1 }),
 		})
 	),
-	s("uc;", { t('"use client";') }),
-	s("us;", { t('"use server";') }),
-	s("uh;", { t('"use cache";') }),
+	s("uc;", { t('"use client";'), t({ "", "", "" }) }),
+	s("us;", { t('"use server";'), t({ "", "", "" }) }),
+	s("uh;", { t('"use cache";'), t({ "", "", "" }) }),
 	s("vc'", { t('varchar("'), i(1), t('", { length: 255 })') }),
 	s("os=", { t("onSubmit={"), i(1), t("}") }),
 	s("oc=", { t("onClick={"), i(1), t("}") }),
-	s("s'", { t('size="'), i(1), t('"') }),
+	s("s=", { t('size="'), i(1), t('"') }),
 	s("ar,", { t("() => {"), t({ "", "  " }), i(1), t({ "", "}" }) }),
 	s("ac;", { t("async ("), i(1), t(") => {"), t({ "", "}" }) }),
 	s("aw ", { t("await ", i(1)) }),
@@ -181,11 +181,13 @@ return {
 	s(";l", { t(": {"), i(1), t("},") }),
 	s("g:", { t("gap: "), i(1), t(";") }),
 	s("c=", { t('className="'), i(1), t('"') }),
-	s("v=", { t('value="'), i(1), t('"') }),
-	s("v{", { t("value={"), i(1) }),
-	s("vr=", { t('variant="'), i(1), t('"') }),
+	s("va=", { t('value="'), i(1), t('"') }),
+	s("va{", { t("value={"), i(1) }),
+	s("v=", { t('variant="'), i(1), t('"') }),
 	s("c{", { t("className={"), i(1), t("") }),
-	s("if(", { t("if ("), i(1), t(") {"), t({ "", "  " }), i(2), t({ "", "}" }) }),
+	s("i{", { t("if ("), i(1), t(") {"), t({ "", "" }) }),
+	s("e{", { t("else ("), i(1), t(") {"), t({ "", "" }) }),
+	s("ei{", { t("else if ("), i(1), t(") {"), t({ "", "" }) }),
 	s("m(", { t("map(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", ")" }) }),
 	s("m{", { t("map(("), i(1), t(") => {"), t({ "", "  " }), i(2), t({ "", ")" }) }),
 	s("fl(", { t("filter(("), i(1), t(") => ("), t({ "", "  " }), i(2), t({ "", ")" }) }),
