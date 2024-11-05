@@ -108,6 +108,7 @@ return {
 	s("r(", { t("returning("), i(1) }),
 	s("rq(", { t("require("), i(1) }),
 	s("fr(", { t("from("), i(1) }),
+	s("sf(", { t(".select().from("), i(1) }),
 	s("u(", { t("update("), i(1) }),
 	s("v(", { t("values("), i(1) }),
 	s("s(", { t("select("), i(1) }),
