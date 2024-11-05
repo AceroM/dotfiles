@@ -50,3 +50,4 @@ alias fb="foreman start -f Procfile.dev \"js=1,css=1,job=1\""
 
 # doppler
 alias dp="doppler"
+alias ds="doppler secrets"

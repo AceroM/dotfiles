@@ -4,6 +4,8 @@ local t = ls.text_node
 local i = ls.insert_node
 
 return {
+	s("up;", { t("uppercase") }),
+	s("un;", { t("underline") }),
 	s("d:", { t("disabled:") }),
 	s("o-", { t("opacity-") }),
 	s("of-", { t("offset-") }),
