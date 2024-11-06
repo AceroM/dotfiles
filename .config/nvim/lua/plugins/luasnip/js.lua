@@ -224,4 +224,5 @@ return {
   s("c ", { t("const "), i(1) }),
   s("l ", { t("let "), i(1) }),
   s("em ", { t("export module "), i(1), t(" {"), t({ "", "\t" }), i(2), t({ "", "}" }) }),
+  s("qc;", { t("const queryClient = useQueryClient();") }),
 }
