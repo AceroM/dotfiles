@@ -42,7 +42,7 @@ return {
 	s("f1", { t("flex-1") }),
 	s("ovh", { t("overflow-hidden") }),
 	s("ova", { t("overflow-auto") }),
-	s("r;", { t("relative") }),
+	s("rl;", { t("relative") }),
 	s("s-", { t("shadow-"), i(1) }),
 	s("bgw", { t("bg-white") }),
 	s("tw ", { t("text-white") }),
