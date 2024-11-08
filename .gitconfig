@@ -10,7 +10,7 @@
   cl = clone
   fe = fetch
   re = remote
-  sta = stash
+  sa = stash
 [pull]
 	rebase = true
 [user]
