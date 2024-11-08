@@ -23,6 +23,7 @@ alias np="n package.json"
 alias ng="n .gitignore"
 alias nv="n .env"
 alias nr="n README.md"
+alias gd="g add -A && g di HEAD"
 
 # node
 alias ns="npm start"

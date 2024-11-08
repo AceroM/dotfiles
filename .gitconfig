@@ -1,6 +1,6 @@
 [alias]
   fe = fetch --all --prune
-  sta = stash
+  sa = stash
   di = diff
 	co = checkout
 	br = branch
