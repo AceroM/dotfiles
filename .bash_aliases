@@ -9,6 +9,7 @@ alias o="n ."
 alias eb="n ~/.bashrc"
 alias ek="n ~/.config/kitty/kitty.conf"
 alias nl="nvim -c':e#<1'"
+alias nc="npm run console"
 alias en="cd ~/dotfiles/.config/nvim"
 alias ec="cd ~/dotfiles/.config/nvim && n lua/plugins/completions.lua"
 
