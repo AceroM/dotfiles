@@ -12,7 +12,7 @@ return {
   s("at,", { t("<link "), i(1), t(" />") }),
   s("scr,", { t("<script>"), i(1), t("</script>") }),
   s("sty,", { t("<style>"), i(1), t("</style>") }),
-  s("s,", { t("<section>"), i(1), t("</section>") }),
+  s("se,", { t("<section>"), i(1), t("</section>") }),
   s("ar,", { t("<article>"), i(1), t("</article>") }),
   s("n,", { t("<nav>"), i(1), t("</nav>") }),
   s("as,", { t("<aside>"), i(1), t("</aside>") }),
