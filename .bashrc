@@ -28,3 +28,4 @@ fv() {
     exit 1
   fi
 }
+. "/home/miguel/.deno/env"
