@@ -155,7 +155,7 @@ return {
 	s("cf;", { t("<CardFooter>"), i(1), t("</CardFooter>") }),
 	s("tt;", { t("<Tooltip>"), i(1), t("</Tooltip>") }),
 	s("ttc;", { t("<TooltipContent>"), i(1), t("</TooltipContent>") }),
-	s("ttg;", { t("<TooltipTrigger>"), i(1), t("</TooltipTrigger>") }),
+	s("ttg;", { t("<TooltipTrigger asChild>"), i(1), t("</TooltipTrigger>") }),
 	s("ttp;", { t("<TooltipProvider>"), i(1), t("</TooltipProvider>") }),
 	s("tb;", { t("<Tabs>"), i(1), t("</Tabs>") }),
 	s("tbc;", { t("<TabsContent>"), i(1), t("</TabsContent>") }),

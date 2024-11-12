@@ -137,7 +137,8 @@ return {
   s("rj(", { t("rightJoin("), i(1) }),
   s("ij(", { t("innerJoin("), i(1) }),
   s("fj(", { t("fullJoin("), i(1) }),
-  s("o(", { t("orderBy("), i(1), t(")") }),
+  s("o(", { t("orderBy("), i(1) }),
+  s("oj(", { t("object({"), i(1), t("}") }),
   s("ch(", { t("columnHelper.accessor("), i(1) }),
   s("ha-", { t("has-["), i(1), t("]") }),
   s("et ", { t("export type ") }),
@@ -237,5 +238,5 @@ return {
   s("l ", { t("let "), i(1) }),
   s("em ", { t("export module "), i(1), t(" {"), t({ "", "\t" }), i(2), t({ "", "}" }) }),
   s("qc;", { t("const queryClient = useQueryClient();") }),
-  s("ct;", { t("import { unstable_cacheTag as cacheTag } from 'next/cache';") }),
+  s("nc;", { t("import { unstable_cacheTag as cacheTag } from 'next/cache';") }),
 }
