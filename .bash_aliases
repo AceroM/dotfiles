@@ -32,6 +32,7 @@ alias fm="foreman"
 # node
 alias ns="npm start"
 alias nd="npm run dev"
+alias dd="doppler run -- npm run dev"
 alias vr="npx vitest run"
 alias b="bun"
 alias bb="pnpm run baml-build"
