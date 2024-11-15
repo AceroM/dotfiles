@@ -9,6 +9,7 @@
   pu = push
   pl = pull
   cl = clone
+  wt = worktree
 [pull]
 	rebase = true
 [user]
