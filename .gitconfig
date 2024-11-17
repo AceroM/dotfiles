@@ -11,6 +11,7 @@
   fe = fetch
   re = remote
   sa = stash
+  wt = worktree
 [pull]
 	rebase = true
 [user]
