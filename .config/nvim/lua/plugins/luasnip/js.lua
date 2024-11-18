@@ -176,6 +176,7 @@ return {
 	s("ok(", { t("Object.keys("), i(1) }),
 	s("oe(", { t("Object.entries("), i(1) }),
 	s("im;", { t('import { motion } from "framer-motion"') }),
+	s("idf;", { t('import { format } from "date-fns"') }),
 	s("ij;", { t('import dayjs from "dayjs"') }),
 	s("p'", { t("pgTable('"), i(1), t("', {"), i(2), t("})") }),
 	s("uid;", { t('id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),') }),
