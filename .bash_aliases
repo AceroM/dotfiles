@@ -12,6 +12,7 @@ alias nl="nvim -c':e#<1'"
 alias nc="npm run console"
 alias en="cd ~/dotfiles/.config/nvim"
 alias ec="cd ~/dotfiles/.config/nvim && n lua/plugins/completions.lua"
+alias ds="npm run db:studio"
 
 # quick commands
 alias l="printf '\033[2J\033[3J\033[1;1H'"
@@ -53,7 +54,6 @@ alias fb="foreman start -f Procfile.dev \"js=1,css=1,job=1\""
 
 # doppler
 alias dp="doppler"
-alias ds="doppler secrets"
 
 # cloudflare
 alias cf="cloudflared"
