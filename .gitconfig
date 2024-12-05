@@ -12,6 +12,7 @@
   re = remote
   sa = stash
   wt = worktree
+  re = remote
 [pull]
 	rebase = true
 [user]

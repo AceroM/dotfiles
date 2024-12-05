@@ -1,6 +1,7 @@
 source ~/.local/share/omakub/defaults/bash/rc
 source ~/.bash_aliases
 source ~/.bash_private
+. "/home/miguel/.deno/env"
 
 export drop_schema="DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
@@ -28,5 +29,3 @@ fv() {
     exit 1
   fi
 }
-
-. "/home/miguel/.deno/env"
