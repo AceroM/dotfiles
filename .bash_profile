@@ -14,6 +14,9 @@ esac
 # rust
 . "$HOME/.cargo/env"
 
+# deno
+. "/home/miguel/.deno/env"
+
 # fzf
 # determines search program for fzf
 if type ag &> /dev/null; then
@@ -23,5 +26,3 @@ fi
 if type rg &> /dev/null; then
   export FZF_DEFAULT_COMMAND='rg --files --hidden'
 fi
-
-. "/home/miguel/.deno/env"
