@@ -1,9 +1,7 @@
 return {
 	"nvimtools/none-ls.nvim",
 	lazy = false,
-	dependencies = {
-		"nvimtools/none-ls-extras.nvim",
-	},
+	dependencies = { "nvimtools/none-ls-extras.nvim" },
 	config = function()
 		local augroup = vim.api.nvim_create_augroup("LspFormatting", {})
 		local null_ls = require("null-ls")
@@ -33,10 +31,6 @@ return {
 		})
 		vim.keymap.set("n", "<F2>", function()
 			vim.lsp.buf.rename()
-		end, {})
-		vim.keymap.set({ "n", "x" }, "F3", function()
-			vim.lsp.buf.format({ timeout = 5000 })
-			vim.cmd("w")
 		end, {})
 	end,
 }
