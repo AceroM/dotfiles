@@ -1,5 +1,3 @@
-AllCops:
-  NewCops: enable
 Layout/EmptyLineAfterGuardClause:
   Enabled: false
 Layout/LineLength:
