@@ -24,7 +24,7 @@ return {
 					function()
 						return {
 							exe = "prettierd",
-							args = { vim.api.nvim_buf_get_name(0) },
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
 							stdin = true,
 						}
 					end,
@@ -33,7 +33,7 @@ return {
 					function()
 						return {
 							exe = "prettierd",
-							args = { vim.api.nvim_buf_get_name(0) },
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
 							stdin = true,
 						}
 					end,
@@ -42,7 +42,7 @@ return {
 					function()
 						return {
 							exe = "prettierd",
-							args = { vim.api.nvim_buf_get_name(0) },
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
 							stdin = true,
 						}
 					end,
@@ -51,7 +51,7 @@ return {
 					function()
 						return {
 							exe = "prettierd",
-							args = { vim.api.nvim_buf_get_name(0) },
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
 							stdin = true,
 						}
 					end,
