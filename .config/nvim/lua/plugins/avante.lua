@@ -2,7 +2,7 @@ return {
 	{
 		"yetone/avante.nvim",
 		event = "VeryLazy",
-		build = "make BUILD_FROM_SOURCE=true luajit",
+		build = "make",
 		opts = {
 			---@alias Provider "openai" | "claude" | "azure" | "deepseek" | "groq" | "copilot" | [string]
 			provider = "claude",
@@ -17,7 +17,7 @@ return {
 				auto_set_highlight_group = true,
 				auto_set_keymaps = true,
 				auto_apply_diff_after_generation = false,
-				support_paste_from_clipboard = false,
+				support_paste_from_clipboard = true,
 			},
 			mappings = {
 				ask = "<leader>aa",
@@ -62,12 +62,32 @@ return {
 			},
 		},
 		dependencies = {
-			"nvim-tree/nvim-web-devicons",
 			"stevearc/dressing.nvim",
 			"nvim-lua/plenary.nvim",
 			"MunifTanjim/nui.nvim",
-			--- The below is optional, make sure to setup it properly if you have lazy=true
+			--- The below dependencies are optional,
+			"hrsh7th/nvim-cmp", -- autocompletion for avante commands and mentions
+			"nvim-tree/nvim-web-devicons", -- or echasnovski/mini.icons
+			"zbirenbaum/copilot.lua", -- for providers='copilot'
 			{
+				-- support for image pasting
+				"HakonHarnes/img-clip.nvim",
+				event = "VeryLazy",
+				opts = {
+					-- recommended settings
+					default = {
+						embed_image_as_base64 = false,
+						prompt_for_file_name = false,
+						drag_and_drop = {
+							insert_mode = true,
+						},
+						-- required for Windows users
+						use_absolute_path = true,
+					},
+				},
+			},
+			{
+				-- Make sure to set this up properly if you have lazy=true
 				"MeanderingProgrammer/render-markdown.nvim",
 				opts = {
 					file_types = { "markdown", "Avante" },
@@ -77,9 +97,7 @@ return {
 		},
 		config = function()
 			require("avante_lib").load() -- note requiring avante_lib here
-			require("avante").setup({
-				-- add any options here if needed
-			})
+			require("avante").setup({})
 		end,
 	},
 	{

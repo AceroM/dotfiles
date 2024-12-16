@@ -177,12 +177,25 @@ return {
 	s("oe(", { t("Object.entries("), i(1) }),
 	s("im;", { t('import { motion } from "framer-motion"') }),
 	s("ib;", { t('import { Button } from "@/components/ui/button";') }),
+	s("ib;", { t('import { Button } from "@/components/ui/button";') }),
+	s(
+		"isl;",
+		{ t('import { Select, SelectValue, SelectTrigger, SelectItem, SelectContent } from "@/components/ui/select";') }
+	),
+	s("isr;", { t('import { Resource } from "sst/resource";') }),
+	s("it;", { t('import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";') }),
+	s("itt;", { t('import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";') }),
+	s("idr;", {
+		t(
+			'import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";'
+		),
+	}),
 	s("ii;", { t('import { Input } from "@/components/ui/input";') }),
 	s("idf;", { t('import { format } from "date-fns"') }),
 	s("ij;", { t('import dayjs from "dayjs"') }),
 	s("p'", { t("pgTable('"), i(1), t("', {"), i(2), t("})") }),
 	s("uid;", { t('id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),') }),
-	s("id;", { t('import { eq, and, inArray, count, sql, getTableColumns } from "drizzle-orm"') }),
+	s("id;", { t('import { eq, or, and, inArray, count, sql, getTableColumns } from "drizzle-orm"') }),
 	s("iz;", { t('import { z } from "zod"') }),
 	s("il;", { t('import { Link } from "@tanstack/react-router"') }),
 	s("iu;", { t("import { "), i(1), t(' } from "ui";') }),
