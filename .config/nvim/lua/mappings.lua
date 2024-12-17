@@ -180,6 +180,10 @@ vim.keymap.set("t", "<Esc>", "<C-\\><C-n>", { noremap = true, silent = true })
 vim.keymap.set("n", "n", "nzz", { noremap = true, silent = true })
 vim.keymap.set("n", "N", "Nzz", { noremap = true, silent = true })
 
+-- Map arrow keys to C-d and C-u for moving up and down
+vim.keymap.set("n", "<Down>", "<C-d>zz", { noremap = true, silent = true })
+vim.keymap.set("n", "<Up>", "<C-u>zz", { noremap = true, silent = true })
+
 -- open nautilus/finder on current working file
 vim.api.nvim_create_user_command("Cwf", function()
 	local path = vim.fn.expand("%:p:h")
