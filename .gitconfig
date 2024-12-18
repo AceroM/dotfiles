@@ -10,6 +10,7 @@
   pl = pull
   cl = clone
   wt = worktree
+  re = remote
 [pull]
 	rebase = true
 [user]
