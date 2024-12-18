@@ -176,11 +176,26 @@ return {
 	s("ok(", { t("Object.keys("), i(1) }),
 	s("oe(", { t("Object.entries("), i(1) }),
 	s("im;", { t('import { motion } from "framer-motion"') }),
+	s("ib;", { t('import { Button } from "@/components/ui/button";') }),
+	s("ib;", { t('import { Button } from "@/components/ui/button";') }),
+	s(
+		"isl;",
+		{ t('import { Select, SelectValue, SelectTrigger, SelectItem, SelectContent } from "@/components/ui/select";') }
+	),
+	s("isr;", { t('import { Resource } from "sst/resource";') }),
+	s("it;", { t('import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";') }),
+	s("itt;", { t('import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";') }),
+	s("idr;", {
+		t(
+			'import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";'
+		),
+	}),
+	s("ii;", { t('import { Input } from "@/components/ui/input";') }),
 	s("idf;", { t('import { format } from "date-fns"') }),
 	s("ij;", { t('import dayjs from "dayjs"') }),
 	s("p'", { t("pgTable('"), i(1), t("', {"), i(2), t("})") }),
 	s("uid;", { t('id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),') }),
-	s("id;", { t('import { eq, and, inArray, count, sql, getTableColumns } from "drizzle-orm"') }),
+	s("id;", { t('import { eq, or, and, inArray, count, sql, getTableColumns } from "drizzle-orm"') }),
 	s("iz;", { t('import { z } from "zod"') }),
 	s("il;", { t('import { Link } from "@tanstack/react-router"') }),
 	s("iu;", { t("import { "), i(1), t(' } from "ui";') }),
@@ -189,6 +204,14 @@ return {
 	s("ds-", { t("data-[slot="), i(1), t("]:"), i(2) }),
 	s("eaf;", { t("export async function "), i(1), t("() {"), t({ "", "}" }) }),
 	s("edf;", { t("export default function "), i(1), t("() {"), t({ "", "}" }) }),
+	s("edp;", { t("export default function Page"), t("() {"), t({ "", "  " }), i(1), t({ "", "}" }) }),
+	s("edl;", {
+		t("export default function Layout"),
+		t("({ children }: { children: React.ReactNode }) {"),
+		t({ "", "  " }),
+		i(1),
+		t({ "", "}" }),
+	}),
 	s("edaf;", { t("export default async function "), i(1), t("() {"), t({ "", "}" }) }),
 	s("ef;", { t("export function "), i(1), t("() {"), t({ "", "}" }) }),
 	s("ec ", { t("export const ") }),
