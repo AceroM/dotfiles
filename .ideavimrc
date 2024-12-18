@@ -9,6 +9,7 @@ nnoremap <c-k> <c-y>
 
 " Intellij vim plugin settings
 let mapleader=" "
+set clipboard+=unnamed
 set noerrorbells
 set visualbell
 set nocompatible
