@@ -189,3 +189,12 @@ vim.api.nvim_create_user_command("Cwf", function()
 	local path = vim.fn.expand("%:p:h")
 	os.execute("open " .. path)
 end, {})
+
+
+vim.keymap.set("n", "<leader>y", function()
+	local cmd = string.format(
+		'osascript -e \'tell application "Finder" to set the clipboard to (POSIX file "%s")\'',
+		vim.fn.expand("%:p")
+	)
+	vim.fn.system(cmd) -- This actually runs the command
+end)
