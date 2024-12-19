@@ -16,7 +16,7 @@ return {
 				auto_suggestions = false, -- Experimental stage
 				auto_set_highlight_group = true,
 				auto_set_keymaps = true,
-				auto_apply_diff_after_generation = false,
+				auto_apply_diff_after_generation = true,
 				support_paste_from_clipboard = true,
 			},
 			mappings = {

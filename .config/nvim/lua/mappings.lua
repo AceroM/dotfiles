@@ -192,11 +192,20 @@ vim.api.nvim_create_user_command("Cwf", function()
 	os.execute("open " .. path)
 end, {})
 
-
 vim.keymap.set("n", "<leader>y", function()
-	local cmd = string.format(
-		'osascript -e \'tell application "Finder" to set the clipboard to (POSIX file "%s")\'',
-		vim.fn.expand("%:p")
-	)
-	vim.fn.system(cmd) -- This actually runs the command
+	local filepath = vim.fn.expand("%:p")
+	-- Convert to file:// URI format
+	local file_uri = "file://" .. filepath
+
+	-- Copy as text/uri-list format
+	local cmd = string.format('echo "%s" | xclip -selection clipboard -t text/uri-list', file_uri)
+
+	local output = vim.fn.system(cmd)
+	local error_code = vim.v.shell_error
+
+	if error_code == 0 then
+		vim.notify("File copied to clipboard", vim.log.levels.INFO)
+	else
+		vim.notify("Failed to copy file to clipboard: " .. output, vim.log.levels.ERROR)
+	end
 end)
