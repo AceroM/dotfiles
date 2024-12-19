@@ -23,7 +23,7 @@ fv() {
       echo "Error: Key $key not found in $env_file" >&2
       exit 1
     fi
-  else 
+  else
     echo "Error: File $env_file not found" >&2
     exit 1
   fi

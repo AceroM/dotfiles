@@ -2,42 +2,99 @@ return {
 	"mhartington/formatter.nvim",
 	event = "BufWrite",
 	config = function()
+		-- Utilities for creating configurations
 		local util = require("formatter.util")
-
-		vim.api.nvim_create_autocmd("BufWritePost", {
-			group = vim.api.nvim_create_augroup("_formatter", { clear = true }),
-			pattern = "*",
-			command = "FormatWrite",
+		local augroup = vim.api.nvim_create_augroup
+		local autocmd = vim.api.nvim_create_autocmd
+		augroup("__formatter__", { clear = true })
+		autocmd("BufWritePost", {
+			group = "__formatter__",
+			command = ":FormatWrite",
 		})
 
-		-- Provides the following commands:
-		-- Format, FormatWrite, FormatLock, FormatWriteLock
+		-- Provides the Format, FormatWrite, FormatLock, and FormatWriteLock commands
 		require("formatter").setup({
+			-- Enable or disable logging
 			logging = true,
+			-- Set the log level
 			log_level = vim.log.levels.WARN,
+			-- All formatter configurations are opt-in
 			filetype = {
-				ruby = {
+				javascript = {
 					function()
 						return {
-							exe = "rubocop",
+							exe = "prettierd",
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
+							stdin = true,
+						}
+					end,
+				},
+				typescript = {
+					function()
+						return {
+							exe = "prettierd",
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
+							stdin = true,
+						}
+					end,
+				},
+				javascriptreact = {
+					function()
+						return {
+							exe = "prettierd",
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
+							stdin = true,
+						}
+					end,
+				},
+				typescriptreact = {
+					function()
+						return {
+							exe = "prettierd",
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
+							stdin = true,
+						}
+					end,
+				},
+
+				-- Formatter configurations for filetype "lua" go here
+				-- and will be executed in order
+				lua = {
+					-- "formatter.filetypes.lua" defines default configurations for the
+					-- "lua" filetype
+					require("formatter.filetypes.lua").stylua,
+
+					-- You can also define your own configuration
+					function()
+						-- Supports conditional formatting
+						if util.get_current_buffer_file_name() == "special.lua" then
+							return nil
+						end
+
+						-- Full specification of configurations is down below and in Vim help
+						-- files
+						return {
+							exe = "stylua",
 							args = {
-								"--fix-layout",
-								"--autocorrect-all",
-								"--stdin",
-								util.escape_path(util.get_current_buffer_file_name()),
-								"--format",
-								"files",
-								"--stderr",
+								"--search-parent-directories",
+								"--stdin-filepath",
+								util.escape_path(util.get_current_buffer_file_path()),
+								"--",
+								"-",
 							},
 							stdin = true,
 						}
 					end,
 				},
-				lua = {
-					require("formatter.filetypes.lua").stylua,
-				},
+
+				-- Use the special "*" filetype for defining formatter configurations on
+				-- any filetype
 				["*"] = {
+					-- "formatter.filetypes.any" defines default configurations for any
+					-- filetype
 					require("formatter.filetypes.any").remove_trailing_whitespace,
+					-- Remove trailing whitespace without 'sed'
+					-- require("formatter.filetypes.any").substitute_trailing_whitespace,
 				},
 			},
 		})
