@@ -24,6 +24,8 @@ return {
   s("fw:", { t("focus-within:") }),
   s("il;", { t("italic") }),
   s("fm;", { t("font-medium") }),
+  s("fs;", { t("font-semibold") }),
+  s("fb;", { t("font-bold") }),
   s("f-", { t("font-") }),
   s("tx;", { t("text-xs") }),
   s("tl;", { t("text-lg") }),
