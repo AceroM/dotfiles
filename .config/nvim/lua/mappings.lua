@@ -175,7 +175,7 @@ vim.keymap.set("t", "<C-\\><C-k>", "<C-\\><C-n><C-w>k", { noremap = true, silent
 vim.keymap.set("t", "<C-\\><C-h>", "<C-\\><C-n><C-w>h", { noremap = true, silent = true })
 vim.keymap.set("t", "<C-\\><C-l>", "<C-\\><C-n><C-w>l", { noremap = true, silent = true })
 vim.keymap.set("t", "<Esc>", "<C-\\><C-n>", { noremap = true, silent = true })
-
+vim.keymap.set("n", "<c-h>", vim.lsp.buf.rename, { noremap = true, silent = true })
 -- Center screen after jumps
 vim.keymap.set("n", "n", "nzz", { noremap = true, silent = true })
 vim.keymap.set("n", "N", "Nzz", { noremap = true, silent = true })
