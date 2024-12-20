@@ -62,6 +62,7 @@ return {
 			})
 			lspconfig.lua_ls.setup({ capabilities = capabilities })
 			lspconfig.html.setup({ capabilities = capabilities })
+			lspconfig.biome.setup({ capabilities = capabilities })
 			lspconfig.ruby_lsp.setup({
 				capabilities = capabilities,
 				init_options = {

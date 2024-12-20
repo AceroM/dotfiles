@@ -81,7 +81,7 @@ return {
 	s("os=", { t("onSubmit={"), i(1), t("}") }),
 	s("oc=", { t("onClick={"), i(1), t("}") }),
 	s("s=", { t('size="'), i(1), t('"') }),
-	s("p=", { t('placeholder="'), i(1), t('"') }),
+	s("ph=", { t('placeholder="'), i(1), t('"') }),
 	s("d=", { t('disabled="'), i(1), t('"') }),
 	s("d{", { t("disabled={"), i(1) }),
 	s("t=", { t('type="'), i(1), t('"') }),
@@ -176,21 +176,6 @@ return {
 	s("ok(", { t("Object.keys("), i(1) }),
 	s("oe(", { t("Object.entries("), i(1) }),
 	s("im;", { t('import { motion } from "framer-motion"') }),
-	s("ib;", { t('import { Button } from "@/components/ui/button";') }),
-	s("ib;", { t('import { Button } from "@/components/ui/button";') }),
-	s(
-		"isl;",
-		{ t('import { Select, SelectValue, SelectTrigger, SelectItem, SelectContent } from "@/components/ui/select";') }
-	),
-	s("isr;", { t('import { Resource } from "sst/resource";') }),
-	s("it;", { t('import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";') }),
-	s("itt;", { t('import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";') }),
-	s("idr;", {
-		t(
-			'import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";'
-		),
-	}),
-	s("ii;", { t('import { Input } from "@/components/ui/input";') }),
 	s("idf;", { t('import { format } from "date-fns"') }),
 	s("ij;", { t('import dayjs from "dayjs"') }),
 	s("p'", { t("pgTable('"), i(1), t("', {"), i(2), t("})") }),
