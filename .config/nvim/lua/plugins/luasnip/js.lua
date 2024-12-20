@@ -159,7 +159,7 @@ return {
 	s("le ", { t("length "), i(1) }),
 	s("is;", { t("isSuccess"), i(1) }),
 	s("il;", { t("isLoading"), i(1) }),
-	s("ise", { t("isError "), i(1) }),
+	s("ie;", { t("isError "), i(1) }),
 	s({ trig = "ruc;", name = "useCallback" }, fmt("React.useCallback(({}) => {}, [])", { i(1), i(2) })),
 	s({ trig = "rum;", name = "useMemo" }, fmt("React.useMemo(() => {}, [{}])", { i(1), i(2) })),
 	s("rue;", { t("React.useEffect(() => {"), t({ "", "  " }), i(2), t({ "", "}, [" }), i(1), t({ "])" }) }),
