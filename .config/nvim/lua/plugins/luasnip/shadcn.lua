@@ -114,7 +114,6 @@ return {
 	s("sv;", { t("<SelectValue>"), i(1), t("</SelectValue>") }),
 	s("b;", { t("<Button>"), i(1), t("</Button>") }),
 	s("bo;", { t('<Button variant="outline">'), i(1), t("</Button>") }),
-	s("bs;", { t('<Button type="submit">'), i(1), t("</Button>") }),
 	s("bb;", { t('<Button type="button">'), i(1), t("</Button>") }),
 	s("ba;", { t("<Badge>"), i(1), t("</Badge>") }),
 	s("bc;", { t("<Breadcrumb>"), i(1), t("</Breadcrumb>") }),
@@ -270,4 +269,8 @@ return {
 
 	-- one dev
 	s("ys;", { t("<YStack>"), i(1), t("</YStack>") }),
+	s("xs;", { t("<XStack>"), i(1), t("</XStack>") }),
+	s("h1;", { t("<H1>"), i(1), t("</H1>") }),
+	s("tts;", { t("<TooltipSimple>"), i(1), t("</TooltipSimple>") }),
+	s("bs;", { t("<ButtonSimple>"), i(1), t("</ButtonSimple>") }),
 }
