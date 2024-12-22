@@ -105,7 +105,7 @@ return {
 	s("pap;", { t("<PaginationPrevious>"), i(1), t("</PaginationPrevious>") }),
 	s("pae;", { t("<PaginationEllipsis>"), i(1), t("</PaginationEllipsis>") }),
 	s("pr;", { t("<Progress "), i(1), t(" />") }),
-	s("p;", { t("<Popover>"), i(1), t("</Popover>") }),
+	s("po;", { t("<Popover>"), i(1), t("</Popover>") }),
 	s("pc;", { t("<PopoverContent>"), i(1), t("</PopoverContent>") }),
 	s("pg;", { t("<PopoverTrigger asChild>"), i(1), t("</PopoverTrigger>") }),
 	s("sc;", { t("<SelectContent>"), i(1), t("</SelectContent>") }),
@@ -273,4 +273,9 @@ return {
 	s("h1;", { t("<H1>"), i(1), t("</H1>") }),
 	s("tts;", { t("<TooltipSimple>"), i(1), t("</TooltipSimple>") }),
 	s("bs;", { t("<ButtonSimple>"), i(1), t("</ButtonSimple>") }),
+	s("v;", { t({ "<View>", "  " }), i(1), t({ "", "</View>" }) }),
+	s("t;", { t({ "<Text>", "  " }), i(1), t({ "", "</Text>" }) }),
+	s("p;", { t({ "<Paragraph>", "  " }), i(1), t({ "", "</Paragraph>" }) }),
+	s("v.", { t("<View style={styles."), i(1), t("}>"), i(2), t("</View>") }),
+	s("t.", { t("<Text style={styles."), i(1), t("}>"), i(2), t("</Text>") }),
 }
