@@ -56,6 +56,15 @@ return {
 						}
 					end,
 				},
+				json = {
+					function()
+						return {
+							exe = "prettierd",
+							args = { util.escape_path(vim.api.nvim_buf_get_name(0)) },
+							stdin = true,
+						}
+					end,
+				},
 
 				-- Formatter configurations for filetype "lua" go here
 				-- and will be executed in order
