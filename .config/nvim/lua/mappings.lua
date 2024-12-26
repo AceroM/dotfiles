@@ -153,6 +153,7 @@ vim.api.nvim_create_autocmd("TabLeave", {
 -- vim.keymap.set({ "n", "v" }, "<c-m>", ":-tabmove<CR>", { silent = true })
 vim.keymap.set({ "n", "v" }, "<c-,>", ":+tabmove<CR>", { silent = true })
 vim.keymap.set({ "n", "v" }, "<c-.>", vim.lsp.buf.code_action, { silent = true, noremap = true })
+vim.keymap.set("n", "<c-h>", vim.lsp.buf.rename, { noremap = true, silent = true })
 vim.keymap.set({ "n", "v" }, "<c-'>", function()
 	local count = vim.v.count1
 	local line = vim.fn.getline(".")
@@ -301,3 +302,8 @@ vim.keymap.set("n", "<leader>p", apply_claude_diff, {
 	desc = "Apply Claude's diffs from clipboard",
 	silent = false,
 })
+
+if vim.env.TERM == "xterm-kitty" then
+	vim.cmd([[autocmd UIEnter * if v:event.chan ==# 0 | call chansend(v:stderr, "\x1b[>1u") | endif]])
+	vim.cmd([[autocmd UILeave * if v:event.chan ==# 0 | call chansend(v:stderr, "\x1b[<1u") | endif]])
+end

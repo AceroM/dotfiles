@@ -250,4 +250,24 @@ return {
 	s("rh;", { t("<ResizableHandle />") }),
 	s("rp;", { t("<ResizablePanel>"), i(1), t("</ResizablePanel>") }),
 	s("rpg;", { t("<ResizablePanelGroup>"), i(1), t("</ResizablePanelGroup>") }),
+
+	s("ib;", { t('import { Button } from "@/components/ui/button";') }),
+	s("ilb;", { t('import { Label } from "@/components/ui/label";') }),
+	s(
+		"isl;",
+		{ t('import { Select, SelectValue, SelectTrigger, SelectItem, SelectContent } from "@/components/ui/select";') }
+	),
+	s("isr;", { t('import { Resource } from "sst/resource";') }),
+	s("it;", { t('import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";') }),
+	s("itt;", { t('import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";') }),
+	s("idr;", {
+		t(
+			'import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";'
+		),
+	}),
+	s("ii;", { t('import { Input } from "@/components/ui/input";') }),
+	s("isw;", { t("import { Switch } from '@/components/ui/switch';") }),
+
+	-- one dev
+	s("ys;", { t("<YStack>"), i(1), t("</YStack>") }),
 }
