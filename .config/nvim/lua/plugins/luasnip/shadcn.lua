@@ -266,6 +266,11 @@ return {
 		),
 	}),
 	s("ii;", { t('import { Input } from "@/components/ui/input";') }),
+	s("idg;", {
+		t(
+			'import { Dialog, DialogTrigger, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";'
+		),
+	}),
 	s("isw;", { t("import { Switch } from '@/components/ui/switch';") }),
 
 	-- one dev
