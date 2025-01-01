@@ -32,8 +32,8 @@ return {
 			},
 			filesystem = {
 				follow_current_file = {
-          enabled = true
-        },
+					enabled = true,
+				},
 				use_libuv_file_watcher = true,
 				cwd_target = {
 					sidebar = "tab",
@@ -50,15 +50,12 @@ return {
 				system_open = function(state)
 					local node = state.tree:get_node()
 					local path = node:get_id()
-					vim.fn.jobstart({ "xdg-open", path }, { detach = true })
-					local p
-					local lastSlashIndex = path:match("^.+()\\[^\\]*$") -- Match the last slash and everything before it
-					if lastSlashIndex then
-						p = path:sub(1, lastSlashIndex - 1) -- Extract substring before the last slash
-					else
-						p = path -- If no slash found, return original path
-					end
-					vim.cmd("silent !start explorer " .. p)
+					-- Use macOS 'open' command to open the file/directory
+					vim.fn.jobstart({ "open", path }, { detach = true })
+					-- Get the parent directory path
+					local parent_path = vim.fn.fnamemodify(path, ":h")
+					-- Open Finder at the parent directory
+					vim.fn.jobstart({ "open", parent_path }, { detach = true })
 				end,
 			},
 		})

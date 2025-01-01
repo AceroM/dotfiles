@@ -43,5 +43,4 @@ return {
 	s("inp;", { t('<input type="'), i(1), t('" />') }),
 	s("im;", { t('<img src="'), i(1), t('" alt="'), i(2), t('"/>') }),
 	s("a;,", { t('<a href="'), i(1), t('"/>') }),
-	s("l;,", { t('<label htmlFor="'), i(1), t('">'), i(2), t("</label>") }),
 }
