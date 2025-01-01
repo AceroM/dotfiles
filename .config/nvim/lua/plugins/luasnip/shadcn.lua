@@ -273,6 +273,7 @@ return {
 	s("isw;", { t("import { Switch } from '@/components/ui/switch';") }),
 	s("isw;", { t("import { Switch } from '@/components/ui/switch';") }),
 	s("itb;", { t('import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";') }),
+	s("if;", { t('import { Form, FormField, FormItem, FormLabel, FormControl } from "@/components/ui/form";') }),
 
 	-- one dev
 	s("ys;", { t("<YStack>"), i(1), t("</YStack>") }),
