@@ -91,7 +91,7 @@ return {
 	s("aw ", { t("await ", i(1)) }),
 	s("ac ", { t("async ") }),
 	s("r.", { t("React.") }),
-	s("c:", { t("console.log('"), f(clipboard), t(" :>>', "), f(clipboard), t(");") }),
+	s("c;", { t("console.log('"), f(clipboard), t(" :>>', "), f(clipboard), t(");") }),
 	s("c(", { t("console.log("), i(1) }),
 	s("p(", { t("pgTable("), i(1) }),
 	s("ce(", { t("console.error("), i(1) }),

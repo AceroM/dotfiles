@@ -154,7 +154,6 @@ return {
 	s("cai;", { t("<CarouselItem>"), i(1), t("</CarouselItem>") }),
 	s("can;", { t("<CarouselNext>"), i(1), t("</CarouselNext>") }),
 	s("cap;", { t("<CarouselPrevious>"), i(1), t("</CarouselPrevious>") }),
-	s("c;", { t("<Card>"), i(1), t("</Card>") }),
 	s("ct;", { t("<CardTitle>"), i(1), t("</CardTitle>") }),
 	s("ch;", { t("<CardHeader>"), i(1), t("</CardHeader>") }),
 	s("cd;", { t("<CardDescription>"), i(1), t("</CardDescription>") }),
