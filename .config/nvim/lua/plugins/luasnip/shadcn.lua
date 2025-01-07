@@ -28,7 +28,7 @@ return {
 <FormField
   control={{form.control}}
   name="{}"
-  render={{({{ field, fieldState }}) => (
+  render={{({{ field, fieldState: { error } }}) => (
     <FormItem>
       <FormLabel>{}</FormLabel>
       <FormControl>
@@ -36,10 +36,11 @@ return {
           placeholder="{}"
           {{...field}}
           disabled={{isSubmitting}}
-          error={{fieldState.error?.message}}
+          className={cn(error && 'border-red-500 focus-visible:ring-red-500 text-red-500')}
         />
       </FormControl>
       <FormDescription>{}</FormDescription>
+      <FormMessage />
     </FormItem>
   )}}
 />
@@ -265,6 +266,9 @@ return {
 	}),
 	s("ii;", { t('import { Input } from "@/components/ui/input";') }),
 	s("isw;", { t("import { Switch } from '@/components/ui/switch';") }),
+	s("if;", {
+		t('import { Form, FormField, FormItem, FormLabel, FormMessage, FormDescription } from "@/components/ui/form";'),
+	}),
 
 	-- one dev
 	s("ys;", { t("<YStack>"), i(1), t("</YStack>") }),
