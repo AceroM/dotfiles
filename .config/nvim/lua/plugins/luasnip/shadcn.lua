@@ -28,15 +28,15 @@ return {
 <FormField
   control={{form.control}}
   name="{}"
-  render={{({{ field, fieldState: { error } }}) => (
+  render={{({{ field, fieldState }}) => (
     <FormItem>
       <FormLabel>{}</FormLabel>
       <FormControl>
         <Input
           placeholder="{}"
           {{...field}}
-          disabled={{isSubmitting}}
-          className={cn(error && 'border-red-500 focus-visible:ring-red-500 text-red-500')}
+          disabled={{fieldState.isSubmitting}}
+          className={{cn(fieldState.error && 'border-red-500 focus-visible:ring-red-500 text-red-500')}}
         />
       </FormControl>
       <FormDescription>{}</FormDescription>
