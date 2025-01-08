@@ -9,7 +9,8 @@
   pl = pull
   cl = clone
   fe = fetch
-  re = remote
+  rb = rebase
+  rs = reset
   sa = stash
   wt = worktree
   re = remote

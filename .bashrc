@@ -30,3 +30,7 @@ fv() {
     exit 1
   fi
 }
+
+gree() {
+  fd --type f --hidden --exclude .git | tree --fromfile
+}
