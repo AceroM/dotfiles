@@ -41,7 +41,7 @@ alias vr="npx vitest run"
 alias b="bun"
 alias d="bun run dev"
 alias p="bun run push"
-alias p="bun run db-up"
+alias u="bun run db-up"
 alias s="bun run seed"
 alias bb="pnpm run baml-build"
 
