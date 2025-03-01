@@ -2,6 +2,7 @@
 alias pr="cd packages/core"
 alias pf="cd packages/functions"
 alias fe="cd packages/frontend"
+alias ze="cd packages/zero"
 alias be="cd packages/backend"
 alias au="cd packages/auth"
 alias pd="cd packages/demo"
@@ -32,6 +33,7 @@ alias np="n package.json"
 alias nv="n .env"
 alias nr="n README.md"
 alias fm="foreman"
+alias st="bunx sst"
 
 # node
 alias ns="npm start"
@@ -40,9 +42,13 @@ alias dd="doppler run -- npm run dev"
 alias vr="npx vitest run"
 alias b="bun"
 alias d="bun run dev"
+alias dp="bun run dev-prod"
 alias p="bun run push"
+alias pp="bun run push-prod"
 alias u="bun run db-up"
-alias s="bun run seed"
+alias s="bun run build-schema"
+alias sd="bun run build-schema"
+alias sp="bun run seed-prod"
 alias bb="pnpm run baml-build"
 
 # postgres
@@ -60,7 +66,8 @@ alias fr="foreman start -f Procfile.dev \"css=1,guard=1,jobs=1\""
 alias fb="foreman start -f Procfile.dev \"js=1,css=1,job=1\""
 
 # doppler
-alias dp="doppler"
+# alias dp="doppler"
 
 # cloudflare
 alias cf="cloudflared"
+alias cl="claude"

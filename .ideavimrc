@@ -3,6 +3,8 @@ nnoremap <C-;> :noh <cr>
 
 " Intellij vim plugin settings
 let mapleader=" "
+set ideajoin
+set clipboard+=unnamed
 set noerrorbells
 set visualbell
 set nocompatible
@@ -19,11 +21,10 @@ set nobackup
 set nowrap
 set surround
 set termguicolors
-set scrolloff=7
+set scrolloff=0
 set cmdheight=2
 set updatetime=50
 set colorcolumn=80
 set timeout ttimeout
 set timeoutlen=500
 set ttimeoutlen=20
-
