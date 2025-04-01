@@ -38,3 +38,8 @@ gree() {
 cpx() {
   xclip -selection clipboard "$@"
 }
+
+ppx() {
+  local file_path="$1"
+  xclip -selection clipboard -o > "$file_path"
+}
