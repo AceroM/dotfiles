@@ -34,3 +34,7 @@ fv() {
 gree() {
   fd --type f --hidden --exclude .git | tree --fromfile
 }
+
+cpx() {
+  xclip -selection clipboard "$@"
+}
