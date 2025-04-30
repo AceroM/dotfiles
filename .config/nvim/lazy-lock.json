@@ -4,6 +4,7 @@
   "autoclose.nvim": { "branch": "main", "commit": "b2077aa2c83df7ebc19b2a20a3a0654b24ae9c8f" },
   "avante.nvim": { "branch": "main", "commit": "01e05a538b4b7f20fb922016d72be8c42d400b0e" },
   "ayu": { "branch": "master", "commit": "37160699469d695486174fb863aae2f2a4c1f90f" },
+  "catppuccin": { "branch": "main", "commit": "5b5e3aef9ad7af84f463d17b5479f06b87d5c429" },
   "claude.vim": { "branch": "main", "commit": "ba83e8ecff56d2efc043571834e7a3962687b835" },
   "cmp-nvim-lsp": { "branch": "main", "commit": "99290b3ec1322070bcfb9e846450a46f6efa50f0" },
   "cmp_luasnip": { "branch": "master", "commit": "98d9cb5c2c38532bd9bdb481067b20fea8f32e90" },

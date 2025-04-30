@@ -15,6 +15,16 @@ if not (vim.uv or vim.loop).fs_stat(lazypath) then
 end
 
 vim.opt.rtp:prepend(lazypath)
+--
+-- vim.api.nvim_create_autocmd("BufWritePre", {
+-- 	group = vim.api.nvim_create_augroup("TS_add_missing_imports", { clear = true }),
+-- 	desc = "TS_add_missing_imports",
+-- 	pattern = { "*.ts", "*.tsx", "*.js", "*.jsx" },
+-- 	callback = function()
+-- 		vim.cmd([[TSToolsAddMissingImports, TS]])
+-- 		vim.cmd("write")
+-- 	end,
+-- })
 
 vim.api.nvim_create_autocmd("BufWritePre", {
 	pattern = { "*.erb", "*.rb", "*.rake", "Gemfile", "*.gemspec" },
@@ -34,7 +44,7 @@ require("lazy").setup({
 	spec = {
 		{ import = "plugins" },
 	},
-	install = { colorscheme = { "ayu" } },
+	install = { colorscheme = { "catppuccin-latte" } },
 	checker = {
 		enabled = false,
 		concurrency = nil,
