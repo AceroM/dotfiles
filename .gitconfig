@@ -11,6 +11,8 @@
   cl = clone
   wt = worktree
   re = remote
+  rs = reset
+  rb = rebase
 [pull]
 	rebase = true
 [user]
