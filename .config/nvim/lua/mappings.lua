@@ -114,19 +114,15 @@ function _G.enter_or_indent_tag()
 	return "\n"
 end
 
--- vim.keymap.set("n", "<C-;>", "<C-w>o", { silent = true })
--- vim.opt.signcolumn = 'no'
 local function toggle_scrollbind_all_buffers()
 	local windows = vim.api.nvim_list_wins()
 	local all_bound = true
-	-- Check if all windows are already scrollbound
 	for _, win in ipairs(windows) do
 		if not vim.api.nvim_win_get_option(win, "scrollbind") then
 			all_bound = false
 			break
 		end
 	end
-	-- Toggle scrollbind for all windows
 	for _, win in ipairs(windows) do
 		vim.api.nvim_win_set_option(win, "scrollbind", not all_bound)
 	end

@@ -93,6 +93,7 @@ return {
 	s("r.", { t("React.") }),
 	s("c;", { t("console.log('"), f(clipboard), t(" :>>', "), f(clipboard), t(");") }),
 	s("c(", { t("console.log("), i(1) }),
+	s("dt(", { t("defineTable({"), i(1) }),
 	s("p(", { t("pgTable("), i(1) }),
 	s("ce(", { t("console.error("), i(1) }),
 	s("r2", { t("return res.status(200).send("), i(1), t(");") }),
