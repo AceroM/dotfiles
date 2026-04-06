@@ -1,0 +1,15 @@
+[mgr]
+ratio = [1, 1, 4]
+
+[opener]
+play = [
+	{ run = 'mpv "$@"', orphan = true, for = "unix" },
+	{ run = '"C:\Program Files\mpv.exe" %*', orphan = true, for = "windows" }
+]
+edit = [
+  { run = 'bat -p --paging=always --pager="less -R" "$@"', block = true, for = "unix" },
+  { run = "%EDITOR% %*", block = true, for = "windows" },
+]
+open = [
+	{ run = 'open "$@"', desc = "Open" },
+]
