@@ -7,6 +7,7 @@ function x() {
   local msg="${1:-changes}"
   git add . && git commit -m "$msg" --no-verify && git push
 }
+function pl() { git pull origin $(sc) }
 function gd() { gh pr diff "$@"; }
 function gx() {
   gh pr diff "$1"
