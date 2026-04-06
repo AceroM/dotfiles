@@ -1,0 +1,7 @@
+.idea/
+miguel/
+miguelacero/
+private/
+node_modules/
+webstorm/.local/share/jb-cli/node_modules/
+.DS_Store
