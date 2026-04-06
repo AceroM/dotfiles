@@ -1,0 +1,55 @@
+{
+  "git": {
+    "inline_blame": {
+      "enabled": false
+    }
+  },
+  "agent": {
+    "always_allow_tool_actions": true,
+    "default_profile": "write",
+    "default_model": {
+      "provider": "zed.dev",
+      "model": "claude-opus-4-5",
+    },
+    "favorite_models": [],
+    "model_parameters": [],
+  },
+  "languages": {
+    "TypeScript": {
+      "language_servers": ["tsgo", "vtsls"],
+    },
+  },
+  "lsp": {
+    "vtsls": {
+      "settings": {
+        "typescript": {
+          "updateImportsOnFileMove": {
+            "enabled": "always",
+          },
+        },
+        "javascript": {
+          "updateImportsOnFileMove": {
+            "enabled": "always",
+          },
+        },
+      },
+      "enable_lsp_tasks": true,
+    },
+  },
+  "relative_line_numbers": "enabled",
+  "edit_predictions": {
+    "mode": "subtle",
+    "copilot": {
+      "proxy": null,
+      "proxy_no_verify": null,
+    },
+  },
+  "vim_mode": true,
+  "ui_font_size": 14,
+  "buffer_font_size": 14,
+  "theme": {
+    "light": "One Light",
+    "dark": "One Dark",
+    "mode": "system",
+  },
+}

@@ -1,0 +1,163 @@
+[
+  {
+    "context": "ProjectPanel && not_editing",
+    "bindings": {
+      "n": "project_panel::NewFile",
+    },
+  },
+  {
+    "context": "ProjectSearch",
+    "bindings": {},
+  },
+  {
+    "context": "FileFinder",
+    "bindings": {},
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "ctrl-e": "file_finder::Toggle",
+      "alt-shift-c": "workspace::CopyRelativePath",
+      "alt-s": "workspace::Save",
+      "alt-b": "workspace::ToggleLeftDock",
+      "alt-;": "workspace::ToggleRightDock",
+      "alt-f": "workspace::NewSearch",
+    },
+  },
+  {
+    "context": "Pane",
+    "bindings": {
+      "alt-o": "file_finder::Toggle",
+      "alt-shift-t": "pane::ReopenClosedItem",
+      "alt-i": "workspace::ActivateNextPane",
+      "alt-[": "pane::ActivatePreviousItem",
+      "alt-]": "pane::ActivateNextItem",
+      "alt-w": "pane::CloseActiveItem",
+      "ctrl-shift-w": "pane::CloseAllItems",
+    },
+  },
+  {
+    "context": "AssistantPanel",
+    "bindings": {
+      "ctrl-e": "project_panel::ToggleFocus",
+    },
+  },
+  {
+    "context": "Editor",
+    "bindings": {
+      "alt-d": "editor::SelectNext",
+      "alt-p": "command_palette::Toggle",
+      "alt-shift-k": "editor::DuplicateLineUp",
+      "alt-shift-j": "editor::DuplicateLineDown",
+      "alt-shift-w": "workspace::CloseInactiveTabsAndPanes",
+      "alt-x": "editor::Cut",
+      "alt-v": "editor::Paste",
+      "alt-c": "editor::Copy",
+      "alt-shift-p": "editor::GoToPreviousDiagnostic",
+      "alt-n": "editor::GoToDiagnostic",
+      "cmd-backspace": "editor::DeleteLine",
+      "alt-j": "editor::SelectLargerSyntaxNode",
+      "alt-shift-d": "editor::FindAllReferences",
+      "alt-m": "editor::GoToDefinitionSplit",
+      "ctrl-alt-enter": "editor::NewlineAbove",
+      "shift-enter": "editor::NewlineBelow",
+      "alt-a": "editor::SelectAll",
+      "alt-z": "editor::Undo",
+      "alt-k": "assistant::InlineAssist",
+      "alt-shift-g": "search::SelectPreviousMatch",
+      "alt-g": "search::SelectNextMatch",
+      "alt-h": "editor::Hover",
+      "alt-enter": "editor::ToggleCodeActions",
+    },
+  },
+  {
+    "context": "Editor && VimControl && !VimWaiting && !menu",
+    "bindings": {
+      "ctrl-e": "project_panel::ToggleFocus",
+      "g l": "editor::SelectNext",
+      "g a": "editor::SelectAllMatches",
+      "g r": "editor::FindAllReferences",
+      "g ;": "editor::Rename",
+    },
+  },
+  {
+    "context": "(Workspace && !Terminal)",
+    "bindings": {
+      "ctrl-cmd-shift-r": "task::Spawn",
+    },
+  },
+  {
+    "context": "(Workspace && !Terminal)",
+    "bindings": {
+      "ctrl-alt-cmd-r": "task::Spawn",
+    },
+  },
+  {
+    "bindings": {
+      "cmd-shift-r": "workspace::CopyRelativePath",
+    },
+  },
+  {
+    "context": "Pane",
+    "bindings": {
+      "cmd-0": "git_panel::ToggleFocus",
+    },
+  },
+  {
+    "bindings": {
+      "ctrl-alt-p": "editor::OpenPermalinkToLine",
+    },
+  },
+  {
+    "context": "Editor",
+    "bindings": {
+      "cmd-0": "git_panel::ToggleFocus",
+    },
+  },
+  {
+    "bindings": {
+      "ctrl-alt-j": "terminal_panel::ToggleFocus",
+    },
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "ctrl-alt-cmd-d": "debug_panel::ToggleFocus",
+    },
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "cmd-shift-d": "git::Diff",
+    },
+  },
+  {
+    "context": "GitPanel",
+    "bindings": {
+      "ctrl-g d": null,
+    },
+  },
+  {
+    "bindings": {
+      "alt-/": "editor::CopyRelativePath"
+    }
+  },
+  {
+    "context": "Terminal",
+    "bindings": {
+      "ctrl-alt-down": null
+    }
+  },
+  {
+    "context": "(Editor && mode == full)",
+    "bindings": {
+      "ctrl-alt-down": "editor::GoToNextChange"
+    }
+  },
+  {
+    "context": "Editor",
+    "bindings": {
+      "ctrl-l": ["editor::InsertSnippet", {"snippet": "console.log($1);"}]
+    }
+  }
+]

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="${HOME}/.local/share/jb-cli"
+exec bun run "${script_dir}/index.ts" "$@"

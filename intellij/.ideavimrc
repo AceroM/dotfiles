@@ -1,0 +1,39 @@
+let mapleader=" "
+
+Plug 'tpope/vim-commentary'
+Plug 'tpope/vim-surround'
+
+nnoremap L $
+nnoremap H ^
+nnoremap Y ddO
+nnoremap K vt
+nnoremap S v$h
+nnoremap <c-j> <c-e>
+nnoremap <c-k> <c-y>
+nnoremap <c-;> :noh<CR>
+
+set clipboard+=unnamed
+set noerrorbells
+set visualbell
+set nocompatible
+set relativenumber
+set number
+set incsearch
+set ignorecase
+set guicursor=
+set smartcase
+set noswapfile
+set tabstop=2 softtabstop=2 expandtab shiftwidth=2 smarttab
+set noshowmatch
+set nobackup
+set nowrap
+set surround
+set termguicolors
+set scrolloff=2
+set cmdheight=2
+set updatetime=50
+set colorcolumn=80
+set timeout ttimeout " separate mapping and keycode timeouts
+set timeoutlen=500   " mapping timeout 500ms  (adjust for preference)
+set ttimeoutlen=20   " keycode timeout 20ms
+set ideajoin

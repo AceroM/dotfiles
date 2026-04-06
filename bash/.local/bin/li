@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+  echo "Usage: li <LINEAR-ISSUE-ID>" >&2
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "Error: curl is required" >&2
+  exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Error: jq is required" >&2
+  exit 1
+fi
+
+if [ -z "${LINEAR_API_KEY:-}" ]; then
+  echo "Error: LINEAR_API_KEY is not set" >&2
+  exit 1
+fi
+
+issue_id="$1"
+
+query_payload=$(jq -n --arg q "$issue_id" \
+  '{query: "query ($q: String!) { searchIssues(term: $q, first: 1) { nodes { identifier title description state { name } labels { nodes { name } } } } }", variables: {q: $q}}')
+
+curl -s -X POST "https://api.linear.app/graphql" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -d "$query_payload" \
+| jq

@@ -1,0 +1,52 @@
+[alias]
+  ad = add
+  ap = apply
+  fe = fetch --all --prune
+  sa = stash
+  di = diff
+  co = checkout
+  br = branch
+  ci = commit
+  st = status
+  pu = push
+  pl = pull
+  cl = clone
+  re = remote
+  rs = reset
+  rb = rebase
+  rc = rebase --continue
+  ao = remote add origin
+  po = push -u origin
+  plo = pull origin
+  in = init
+  rg = restore --staged
+
+[pull]
+  rebase = true
+
+[user]
+  email = AceroM@users.noreply.github.com
+  name = Miguel Acero
+
+[core]
+  excludesfile = /home/miguel/.gitignore_global
+  ; pager = delta --tabs 2
+  ; [interactive]
+  ;   diffFilter = delta --color-only
+
+[delta]
+  navigate = true
+
+; [merge]
+;   conflictstyle = diff3
+
+; [diff]
+;   colorMoved = default
+
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true
+[init]
+	defaultBranch = main

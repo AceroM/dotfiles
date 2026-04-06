@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 <owner/repo> <path/in/repo> [branch]" >&2
+  echo "   or: $0 <https://github.com/owner/repo/tree/branch/path>" >&2
+  echo "Example: $0 qaml-ai/pi-worker examples/terminal-agent main" >&2
+  echo "Example: $0 https://github.com/qaml-ai/pi-worker/tree/main/examples/terminal-agent" >&2
+}
+
+parse_github_tree_url() {
+  local raw_url="$1"
+  local url="${raw_url%/}"
+  local prefix path_part
+
+  prefix="https://github.com/"
+  if [[ "$url" == "$prefix"* ]]; then
+    path_part="${url#"$prefix"}"
+  else
+    prefix="http://github.com/"
+    if [[ "$url" == "$prefix"* ]]; then
+      path_part="${url#"$prefix"}"
+    else
+      prefix="github.com/"
+      if [[ "$url" == "$prefix"* ]]; then
+        path_part="${url#"$prefix"}"
+      else
+        return 1
+      fi
+    fi
+  fi
+
+  IFS='/' read -r owner repo_name tree_keyword branch rest <<< "$path_part"
+
+  if [[ -z "${owner:-}" || -z "${repo_name:-}" || "$tree_keyword" != "tree" || -z "${branch:-}" || -z "${rest:-}" ]]; then
+    return 1
+  fi
+
+  repo="${owner}/${repo_name}"
+  dir_path="${rest}"
+}
+
+repo=""
+dir_path=""
+branch=""
+
+if [[ $# -eq 1 ]]; then
+  if ! parse_github_tree_url "$1"; then
+    usage
+    exit 1
+  fi
+elif [[ $# -ge 2 && $# -le 3 ]]; then
+  repo="$1"
+  dir_path="$2"
+  branch="${3:-main}"
+else
+  usage
+  exit 1
+fi
+
+if [[ "$repo" != */* ]]; then
+  echo "Error: repo must be in the form owner/repo" >&2
+  exit 1
+fi
+
+if [[ -z "$dir_path" ]]; then
+  echo "Error: path/in/repo cannot be empty" >&2
+  exit 1
+fi
+
+owner="${repo%%/*}"
+repo_name="${repo##*/}"
+zip_dir="/tmp/github"
+zip_path="${zip_dir}/${repo_name}.zip"
+extract_dir="$(mktemp -d /tmp/${repo_name}-XXXXXX)"
+repo_root="${extract_dir}/${repo_name}-${branch}"
+source_dir="${repo_root}/${dir_path}"
+
+cleanup() {
+  rm -rf "$extract_dir"
+}
+trap cleanup EXIT
+
+mkdir -p "$zip_dir"
+
+echo "Downloading ${repo}@${branch} to ${zip_path}..."
+curl -fL "https://github.com/${owner}/${repo_name}/archive/refs/heads/${branch}.zip" -o "$zip_path"
+
+echo "Extracting archive..."
+unzip -q "$zip_path" -d "$extract_dir"
+
+if [[ ! -d "$source_dir" ]]; then
+  echo "Error: directory not found in archive: $dir_path" >&2
+  exit 1
+fi
+
+dest_name="$(basename "$dir_path")"
+if [[ -e "$dest_name" ]]; then
+  echo "Error: destination already exists: $dest_name" >&2
+  exit 1
+fi
+
+echo "Copying ${dir_path} to ./${dest_name} ..."
+cp -R "$source_dir" "$dest_name"
+
+echo "Done."
+echo "ZIP saved at: $zip_path"
+echo "Directory copied to: ./$dest_name"

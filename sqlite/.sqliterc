@@ -1,0 +1,5 @@
+.headers on
+.mode json
+.nullvalue [NULL]
+.separator ROW "\n"
+.timer off
