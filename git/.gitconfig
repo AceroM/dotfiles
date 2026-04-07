@@ -30,18 +30,18 @@
 
 [core]
   excludesfile = /home/miguel/.gitignore_global
-  ; pager = delta --tabs 2
-  ; [interactive]
-  ;   diffFilter = delta --color-only
+  pager = delta --tabs 2
+[interactive]
+   diffFilter = delta --color-only
 
 [delta]
   navigate = true
 
-; [merge]
-;   conflictstyle = diff3
+[merge]
+  conflictstyle = diff3
 
-; [diff]
-;   colorMoved = default
+[diff]
+  colorMoved = default
 
 [filter "lfs"]
 	clean = git-lfs clean -- %f
