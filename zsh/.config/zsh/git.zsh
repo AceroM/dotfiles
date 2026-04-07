@@ -31,6 +31,7 @@ function gx() {
 function gs() { git show "$@" }
 function sa() { git stash "$@" }
 function di() { git diff "$@" }
+function si() { git diff --staged }
 function gr() { git reset --hard HEAD }
 function ap() { git stash apply "$@" }
 function fe() { git fetch --all --prune }
