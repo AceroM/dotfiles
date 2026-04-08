@@ -28,6 +28,8 @@ function gx() {
     git log --oneline -- "${args[@]}"
   fi
 }
+# gh pr paths
+function hp() { gh pr view --json files --jq '.files[].path' }
 function gs() { git show "$@" }
 function sa() { git stash "$@" }
 function di() { git diff "$@" }
