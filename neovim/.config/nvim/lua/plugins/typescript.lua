@@ -12,9 +12,43 @@ return {
         enabled = false,
       },
       vtsls = {
-        enabled = false,
+        settings = {
+          typescript = {
+            inlayHints = {
+              enabled = false,
+            },
+          },
+          javascript = {
+            inlayHints = {
+              enabled = false,
+            },
+          },
+        },
+        keys = {
+          {
+            "<leader>co",
+            LazyVim.lsp.action["source.organizeImports"],
+            desc = "Organize Imports",
+          },
+          {
+            "<leader>cM",
+            LazyVim.lsp.action["source.addMissingImports.ts"],
+            desc = "Add missing imports",
+          },
+          {
+            "<leader>cu",
+            LazyVim.lsp.action["source.removeUnused.ts"],
+            desc = "Remove unused imports",
+          },
+          {
+            "<leader>cD",
+            LazyVim.lsp.action["source.fixAll.ts"],
+            desc = "Fix all diagnostics",
+          },
+        },
       },
       tsgo = {
+        enabled = false,
         settings = {
           typescript = {
             inlayHints = {
@@ -63,7 +97,7 @@ return {
         return true
       end,
       vtsls = function()
-        return true
+        return false
       end,
     },
   },
