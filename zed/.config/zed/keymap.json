@@ -159,5 +159,14 @@
     "bindings": {
       "ctrl-l": ["editor::InsertSnippet", {"snippet": "console.log($1);"}]
     }
+  },
+  {
+    "context": "Editor",
+    "bindings": {
+      "alt-up": "editor::PageUp",
+      "alt-down": "editor::PageDown",
+      "alt-shift-up": "editor::MoveLineUp",
+      "alt-shift-down": "editor::MoveLineDown"
+    }
   }
 ]
