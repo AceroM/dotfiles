@@ -14,8 +14,8 @@ function gd() { gh pr diff "$@"; }
 function gx() {
   gh pr diff "$1"
   gh pr view "$1"
-  function gl() {
 }
+function gl() {
   local n=""
   local args=("$@")
 
