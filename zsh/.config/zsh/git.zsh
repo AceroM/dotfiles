@@ -54,6 +54,45 @@ function gc() {
     local repo_url=$(gh repo view --json url -q .url)
     open "${repo_url}/compare/${base_branch}...${current_branch}"
 }
+function gj() {
+  local target="$1"
+
+  if [[ -z "$target" ]]; then
+    echo "Usage: gj <path[:line]>"
+    return 1
+  fi
+
+  local repo_url
+  repo_url=$(gh repo view --json url -q .url 2>/dev/null)
+
+  if [[ -z "$repo_url" ]]; then
+    echo "Not in a GitHub repo"
+    return 1
+  fi
+
+  local path="$target"
+  local line=""
+
+  if [[ "$target" =~ ^(.+):([0-9]+)$ ]]; then
+    path="${match[1]}"
+    line="${match[2]}"
+  fi
+
+  local branch
+  branch=$(git branch --show-current)
+
+  if [[ -z "$branch" ]]; then
+    branch=$(git rev-parse HEAD)
+  fi
+
+  local url="${repo_url}/blob/${branch}/${path}"
+
+  if [[ -n "$line" ]]; then
+    url="${url}#L${line}"
+  fi
+
+  open "$url"
+}
 function ao() {
   if [[ $# -ne 1 ]]; then
     echo "Usage: ao <repo-name>"
