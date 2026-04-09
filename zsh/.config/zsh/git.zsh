@@ -5,7 +5,9 @@ alias g="git"
 alias gi="git init"
 function x() {
   local msg="${1:-changes}"
-  git add . && git commit -m "$msg" --no-verify && git push
+  local session_name="x-$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")-$(date +%s)"
+
+  tmux new-session -d -s "$session_name" "cd $(printf '%q' "$PWD") && git add . && git commit -m $(printf '%q' "$msg") --no-verify && git push"
 }
 function pl() { git pull origin $(sc) }
 function gd() { gh pr diff "$@"; }
