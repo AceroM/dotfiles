@@ -35,7 +35,8 @@ function sa() { git stash "$@" }
 function di() { git diff "$@" }
 function si() { git diff --staged }
 function gr() { git reset --hard HEAD }
-function ap() { git stash apply "$@" }
+function sap() { git stash apply "$@" }
+function ap() { git apply "$@" }
 function fe() { git fetch --all --prune }
 function rc() { git rebase --continue }
 function in() { git init }
