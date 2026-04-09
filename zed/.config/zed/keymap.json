@@ -168,5 +168,17 @@
       "alt-shift-up": "editor::MoveLineUp",
       "alt-shift-down": "editor::MoveLineDown"
     }
+  },
+  {
+    "context": "VimControl && !menu",
+    "bindings": {
+      "alt-enter": "editor::OpenExcerpts"
+    }
+  },
+  {
+    "context": "VimControl && !menu",
+    "unbind": {
+      "g space": "editor::OpenExcerpts"
+    }
   }
 ]
