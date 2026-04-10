@@ -190,6 +190,11 @@ config.keys = {
 		action = wezterm.action.CloseCurrentPane({ confirm = false }),
 	},
 	{
+		key = "w",
+		mods = "CMD|SHIFT",
+		action = wezterm.action.CloseCurrentTab({ confirm = false }),
+	},
+	{
 		key = "[",
 		mods = "CMD",
 		action = wezterm.action.ActivatePaneDirection("Prev"),

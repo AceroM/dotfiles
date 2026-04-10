@@ -1,0 +1,1 @@
+alias zd="zed ~/.dotfiles"

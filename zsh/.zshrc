@@ -8,3 +8,6 @@ if [ -f ~/.zsh_private ]; then
   source ~/.zsh_private
 fi
 
+
+# sentry
+fpath=("/Users/miguelacero/.local/share/zsh/site-functions" $fpath)
