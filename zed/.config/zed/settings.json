@@ -55,6 +55,7 @@
   "vim_mode": true,
   "ui_font_size": 14,
   "buffer_font_size": 14,
+  "color_decorators": false,
   "theme": {
     "light": "One Light",
     "dark": "One Dark",
