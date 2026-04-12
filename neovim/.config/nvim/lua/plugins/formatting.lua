@@ -1,12 +1,10 @@
 return {
-  -- Configure conform.nvim for formatting with prettierd
+  -- Configure conform.nvim formatters
   {
     "stevearc/conform.nvim",
     opts = function(_, opts)
-      -- Override formatters for specific file types to use prettierd
-
       opts.formatters_by_ft = opts.formatters_by_ft or {}
-      -- Use prettierd for these file types
+
       local prettierd_filetypes = {
         "javascript",
         "javascriptreact",
@@ -25,11 +23,9 @@ return {
         opts.formatters_by_ft[ft] = { "prettierd" }
       end
 
-      -- Enable format on save
-      -- opts.format_on_save = {
-      --   timeout_ms = 3000,
-      --   lsp_fallback = true,
-      -- }
+      opts.formatters_by_ft.sh = { "shfmt" }
+      opts.formatters_by_ft.bash = { "shfmt" }
+      opts.formatters_by_ft.zsh = {}
 
       return opts
     end,
