@@ -25,7 +25,7 @@ return {
 
       opts.formatters_by_ft.sh = { "shfmt" }
       opts.formatters_by_ft.bash = { "shfmt" }
-      opts.formatters_by_ft.zsh = {}
+      opts.formatters_by_ft.zsh = { "shfmt" }
 
       return opts
     end,
