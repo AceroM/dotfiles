@@ -180,5 +180,15 @@
     "unbind": {
       "g space": "editor::OpenExcerpts"
     }
+  },
+  {
+    "bindings": {
+      "g cmd-d": "git::BranchDiff"
+    }
+  },
+  {
+    "bindings": {
+      "cmd-5": "editor::RestartLanguageServer"
+    }
   }
 ]
