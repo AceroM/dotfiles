@@ -1,6 +1,12 @@
 return {
   "nvim-neo-tree/neo-tree.nvim",
   opts = {
+    filesystem = {
+      filtered_items = {
+        hide_dotfiles = false,
+        hide_hidden = false,
+      },
+    },
     window = {
       position = "left",
       width = 30, -- You can adjust this to your preference
