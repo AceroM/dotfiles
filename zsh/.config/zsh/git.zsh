@@ -11,6 +11,7 @@ function x() {
 }
 function pl() { git pull origin $(sc) }
 function gd() { gh pr diff "$@"; }
+function gb() { gh browse "$@" }
 function gx() {
   gh pr diff "$1"
   gh pr view "$1"
