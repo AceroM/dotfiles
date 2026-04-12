@@ -1,12 +1,12 @@
 {
   "extras": [
     "lazyvim.plugins.extras.editor.neo-tree",
-    "lazyvim.plugins.extras.formatting.biome",
+    "lazyvim.plugins.extras.lang.typescript.biome",
     "lazyvim.plugins.extras.formatting.prettier"
   ],
   "install_version": 8,
   "news": {
-    "NEWS.md": "10960"
+    "NEWS.md": "11866"
   },
   "version": 8
 }
