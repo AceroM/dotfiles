@@ -48,6 +48,7 @@ function ad() { git add "$@" }
 function st() { git status }
 function co() { git checkout "$@" }
 function cb() { git checkout -b "$@" }
+alias c-='git checkout -'
 function rb() { git rebase "$@" }
 function sc() { git branch --show-current }
 function cm() { git commit -m "$@" --no-verify; }
