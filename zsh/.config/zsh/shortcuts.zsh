@@ -13,3 +13,5 @@ alias sp="git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E 
 alias y="yazi"
 alias lg="lazygit"
 alias ob="obsidian"
+alias ..='cd ..'
+alias ...='cd ../..'
