@@ -12,4 +12,4 @@
 # @raycast.author AceroM
 # @raycast.authorURL https://raycast.com/AceroM
 
-openssl rand -base64 32 | pbcopy
+openssl rand -base64 32 | tr -d '\n' | pbcopy
