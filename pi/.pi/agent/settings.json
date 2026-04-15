@@ -6,7 +6,7 @@
   "packages": [
     "npm:pi-interactive-shell"
   ],
-  "theme": "dark",
+  "theme": "light",
   "quietStartup": true,
   "hideThinkingBlock": true
 }

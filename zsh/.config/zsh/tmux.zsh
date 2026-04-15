@@ -22,6 +22,16 @@ alias ta='t a'
 alias tk='t k'
 alias tr='t r'
 
+function pa() {
+  local name="$1"
+  local lines="${2:-300}"
+  tmux capture-pane -t "$name" -S -"$lines" \; save-buffer /tmp/"$name".txt
+}
+
+function pr() {
+  bat /tmp/"$1".txt
+}
+
 function t() {
   local cmd="$1"
   local name="$2"
