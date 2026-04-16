@@ -26,8 +26,32 @@ issue_id="$1"
 query_payload=$(jq -n --arg q "$issue_id" \
   '{query: "query ($q: String!) { searchIssues(term: $q, first: 1) { nodes { identifier title description state { name } labels { nodes { name } } } } }", variables: {q: $q}}')
 
-curl -s -X POST "https://api.linear.app/graphql" \
+response=$(curl -s -X POST "https://api.linear.app/graphql" \
   -H "Content-Type: application/json" \
   -H "Authorization: $LINEAR_API_KEY" \
-  -d "$query_payload" \
-| jq
+  -d "$query_payload")
+
+issue=$(printf '%s' "$response" | jq '.data.searchIssues.nodes[0]')
+
+if [ "$issue" = "null" ] || [ -z "$issue" ]; then
+  echo "Error: issue '$issue_id' not found" >&2
+  exit 1
+fi
+
+title=$(printf '%s' "$issue" | jq -r '.title')
+identifier=$(printf '%s' "$issue" | jq -r '.identifier')
+state=$(printf '%s' "$issue" | jq -r '.state.name // "Unknown"')
+description=$(printf '%s' "$issue" | jq -r '.description // ""')
+labels=$(printf '%s' "$issue" | jq -r '[.labels.nodes[].name] | join(", ")')
+
+printf '# %s\n\n' "$title"
+printf -- '- Identifier: %s\n' "$identifier"
+printf -- '- State: %s\n' "$state"
+
+if [ -n "$labels" ]; then
+  printf -- '- Labels: %s\n' "$labels"
+fi
+
+if [ -n "$description" ]; then
+  printf '\n%s\n' "$description"
+fi
