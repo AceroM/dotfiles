@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: lr <linear ticket id>
+
+Example:
+  lr PROD-1508
+
+Archives the specified Linear issue.
+EOF
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+if [ $# -ne 1 ]; then
+  usage
+  exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Error: jq is required" >&2
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "Error: curl is required" >&2
+  exit 1
+fi
+
+if [ -z "${LINEAR_API_KEY:-}" ]; then
+  echo "Error: LINEAR_API_KEY is not set. Run with doppler or export it." >&2
+  exit 1
+fi
+
+issue_identifier="$1"
+
+issue_query_payload=$(jq -n \
+  --arg identifier "$issue_identifier" \
+  '{query: "query($identifier: String!) { issue(id: $identifier) { id identifier title url } issueByKey(issueKey: $identifier) { id identifier title url } }", variables: {identifier: $identifier}}')
+
+issue_response=$(curl -s -X POST "https://api.linear.app/graphql" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -d "$issue_query_payload")
+
+issue_id=$(echo "$issue_response" | jq -r '.data.issueByKey.id // .data.issue.id // empty')
+issue_key=$(echo "$issue_response" | jq -r '.data.issueByKey.identifier // .data.issue.identifier // empty')
+issue_url=$(echo "$issue_response" | jq -r '.data.issueByKey.url // .data.issue.url // empty')
+
+if [ -z "$issue_id" ]; then
+  echo "Error: Could not find Linear issue '$issue_identifier'." >&2
+  echo "$issue_response" | jq . >&2
+  exit 1
+fi
+
+archive_payload=$(jq -n \
+  --arg issue_id "$issue_id" \
+  '{query: "mutation($id: String!) { issueArchive(id: $id) { success } }", variables: {id: $issue_id}}')
+
+archive_response=$(curl -s -X POST "https://api.linear.app/graphql" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -d "$archive_payload")
+
+archive_success=$(echo "$archive_response" | jq -r '.data.issueArchive.success // false')
+
+if [ "$archive_success" != "true" ]; then
+  echo "Error: Failed to archive Linear issue." >&2
+  echo "$archive_response" | jq . >&2
+  exit 1
+fi
+
+echo "Archived $issue_key"
+echo "$issue_url"
