@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-  echo "Usage: li <LINEAR-ISSUE-ID>" >&2
+if [ $# -ne 1 ] && [ "$1" != "--json" ]; then
+  echo "Usage: li [--json] <LINEAR-ISSUE-ID>" >&2
   exit 1
 fi
 
@@ -21,6 +21,17 @@ if [ -z "${LINEAR_API_KEY:-}" ]; then
   exit 1
 fi
 
+json_mode=false
+if [ "$1" = "--json" ]; then
+  json_mode=true
+  shift
+fi
+
+if [ $# -ne 1 ]; then
+  echo "Usage: li [--json] <LINEAR-ISSUE-ID>" >&2
+  exit 1
+fi
+
 issue_id="$1"
 
 query_payload=$(jq -n --arg q "$issue_id" \
@@ -36,6 +47,11 @@ issue=$(printf '%s' "$response" | jq '.data.searchIssues.nodes[0]')
 if [ "$issue" = "null" ] || [ -z "$issue" ]; then
   echo "Error: issue '$issue_id' not found" >&2
   exit 1
+fi
+
+if $json_mode; then
+  printf '%s\n' "$response"
+  exit 0
 fi
 
 title=$(printf '%s' "$issue" | jq -r '.title')
