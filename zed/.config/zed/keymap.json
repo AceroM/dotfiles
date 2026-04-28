@@ -139,26 +139,26 @@
   },
   {
     "bindings": {
-      "alt-/": "editor::CopyRelativePath"
-    }
+      "alt-/": "editor::CopyRelativePath",
+    },
   },
   {
     "context": "Terminal",
     "bindings": {
-      "ctrl-alt-down": null
-    }
+      "ctrl-alt-down": null,
+    },
   },
   {
     "context": "(Editor && mode == full)",
     "bindings": {
-      "ctrl-alt-down": "editor::GoToNextChange"
-    }
+      "ctrl-alt-down": "editor::GoToNextChange",
+    },
   },
   {
     "context": "Editor",
     "bindings": {
-      "ctrl-l": ["editor::InsertSnippet", {"snippet": "console.log($1);"}]
-    }
+      "ctrl-l": ["editor::InsertSnippet", { "snippet": "console.log($1);" }],
+    },
   },
   {
     "context": "Editor",
@@ -166,29 +166,35 @@
       "alt-up": "editor::PageUp",
       "alt-down": "editor::PageDown",
       "alt-shift-up": "editor::MoveLineUp",
-      "alt-shift-down": "editor::MoveLineDown"
-    }
+      "alt-shift-down": "editor::MoveLineDown",
+    },
   },
   {
     "context": "VimControl && !menu",
     "bindings": {
-      "alt-enter": "editor::OpenExcerpts"
-    }
+      "alt-enter": "editor::OpenExcerpts",
+    },
   },
   {
     "context": "VimControl && !menu",
     "unbind": {
-      "g space": "editor::OpenExcerpts"
-    }
+      "g space": "editor::OpenExcerpts",
+    },
   },
   {
     "bindings": {
-      "g cmd-d": "git::BranchDiff"
-    }
+      "g cmd-d": "git::BranchDiff",
+    },
   },
   {
     "bindings": {
-      "cmd-5": "editor::RestartLanguageServer"
-    }
-  }
+      "cmd-5": "editor::RestartLanguageServer",
+    },
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "cmd-alt-;": "workspace::ToggleRightDock",
+    },
+  },
 ]
