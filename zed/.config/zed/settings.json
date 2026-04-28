@@ -1,4 +1,17 @@
 {
+  "cli_default_open_behavior": "new_window",
+  "project_panel": {
+    "dock": "right"
+  },
+  "outline_panel": {
+    "dock": "right"
+  },
+  "collaboration_panel": {
+    "dock": "right"
+  },
+  "git_panel": {
+    "dock": "right"
+  },
   "autosave": "on_focus_change",
   "git": {
     "inline_blame": {
@@ -6,6 +19,7 @@
     },
   },
   "agent": {
+    "dock": "left",
     "tool_permissions": {
       "default": "allow",
     },
