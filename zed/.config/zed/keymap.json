@@ -197,4 +197,9 @@
       "cmd-alt-;": "workspace::ToggleRightDock",
     },
   },
+  {
+    "bindings": {
+      "cmd-shift-.": "editor::ToggleFocus",
+    },
+  },
 ]
