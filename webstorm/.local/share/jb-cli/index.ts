@@ -1,6 +1,12 @@
 #!/usr/bin/env bun
 
-import { readdirSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  readdirSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 
 const rootDir = import.meta.dir;
@@ -59,7 +65,8 @@ const presets: Preset[] = [
   {
     id: "module-files",
     label: "Module files",
-    description: "Creates modules.xml and a project .iml using the current folder name.",
+    description:
+      "Creates modules.xml and a project .iml using the current folder name.",
     files: [
       {
         template: "modules.xml",
@@ -83,13 +90,16 @@ const state = {
 function render() {
   process.stdout.write("\x1Bc");
   const filtered = getFilteredPresets();
-  if (state.cursor >= filtered.length) state.cursor = Math.max(filtered.length - 1, 0);
+  if (state.cursor >= filtered.length)
+    state.cursor = Math.max(filtered.length - 1, 0);
 
   console.log("jb — JetBrains project config writer\n");
   console.log(`Project: ${cwd}`);
   console.log(`Module:  ${moduleName}`);
   console.log(`Target:  ${ideaDir}\n`);
-  console.log("Type to filter. ↑/↓ move. Space toggles. Enter writes files. Ctrl+C exits.\n");
+  console.log(
+    "Type to filter. ↑/↓ move. Space toggles. Enter writes files. Ctrl+C exits.\n",
+  );
   console.log(`Filter: ${state.query || "(all)"}\n`);
 
   if (filtered.length === 0) {
@@ -113,7 +123,8 @@ function getFilteredPresets() {
   const query = state.query.trim().toLowerCase();
   if (!query) return presets;
   return presets.filter((preset) => {
-    const haystack = `${preset.label} ${preset.description} ${preset.id}`.toLowerCase();
+    const haystack =
+      `${preset.label} ${preset.description} ${preset.id}`.toLowerCase();
     return haystack.includes(query);
   });
 }
