@@ -20,66 +20,98 @@
   "autosave": "on_focus_change",
   "git": {
     "inline_blame": {
-      "enabled": false,
-    },
+      "enabled": false
+    }
   },
   "agent": {
     "dock": "left",
     "tool_permissions": {
-      "default": "allow",
+      "default": "allow"
     },
     "default_profile": "write",
     "default_model": {
       "effort": "high",
       "enable_thinking": true,
       "provider": "zed.dev",
-      "model": "claude-opus-4-7",
+      "model": "claude-opus-4-7"
     },
     "favorite_models": [],
-    "model_parameters": [],
+    "model_parameters": []
   },
   "languages": {
     "TypeScript": {
-      "language_servers": ["tsgo", "vtsls"],
+      "language_servers": ["tsgo", "vtsls", "oxfmt"],
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
     },
+    "TSX": {
+      "language_servers": ["...", "oxfmt"],
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "JavaScript": {
+      "language_servers": ["...", "oxfmt"],
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "JSON": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "JSONC": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    }
   },
   "lsp": {
+    "oxfmt": {
+      "initialization_options": {
+        "settings": {
+          "fmt.configPath": null,
+          "run": "onSave"
+        }
+      }
+    },
     "tsgo": {
       "settings": {
-        "package_version": "7.0.0-dev.20251029.1",
-      },
+        "package_version": "7.0.0-dev.20251029.1"
+      }
     },
     "vtsls": {
       "settings": {
         "typescript": {
           "updateImportsOnFileMove": {
-            "enabled": "always",
-          },
+            "enabled": "always"
+          }
         },
         "javascript": {
           "updateImportsOnFileMove": {
-            "enabled": "always",
-          },
-        },
+            "enabled": "always"
+          }
+        }
       },
-      "enable_lsp_tasks": true,
-    },
+      "enable_lsp_tasks": true
+    }
   },
   "relative_line_numbers": "enabled",
   "edit_predictions": {
     "mode": "subtle",
     "copilot": {
       "proxy": null,
-      "proxy_no_verify": null,
-    },
+      "proxy_no_verify": null
+    }
   },
   "vim_mode": true,
   "ui_font_size": 14,
   "buffer_font_size": 14,
-  "color_decorators": false,
   "theme": {
     "light": "One Light",
     "dark": "One Dark",
-    "mode": "system",
-  },
+    "mode": "system"
+  }
 }
