@@ -3,6 +3,15 @@ alias ga="gh pr review --approve"
 alias pv="gh pr view -w"
 alias g="git"
 alias gi="git init"
+function jw() {
+  gh pr merge "$@" --merge --delete-branch
+}
+function jl() {
+  gh pr list
+}
+function jd() {
+  gh pr diff "$@"
+}
 function x() {
   local msg="${1:-changes}"
   local session_name="x-$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")-$(date +%s)"
