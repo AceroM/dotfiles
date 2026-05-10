@@ -12,6 +12,9 @@ function jl() {
 function jd() {
   gh pr diff "$@"
 }
+function jc() {
+  gh pr checkout "$@"
+}
 function x() {
   local msg="${1:-changes}"
   local session_name="x-$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")-$(date +%s)"
