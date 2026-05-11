@@ -12,3 +12,13 @@ vim.api.nvim_del_augroup_by_name("lazyvim_highlight_yank")
 
 -- Disable LazyVim's wrap+spell autocmds for text/markdown
 vim.api.nvim_del_augroup_by_name("lazyvim_wrap_spell")
+
+-- Enable wrap for files with no extension
+vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
+  callback = function(args)
+    local name = vim.api.nvim_buf_get_name(args.buf)
+    if name ~= "" and vim.fn.fnamemodify(name, ":e") == "" then
+      vim.wo.wrap = true
+    end
+  end,
+})

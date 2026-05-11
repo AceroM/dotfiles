@@ -26,7 +26,14 @@ return {
       
       -- Reduce aggressive completion triggers
       opts.completion.trigger.show_on_insert_on_trigger_character = false
-      
+
+      -- Disable completion popups in files with no extension
+      opts.enabled = function()
+        local name = vim.api.nvim_buf_get_name(0)
+        if name == "" then return false end
+        return vim.fn.fnamemodify(name, ":e") ~= ""
+      end
+
       return opts
     end,
   },
