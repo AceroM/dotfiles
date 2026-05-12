@@ -41,6 +41,13 @@ vim.keymap.set("n", "<leader>cn", function()
   vim.notify("Copied filename: " .. filename)
 end, { desc = "Copy current filename" })
 
+-- Copy entire file to clipboard without moving cursor
+vim.keymap.set("n", "<C-y>", function()
+  local pos = vim.api.nvim_win_get_cursor(0)
+  vim.cmd('silent %y+')
+  vim.api.nvim_win_set_cursor(0, pos)
+end, { desc = "Copy entire file to clipboard", silent = true })
+
 -- Go to definition in vertical/horizontal splits
 vim.keymap.set(
   "n",
