@@ -163,8 +163,8 @@
   {
     "context": "Editor",
     "bindings": {
-      "alt-up": "vim::PageUp",
-      "alt-down": "vim::PageDown",
+      "alt-up": "vim::ScrollUp",
+      "alt-down": "vim::ScrollDown",
       "alt-shift-up": "editor::MoveLineUp",
       "alt-shift-down": "editor::MoveLineDown",
     },
