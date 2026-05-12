@@ -48,6 +48,10 @@ vim.keymap.set("n", "<C-y>", function()
   vim.api.nvim_win_set_cursor(0, pos)
 end, { desc = "Copy entire file to clipboard", silent = true })
 
+vim.keymap.set("n", "<C-;>", 'ggdG', { desc = "Clear entire file" })
+vim.keymap.set("n", "<A-Down>", "<C-d>", { desc = "Half-page down" })
+vim.keymap.set("n", "<A-Up>", "<C-u>", { desc = "Half-page up" })
+
 -- Go to definition in vertical/horizontal splits
 vim.keymap.set(
   "n",
