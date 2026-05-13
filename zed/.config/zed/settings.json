@@ -78,7 +78,7 @@
   "relative_line_numbers": "enabled",
   "edit_predictions": {
     "provider": "zed",
-    "mode": "subtle",
+    "mode": "eager",
     "copilot": {
       "proxy": null,
       "proxy_no_verify": null
