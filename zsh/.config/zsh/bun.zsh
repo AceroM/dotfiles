@@ -1,4 +1,5 @@
 alias bu="bun update --interactive"
+alias bd="bun run deploy"
 alias ct="bun check-types"
 alias rd="bun db:reset && bun run dev"
 alias td="bun db:reset && bun run t:dev"
