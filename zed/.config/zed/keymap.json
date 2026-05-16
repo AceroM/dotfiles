@@ -146,6 +146,7 @@
     "context": "Terminal",
     "bindings": {
       "ctrl-alt-down": null,
+      "ctrl-alt-k": "terminal_panel::ToggleFocus",
     },
   },
   {
