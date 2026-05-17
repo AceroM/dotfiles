@@ -9,7 +9,7 @@
 # Registry: each app gets a `_up_<name>` function that performs the update.
 # To add a new app, define `_up_<name>` and add its name to `_up_apps`.
 
-_up_apps=(claude wrangler)
+_up_apps=(claude wrangler pi)
 
 _up_claude() {
   command -v claude >/dev/null 2>&1 || { echo "claude: not installed"; return 1; }
@@ -26,6 +26,13 @@ _up_wrangler() {
     return 0
   fi
   vp install -g wrangler
+}
+
+_up_pi() {
+  command -v pi >/dev/null 2>&1 || { echo "pi: not installed"; return 1; }
+  command -v vp >/dev/null 2>&1 || { echo "pi: vp (vite+) not found"; return 1; }
+  vp update -g @earendil-works/pi-coding-agent
+  pi update
 }
 
 function up() {

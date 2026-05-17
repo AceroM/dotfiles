@@ -123,6 +123,11 @@ wezterm.on("window-config-reloaded", function(window, pane)
 	end
 end)
 
+config.set_environment_variables = {
+	EDITOR = "zed --wait",
+	VISUAL = "zed --wait",
+}
+
 config.show_tab_index_in_tab_bar = true
 
 wezterm.on("format-tab-title", function(tab, tabs, panes, cfg, hover, max_width)
