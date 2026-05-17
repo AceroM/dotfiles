@@ -162,6 +162,12 @@
     },
   },
   {
+    "context": "Editor && vim_mode == insert",
+    "bindings": {
+      "ctrl-d": ["editor::InsertSnippet", { "snippet": "debugger;" }],
+    },
+  },
+  {
     "context": "Editor",
     "bindings": {
       "alt-up": "vim::ScrollUp",
