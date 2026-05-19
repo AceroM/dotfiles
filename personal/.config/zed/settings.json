@@ -48,7 +48,7 @@
   },
   "languages": {
     "TypeScript": {
-      "language_servers": ["vtsls"],
+      "language_servers": ["tsgo"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }]
@@ -74,6 +74,13 @@
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    }
+  },
+  "lsp": {
+    "tsgo": {
+      "settings": {
+        "package_version": "7.0.0-dev.20251029.1"
+      }
     }
   },
   "relative_line_numbers": "enabled",
