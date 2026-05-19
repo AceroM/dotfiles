@@ -4,15 +4,10 @@ Interactive Bun CLI for writing reusable JetBrains project config into the curre
 
 ## Install in dotfiles
 
-This project is meant to be stowed from:
-
-- `webstorm/.local/share/jb-cli`
-- `bash/.local/bin/jb`
-
-After stowing `webstorm` and `bash`, reload your shell and run:
+Stow from the `cli` directory:
 
 ```bash
-jb
+stow -d cli -t ~ jb
 ```
 
 ## Current presets
