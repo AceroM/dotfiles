@@ -4,6 +4,7 @@ import React, {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
 import { render, Box, Text, useInput, useApp, useStdout } from "ink";
@@ -33,6 +34,31 @@ type Item =
   | { kind: "linear"; key: string; data: Issue };
 
 type ItemStatus = "idle" | "closing" | "closed" | "error";
+
+type PRPreview = {
+  title: string;
+  body: string;
+  labels: { name: string }[];
+  reviewDecision: string;
+  additions: number;
+  deletions: number;
+  headRefName: string;
+  url: string;
+};
+
+type IssuePreview = {
+  identifier: string;
+  title: string;
+  description: string;
+  state: string;
+  priority: number;
+  labels: string[];
+  url: string;
+};
+
+type PreviewData =
+  | { kind: "pr"; data: PRPreview }
+  | { kind: "linear"; data: IssuePreview };
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -94,6 +120,73 @@ async function fetchIssues(): Promise<Issue[]> {
     state: n.state.name,
     teamId: n.team.id,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Preview fetching
+// ---------------------------------------------------------------------------
+
+async function fetchPRPreview(number: number): Promise<PRPreview> {
+  const proc = Bun.spawn([
+    "gh",
+    "pr",
+    "view",
+    String(number),
+    "--json",
+    "title,body,labels,reviewDecision,additions,deletions,headRefName,url",
+  ]);
+  const text = await new Response(proc.stdout).text();
+  const raw = JSON.parse(text);
+  return {
+    title: raw.title ?? "",
+    body: raw.body ?? "",
+    labels: raw.labels ?? [],
+    reviewDecision: raw.reviewDecision ?? "",
+    additions: raw.additions ?? 0,
+    deletions: raw.deletions ?? 0,
+    headRefName: raw.headRefName ?? "",
+    url: raw.url ?? "",
+  };
+}
+
+async function fetchIssuePreview(issueId: string): Promise<IssuePreview> {
+  const apiKey = process.env.LINEAR_API_KEY;
+  if (!apiKey) throw new Error("LINEAR_API_KEY not set");
+
+  const res = await fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: apiKey,
+    },
+    body: JSON.stringify({
+      query: `query ($id: String!) {
+        issue(id: $id) {
+          identifier
+          title
+          description
+          state { name }
+          priority
+          labels { nodes { name } }
+          url
+        }
+      }`,
+      variables: { id: issueId },
+    }),
+  });
+
+  const json = (await res.json()) as any;
+  const n = json.data?.issue;
+  if (!n) throw new Error("Issue not found");
+  return {
+    identifier: n.identifier,
+    title: n.title,
+    description: n.description ?? "",
+    state: n.state?.name ?? "",
+    priority: n.priority ?? 0,
+    labels: (n.labels?.nodes ?? []).map((l: any) => l.name),
+    url: n.url ?? "",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +268,50 @@ function truncate(str: string, max: number): string {
   return str.length > max ? str.slice(0, max - 1) + "…" : str;
 }
 
+function wrapText(text: string, width: number, maxLines: number): string[] {
+  if (!text) return [];
+  const allLines: string[] = [];
+  for (const raw of text.split("\n")) {
+    if (raw.length === 0) {
+      allLines.push("");
+      continue;
+    }
+    let remaining = raw;
+    while (remaining.length > 0) {
+      if (remaining.length <= width) {
+        allLines.push(remaining);
+        remaining = "";
+      } else {
+        let breakAt = remaining.lastIndexOf(" ", width);
+        if (breakAt <= 0) breakAt = width;
+        allLines.push(remaining.slice(0, breakAt));
+        remaining = remaining.slice(breakAt).trimStart();
+      }
+    }
+  }
+  if (allLines.length <= maxLines) return allLines;
+  const result = allLines.slice(0, maxLines);
+  const last = result[result.length - 1];
+  result[result.length - 1] =
+    last.slice(0, Math.min(last.length, width - 1)) + "…";
+  return result;
+}
+
+function priorityLabel(p: number): string {
+  switch (p) {
+    case 1:
+      return "Urgent";
+    case 2:
+      return "High";
+    case 3:
+      return "Medium";
+    case 4:
+      return "Low";
+    default:
+      return "None";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Components
 // ---------------------------------------------------------------------------
@@ -188,8 +325,8 @@ function Header({ deleteBranch }: { deleteBranch: boolean }) {
       <Text dimColor>Tidy up Linear tickets & GitHub PRs</Text>
       <Box gap={1}>
         <Text dimColor>
-          ↑↓ navigate · space select · a all · n none · enter close · d
-          branches{" "}
+          ↑↓ navigate · →/← preview · space select · a all · n none · enter
+          close · d branches{" "}
         </Text>
         <Text color={deleteBranch ? "red" : "gray"}>
           {deleteBranch ? "ON" : "off"}
@@ -288,6 +425,171 @@ function ItemRow({
   );
 }
 
+function PreviewCard({
+  item,
+  preview,
+  loading,
+  width,
+  height,
+}: {
+  item: Item | undefined;
+  preview: PreviewData | null;
+  loading: boolean;
+  width: number;
+  height: number;
+}) {
+  const innerWidth = Math.max(10, width - 4);
+  const bodyLines = Math.max(1, height - 8);
+  const borderColor = !preview
+    ? "gray"
+    : preview.kind === "pr"
+      ? "blue"
+      : "magenta";
+
+  if (!item) {
+    return (
+      <Box
+        borderStyle="round"
+        borderColor="gray"
+        width={width}
+        height={height}
+        flexDirection="column"
+        paddingX={1}
+      >
+        <Text dimColor>No item selected</Text>
+      </Box>
+    );
+  }
+
+  if (loading) {
+    return (
+      <Box
+        borderStyle="round"
+        borderColor="gray"
+        width={width}
+        height={height}
+        flexDirection="column"
+        paddingX={1}
+      >
+        <Text bold>
+          {item.kind === "pr"
+            ? `PR #${item.data.number}`
+            : (item.data as Issue).identifier}
+        </Text>
+        <Text dimColor>{"─".repeat(innerWidth)}</Text>
+        <Text dimColor>Loading…</Text>
+      </Box>
+    );
+  }
+
+  if (!preview) {
+    return (
+      <Box
+        borderStyle="round"
+        borderColor="gray"
+        width={width}
+        height={height}
+        flexDirection="column"
+        paddingX={1}
+      >
+        <Text dimColor>Failed to load preview</Text>
+      </Box>
+    );
+  }
+
+  if (preview.kind === "pr") {
+    const {
+      title,
+      body,
+      labels,
+      reviewDecision,
+      additions,
+      deletions,
+      headRefName,
+    } = preview.data;
+    const wrapped = wrapText(body || "(no description)", innerWidth, bodyLines);
+    const labelStr = labels.map((l) => l.name).join(", ");
+
+    return (
+      <Box
+        borderStyle="round"
+        borderColor={borderColor}
+        width={width}
+        height={height}
+        flexDirection="column"
+        paddingX={1}
+        overflow="hidden"
+      >
+        <Text bold color="blue" wrap="truncate-end">
+          PR #{(item!.data as PR).number}
+        </Text>
+        <Text bold wrap="truncate-end">
+          {title}
+        </Text>
+        <Text dimColor>{"─".repeat(innerWidth)}</Text>
+        {wrapped.map((line, i) => (
+          <Text key={i} wrap="truncate-end">
+            {line || " "}
+          </Text>
+        ))}
+        <Box flexGrow={1} />
+        <Text dimColor wrap="truncate-end">
+          {headRefName} · +{additions} -{deletions}
+          {reviewDecision ? ` · ${reviewDecision.toLowerCase()}` : ""}
+        </Text>
+        {labelStr ? (
+          <Text color="yellow" wrap="truncate-end">
+            {labelStr}
+          </Text>
+        ) : null}
+      </Box>
+    );
+  }
+
+  const { identifier, title, description, state, priority, labels } =
+    preview.data;
+  const wrapped = wrapText(
+    description || "(no description)",
+    innerWidth,
+    bodyLines,
+  );
+  const labelStr = labels.join(", ");
+
+  return (
+    <Box
+      borderStyle="round"
+      borderColor={borderColor}
+      width={width}
+      height={height}
+      flexDirection="column"
+      paddingX={1}
+      overflow="hidden"
+    >
+      <Text bold color="magenta" wrap="truncate-end">
+        {identifier}
+      </Text>
+      <Text bold wrap="truncate-end">
+        {title}
+      </Text>
+      <Text dimColor>{"─".repeat(innerWidth)}</Text>
+      {wrapped.map((line, i) => (
+        <Text key={i} wrap="truncate-end">
+          {line || " "}
+        </Text>
+      ))}
+      <Box flexGrow={1} />
+      <Text dimColor wrap="truncate-end">
+        {state} · {priorityLabel(priority)}
+      </Text>
+      {labelStr ? (
+        <Text color="yellow" wrap="truncate-end">
+          {labelStr}
+        </Text>
+      ) : null}
+    </Box>
+  );
+}
+
 function Footer({
   selectedCount,
   closedCount,
@@ -333,6 +635,14 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [viewport, setViewport] = useState(0);
 
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const previewCache = useRef<Map<string, PreviewData>>(new Map());
+
+  const listWidth = previewOpen ? Math.floor(termWidth * 0.45) : termWidth;
+  const previewWidth = termWidth - listWidth;
+
   useEffect(() => {
     Promise.all([fetchPRs(), fetchIssues()])
       .then(([prs, issues]) => {
@@ -357,6 +667,55 @@ function App() {
         setLoading(false);
       });
   }, []);
+
+  useEffect(() => {
+    if (!previewOpen || items.length === 0) {
+      setPreviewData(null);
+      return;
+    }
+
+    const item = items[cursor];
+    if (!item) return;
+
+    const cached = previewCache.current.get(item.key);
+    if (cached) {
+      setPreviewData(cached);
+      setPreviewLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewData(null);
+
+    (async () => {
+      try {
+        let data: PreviewData;
+        if (item.kind === "pr") {
+          data = { kind: "pr", data: await fetchPRPreview(item.data.number) };
+        } else {
+          data = {
+            kind: "linear",
+            data: await fetchIssuePreview(item.data.id),
+          };
+        }
+        if (!cancelled) {
+          previewCache.current.set(item.key, data);
+          setPreviewData(data);
+          setPreviewLoading(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setPreviewData(null);
+          setPreviewLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [previewOpen, cursor, items]);
 
   const closeSelected = useCallback(async () => {
     const toClose = items.filter((item) => selected.has(item.key));
@@ -385,6 +744,16 @@ function App() {
 
     if (input === "q") {
       exit();
+      return;
+    }
+
+    if (key.rightArrow) {
+      setPreviewOpen(true);
+      return;
+    }
+
+    if (key.leftArrow) {
+      setPreviewOpen(false);
       return;
     }
 
@@ -478,53 +847,61 @@ function App() {
   ).length;
 
   const allVisible = items.slice(viewport, viewport + termRows);
-
-  const firstVisibleLinearIdx = allVisible.findIndex(
-    (i) => i.kind === "linear",
-  );
   const showPrHeader = allVisible.some((i) => i.kind === "pr");
   const showLinearHeader =
-    firstVisibleLinearIdx !== -1 && issues.length > 0;
+    allVisible.some((i) => i.kind === "linear") && issues.length > 0;
 
   return (
     <Box flexDirection="column">
       <Header deleteBranch={deleteBranch} />
 
-      {showPrHeader && (
-        <SectionLabel>
-          GitHub PRs ({prs.length})
-        </SectionLabel>
-      )}
+      <Box flexDirection="row">
+        <Box flexDirection="column" width={listWidth}>
+          {showPrHeader && (
+            <SectionLabel>GitHub PRs ({prs.length})</SectionLabel>
+          )}
 
-      {allVisible.map((item, i) => {
-        const globalIdx = viewport + i;
-        const parts: ReactNode[] = [];
+          {allVisible.map((item, i) => {
+            const globalIdx = viewport + i;
+            const parts: ReactNode[] = [];
 
-        if (
-          showLinearHeader &&
-          item.kind === "linear" &&
-          (i === 0 || allVisible[i - 1]?.kind === "pr")
-        ) {
-          parts.push(
-            <SectionLabel key={`sec-${i}`}>
-              Linear Issues ({issues.length})
-            </SectionLabel>,
-          );
-        }
+            if (
+              showLinearHeader &&
+              item.kind === "linear" &&
+              (i === 0 || allVisible[i - 1]?.kind === "pr")
+            ) {
+              parts.push(
+                <SectionLabel key={`sec-${i}`}>
+                  Linear Issues ({issues.length})
+                </SectionLabel>,
+              );
+            }
 
-        parts.push(
-          <ItemRow
-            key={item.key}
-            item={item}
-            active={globalIdx === cursor}
-            selected={selected.has(item.key)}
-            status={statuses.get(item.key) ?? "idle"}
-            width={termWidth}
-          />,
-        );
+            parts.push(
+              <ItemRow
+                key={item.key}
+                item={item}
+                active={globalIdx === cursor}
+                selected={selected.has(item.key)}
+                status={statuses.get(item.key) ?? "idle"}
+                width={listWidth}
+              />,
+            );
 
-        return <React.Fragment key={item.key}>{parts}</React.Fragment>;
-      })}
+            return <React.Fragment key={item.key}>{parts}</React.Fragment>;
+          })}
+        </Box>
+
+        {previewOpen && (
+          <PreviewCard
+            item={items[cursor]}
+            preview={previewData}
+            loading={previewLoading}
+            width={previewWidth}
+            height={termRows}
+          />
+        )}
+      </Box>
 
       <Footer
         selectedCount={selected.size}
