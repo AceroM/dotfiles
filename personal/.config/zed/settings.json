@@ -92,6 +92,9 @@
       "proxy_no_verify": null
     }
   },
+  "terminal": {
+    "option_as_meta": true
+  },
   "vim_mode": true,
   "ui_font_size": 14,
   "buffer_font_size": 14,
