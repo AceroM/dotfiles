@@ -146,7 +146,9 @@
     "context": "Terminal",
     "bindings": {
       "ctrl-alt-down": null,
+      "ctrl-a": null,
       "ctrl-e": null,
+      "alt-backspace": ["terminal::SendKeystroke", "ctrl-w"],
       "ctrl-alt-k": "terminal_panel::ToggleFocus",
     },
   },
