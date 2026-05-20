@@ -13,6 +13,7 @@ function lk() {
   pids=$(for port in "$@"; do lsof -ti :"$port"; done | sort -u)
   [[ -n "$pids" ]] && echo "$pids" | xargs kill
 }
+function kt() { pkill -f tsgo }
 alias pp="pbpaste"
 alias pc="pbcopy"
 alias e="echo"
