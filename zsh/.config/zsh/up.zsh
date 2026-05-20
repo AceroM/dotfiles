@@ -1,12 +1,13 @@
-# up — check installed apps/CLIs.
+# up — check and update installed apps/CLIs.
 #
 # Usage:
 #   up            list current versions and whether each is outdated
 #   up list       same as `up`
+#   up update     update any outdated apps
+#   up <name>     update just that app (e.g. `up claude`, `up pi`)
 #
-# Registry: each app gets a `_up_<name>_status` function that prints one
-# status line. To add a new app, define `_up_<name>_status` and add its
-# name to `_up_apps`.
+# Registry: each app gets a `_up_<name>_status` and `_up_<name>_update`
+# function. To add a new app, define both and add its name to `_up_apps`.
 
 _up_apps=(claude wrangler pi)
 
@@ -32,6 +33,10 @@ _up_claude_status() {
   fi
 }
 
+_up_claude_update() {
+  npm install -g @anthropic-ai/claude-code
+}
+
 _up_wrangler_status() {
   if ! command -v wrangler >/dev/null 2>&1; then
     _up_print wrangler "-" "not installed"
@@ -47,6 +52,10 @@ _up_wrangler_status() {
   else
     _up_print wrangler "$current" "up to date"
   fi
+}
+
+_up_wrangler_update() {
+  npm install -g wrangler
 }
 
 _up_pi_status() {
@@ -66,12 +75,11 @@ _up_pi_status() {
   fi
 }
 
-function up() {
-  if [[ $# -gt 0 && "$1" != "list" ]]; then
-    echo "up: unknown command '$1' (usage: up [list])"
-    return 1
-  fi
+_up_pi_update() {
+  npm install -g @earendil-works/pi-coding-agent
+}
 
+_up_list() {
   _up_print NAME VERSION STATUS
   local app fn
   for app in "${_up_apps[@]}"; do
@@ -82,4 +90,48 @@ function up() {
     fi
     "$fn"
   done
+}
+
+_up_one() {
+  # _up_one <app> — update a single app, regardless of current status.
+  local app=$1 fn="_up_${1}_update"
+  if ! typeset -f "$fn" >/dev/null; then
+    echo "up: no update function for '$app'" >&2
+    return 1
+  fi
+  echo "==> updating $app"
+  "$fn"
+}
+
+_up_update_outdated() {
+  local app status_fn line
+  for app in "${_up_apps[@]}"; do
+    status_fn="_up_${app}_status"
+    typeset -f "$status_fn" >/dev/null || continue
+    line=$("$status_fn")
+    if [[ "$line" == *"outdated"* ]]; then
+      _up_one "$app"
+    fi
+  done
+}
+
+function up() {
+  if [[ $# -eq 0 || "$1" == "list" ]]; then
+    _up_list
+    return
+  fi
+
+  case "$1" in
+    update)
+      _up_update_outdated
+      ;;
+    *)
+      if (( ${_up_apps[(Ie)$1]} )); then
+        _up_one "$1"
+      else
+        echo "up: unknown command '$1' (usage: up [list|update|<app>])" >&2
+        return 1
+      fi
+      ;;
+  esac
 }
