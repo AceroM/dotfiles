@@ -210,4 +210,9 @@
       "cmd-shift-.": "editor::ToggleFocus",
     },
   },
+  {
+    "bindings": {
+      "alt-cmd-n": "agent::NewThread",
+    },
+  },
 ]
