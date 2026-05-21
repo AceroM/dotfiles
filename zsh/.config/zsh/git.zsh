@@ -6,9 +6,6 @@ alias gi="git init"
 function jw() {
   gh pr merge "$@" --merge --delete-branch
 }
-function jl() {
-  gh pr list
-}
 function jd() {
   gh pr diff "$@"
 }
