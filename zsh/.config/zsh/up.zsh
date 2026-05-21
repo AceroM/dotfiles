@@ -34,7 +34,7 @@ _up_claude_status() {
 }
 
 _up_claude_update() {
-  npm install -g @anthropic-ai/claude-code
+  brew upgrade claude-code
 }
 
 _up_wrangler_status() {
