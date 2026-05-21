@@ -128,6 +128,7 @@ config.set_environment_variables = {
 	VISUAL = "zed --wait",
 }
 
+config.enable_tab_bar = false
 config.show_tab_index_in_tab_bar = true
 
 wezterm.on("format-tab-title", function(tab, tabs, panes, cfg, hover, max_width)
@@ -256,6 +257,19 @@ config.keys = {
 					return
 				end
 			end
+		end),
+	},
+	{
+		key = "b",
+		mods = "CMD|SHIFT",
+		action = wezterm.action_callback(function(win, pane)
+			local overrides = win:get_config_overrides() or {}
+			if overrides.enable_tab_bar == nil then
+				overrides.enable_tab_bar = true
+			else
+				overrides.enable_tab_bar = not overrides.enable_tab_bar
+			end
+			win:set_config_overrides(overrides)
 		end),
 	},
 	{
