@@ -1,6 +1,3 @@
-alias ca="claude agents"
-
-function ce() {
   local s="claude-$(uuidgen | cut -d- -f1)"
   tmux new-session -d "$s" "claude --dangerously-skip-permissions"
   sleep 1
