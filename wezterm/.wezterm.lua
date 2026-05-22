@@ -273,6 +273,11 @@ config.keys = {
 		end),
 	},
 	{
+		key = "f",
+		mods = "CTRL|CMD",
+		action = wezterm.action.ToggleFullScreen,
+	},
+	{
 		key = "t",
 		mods = "CMD",
 		action = wezterm.action_callback(function(win, pane)
