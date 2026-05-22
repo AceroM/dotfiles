@@ -24,7 +24,7 @@ fi
 issue_id="$1"
 
 query_payload=$(jq -n --arg q "$issue_id" \
-  '{query: "query ($q: String!) { searchIssues(term: $q, first: 1) { nodes { identifier title description state { name } labels { nodes { name } } } } }", variables: {q: $q}}')
+  '{query: "query ($q: String!) { searchIssues(term: $q, first: 1) { nodes { identifier title description priority state { name } labels { nodes { name } } } } }", variables: {q: $q}}')
 
 curl -s -X POST "https://api.linear.app/graphql" \
   -H "Content-Type: application/json" \
