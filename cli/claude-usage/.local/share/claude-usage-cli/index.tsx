@@ -668,7 +668,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [viewport, setViewport] = useState(0);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [range, setRange] = useState<TimeRange>("monthly");
+  const [range, setRange] = useState<TimeRange>("weekly");
   const [search, setSearch] = useState("");
   const [searching, setSearching] = useState(false);
 
