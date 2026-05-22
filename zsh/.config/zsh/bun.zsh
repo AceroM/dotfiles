@@ -3,6 +3,7 @@ alias bd="bun run deploy"
 alias ct="bun check-types"
 alias rd="bun db:reset && bun run dev"
 alias td="bun db:reset && bun run t:dev"
+alias bt="bun t:dev"
 
 export BUN_INSTALL="$HOME/.bun"
 export DELTA_FEATURES=+side-by-side
