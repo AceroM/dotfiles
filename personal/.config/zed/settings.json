@@ -2,86 +2,84 @@
   "agent_servers": {
     "claude-acp": {
       "default_config_options": {
-        "mode": "bypassPermissions"
+        "mode": "bypassPermissions",
       },
       "favorite_config_option_values": {
-        "mode": [
-          "bypassPermissions"
-        ]
+        "mode": ["bypassPermissions"],
       },
-      "type": "registry"
-    }
+      "type": "registry",
+    },
   },
   "cli_default_open_behavior": "new_window",
   "project_panel": {
-    "dock": "right"
+    "dock": "right",
   },
   "outline_panel": {
-    "dock": "right"
+    "dock": "right",
   },
   "collaboration_panel": {
-    "dock": "right"
+    "dock": "right",
   },
   "git_panel": {
-    "dock": "right"
+    "dock": "right",
   },
   "autosave": "on_focus_change",
   "git": {
     "inline_blame": {
-      "enabled": false
-    }
+      "enabled": false,
+    },
   },
   "agent": {
     "dock": "left",
     "tool_permissions": {
-      "default": "allow"
+      "default": "allow",
     },
     "default_profile": "write",
     "default_model": {
       "effort": "high",
       "enable_thinking": true,
       "provider": "zed.dev",
-      "model": "claude-opus-4-7"
+      "model": "claude-opus-4-7",
     },
     "favorite_models": [],
-    "model_parameters": []
+    "model_parameters": [],
   },
   "languages": {
     "TypeScript": {
       "language_servers": ["tsgo"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
-      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+      "formatter": [{ "language_server": { "name": "oxfmt" } }],
     },
     "TSX": {
       "language_servers": ["...", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
-      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+      "formatter": [{ "language_server": { "name": "oxfmt" } }],
     },
     "JavaScript": {
       "language_servers": ["...", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
-      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+      "formatter": [{ "language_server": { "name": "oxfmt" } }],
     },
     "JSON": {
       "format_on_save": "on",
       "prettier": { "allowed": false },
-      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+      "formatter": [{ "language_server": { "name": "oxfmt" } }],
     },
     "JSONC": {
       "format_on_save": "on",
       "prettier": { "allowed": false },
-      "formatter": [{ "language_server": { "name": "oxfmt" } }]
-    }
+      "formatter": [{ "language_server": { "name": "oxfmt" } }],
+    },
   },
   "lsp": {
     "tsgo": {
       "settings": {
-        "package_version": "7.0.0-dev.20251029.1"
-      }
-    }
+        "package_version": "7.0.0-dev.20251029.1",
+      },
+    },
   },
   "relative_line_numbers": "enabled",
   "edit_predictions": {
@@ -89,11 +87,11 @@
     "mode": "eager",
     "copilot": {
       "proxy": null,
-      "proxy_no_verify": null
-    }
+      "proxy_no_verify": null,
+    },
   },
   "terminal": {
-    "option_as_meta": true
+    "option_as_meta": true,
   },
   "vim_mode": true,
   "ui_font_size": 14,
@@ -101,6 +99,6 @@
   "theme": {
     "light": "One Light",
     "dark": "One Dark",
-    "mode": "system"
-  }
+    "mode": "system",
+  },
 }
