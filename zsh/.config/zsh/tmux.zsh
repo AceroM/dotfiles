@@ -29,7 +29,17 @@ function t() {
 
   case "$cmd" in
     l)
-      tmux list-sessions -F '#S'
+      local s title
+      tmux list-sessions -F '#S' 2>/dev/null | while read -r s; do
+        cmd=$(tmux display-message -p -t "$s:0.0" '#{pane_current_command}' 2>/dev/null)
+        title=$(tmux display-message -p -t "$s:0.0" '#{pane_title}' 2>/dev/null)
+        if [[ "$cmd" == *claude* || "$cmd" == *node* ]] \
+           && [[ -n "$title" && "$title" != "$s" && "$title" != "zsh" && "$title" != "$cmd" ]]; then
+          printf '%s: %s\n' "$s" "$title"
+        else
+          printf '%s\n' "$s"
+        fi
+      done
       ;;
     a)
       tmux attach-session -t "$name"

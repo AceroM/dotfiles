@@ -8,10 +8,26 @@ function ce() {
 function cn() {
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
-  local name
+
+  typeset -A used_letters
+  local existing cmd
+  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+    if [[ "$cmd" == *claude* || "$cmd" == *node* ]]; then
+      used_letters[${existing:0:1}]=1
+    fi
+  done
+
+  local name first_letter attempts=0
   while true; do
     name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
-    tmux has-session -t "$name" 2>/dev/null || break
+    first_letter="${name:0:1}"
+    if ! tmux has-session -t "$name" 2>/dev/null; then
+      if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
+        break
+      fi
+    fi
+    ((attempts++))
   done
   tmux new-session -ds "$name" "claude --dangerously-skip-permissions"
   tmux attach -t "$name"
