@@ -278,6 +278,11 @@ config.keys = {
 		action = wezterm.action.ToggleFullScreen,
 	},
 	{
+		key = "Tab",
+		mods = "CTRL",
+		action = wezterm.action.SendString("\x1b[9;5u"),
+	},
+	{
 		key = "t",
 		mods = "CMD",
 		action = wezterm.action_callback(function(win, pane)
