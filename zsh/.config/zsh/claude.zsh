@@ -13,7 +13,7 @@ function cn() {
   local existing cmd
   for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
     cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
-    if [[ "$cmd" == *claude* || "$cmd" == *node* ]]; then
+    if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
       used_letters[${existing:0:1}]=1
     fi
   done
