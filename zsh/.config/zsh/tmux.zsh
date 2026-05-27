@@ -18,9 +18,9 @@ function _t_compact() {
 }
 
 alias l='t l'
-alias ta='t a'
-alias tk='t k'
-alias tr='t r'
+alias a='t a'
+alias k='t k'
+alias r='t r'
 
 function t() {
   local cmd="$1"
