@@ -1,2 +1,2 @@
-alias awake='caffeinate -dimsu &'
-alias sleepy='pkill caffeinate'
+alias cf='caffeinate -dimsu &'
+alias ck='pkill caffeinate'
