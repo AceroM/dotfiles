@@ -29,7 +29,7 @@ function cn() {
     fi
     ((attempts++))
   done
-  tmux new-session -ds "$name" "claude --dangerously-skip-permissions"
+  tmux new-session -ds "$name" "claude"
   tmux attach -t "$name"
 }
 
