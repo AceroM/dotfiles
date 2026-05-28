@@ -5,7 +5,7 @@ function ce() {
   tmux send-keys -t "$s:0.0" "$1" C-m
 }
 
-function cn() {
+function p() {
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
 
