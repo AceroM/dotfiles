@@ -18,6 +18,7 @@ function _t_compact() {
 }
 
 alias tx='tmux source-file ~/.tmux.conf'
+alias tz='tmux source-file ~/.tmux.conf'
 alias l='t l'
 alias a='t a'
 alias k='t k'
