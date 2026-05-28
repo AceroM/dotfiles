@@ -2,4 +2,13 @@
 set -euo pipefail
 
 script_dir="${HOME}/.local/share/claude-usage-cli"
+# bun resolves symlinks, so node_modules must be next to the real index.tsx
+real_script="$(readlink -f "${script_dir}/index.tsx")"
+real_dir="$(dirname "${real_script}")"
+
+if [ ! -d "${real_dir}/node_modules" ]; then
+  echo "Installing dependencies..." >&2
+  (cd "${real_dir}" && bun install --frozen-lockfile)
+fi
+
 exec bun run "${script_dir}/index.tsx" "$@"
