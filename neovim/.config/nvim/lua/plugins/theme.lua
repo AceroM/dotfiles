@@ -1,8 +1,11 @@
-local omarchy_theme_path = "/home/miguel/.config/omarchy/current/theme/neovim.lua"
-local stat = vim.loop.fs_stat(omarchy_theme_path)
+local in_ssh = vim.env.SSH_CONNECTION ~= nil or vim.env.SSH_TTY ~= nil
 
-if stat then
-  return dofile(omarchy_theme_path)
+if not in_ssh then
+  local omarchy_theme_path = "/home/miguel/.config/omarchy/current/theme/neovim.lua"
+  local stat = vim.loop.fs_stat(omarchy_theme_path)
+  if stat then
+    return dofile(omarchy_theme_path)
+  end
 end
 
 -- Detect macOS system appearance
@@ -16,7 +19,7 @@ local function is_dark_mode()
   return true -- Default to dark if detection fails
 end
 
-local flavour = is_dark_mode() and "macchiato" or "latte"
+local flavour = in_ssh and "mocha" or (is_dark_mode() and "macchiato" or "latte")
 
 return {
   -- Configure catppuccin theme

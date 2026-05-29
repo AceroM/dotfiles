@@ -1,3 +1,9 @@
+-- Over SSH, transparency lets the remote terminal's background bleed through
+-- and catppuccin's palette stops reading correctly. Bail and let the theme paint.
+if vim.env.SSH_CONNECTION or vim.env.SSH_TTY then
+  return
+end
+
 -- transparent background
 vim.api.nvim_set_hl(0, "Normal", { bg = "none" })
 vim.api.nvim_set_hl(0, "NormalFloat", { bg = "none" })
