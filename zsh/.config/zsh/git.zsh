@@ -13,6 +13,11 @@ function jc() {
   gh pr checkout "$@"
 }
 function x() {
+  if [[ -f ./scripts/x.sh ]]; then
+    ./scripts/x.sh "$@"
+    return
+  fi
+
   local msg="${1:-changes}"
   local session_name="x-$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")-$(date +%s)"
 
