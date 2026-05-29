@@ -46,6 +46,7 @@ function hp() { gh pr view --json files --jq '.files[].path' }
 function gs() { git show "$@" }
 function sa() { git stash "$@" }
 function di() { git diff "$@" }
+function dl() { git diff --numstat "$@" | awk '{a+=$1; d+=$2} END {print a+d}' }
 function did() { git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@" }
 function si() { git diff --staged }
 function gr() { git reset --hard HEAD }
