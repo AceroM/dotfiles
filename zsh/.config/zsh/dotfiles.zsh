@@ -1,2 +1,8 @@
 alias dot="cd ~/.dotfiles"
-alias d="git --no-pager diff"
+d() {
+  if [[ -f ./scripts/diff.sh ]]; then
+    ./scripts/diff.sh "$@"
+  else
+    git --no-pager diff "$@"
+  fi
+}
