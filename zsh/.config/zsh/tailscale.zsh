@@ -2,10 +2,28 @@
 # Tailnet-only (not public). For public access use `tailscale funnel`.
 
 # Show current serve config.
-function tss() { tailscale serve status }
+function tl() { tailscale serve status }
 
 # Reset all serves.
 function tsr() { tailscale serve reset }
+
+# Expose a localhost port on https:443. Usage: to <local-port>
+function to() {
+  if [[ $# -ne 1 ]]; then
+    echo "Usage: to <local-port>"
+    return 1
+  fi
+  tailscale serve --bg --https=443 "http://localhost:$1"
+}
+
+# Close the serve on https:443. Usage: tc <local-port>
+function tc() {
+  if [[ $# -ne 1 ]]; then
+    echo "Usage: tc <local-port>"
+    return 1
+  fi
+  tailscale serve --https=443 off
+}
 
 # Expose a localhost port on a tailnet HTTPS port. Usage: tsp <https-port> <local-port>
 # Valid HTTPS ports: 443, 8443, 10000.
