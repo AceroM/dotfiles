@@ -15,6 +15,11 @@ function pm() {
 }
 
 function p() {
+  local input=""
+  if [[ ! -t 0 ]]; then
+    input=$(cat)
+  fi
+
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
 
@@ -39,6 +44,12 @@ function p() {
     ((attempts++))
   done
   tmux new-session -ds "$name" "claude"
+  if [[ -n "$input" ]]; then
+    sleep 1
+    printf '%s' "$input" | tmux load-buffer -
+    tmux paste-buffer -t "$name:0.0"
+    tmux send-keys -t "$name:0.0" Enter
+  fi
   tmux attach -t "$name"
 }
 
