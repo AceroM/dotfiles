@@ -78,3 +78,12 @@ function redacted-serve-off() {
   tailscale serve --https=443 off
   tailscale serve --https=8443 off
 }
+
+# Vite: expose app (5173) on https:443.
+function vite-serve-on() {
+  tailscale serve --bg --https=443 http://localhost:5173
+}
+
+function vite-serve-off() {
+  tailscale serve --https=443 off
+}
