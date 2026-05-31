@@ -31,15 +31,16 @@ function t() {
 
   case "$cmd" in
   l)
-    local s title
+    local s title dir
     tmux list-sessions -F '#S' 2>/dev/null | while read -r s; do
       cmd=$(tmux display-message -p -t "$s:0.0" '#{pane_current_command}' 2>/dev/null)
       title=$(tmux display-message -p -t "$s:0.0" '#{pane_title}' 2>/dev/null)
+      dir=$(tmux display-message -p -t "$s:0.0" '#{b:pane_current_path}' 2>/dev/null)
       if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]] &&
         [[ -n "$title" && "$title" != "$s" && "$title" != "zsh" && "$title" != "$cmd" ]]; then
-        printf '%s: %s\n' "$s" "$title"
+        printf '%s [%s]: %s\n' "$s" "$dir" "$title"
       else
-        printf '%s\n' "$s"
+        printf '%s [%s]\n' "$s" "$dir"
       fi
     done
     ;;
