@@ -35,3 +35,25 @@ function tdp() {
   fi
   tailscale file cp --name "$1" - "${2%:}:"
 }
+
+# Move the latest screenshot received via taildrop (in ~/Downloads) to <dest>.
+# Usage: sr <dest>
+function sr() {
+  if [[ $# -ne 1 ]]; then
+    echo "Usage: sr <dest>"
+    return 1
+  fi
+  local dest="$1"
+  local latest
+  latest=$(ls -t ~/Downloads/Screenshot*.png 2>/dev/null | head -1)
+  if [[ -z "$latest" ]]; then
+    echo "No screenshot found in ~/Downloads" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if mv "$latest" "$dest"; then
+    echo "Moved \"$(basename "$latest")\" to \"$dest\""
+  else
+    return 1
+  fi
+}
