@@ -23,6 +23,8 @@ function _ts_active_config() {
     echo "app"
   elif [[ "$p443" == "http://localhost:5173" && -z "$p8443" ]]; then
     echo "vite"
+  elif [[ "$p443" == "http://localhost:3001" && -z "$p8443" ]]; then
+    echo "work"
   fi
 }
 
@@ -116,16 +118,25 @@ function vite-serve-off() {
   tailscale serve --https=443 off
 }
 
-# Switch named serve config. Usage: ts <app|vite>
+# Work: expose app (3001) on https:443.
+function work-serve-on() {
+  tailscale serve --bg --https=443 http://localhost:3001
+}
+
+function work-serve-off() {
+  tailscale serve --https=443 off
+}
+
+# Switch named serve config. Usage: ts <app|vite|work>
 function ts() {
   if [[ $# -ne 1 ]]; then
-    echo "Usage: ts <app|vite>"
+    echo "Usage: ts <app|vite|work>"
     return 1
   fi
   local target=$1 current
   case "$target" in
-    app|vite) ;;
-    *) echo "Unknown config: $target (expected: app, vite)"; return 1 ;;
+    app|vite|work) ;;
+    *) echo "Unknown config: $target (expected: app, vite, work)"; return 1 ;;
   esac
   current=$(_ts_active_config)
   if [[ "$current" == "$target" ]]; then
