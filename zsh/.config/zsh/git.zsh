@@ -26,6 +26,9 @@ function x() {
 function pl() { git pull origin $(sc) }
 function gd() { gh pr diff "$@"; }
 function gb() { gh browse "$@" }
+function gu() {
+  git remote get-url origin | sed -E 's#git@github\.com:#https://github.com/#; s#\.git$##'
+}
 function gx() {
   gh pr diff "$1"
   gh pr view "$1"
