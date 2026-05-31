@@ -7,11 +7,8 @@ function ce() {
 
 function pm() {
   local s="claude-pm-$(uuidgen | cut -d- -f1)"
-  tmux new-session -ds "$s" "claude --dangerously-skip-permissions"
-  sleep 2
-  tmux send-keys -t "$s:0.0" "read current diffs come up with commit messsage and push"
-  sleep 1
-  tmux send-keys -t "$s:0.0" Enter
+  local prompt='Review the staged + unstaged diff and the recent git log for style. Write a Conventional Commits message (type(scope): summary, with a body if the change warrants it) that accurately describes the change — never use a placeholder like "changes". Then commit and push. Do NOT add a Co-Authored-By footer or any AI attribution.'
+  tmux new-session -ds "$s" "claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
 }
 
 function p() {
