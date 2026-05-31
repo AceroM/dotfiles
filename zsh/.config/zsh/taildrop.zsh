@@ -43,7 +43,7 @@ function sr() {
     echo "Usage: sr <dest>"
     return 1
   fi
-  local dest="$1"
+  local dest="./images/$1"
   local latest
   latest=$(ls -t ~/Downloads/Screenshot*.png 2>/dev/null | head -1)
   if [[ -z "$latest" ]]; then
