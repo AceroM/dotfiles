@@ -44,7 +44,14 @@ function t() {
     done
     ;;
   a)
-    tmux attach-session -t "$name"
+    if [[ -n "$name" ]]; then
+      tmux attach-session -t "$name"
+    elif tmux has-session 2>/dev/null; then
+      tmux attach-session \; choose-tree -Zs -F "#{session_name}#{?#{&&:#{!=:#{pane_title},#{session_name}},#{&&:#{!=:#{pane_title},zsh},#{!=:#{pane_title},#{pane_current_command}}}},: #{pane_title},}"
+    else
+      local new_name="$(_session_random_name)"
+      tmux new-session -s "$new_name" -n "$new_name"
+    fi
     ;;
   k)
     local port="$session_cmd"
