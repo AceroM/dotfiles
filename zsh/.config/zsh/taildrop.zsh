@@ -53,6 +53,7 @@ function sr() {
   mkdir -p "$(dirname "$dest")"
   if mv "$latest" "$dest"; then
     echo "Moved \"$(basename "$latest")\" to \"$dest\""
+    chafa "$dest"
   else
     return 1
   fi
