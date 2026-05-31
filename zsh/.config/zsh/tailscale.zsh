@@ -5,8 +5,36 @@
 # Tailscale only allows HTTPS on ports 443, 8443, 10000 — `to` picks the first
 # free one; `tc` looks up which one is forwarding your local port.
 
+# Internal: proxy target for a given HTTPS port (empty if none).
+function _ts_proxy_for_https_port() {
+  tailscale serve status --json 2>/dev/null | jq -r --arg p ":$1" '
+    .Web // {} | to_entries[]
+    | select(.key | endswith($p))
+    | .value.Handlers["/"].Proxy // empty
+  ' | head -1
+}
+
+# Internal: detect which named config matches the current serve state.
+function _ts_active_config() {
+  local p443 p8443
+  p443=$(_ts_proxy_for_https_port 443)
+  p8443=$(_ts_proxy_for_https_port 8443)
+  if [[ "$p443" == "http://localhost:4321" && "$p8443" == "http://localhost:5173" ]]; then
+    echo "porio"
+  elif [[ "$p443" == "http://localhost:5173" && -z "$p8443" ]]; then
+    echo "vite"
+  fi
+}
+
 # Show current serve config.
-function tl() { tailscale serve status }
+function tl() {
+  local config
+  config=$(_ts_active_config)
+  if [[ -n "$config" ]]; then
+    echo "config: $config"
+  fi
+  tailscale serve status
+}
 
 # Reset all serves.
 function tsr() { tailscale serve reset }
