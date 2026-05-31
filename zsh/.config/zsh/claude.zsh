@@ -5,6 +5,15 @@ function ce() {
   tmux send-keys -t "$s:0.0" "$1" C-m
 }
 
+function pm() {
+  local s="claude-pm-$(uuidgen | cut -d- -f1)"
+  tmux new-session -ds "$s" "claude --dangerously-skip-permissions"
+  sleep 2
+  tmux send-keys -t "$s:0.0" "read current diffs come up with commit messsage and push"
+  sleep 1
+  tmux send-keys -t "$s:0.0" Enter
+}
+
 function p() {
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
