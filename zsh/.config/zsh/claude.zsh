@@ -11,6 +11,11 @@ function pm() {
   tmux new-session -ds "$s" "claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
 }
 
+function j() {
+  local s="claude-j-$(uuidgen | cut -d- -f1)"
+  tmux new-session -ds "$s" "claude --dangerously-skip-permissions -p $(printf '%q' "$1")"
+}
+
 function p() {
   local input=""
   if [[ ! -t 0 ]]; then
