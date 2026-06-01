@@ -17,3 +17,7 @@ alias ob="obsidian"
 alias rs="openssl rand -base64 32"
 alias ..='cd ..'
 alias ...='cd ../..'
+
+for i in 0 1 2 3 4 5 6 7 8 9; do
+  eval "$i() { local p; p=\$(bm path $i) || { echo 'slot $i empty' >&2; return 1; }; cd \"\$p\"; }"
+done

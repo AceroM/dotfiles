@@ -3,6 +3,9 @@ d() {
   if [[ -f ./scripts/diff.sh ]]; then
     ./scripts/diff.sh "$@"
   else
-    git --no-pager diff "$@"
+    git diff "$@"
   fi
+}
+db() {
+  git diff "$@" | bat
 }
