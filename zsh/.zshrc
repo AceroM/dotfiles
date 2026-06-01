@@ -14,3 +14,6 @@ fpath=("/Users/miguelacero/.local/share/zsh/site-functions" $fpath)
 
 # bun completions
 [ -s "/Users/miguel/.bun/_bun" ] && source "/Users/miguel/.bun/_bun"
+
+# direnv
+eval "$(direnv hook zsh)"

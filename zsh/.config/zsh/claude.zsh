@@ -1,6 +1,6 @@
 function ce() {
   local s="claude-$(uuidgen | cut -d- -f1)"
-  tmux new-session -d "$s" "claude --dangerously-skip-permissions"
+  tmux new-session -d "$s" -c "$PWD" "direnv exec '$PWD' claude --dangerously-skip-permissions"
   sleep 1
   tmux send-keys -t "$s:0.0" "$1" C-m
 }
@@ -8,14 +8,37 @@ function ce() {
 function pm() {
   local s="claude-pm-$(uuidgen | cut -d- -f1)"
   local prompt='Review the staged + unstaged diff and the recent git log for style. Write a Conventional Commits message (type(scope): summary, with a body if the change warrants it) that accurately describes the change — never use a placeholder like "changes". Then commit and push. Do NOT add a Co-Authored-By footer or any AI attribution.'
-  tmux new-session -ds "$s" "claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
+  tmux new-session -ds "$s" -c "$PWD" "direnv exec '$PWD' claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
 }
 
 function j() {
-  local s="claude-j-$(uuidgen | cut -d- -f1)"
-  tmux new-session -ds "$s" "claude"
+  local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
+  local -a nouns=("${SESSION_NAME_NOUNS[@]}")
+
+  typeset -A used_letters
+  local existing cmd
+  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+    if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
+      used_letters[${existing:0:1}]=1
+    fi
+  done
+
+  local name first_letter attempts=0
+  while true; do
+    name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
+    first_letter="${name:0:1}"
+    if ! tmux has-session -t "$name" 2>/dev/null; then
+      if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
+        break
+      fi
+    fi
+    ((attempts++))
+  done
+  tmux new-session -ds "$name" -c "$PWD" "direnv exec '$PWD' claude"
   sleep 1
-  tmux send-keys -t "$s:0.0" "$1" C-m
+  tmux send-keys -t "$name:0.0" "$1" C-m
+  tmux send-keys -t "$name:0.0" C-m
 }
 
 function p() {
@@ -47,7 +70,7 @@ function p() {
     fi
     ((attempts++))
   done
-  tmux new-session -ds "$name" "claude"
+  tmux new-session -ds "$name" -c "$PWD" "direnv exec '$PWD' claude"
   if [[ -n "$input" ]]; then
     sleep 1
     printf '%s' "$input" | tmux load-buffer -
