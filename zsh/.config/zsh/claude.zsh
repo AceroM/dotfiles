@@ -13,7 +13,9 @@ function pm() {
 
 function j() {
   local s="claude-j-$(uuidgen | cut -d- -f1)"
-  tmux new-session -ds "$s" "claude --dangerously-skip-permissions -p $(printf '%q' "$1")"
+  tmux new-session -ds "$s" "claude"
+  sleep 1
+  tmux send-keys -t "$s:0.0" "$1" C-m
 }
 
 function p() {

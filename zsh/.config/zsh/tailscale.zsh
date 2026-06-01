@@ -16,10 +16,11 @@ function _ts_proxy_for_https_port() {
 
 # Internal: detect which named config matches the current serve state.
 function _ts_active_config() {
-  local p443 p8443
+  local p443 p8443 p10000
   p443=$(_ts_proxy_for_https_port 443)
   p8443=$(_ts_proxy_for_https_port 8443)
-  if [[ "$p443" == "http://localhost:4321" && "$p8443" == "http://localhost:5173" ]]; then
+  p10000=$(_ts_proxy_for_https_port 10000)
+  if [[ "$p443" == "http://localhost:4321" && "$p8443" == "http://localhost:5173" && "$p10000" == "http://localhost:7476" ]]; then
     echo "app"
   elif [[ "$p443" == "http://localhost:5173" && -z "$p8443" ]]; then
     echo "vite"
@@ -98,15 +99,17 @@ function tc() {
   tailscale serve --https="$https_port" off
 }
 
-# App: expose web (4321) on https:443 and app (5173) on https:8443.
+# App: expose web (4321) on https:443, app (5173) on https:8443, and 7476 on https:10000.
 function app-serve-on() {
   tailscale serve --bg --https=443 http://localhost:4321
   tailscale serve --bg --https=8443 http://localhost:5173
+  tailscale serve --bg --https=10000 http://localhost:7476
 }
 
 function app-serve-off() {
   tailscale serve --https=443 off
   tailscale serve --https=8443 off
+  tailscale serve --https=10000 off
 }
 
 # Vite: expose app (5173) on https:443.
