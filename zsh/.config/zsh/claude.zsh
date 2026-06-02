@@ -70,7 +70,12 @@ function p() {
     fi
     ((attempts++))
   done
-  tmux new-session -ds "$name" -c "$PWD" "direnv exec '$PWD' claude"
+  local claude_cmd="direnv exec '$PWD' claude"
+  local arg
+  for arg in "$@"; do
+    claude_cmd+=" ${(q)arg}"
+  done
+  tmux new-session -ds "$name" -c "$PWD" "$claude_cmd"
   if [[ -n "$input" ]]; then
     sleep 1
     printf '%s' "$input" | tmux load-buffer -
