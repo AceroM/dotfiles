@@ -1,5 +1,14 @@
 [mgr]
-ratio = [1, 1, 4]
+ratio = [1, 1, 6] # parent 12% · current 12% · preview 75%
+
+[preview]
+# Default cap is 600x900, which looks tiny in a Retina preview pane. Raise it so
+# images render large enough to fill the pane. Higher = bigger/sharper but a bit
+# more CPU per preview (fine locally in WezTerm).
+max_width = 1920
+max_height = 1920
+image_quality = 90        # 50–90, default 75 — max sharpness
+image_filter = "lanczos3" # sharper resampling than the default "triangle"
 
 [opener]
 play = [
