@@ -64,7 +64,13 @@ function fe() { git fetch --all --prune }
 function rc() { git rebase --continue }
 function in() { git init }
 function ad() { git add "$@" }
-function st() { git status }
+function st() {
+  if [[ -f ./scripts/status.sh ]]; then
+    ./scripts/status.sh "$@"
+  else
+    git status "$@"
+  fi
+}
 function co() { git checkout "$@" }
 function cb() { git checkout -b "$@" }
 alias c-='git checkout -'
