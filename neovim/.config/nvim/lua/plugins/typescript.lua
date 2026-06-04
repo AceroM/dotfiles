@@ -14,6 +14,12 @@ return {
       vtsls = {
         settings = {
           typescript = {
+            -- Cap tsserver's V8 heap (passed as --max-old-space-size, in MB).
+            -- Default is 3072. At ~4096 heap the process RSS peaks around 5 GB,
+            -- then tsserver OOM-crashes and the LSP client auto-restarts it.
+            tsserver = {
+              maxTsServerMemory = 4096,
+            },
             inlayHints = {
               enabled = false,
             },
