@@ -162,6 +162,19 @@ config.initial_rows = 28
 -- Font size configuration
 config.font_size = 15
 config.window_decorations = "RESIZE"
+
+-- Make BOTH Option keys act as Alt/Meta (send ESC-prefixed sequences) instead
+-- of composing accented characters. Required for tmux/shell `M-` bindings to
+-- work from the right Option key, not just the left.
+-- use_ime = false is the key part: with the IME on (the macOS default), the
+-- right Option is captured for dead-key/accent composition and the two
+-- send_composed_* settings below can't fully override it. Disabling the IME
+-- hands full Option-key control to WezTerm. Trade-off: no Option-accent input
+-- (é, å, ñ, ...) and no CJK/IME composition.
+config.use_ime = false
+config.send_composed_key_when_left_alt_is_pressed = false
+config.send_composed_key_when_right_alt_is_pressed = false
+
 -- Theme is now set dynamically based on system appearance (see top of file)
 -- Light: Abernathy, Dark: Catppuccin Mocha
 -- config.window_frame = theme.window_frame() -- needed only if using fancy tab bar
