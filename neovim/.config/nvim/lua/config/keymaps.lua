@@ -52,6 +52,22 @@ vim.keymap.set("n", "<C-;>", 'ggdG', { desc = "Clear entire file" })
 vim.keymap.set("n", "<A-Down>", "<C-d>", { desc = "Half-page down" })
 vim.keymap.set("n", "<A-Up>", "<C-u>", { desc = "Half-page up" })
 
+-- Toggle inline visibility of all git hunks in the current file
+-- (line highlight + inline deleted lines + word-level diff)
+local git_hunks_shown = false
+vim.keymap.set("n", "<leader>gH", function()
+  local ok, gs = pcall(require, "gitsigns")
+  if not ok then
+    return
+  end
+  git_hunks_shown = not git_hunks_shown
+  gs.toggle_linehl(git_hunks_shown)
+  gs.toggle_deleted(git_hunks_shown)
+  gs.toggle_word_diff(git_hunks_shown)
+  gs.refresh()
+  vim.notify("Git hunks " .. (git_hunks_shown and "shown" or "hidden"))
+end, { desc = "Toggle visibility of all git hunks" })
+
 -- Go to definition in vertical/horizontal splits
 vim.keymap.set(
   "n",
