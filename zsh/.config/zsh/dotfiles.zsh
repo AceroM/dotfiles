@@ -1,5 +1,5 @@
 alias dot="cd ~/.dotfiles"
-dd() {
+d() {
   if [[ -f ./scripts/diff.sh ]]; then
     ./scripts/diff.sh "$@"
   else
