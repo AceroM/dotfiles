@@ -75,8 +75,8 @@ function nss() {
   fi
   git diff --numstat "${1:-main}...HEAD" | awk 'NF {printf "+%-5s -%-5s %s\n", $1, $2, $3}'
 }
-# nd <path> [base] — full patch for one file from the PR (base defaults to main)
-function nd() { git diff "${2:-main}...HEAD" -- "$1" }
+# nd <path...> — full patch for one or more files from the PR (base defaults to main, override with ND_BASE)
+function nd() { git diff "${ND_BASE:-main}...HEAD" -- "$@" }
 function did() { git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@" }
 function si() { git diff --staged }
 function gr() { git reset --hard HEAD }
