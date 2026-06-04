@@ -1,6 +1,8 @@
 function ce() {
   local s="claude-$(uuidgen | cut -d- -f1)"
-  tmux new-session -d "$s" -c "$PWD" "direnv exec '$PWD' claude --dangerously-skip-permissions"
+  local env_prefix=""
+  [[ -n "$CLAUDE_CODE_NO_FLICKER" ]] && env_prefix="CLAUDE_CODE_NO_FLICKER=$CLAUDE_CODE_NO_FLICKER "
+  tmux new-session -d "$s" -c "$PWD" "${env_prefix}direnv exec '$PWD' claude --dangerously-skip-permissions"
   sleep 1
   tmux send-keys -t "$s:0.0" "$1" C-m
 }
@@ -8,7 +10,9 @@ function ce() {
 function pm() {
   local s="claude-pm-$(uuidgen | cut -d- -f1)"
   local prompt='Review the staged + unstaged diff and the recent git log for style. Write a Conventional Commits message (type(scope): summary, with a body if the change warrants it) that accurately describes the change — never use a placeholder like "changes". Then commit and push. Do NOT add a Co-Authored-By footer or any AI attribution.'
-  tmux new-session -ds "$s" -c "$PWD" "direnv exec '$PWD' claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
+  local env_prefix=""
+  [[ -n "$CLAUDE_CODE_NO_FLICKER" ]] && env_prefix="CLAUDE_CODE_NO_FLICKER=$CLAUDE_CODE_NO_FLICKER "
+  tmux new-session -ds "$s" -c "$PWD" "${env_prefix}direnv exec '$PWD' claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
 }
 
 function j() {
@@ -35,7 +39,9 @@ function j() {
     fi
     ((attempts++))
   done
-  tmux new-session -ds "$name" -c "$PWD" "direnv exec '$PWD' claude"
+  local env_prefix=""
+  [[ -n "$CLAUDE_CODE_NO_FLICKER" ]] && env_prefix="CLAUDE_CODE_NO_FLICKER=$CLAUDE_CODE_NO_FLICKER "
+  tmux new-session -ds "$name" -c "$PWD" "${env_prefix}direnv exec '$PWD' claude"
   sleep 1
   tmux send-keys -t "$name:0.0" "$1" C-m
   tmux send-keys -t "$name:0.0" C-m
@@ -70,7 +76,9 @@ function p() {
     fi
     ((attempts++))
   done
-  local claude_cmd="direnv exec '$PWD' claude"
+  local env_prefix=""
+  [[ -n "$CLAUDE_CODE_NO_FLICKER" ]] && env_prefix="CLAUDE_CODE_NO_FLICKER=$CLAUDE_CODE_NO_FLICKER "
+  local claude_cmd="${env_prefix}direnv exec '$PWD' claude"
   local arg
   for arg in "$@"; do
     claude_cmd+=" ${(q)arg}"
