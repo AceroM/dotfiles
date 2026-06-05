@@ -55,8 +55,20 @@ function gs() { git show "$@" }
 function sa() { git stash "$@" }
 function di() { git diff "$@" }
 function dl() { git diff --numstat "$@" | awk '{a+=$1; d+=$2} END {print a+d}' }
-function ns() { git diff --numstat HEAD "$@" | awk '{printf "+%-5s -%-5s %s\n", $1, $2, $3}' }
-function nss() { git diff --numstat "${1:-main}...HEAD" | awk 'NF {printf "+%-5s -%-5s %s\n", $1, $2, $3}' }
+function ns() {
+  if [[ -f ./scripts/ns.sh ]]; then
+    ./scripts/ns.sh "$@"
+    return
+  fi
+  git diff --numstat HEAD "$@" | awk '{printf "+%-5s -%-5s %s\n", $1, $2, $3}'
+}
+function nss() {
+  if [[ -f ./scripts/nss.zsh ]]; then
+    ./scripts/nss.zsh "$@"
+    return
+  fi
+  git diff --numstat "${1:-main}...HEAD" | awk 'NF {printf "+%-5s -%-5s %s\n", $1, $2, $3}'
+}
 # nd <path> [base] — full patch for one file from the PR (base defaults to main)
 function nd() { git diff "${2:-main}...HEAD" -- "$1" }
 function did() { git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@" }
