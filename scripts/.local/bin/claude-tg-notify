@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# claude-tg-notify — Claude Code hook handler.
+# Reads a hook JSON payload from stdin and sends a Telegram message
+# via tg-send whenever Claude needs the user's attention.
+#
+# Wire this up in ~/.claude/settings.json under "hooks":
+#   - PreToolUse  matcher "AskUserQuestion|ExitPlanMode"
+#   - Notification (empty matcher; filters inside this script)
+#
+# Exits 0 quickly; tg-send is detached so Claude is never blocked.
+
+set -u
+
+payload="$(cat)"
+
+msg="$(printf '%s' "$payload" | TMUX_PANE="${TMUX_PANE:-}" TMUX_ENV="${TMUX:-}" /usr/bin/env python3 <<'PY'
+import json, os, sys, subprocess
+
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    d = {}
+
+event = (d.get("hook_event_name") or "").strip()
+tool  = (d.get("tool_name") or "").strip()
+note  = (d.get("message") or "").strip()
+cwd   = (d.get("cwd") or os.environ.get("PWD") or "").strip()
+
+# Filter: only forward things that are actually "action needed".
+ACTION_TYPES = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
+reason = None
+if event == "PreToolUse":
+    if tool in ("AskUserQuestion", "ExitPlanMode"):
+        reason = f"awaiting input: {tool}"
+elif event == "Notification":
+    # The notification "type" sometimes shows up in `message` or a sibling field;
+    # also accept any message that looks like a prompt for the user.
+    lower = note.lower()
+    if any(t in lower for t in ACTION_TYPES) \
+       or "permission" in lower or "waiting" in lower or "idle" in lower \
+       or "approve" in lower or "input" in lower:
+        reason = note or "needs attention"
+
+if not reason:
+    sys.exit(0)  # nothing to send
+
+# tmux pane info
+pane_info = ""
+reply_target = ""
+if os.environ.get("TMUX_ENV"):
+    pane = os.environ.get("TMUX_PANE", "")
+    args = ["tmux", "display-message", "-p"]
+    if pane:
+        args += ["-t", pane]
+    args += ["#S:#I.#P  #W  [#{pane_current_command}]"]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=2)
+        if r.returncode == 0:
+            pane_info = r.stdout.strip()
+    except Exception:
+        pass
+    # Stable numeric ID for this tmux session, used by the Telegram reply webhook.
+    try:
+        r = subprocess.run(
+            [os.path.expanduser("~/.local/bin/tg-session-id")],
+            capture_output=True, text=True, timeout=2,
+            env={**os.environ, "TMUX": os.environ.get("TMUX_ENV", "")},
+        )
+        if r.returncode == 0:
+            reply_target = r.stdout.strip()
+    except Exception:
+        pass
+
+home = os.path.expanduser("~")
+short_cwd = ("~" + cwd[len(home):]) if cwd.startswith(home) else cwd
+
+lines = [f"🤖 claude: {reason}"]
+if reply_target:
+    lines.append(f"reply: {reply_target}")
+if pane_info:
+    lines.append(f"pane: {pane_info}")
+if short_cwd:
+    lines.append(f"dir:  {short_cwd}")
+print("\n".join(lines))
+PY
+)"
+
+if [[ -z "$msg" ]]; then
+  exit 0
+fi
+
+# Detach tg-send so the hook returns immediately.
+( "$HOME/.local/bin/tg-send" "$msg" >/dev/null 2>&1 & ) >/dev/null 2>&1
+exit 0

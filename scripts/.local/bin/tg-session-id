@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# tg-session-id — print a stable per-tmux-session ID for Telegram replies.
+#
+# Output: "[N] session-name" if currently inside tmux, nothing otherwise.
+# Side effect: ~/.config/telegram/sessions.json gains a new entry for any
+# session it hasn't seen before. IDs are integers, monotonically assigned.
+#
+# Used by:
+#   - ~/.local/bin/claude-tg-notify  (hook footer)
+#   - ~/.claude/commands/ts.md       (/ts skill footer)
+#   - /Users/miguel/porio/tg/        (webhook reverse lookup)
+
+set -euo pipefail
+
+if [[ -z "${TMUX:-}" ]]; then
+  exit 0
+fi
+
+session="$(tmux display-message -p '#S' 2>/dev/null || true)"
+if [[ -z "$session" ]]; then
+  exit 0
+fi
+
+TG_REGISTRY_PATH="${TG_REGISTRY_PATH:-$HOME/.config/telegram/sessions.json}" \
+TG_SESSION="$session" \
+/usr/bin/env python3 <<'PY'
+import json, os, sys
+
+path = os.environ["TG_REGISTRY_PATH"]
+session = os.environ["TG_SESSION"]
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path) as f:
+        reg = json.load(f)
+    if not isinstance(reg, dict):
+        reg = {}
+except (FileNotFoundError, json.JSONDecodeError):
+    reg = {}
+
+if session not in reg:
+    next_id = max((v for v in reg.values() if isinstance(v, int)), default=-1) + 1
+    reg[session] = next_id
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(reg, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+print(f"[{reg[session]}] {session}")
+PY
