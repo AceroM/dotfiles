@@ -23,7 +23,13 @@ function x() {
 
   tmux new-session -d -s "$session_name" "cd $(printf '%q' "$PWD") && git add . && git commit -m $(printf '%q' "$msg") --no-verify && git push"
 }
-function pl() { git pull origin $(sc) }
+function pl() {
+  if [[ -f ./scripts/pl.sh ]]; then
+    ./scripts/pl.sh "$@"
+    return
+  fi
+  git pull origin $(sc)
+}
 function gd() { gh pr diff "$@"; }
 function gb() { gh browse "$@" }
 function gu() {
