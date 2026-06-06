@@ -26,6 +26,8 @@ function _ts_active_config() {
     echo "vite"
   elif [[ "$p443" == "http://localhost:3001" && -z "$p8443" ]]; then
     echo "work"
+  elif [[ "$p443" == "http://localhost:5555" && -z "$p8443" ]]; then
+    echo "studio"
   fi
 }
 
@@ -130,16 +132,25 @@ function work-serve-off() {
   tailscale serve --https=443 off
 }
 
-# Switch named serve config. Usage: ts <app|vite|work>
+# Studio: expose prisma studio (5555) on https:443.
+function studio-serve-on() {
+  tailscale serve --bg --https=443 http://localhost:5555
+}
+
+function studio-serve-off() {
+  tailscale serve --https=443 off
+}
+
+# Switch named serve config. Usage: ts <app|vite|work|studio>
 function ts() {
   if [[ $# -ne 1 ]]; then
-    echo "Usage: ts <app|vite|work>"
+    echo "Usage: ts <app|vite|work|studio>"
     return 1
   fi
   local target=$1 current
   case "$target" in
-    app|vite|work) ;;
-    *) echo "Unknown config: $target (expected: app, vite, work)"; return 1 ;;
+    app|vite|work|studio) ;;
+    *) echo "Unknown config: $target (expected: app, vite, work, studio)"; return 1 ;;
   esac
   current=$(_ts_active_config)
   if [[ "$current" == "$target" ]]; then
