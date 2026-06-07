@@ -1,7 +1,7 @@
 local function topRightToast(text, opts)
   opts = opts or {}
   local screen = hs.screen.mainScreen():frame()
-  local w, h = 320, 64
+  local w, h = 440, 64
   local margin = 16
   local frame = hs.geometry.rect(
     screen.x + screen.w - w - margin,
