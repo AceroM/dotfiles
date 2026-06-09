@@ -327,3 +327,138 @@ function rl() {
   tmux send-keys -t repl ".load out/load.ts" C-m
   tmux attach -t repl
 }
+
+# my spend — Claude tokens + $ spent. usage: ms [name] [lookback]
+#   ms                 -> today (miguel), falls back to latest day if not reported yet
+#   ms miguel 1w       -> last 7 days, per-day breakdown + total
+#   ms gregg 1d|2w|1m  -> lookback units: d=day w=week m=month y=year
+function ms() {
+  if [[ -z "$ANTHROPIC_ADMIN_API_KEY" ]]; then
+    echo "ANTHROPIC_ADMIN_API_KEY is not set"
+    return 1
+  fi
+
+  WHO="${1:-miguel}" LOOKBACK="${2:-}" bun run - <<'TSEOF'
+const BASE = "https://api.anthropic.com/v1";
+const KEY = process.env.ANTHROPIC_ADMIN_API_KEY;
+const WHO = (process.env.WHO ?? "miguel").toLowerCase();
+const LB = (process.env.LOOKBACK ?? "").trim();
+const headers = { "x-api-key": KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" };
+const C = { bold: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", reset: "\x1b[0m" };
+
+function pricing(model) {
+  const m = (model ?? "").toLowerCase();
+  if (m.includes("opus")) return { input: 15, output: 75, cache_read: 1.5, cache_creation: 18.75 };
+  if (m.includes("haiku")) return { input: 0.8, output: 4, cache_read: 0.08, cache_creation: 1 };
+  return { input: 3, output: 15, cache_read: 0.3, cache_creation: 3.75 }; // sonnet / default
+}
+const groupName = (k) => k.match(/^claude_code_key_(.+)_[a-z]{4}$/)?.[1] ?? k;
+const fmt = (n) => n.toLocaleString("en-US");
+const fmtT = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : "" + n;
+
+// parse lookback like 1d / 7d / 1w / 2w / 1m / 1y -> number of calendar days
+const UNIT = { d: 1, w: 7, m: 30, y: 365 };
+const lbm = LB.match(/^(\d+)\s*([dwmy])$/i);
+if (LB && !lbm) { console.error(`bad lookback "${LB}" — use e.g. 1d, 7d, 1w, 2w, 1m, 1y`); process.exit(1); }
+const windowMode = !!lbm;
+const spanDays = lbm ? parseInt(lbm[1], 10) * UNIT[lbm[2].toLowerCase()] : 1;
+
+// fetch window: window mode covers spanDays (incl today); today mode grabs 2 days for lag fallback
+const now = new Date();
+const backDays = windowMode ? spanDays - 1 : 2;
+const start = new Date(now);
+start.setUTCDate(start.getUTCDate() - backDays);
+start.setUTCHours(0, 0, 0, 0);
+const params = new URLSearchParams({
+  bucket_width: "1d", "group_by[]": "api_key_id",
+  starting_at: start.toISOString(), ending_at: now.toISOString(), limit: "31",
+});
+
+const buckets = [];
+let page = null, guard = 0;
+while (guard++ < 50) {
+  const res = await fetch(`${BASE}/organizations/usage_report/messages?${params}${page ? `&page=${page}` : ""}`, { headers });
+  if (!res.ok) { console.error(`Usage API ${res.status}: ${await res.text()}`); process.exit(1); }
+  const j = await res.json();
+  buckets.push(...j.data);
+  if (!j.has_more || !j.next_page) break;
+  page = j.next_page;
+}
+
+// map key id -> name
+const keys = [];
+let after = null; guard = 0;
+while (guard++ < 50) {
+  const kp = new URLSearchParams({ limit: "100" });
+  if (after) kp.set("after_id", after);
+  const res = await fetch(`${BASE}/organizations/api_keys?${kp}`, { headers });
+  if (!res.ok) { console.error(`API Keys ${res.status}: ${await res.text()}`); process.exit(1); }
+  const j = await res.json();
+  keys.push(...j.data);
+  if (!j.has_more || !j.last_id) break;
+  after = j.last_id;
+}
+const nameMap = new Map(keys.map((k) => [k.id, k.name]));
+
+// aggregate WHO's usage per day
+const byDay = new Map();
+for (const b of buckets) {
+  const date = b.starting_at.slice(0, 10);
+  for (const r of b.results) {
+    if (!groupName(nameMap.get(r.api_key_id) ?? "").toLowerCase().includes(WHO)) continue;
+    const pr = pricing(r.model);
+    const inp = r.uncached_input_tokens ?? 0, out = r.output_tokens ?? 0, cr = r.cache_read_input_tokens ?? 0;
+    const cc = (r.cache_creation?.ephemeral_1h_input_tokens ?? 0) + (r.cache_creation?.ephemeral_5m_input_tokens ?? 0);
+    let d = byDay.get(date);
+    if (!d) { d = { inp: 0, out: 0, cr: 0, cc: 0, cost: 0 }; byDay.set(date, d); }
+    d.inp += inp; d.out += out; d.cr += cr; d.cc += cc;
+    d.cost += (inp * pr.input + out * pr.output + cr * pr.cache_read + cc * pr.cache_creation) / 1e6;
+  }
+}
+
+const { bold, dim, cyan, green, yellow, reset } = C;
+const today = now.toISOString().slice(0, 10);
+const dash = (n) => dim + "─".repeat(n) + reset;
+const breakdown = (d) => {
+  console.log(`  Input (uncached)  ${fmt(d.inp)}`);
+  console.log(`  Output            ${fmt(d.out)}`);
+  console.log(`  Cache read        ${fmt(d.cr)}`);
+  console.log(`  Cache creation    ${fmt(d.cc)}`);
+  console.log(`  ${dash(34)}`);
+  console.log(`  ${bold}Total tokens${reset}      ${green}${fmt(d.inp + d.out + d.cr + d.cc)}${reset}`);
+  console.log(`  ${bold}Cost${reset}              ${green}$${d.cost.toFixed(2)}${reset}  ${dim}(~Sonnet est; API model=null)${reset}`);
+};
+
+console.log(`\n  ${bold}${cyan}${WHO} — Claude spend${reset}`);
+
+if (windowMode) {
+  const rangeStart = start.toISOString().slice(0, 10);
+  const days = [...byDay.entries()].filter(([dt]) => dt >= rangeStart).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  console.log(`  ${dim}last ${spanDays} day${spanDays > 1 ? "s" : ""} (${rangeStart} → ${today})${reset}\n`);
+  if (!days.length) { console.log(`  ${dim}No usage found for "${WHO}" in this window.${reset}\n`); process.exit(0); }
+  const sum = { inp: 0, out: 0, cr: 0, cc: 0, cost: 0 };
+  for (const [dt, d] of days) {
+    const tok = d.inp + d.out + d.cr + d.cc;
+    console.log(`  ${dim}${dt}${reset}  ${fmtT(tok).padStart(7)} tok  ${green}$${d.cost.toFixed(2)}${reset}`);
+    sum.inp += d.inp; sum.out += d.out; sum.cr += d.cr; sum.cc += d.cc; sum.cost += d.cost;
+  }
+  if (!byDay.has(today)) console.log(`  ${dim}${yellow}(today not reported yet)${reset}`);
+  console.log(`  ${dash(34)}`);
+  breakdown(sum);
+  console.log("");
+} else {
+  let date = today, d = byDay.get(today), lagged = false;
+  if (!d) {
+    const all = [...byDay.keys()].sort();
+    date = all[all.length - 1];
+    d = date ? byDay.get(date) : null;
+    lagged = true;
+  }
+  if (!d) { console.log(`  ${dim}No usage found for "${WHO}" in the last few days.${reset}\n`); process.exit(0); }
+  if (lagged) console.log(`  ${yellow}today (${today}) not reported yet — showing latest day${reset}`);
+  console.log(`  ${dim}${date}${reset}\n`);
+  breakdown(d);
+  console.log("");
+}
+TSEOF
+}
