@@ -296,6 +296,11 @@ config.keys = {
 		action = wezterm.action.SendString("\x1b[9;5u"),
 	},
 	{
+		key = ";",
+		mods = "CTRL",
+		action = wezterm.action.SendString("\x1b[59;5u"),
+	},
+	{
 		key = "t",
 		mods = "CMD",
 		action = wezterm.action_callback(function(win, pane)
