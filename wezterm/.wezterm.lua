@@ -244,6 +244,16 @@ config.keys = {
 		action = wezterm.action.ActivateTabRelative(-1),
 	},
 	{
+		key = "DownArrow",
+		mods = "CMD|OPT",
+		action = wezterm.action.SendString("\x1b[1;99B"),
+	},
+	{
+		key = "UpArrow",
+		mods = "CMD|OPT",
+		action = wezterm.action.SendString("\x1b[1;99A"),
+	},
+	{
 		key = "e",
 		mods = "CMD",
 		action = wezterm.action_callback(function(win, pane)
