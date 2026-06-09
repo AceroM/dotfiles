@@ -1,6 +1,6 @@
 function ce() {
   local s="claude-$(uuidgen | cut -d- -f1)"
-  tmux new-session -d "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=0 direnv exec '$PWD' claude --dangerously-skip-permissions"
+  tmux new-session -d "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --dangerously-skip-permissions"
   sleep 1
   tmux send-keys -t "$s:0.0" "$1" C-m
 }
@@ -8,7 +8,7 @@ function ce() {
 function pm() {
   local s="claude-pm-$(uuidgen | cut -d- -f1)"
   local prompt='Review the staged + unstaged diff and the recent git log for style. Write a Conventional Commits message (type(scope): summary, with a body if the change warrants it) that accurately describes the change — never use a placeholder like "changes". Then commit and push. Do NOT add a Co-Authored-By footer or any AI attribution.'
-  tmux new-session -ds "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=0 direnv exec '$PWD' claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
+  tmux new-session -ds "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
 }
 
 function j() {
@@ -35,7 +35,7 @@ function j() {
     fi
     ((attempts++))
   done
-  tmux new-session -ds "$name" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=0 direnv exec '$PWD' claude"
+  tmux new-session -ds "$name" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude"
   sleep 1
   tmux send-keys -t "$name:0.0" "$1" C-m
   tmux send-keys -t "$name:0.0" C-m
@@ -70,7 +70,7 @@ function p() {
     fi
     ((attempts++))
   done
-  local claude_cmd="CLAUDE_CODE_NO_FLICKER=0 direnv exec '$PWD' claude"
+  local claude_cmd="CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude"
   local arg
   for arg in "$@"; do
     claude_cmd+=" ${(q)arg}"
