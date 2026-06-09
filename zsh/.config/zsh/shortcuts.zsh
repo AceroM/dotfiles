@@ -16,6 +16,7 @@ alias lg="lazygit"
 alias ob="obsidian"
 alias rnd="openssl rand -base64 32"
 
+unalias rs 2>/dev/null
 rs() {
   local db="${1:?usage: rs <database>}"
   psql "$db" -c "$DROP_TABLES_SQL"
