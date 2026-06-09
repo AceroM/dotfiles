@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+session="agents"
+port="${1:-3333}"
+script_dir="${HOME}/.local/share/agents-cli"
+
+if tmux has-session -t "$session" 2>/dev/null; then
+  echo "agents session already running — attaching"
+  exec tmux attach-session -t "$session"
+fi
+
+tmux new-session -d -s "$session" -n "$session" "bun run ${script_dir}/index.ts ${port}"
+echo "agents server started in tmux session '${session}' on port ${port}"
+echo "  attach: tmux attach -t ${session}"
+echo "  kill:   tmux kill-session -t ${session}"
