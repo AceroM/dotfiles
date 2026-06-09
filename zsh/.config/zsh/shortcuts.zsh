@@ -14,7 +14,12 @@ alias sp="git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E 
 alias y="yazi"
 alias lg="lazygit"
 alias ob="obsidian"
-alias rs="openssl rand -base64 32"
+alias rnd="openssl rand -base64 32"
+
+rs() {
+  local db="${1:?usage: rs <database>}"
+  psql "$db" -c "$DROP_TABLES_SQL"
+}
 alias ..='cd ..'
 alias ...='cd ../..'
 
