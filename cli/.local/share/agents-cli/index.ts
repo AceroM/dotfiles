@@ -93,6 +93,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     <span><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">j/k</kbd> open</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">↵</kbd> open</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">p</kbd> copy path</span>
+    <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">r</kbd> refresh</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">/</kbd> search</span>
   </div>
 </nav>
@@ -243,6 +244,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
   document.addEventListener("keydown", (e) => {
     if (document.activeElement === search) return;
     if (e.key === "p") { e.preventDefault(); copyPath(); }
+    if (e.key === "r") { e.preventDefault(); location.reload(); }
   });
 
   // Live reload via SSE
@@ -324,6 +326,7 @@ const server = Bun.serve({
       });
     }
 
+    cachedFiles = null;
     const files = findHtmlFiles();
     const active = url.searchParams.get("file");
     const html = buildPage(files, active);
