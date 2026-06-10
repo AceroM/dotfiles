@@ -1,6 +1,9 @@
 # Two tmux servers: default socket = claude sessions, `tmux -L bg` = background processes.
 # Claude server: a / l / k / r          bg server: bg / ba / bl / bk / bgr / bgn
 
+# stale aliases from older versions of this file shadow the functions below on re-source
+unalias l a k r t tb bg ba bl bk bgr bgn sk 2>/dev/null
+
 function _tm() {
   local sock="$1"
   shift
