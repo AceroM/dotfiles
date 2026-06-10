@@ -30,10 +30,13 @@ function _session_random_name() {
 
 _T_CHOOSE_FORMAT="#{session_name}#{?#{&&:#{!=:#{pane_title},#{session_name}},#{&&:#{!=:#{pane_title},zsh},#{!=:#{pane_title},#{pane_current_command}}}},: #{pane_title},}"
 
-# first session whose claude is actively working (busy spinner is a braille glyph; idle is ✳)
-function _t_busy_session() {
-  local sock="$1" s title
+# the next session worth attending to — for now: first session whose claude is
+# actively working (busy spinner is a braille glyph; idle is ✳).
+# optional $2 excludes a session (e.g. the one you're about to kill)
+function next_priority_session() {
+  local sock="$1" exclude="$2" s title
   _tm "$sock" list-sessions -F '#S' 2>/dev/null | while read -r s; do
+    [[ -n "$exclude" && "$s" == "$exclude" ]] && continue
     title=$(_tm "$sock" display-message -p -t "$s:0.0" '#{pane_title}' 2>/dev/null)
     if [[ "$title" == [⠀-⣿]* ]]; then
       echo "$s"
@@ -41,6 +44,19 @@ function _t_busy_session() {
     fi
   done
   return 1
+}
+
+# switch the attached client to the next priority session (else just the next
+# one), then kill the session we left. used by the M-x binding in .tmux.conf
+function _t_switch_next_and_kill() {
+  local sock="$1" current="$2"
+  local next="$(next_priority_session "$sock" "$current")"
+  if [[ -n "$next" ]]; then
+    _tm "$sock" switch-client -t "$next"
+  else
+    _tm "$sock" switch-client -n
+  fi
+  _tm "$sock" kill-session -t "$current"
 }
 
 # attach to <name> (creating it if missing, with optional <cmd>);
@@ -56,7 +72,7 @@ function _t_attach() {
       _tm "$sock" new-session -s "$name" -n "$name"
     fi
   elif _tm "$sock" has-session 2>/dev/null; then
-    local busy="$(_t_busy_session "$sock")"
+    local busy="$(next_priority_session "$sock")"
     if [[ -n "$busy" ]]; then
       _tm "$sock" attach-session -t "$busy"
     else
