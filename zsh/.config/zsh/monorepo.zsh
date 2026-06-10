@@ -14,7 +14,6 @@ function mr() {
     return 1
   fi
 
-  # Uses your existing t wrapper:
-  # t n <session-name> <command>
-  tmux new -d -s "$app" "cd \"$app_dir\" && bun run dev"
+  # dev servers live on the bg tmux server (browse with `bg`, kill with `bk`)
+  tmux -L bg new -d -s "$app" "cd \"$app_dir\" && bun run dev"
 }

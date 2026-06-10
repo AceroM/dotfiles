@@ -322,10 +322,10 @@ PYEOF
 
 function rl() {
   local cfg="${1:-dev}"
-  tmux new-session -ds repl "doppler -c $cfg run -- bun repl"
+  tmux -L bg new-session -ds repl "doppler -c $cfg run -- bun repl"
   sleep 1
-  tmux send-keys -t repl ".load out/load.ts" C-m
-  tmux attach -t repl
+  tmux -L bg send-keys -t repl ".load out/load.ts" C-m
+  tmux -L bg attach -t repl
 }
 
 # my spend — Claude tokens + $ spent. usage: ms [name] [lookback]
