@@ -294,7 +294,11 @@ function buildPage(files: FileEntry[], active: string | null): string {
         });
       } catch {}
     }
-    previewFrame.addEventListener("load", attachIframeKeys);
+    previewFrame.addEventListener("load", () => {
+      attachIframeKeys();
+      try { previewFrame.contentWindow.focus(); } catch {}
+    });
+    try { previewFrame.contentWindow.focus(); } catch {}
   }
 </script>
 </body>
@@ -367,7 +371,7 @@ const server = Bun.serve({
 
     cachedFiles = null;
     const files = findHtmlFiles();
-    const active = url.searchParams.get("file");
+    const active = url.searchParams.get("file") ?? files[0]?.path ?? null;
     const html = buildPage(files, active);
     return new Response(html, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
