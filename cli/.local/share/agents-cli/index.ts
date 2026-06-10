@@ -69,7 +69,17 @@ function buildPage(files: FileEntry[], active: string | null): string {
     .sidebar.open { transform: translateX(0); }
     .overlay.open { display: block; }
   }
+
+  @media (min-width: 768px) {
+    .sidebar { transition: transform .2s ease; }
+    .main { transition: margin-left .2s ease; }
+    #expandBtn { display: none; }
+    html.collapsed .sidebar { transform: translateX(-100%); }
+    html.collapsed .main { margin-left: 0 !important; }
+    html.collapsed #expandBtn { display: flex; }
+  }
 </style>
+<script>try{if(localStorage.getItem("sidebarCollapsed")==="1")document.documentElement.classList.add("collapsed")}catch(e){}</script>
 </head>
 <body class="h-full font-sans bg-white text-gray-900">
 
@@ -80,9 +90,14 @@ function buildPage(files: FileEntry[], active: string | null): string {
 
 <div class="overlay hidden fixed inset-0 bg-black/50 z-[25]" id="overlay"></div>
 
+<button id="expandBtn" class="fixed top-3 left-3 z-40 items-center justify-center w-8 h-8 bg-white border border-gray-200 rounded-md shadow-sm text-gray-600 hover:bg-gray-100 cursor-pointer text-[16px] leading-none" title="Show sidebar (b)">&#187;</button>
+
 <nav class="sidebar fixed top-0 left-0 bottom-0 w-[280px] bg-gray-50 border-r border-gray-200 flex flex-col z-30" id="sidebar">
   <div class="p-4 pb-3 border-b border-gray-200">
-    <h1 class="text-[15px] font-bold mb-2.5">agents</h1>
+    <div class="flex items-center justify-between mb-2.5">
+      <h1 class="text-[15px] font-bold">agents</h1>
+      <button id="collapseBtn" class="hidden md:flex items-center justify-center w-6 h-6 text-gray-500 hover:text-gray-900 hover:bg-gray-200 rounded cursor-pointer text-[15px] leading-none" title="Collapse sidebar (b)">&#171;</button>
+    </div>
     <input type="text" id="search" placeholder="Search… (/ to focus)" autocomplete="off"
       class="w-full py-1.5 px-2.5 border border-gray-200 rounded-md bg-white text-gray-900 text-[13px] outline-none focus:border-blue-600 placeholder:text-gray-400" />
   </div>
@@ -95,10 +110,11 @@ function buildPage(files: FileEntry[], active: string | null): string {
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">p</kbd> copy path</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">r</kbd> refresh</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">/</kbd> search</span>
+    <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">b</kbd> sidebar</span>
   </div>
 </nav>
 
-<div class="h-full ml-0 pt-12 md:ml-[280px] md:pt-0 flex flex-col">
+<div class="main h-full ml-0 pt-12 md:ml-[280px] md:pt-0 flex flex-col">
   ${active ? `<div class="flex items-center px-4 py-1.5 bg-gray-50 border-b border-gray-200 text-[12px] text-gray-500 shrink-0">
     <span class="flex-1 font-mono overflow-hidden text-ellipsis whitespace-nowrap">${active}</span>
     <button id="copyBtn" class="ml-2 px-2 py-0.5 text-[11px] bg-white border border-gray-200 rounded hover:bg-gray-100 cursor-pointer text-gray-600 shrink-0" title="Copy path (p)">copy path</button>
@@ -192,6 +208,16 @@ function buildPage(files: FileEntry[], active: string | null): string {
   burger.addEventListener("click", toggleMenu);
   overlay.addEventListener("click", toggleMenu);
 
+  // Desktop sidebar collapse
+  const collapseBtn = document.getElementById("collapseBtn");
+  const expandBtn = document.getElementById("expandBtn");
+  function setCollapsed(v) {
+    document.documentElement.classList.toggle("collapsed", v);
+    try { localStorage.setItem("sidebarCollapsed", v ? "1" : "0"); } catch {}
+  }
+  collapseBtn.addEventListener("click", () => setCollapsed(true));
+  expandBtn.addEventListener("click", () => setCollapsed(false));
+
   // Navigate without full page reload
   function openItem(el) {
     const file = el.getAttribute("title");
@@ -239,6 +265,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     if (document.activeElement === search) return;
     if (e.key === "p") { e.preventDefault(); copyPath(); }
     if (e.key === "r") { e.preventDefault(); location.reload(); }
+    if (e.key === "b") { e.preventDefault(); setCollapsed(!document.documentElement.classList.contains("collapsed")); }
   });
 
   // Live reload via SSE
@@ -255,7 +282,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     function attachIframeKeys() {
       try {
         previewFrame.contentWindow.addEventListener("keydown", (e) => {
-          if (["p", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
+          if (["j", "k", "p", "b", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
             e.preventDefault();
             document.dispatchEvent(new KeyboardEvent("keydown", { key: e.key, bubbles: true }));
           }
