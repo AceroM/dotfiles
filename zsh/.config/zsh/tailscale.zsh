@@ -4,6 +4,10 @@
 # Mental model: `to <local-port>` opens, `tc <local-port>` closes.
 # Tailscale only allows HTTPS on ports 443, 8443, 10000 — `to` picks the first
 # free one; `tc` looks up which one is forwarding your local port.
+#
+# agents-cli (localhost:3333) is treated as always-on and pinned to https:10000.
+# Every named config in `ts` reserves 10000 for it; `tsr` re-establishes it.
+# To take it down explicitly, run `tc 3333`.
 
 # Internal: proxy target for a given HTTPS port (empty if none).
 function _ts_proxy_for_https_port() {
@@ -20,7 +24,7 @@ function _ts_active_config() {
   p443=$(_ts_proxy_for_https_port 443)
   p8443=$(_ts_proxy_for_https_port 8443)
   p10000=$(_ts_proxy_for_https_port 10000)
-  if [[ "$p443" == "http://localhost:4321" && "$p8443" == "http://localhost:5173" && "$p10000" == "http://localhost:7476" ]]; then
+  if [[ "$p443" == "http://localhost:4321" && "$p8443" == "http://localhost:5173" ]]; then
     echo "app"
   elif [[ "$p443" == "http://localhost:5173" && -z "$p8443" ]]; then
     echo "vite"
@@ -43,8 +47,20 @@ function tl() {
   tailscale serve status
 }
 
-# Reset all serves.
-function tsr() { tailscale serve reset }
+# Reset all serves (then re-pin agents-cli on https:10000).
+function tsr() {
+  tailscale serve reset
+  _ts_ensure_agents
+}
+
+# Internal: ensure agents-cli (3333) is served on https:10000.
+function _ts_ensure_agents() {
+  local existing
+  existing=$(_ts_https_port_for 3333)
+  if [[ -z "$existing" ]]; then
+    tailscale serve --bg --https=10000 http://localhost:3333
+  fi
+}
 
 # Internal: HTTPS port currently proxying a given local port (empty if none).
 function _ts_https_port_for() {
@@ -103,22 +119,23 @@ function tc() {
   tailscale serve --https="$https_port" off
 }
 
-# App: expose web (4321) on https:443, app (5173) on https:8443, and 7476 on https:10000.
+# App: expose web (4321) on https:443, app (5173) on https:8443.
+# (https:10000 is reserved for agents-cli/3333 — see _ts_ensure_agents.)
 function app-serve-on() {
   tailscale serve --bg --https=443 http://localhost:4321
   tailscale serve --bg --https=8443 http://localhost:5173
-  tailscale serve --bg --https=10000 http://localhost:7476
+  _ts_ensure_agents
 }
 
 function app-serve-off() {
   tailscale serve --https=443 off
   tailscale serve --https=8443 off
-  tailscale serve --https=10000 off
 }
 
 # Vite: expose app (5173) on https:443.
 function vite-serve-on() {
   tailscale serve --bg --https=443 http://localhost:5173
+  _ts_ensure_agents
 }
 
 function vite-serve-off() {
@@ -128,6 +145,7 @@ function vite-serve-off() {
 # Work: expose app (3001) on https:443.
 function work-serve-on() {
   tailscale serve --bg --https=443 http://localhost:3001
+  _ts_ensure_agents
 }
 
 function work-serve-off() {
@@ -137,15 +155,18 @@ function work-serve-off() {
 # Studio: expose prisma studio (5555) on https:443.
 function studio-serve-on() {
   tailscale serve --bg --https=443 http://localhost:5555
+  _ts_ensure_agents
 }
 
 function studio-serve-off() {
   tailscale serve --https=443 off
 }
 
-# Agents: expose agents (3333) on https:443.
+# Agents: also expose agents (3333) on https:443 (the short URL).
+# 3333 is always served on https:10000 regardless of mode.
 function agents-serve-on() {
   tailscale serve --bg --https=443 http://localhost:3333
+  _ts_ensure_agents
 }
 
 function agents-serve-off() {

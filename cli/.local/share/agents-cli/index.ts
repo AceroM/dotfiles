@@ -90,7 +90,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     ${items}
   </div>
   <div class="px-3.5 py-2 border-t border-gray-200 text-[11px] text-gray-400 select-none flex flex-wrap gap-y-1">
-    <span><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">j/k</kbd> open</span>
+    <span><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">↑/↓</kbd> open</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">↵</kbd> open</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">p</kbd> copy path</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">r</kbd> refresh</span>
@@ -171,18 +171,12 @@ function buildPage(files: FileEntry[], active: string | null): string {
 
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setFocus(focusIdx < visible.length - 1 ? focusIdx + 1 : 0);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setFocus(focusIdx > 0 ? focusIdx - 1 : visible.length - 1);
-    } else if (!isSearching && e.key === "j") {
-      e.preventDefault();
-      const next = focusIdx < visible.length - 1 ? focusIdx + 1 : 0;
+      const next = focusIdx === -1 ? 0 : focusIdx < visible.length - 1 ? focusIdx + 1 : 0;
       setFocus(next);
       openItem(visible[next]);
-    } else if (!isSearching && e.key === "k") {
+    } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      const prev = focusIdx > 0 ? focusIdx - 1 : visible.length - 1;
+      const prev = focusIdx === -1 ? visible.length - 1 : focusIdx > 0 ? focusIdx - 1 : visible.length - 1;
       setFocus(prev);
       openItem(visible[prev]);
     } else if (e.key === "Enter" && focusIdx >= 0) {
@@ -261,7 +255,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     function attachIframeKeys() {
       try {
         previewFrame.contentWindow.addEventListener("keydown", (e) => {
-          if (["j", "k", "p", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
+          if (["p", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
             e.preventDefault();
             document.dispatchEvent(new KeyboardEvent("keydown", { key: e.key, bubbles: true }));
           }
