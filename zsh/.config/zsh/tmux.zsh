@@ -1,5 +1,5 @@
 # Two tmux servers: default socket = claude sessions, `tmux -L bg` = background processes.
-# Claude server: a / l / k / r          bg server: bg / bgl / bk / bgr / bgn
+# Claude server: a / l / k / r          bg server: bg / ba / bl / bk / bgr / bgn
 
 function _tm() {
   local sock="$1"
@@ -94,8 +94,20 @@ function k() { _t_kill "" "$@" }
 function r() { _t_read "" "$@" }
 
 # ── bg server (tmux -L bg) ──────────────────────────────────────────
-function bg() { _t_attach bg "$@" } # shadows the zsh builtin; use `builtin bg` for job control
-function bgl() { _t_list bg }
+# no args: attach to the first session; with args: same as `a` but on the bg server
+function bg() { # shadows the zsh builtin; use `builtin bg` for job control
+  if [[ $# -eq 0 ]]; then
+    local first="$(_tm bg list-sessions -F '#S' 2>/dev/null | head -1)"
+    if [[ -n "$first" ]]; then
+      _tm bg attach-session -t "$first"
+      return
+    fi
+  fi
+  _t_attach bg "$@"
+}
+function ba() { _t_attach bg "$@" } # picker (old no-arg bg behavior)
+function bl() { _t_list bg }
+alias bgl='bl'
 function bk() { _t_kill bg "$@" }
 function bgr() { _t_read bg "$@" }
 
