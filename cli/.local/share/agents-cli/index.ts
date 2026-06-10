@@ -107,7 +107,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
   <div class="px-3.5 py-2 border-t border-gray-200 text-[11px] text-gray-400 select-none flex flex-wrap gap-y-1">
     <span><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">↑/↓</kbd> open</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">↵</kbd> open</span>
-    <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">p</kbd> copy path</span>
+    <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">;</kbd> copy path</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">r</kbd> refresh</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">/</kbd> search</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">b</kbd> sidebar</span>
@@ -117,7 +117,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
 <div class="main h-full ml-0 pt-12 md:ml-[280px] md:pt-0 flex flex-col">
   ${active ? `<div class="flex items-center px-4 py-1.5 bg-gray-50 border-b border-gray-200 text-[12px] text-gray-500 shrink-0">
     <span class="flex-1 font-mono overflow-hidden text-ellipsis whitespace-nowrap">${active}</span>
-    <button id="copyBtn" class="ml-2 px-2 py-0.5 text-[11px] bg-white border border-gray-200 rounded hover:bg-gray-100 cursor-pointer text-gray-600 shrink-0" title="Copy path (p)">copy path</button>
+    <button id="copyBtn" class="ml-2 px-2 py-0.5 text-[11px] bg-white border border-gray-200 rounded hover:bg-gray-100 cursor-pointer text-gray-600 shrink-0" title="Copy path (;)">copy path</button>
   </div>
   <iframe id="preview" src="/raw?file=${encodeURIComponent(active)}" class="w-full flex-1 border-none bg-white"></iframe>` : '<div class="flex items-center justify-center flex-1 text-gray-400 text-[15px]">Select a file from the sidebar</div>'}
 </div>
@@ -263,7 +263,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
 
   document.addEventListener("keydown", (e) => {
     if (document.activeElement === search) return;
-    if (e.key === "p") { e.preventDefault(); copyPath(); }
+    if (e.key === ";") { e.preventDefault(); copyPath(); }
     if (e.key === "r") { e.preventDefault(); location.reload(); }
     if (e.key === "b") { e.preventDefault(); setCollapsed(!document.documentElement.classList.contains("collapsed")); }
   });
@@ -282,7 +282,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     function attachIframeKeys() {
       try {
         previewFrame.contentWindow.addEventListener("keydown", (e) => {
-          if (["j", "k", "p", "b", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
+          if (["j", "k", ";", "b", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
             e.preventDefault();
             document.dispatchEvent(new KeyboardEvent("keydown", { key: e.key, bubbles: true }));
           }
