@@ -29,6 +29,11 @@ function timeAgo(ms: number): string {
 
 let cachedFiles: FileEntry[] | null = null;
 
+// Encode a relative file path for use under /raw/ (keep the slashes)
+function rawHref(path: string): string {
+  return "/raw/" + path.split("/").map(encodeURIComponent).join("/");
+}
+
 function findHtmlFiles(): FileEntry[] {
   if (cachedFiles) return cachedFiles;
   const glob = new Glob("agents/**/*.html");
@@ -119,7 +124,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     <span class="flex-1 font-mono overflow-hidden text-ellipsis whitespace-nowrap">${active}</span>
     <button id="copyBtn" class="ml-2 px-2 py-0.5 text-[11px] bg-white border border-gray-200 rounded hover:bg-gray-100 cursor-pointer text-gray-600 shrink-0" title="Copy path (;)">copy path</button>
   </div>
-  <iframe id="preview" src="/raw?file=${encodeURIComponent(active)}" class="w-full flex-1 border-none bg-white"></iframe>` : '<div class="flex items-center justify-center flex-1 text-gray-400 text-[15px]">Select a file from the sidebar</div>'}
+  <iframe id="preview" src="${rawHref(active)}" class="w-full flex-1 border-none bg-white"></iframe>` : '<div class="flex items-center justify-center flex-1 text-gray-400 text-[15px]">Select a file from the sidebar</div>'}
 </div>
 
 <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 bg-gray-900 text-white text-[13px] rounded-lg shadow-lg opacity-0 transition-opacity duration-200 pointer-events-none z-50"></div>
@@ -224,7 +229,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     if (!file) return;
     const iframe = document.getElementById("preview");
     if (iframe) {
-      iframe.src = "/raw?file=" + encodeURIComponent(file);
+      iframe.src = "/raw/" + file.split("/").map(encodeURIComponent).join("/");
     } else {
       // No iframe yet (nothing was selected) — need full navigation
       el.click();
@@ -313,7 +318,7 @@ watch(`${cwd}/agents`, { recursive: true }, (_event, filename) => {
 const server = Bun.serve({
   port,
   idleTimeout: 255,
-  fetch(req) {
+  async fetch(req) {
     const url = new URL(req.url);
 
     if (url.pathname === "/events") {
@@ -336,15 +341,28 @@ const server = Bun.serve({
       );
     }
 
+    // Path-based serving: the iframe loads /raw/agents/<dir>/<file>.html, so
+    // relative asset srcs in the report (sibling screenshots) resolve to
+    // /raw/agents/<dir>/<asset> and get served here too.
+    if (url.pathname.startsWith("/raw/")) {
+      const rel = decodeURIComponent(url.pathname.slice("/raw/".length));
+      if (!rel.startsWith("agents/") || rel.split("/").includes("..")) {
+        return new Response("Not found", { status: 404 });
+      }
+      const resolved = Bun.file(`${cwd}/${rel}`);
+      if (!(await resolved.exists())) {
+        return new Response("Not found", { status: 404 });
+      }
+      return new Response(resolved); // Content-Type inferred from extension
+    }
+
+    // Legacy query form (old bookmarks) — redirect to the path form
     if (url.pathname === "/raw") {
       const file = url.searchParams.get("file");
       if (!file || !file.startsWith("agents/")) {
         return new Response("Not found", { status: 404 });
       }
-      const resolved = Bun.file(`${cwd}/${file}`);
-      return new Response(resolved, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      });
+      return Response.redirect(rawHref(file), 302);
     }
 
     cachedFiles = null;

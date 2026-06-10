@@ -30,7 +30,21 @@ function _session_random_name() {
 
 _T_CHOOSE_FORMAT="#{session_name}#{?#{&&:#{!=:#{pane_title},#{session_name}},#{&&:#{!=:#{pane_title},zsh},#{!=:#{pane_title},#{pane_current_command}}}},: #{pane_title},}"
 
-# attach to <name> (creating it if missing, with optional <cmd>), or open the picker
+# first session whose claude is actively working (busy spinner is a braille glyph; idle is ✳)
+function _t_busy_session() {
+  local sock="$1" s title
+  _tm "$sock" list-sessions -F '#S' 2>/dev/null | while read -r s; do
+    title=$(_tm "$sock" display-message -p -t "$s:0.0" '#{pane_title}' 2>/dev/null)
+    if [[ "$title" == [⠀-⣿]* ]]; then
+      echo "$s"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# attach to <name> (creating it if missing, with optional <cmd>);
+# no args: attach to an in-progress claude session if there is one, else open the picker
 function _t_attach() {
   local sock="$1" name="$2" session_cmd="$3"
   if [[ -n "$name" ]]; then
@@ -42,7 +56,12 @@ function _t_attach() {
       _tm "$sock" new-session -s "$name" -n "$name"
     fi
   elif _tm "$sock" has-session 2>/dev/null; then
-    _tm "$sock" attach-session \; choose-tree -Zs -F "$_T_CHOOSE_FORMAT"
+    local busy="$(_t_busy_session "$sock")"
+    if [[ -n "$busy" ]]; then
+      _tm "$sock" attach-session -t "$busy"
+    else
+      _tm "$sock" attach-session \; choose-tree -Zs -F "$_T_CHOOSE_FORMAT"
+    fi
   else
     local new_name="$(_session_random_name "$sock")"
     _tm "$sock" new-session -s "$new_name" -n "$new_name"
