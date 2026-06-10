@@ -21,7 +21,7 @@ function x() {
   local msg="${1:-changes}"
   local session_name="x-$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")-$(date +%s)"
 
-  tmux new-session -d -s "$session_name" "cd $(printf '%q' "$PWD") && git add . && git commit -m $(printf '%q' "$msg") --no-verify && git push"
+  tmux -L bg new-session -d -s "$session_name" "cd $(printf '%q' "$PWD") && git add . && git commit -m $(printf '%q' "$msg") --no-verify && git push"
 }
 function pl() {
   if [[ -f ./scripts/pl.sh ]]; then
