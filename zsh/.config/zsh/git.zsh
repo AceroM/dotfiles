@@ -100,8 +100,7 @@ alias c-='git checkout -'
 function rb() { git rebase "$@" }
 function sc() { git branch --show-current }
 function cm() { git commit -m "$@" --no-verify; }
-function wk() { git worktree list --porcelain | sed -n 's/^branch refs\/heads\///p'
-}
+# wk (worktree list) lives in worktrees.zsh now
 function gc() {
     local current_branch=$(git branch --show-current)
     local base_branch=${1:-main}
