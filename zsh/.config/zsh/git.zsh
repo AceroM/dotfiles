@@ -100,7 +100,7 @@ alias c-='git checkout -'
 function rb() { git rebase "$@" }
 function sc() { git branch --show-current }
 function cm() { git commit -m "$@" --no-verify; }
-# wk (worktree list) lives in worktrees.zsh now
+# wl (worktree list) lives in worktrees.zsh now
 function gc() {
     local current_branch=$(git branch --show-current)
     local base_branch=${1:-main}

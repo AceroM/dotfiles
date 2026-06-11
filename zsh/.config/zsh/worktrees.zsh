@@ -2,13 +2,18 @@
 # Claude Code uses, so these functions and Claude-created worktrees mix freely.
 #   wn <branch>  new worktree (+ setup hook) and cd in
 #   ws [name]    switch to a worktree; no arg or "main" → main checkout
-#   wk           list worktrees
+#   wl           list worktrees
 #   wx [name]    remove a worktree (no arg: the one you're in)
 #   wi <name>    re-run the setup hook (env files, deps) on a worktree
 # Repo resolution lets them run from anywhere: the repo you're in (linked
 # worktrees resolve back to the main checkout) → ./app (the orchestrator-root
 # case, e.g. ~/porio) → $WORKTREES_DEFAULT_REPO.
 : ${WORKTREES_DEFAULT_REPO:=$HOME/porio/app}
+
+# zsh expands aliases while parsing function definitions, so a stale alias on
+# any of these names (e.g. worktrunk's old `ws`) breaks re-sourcing in a live
+# shell — drop them first
+unalias wn ws wl wx wi 2>/dev/null
 
 _wt_repo() {
   local gitdir
@@ -62,7 +67,7 @@ ws() {
   cd "$dir"
 }
 
-wk() { git -C "$(_wt_repo)" worktree list "$@" }
+wl() { git -C "$(_wt_repo)" worktree list "$@" }
 
 # wx [name] — remove a worktree (branch is kept). With no arg, removes the
 # worktree you're standing in and hops back to the main checkout. Extra args
@@ -106,4 +111,6 @@ _wt_complete() {
   names=(${names:#})
   compadd main $names
 }
-(( $+functions[compdef] )) && compdef _wt_complete wn ws wx wi
+if (( $+functions[compdef] )); then
+  compdef _wt_complete wn ws wx wi
+fi
