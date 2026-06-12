@@ -172,3 +172,19 @@ function bgn() {
 function sk() {
   tmux -L bg send-keys -t repl "$1" C-m && tmux -L bg capture-pane -pS -30 -t repl
 }
+
+# ── completion: complete existing session names ─────────────────────
+# default-server names for a/k/r, bg-server names for bg/ba/bk/bgr
+function _tm_complete_sessions() {
+  local sock="$1" out
+  out="$(_tm "$sock" list-sessions -F '#S' 2>/dev/null)"
+  [[ -z "$out" ]] && return
+  local -a sessions=(${(f)out})
+  compadd -a sessions
+}
+function _tm_complete_default() { _tm_complete_sessions "" }
+function _tm_complete_bg()      { _tm_complete_sessions bg }
+if (( $+functions[compdef] )); then
+  compdef _tm_complete_default a k r
+  compdef _tm_complete_bg bg ba bk bgr
+fi
