@@ -2,7 +2,7 @@
 
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,21 +10,106 @@ const cwd = process.cwd();
 const port = parseInt(process.argv[2] || "3433", 10); // 3433 = DIFF on a phone keypad
 const here = dirname(fileURLToPath(import.meta.url));
 
-// Resolve the GitHub repo from wherever the server was launched
-let repo: string;
-try {
-  repo = (await $`gh repo view --json nameWithOwner -q .nameWithOwner`.cwd(cwd).quiet().text()).trim();
-} catch {
-  console.error("diffshub: `gh repo view` failed — run from a repo with a GitHub remote (and `gh auth login`)");
-  process.exit(1);
+// ---- Resolve target repo(s) ----
+// Single-repo mode: cwd is a git repo (today's behaviour).
+// Workspace mode: cwd isn't a git repo but holds sub-repos (e.g. ~/porio with
+// app/ + web/) — combine commits/PRs/changes across them. The repo set comes
+// from $DIFFSHUB_REPOS, then ./.diffshub.json, then the app+web default, then a
+// scan of every immediate child git repo.
+
+interface RepoCtx {
+  key: string;
+  dir: string;
+  nameWithOwner: string;
+  branch: string;
 }
 
-let branch = "";
-try {
-  branch = (await $`git branch --show-current`.cwd(cwd).quiet().text()).trim();
-} catch {}
+async function isGitWorkTree(dir: string): Promise<boolean> {
+  try {
+    return (await $`git -C ${dir} rev-parse --is-inside-work-tree`.quiet().text()).trim() === "true";
+  } catch {
+    return false;
+  }
+}
 
-// Reviewed-commit tracking, persisted per repo in a local SQLite db
+async function resolveRepo(key: string, dir: string): Promise<RepoCtx | null> {
+  let nameWithOwner: string;
+  try {
+    nameWithOwner = (
+      await $`gh repo view --json nameWithOwner -q .nameWithOwner`.cwd(dir).quiet().text()
+    ).trim();
+  } catch {
+    return null;
+  }
+  if (!nameWithOwner) return null;
+  let branch = "";
+  try {
+    branch = (await $`git branch --show-current`.cwd(dir).quiet().text()).trim();
+  } catch {}
+  return { key, dir, nameWithOwner, branch };
+}
+
+async function resolveWorkspaceRepos(): Promise<RepoCtx[]> {
+  let keys: string[] = [];
+  const env = process.env.DIFFSHUB_REPOS;
+  if (env) keys = env.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!keys.length) {
+    try {
+      const cfg = await Bun.file(`${cwd}/.diffshub.json`).json();
+      const list = Array.isArray(cfg) ? cfg : cfg?.repos;
+      if (Array.isArray(list)) keys = list.filter((x: unknown): x is string => typeof x === "string");
+    } catch {}
+  }
+  if (!keys.length) keys = ["app", "web"];
+  let resolved = (
+    await Promise.all(
+      keys.filter((k) => existsSync(`${cwd}/${k}/.git`)).map((k) => resolveRepo(k, `${cwd}/${k}`)),
+    )
+  ).filter((r): r is RepoCtx => r !== null);
+  if (!resolved.length) {
+    // Fall back to every immediate child that is a git repo.
+    let children: string[] = [];
+    try {
+      children = readdirSync(cwd, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && existsSync(`${cwd}/${e.name}/.git`))
+        .map((e) => e.name)
+        .sort();
+    } catch {}
+    resolved = (
+      await Promise.all(children.map((k) => resolveRepo(k, `${cwd}/${k}`)))
+    ).filter((r): r is RepoCtx => r !== null);
+  }
+  return resolved;
+}
+
+const workspace = !(await isGitWorkTree(cwd));
+let repos: RepoCtx[];
+if (!workspace) {
+  const r = await resolveRepo("", cwd);
+  if (!r) {
+    console.error(
+      "diffshub: `gh repo view` failed — run from a repo with a GitHub remote (and `gh auth login`)",
+    );
+    process.exit(1);
+  }
+  r.key = r.nameWithOwner.split("/").pop() || "repo";
+  repos = [r];
+} else {
+  repos = await resolveWorkspaceRepos();
+  if (!repos.length) {
+    console.error(
+      `diffshub: ${cwd} is not a git repo and no sub-repos were found.\n` +
+        `Set DIFFSHUB_REPOS=app,web (or add ./.diffshub.json with {"repos":["app","web"]}).`,
+    );
+    process.exit(1);
+  }
+}
+const repoByKey = (key?: string | null): RepoCtx => repos.find((r) => r.key === key) ?? repos[0];
+const label = workspace
+  ? `${cwd.split("/").pop()} (${repos.map((r) => r.key).join(" · ")})`
+  : repos[0].nameWithOwner;
+
+// Reviewed-commit tracking, persisted per repo (by nameWithOwner) in a local db
 const stateDir = `${process.env.HOME}/.local/state/diffshub`;
 mkdirSync(stateDir, { recursive: true });
 const db = new Database(`${stateDir}/diffshub.sqlite`);
@@ -34,13 +119,15 @@ db.run(`CREATE TABLE IF NOT EXISTS reviewed (
   reviewed_at INTEGER NOT NULL,
   PRIMARY KEY (repo, sha)
 )`);
-const listReviewedStmt = db.query<{ sha: string }, [string]>(
-  "SELECT sha FROM reviewed WHERE repo = ?",
-);
 const markReviewedStmt = db.query(
   "INSERT OR REPLACE INTO reviewed (repo, sha, reviewed_at) VALUES (?, ?, ?)",
 );
 const unmarkReviewedStmt = db.query("DELETE FROM reviewed WHERE repo = ? AND sha = ?");
+// Reviewed shas across every active repo (shas are globally unique in practice)
+const listReviewedAllStmt = db.query<{ sha: string }, string[]>(
+  `SELECT DISTINCT sha FROM reviewed WHERE repo IN (${repos.map(() => "?").join(",")})`,
+);
+const reviewedRepoNames = repos.map((r) => r.nameWithOwner);
 
 function json(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), {
@@ -64,17 +151,27 @@ interface CommitSummary {
   login: string | null;
   avatar: string | null;
   date: string;
+  repo: string;
 }
 
-async function listCommits(page: number): Promise<CommitSummary[]> {
-  const base = `repos/${repo}/commits?per_page=50&page=${page}`;
+// Collect fulfilled values; only throw when every repo failed (so one bad
+// remote doesn't blank the whole combined list).
+function settle<T>(settled: PromiseSettledResult<T[]>[]): T[] {
+  if (settled.length && settled.every((s) => s.status === "rejected")) {
+    throw (settled[0] as PromiseRejectedResult).reason;
+  }
+  return settled.flatMap((s) => (s.status === "fulfilled" ? s.value : []));
+}
+
+async function listCommitsForRepo(r: RepoCtx, page: number): Promise<CommitSummary[]> {
+  const base = `repos/${r.nameWithOwner}/commits?per_page=50&page=${page}`;
   // Prefer the checked-out branch; fall back to the default branch if it
   // isn't pushed to GitHub.
-  const urls = branch ? [`${base}&sha=${encodeURIComponent(branch)}`, base] : [base];
+  const urls = r.branch ? [`${base}&sha=${encodeURIComponent(r.branch)}`, base] : [base];
   let lastError: unknown;
   for (const url of urls) {
     try {
-      const raw = await $`gh api ${url}`.cwd(cwd).quiet().text();
+      const raw = await $`gh api ${url}`.cwd(r.dir).quiet().text();
       return JSON.parse(raw).map((c: any) => ({
         sha: c.sha,
         message: c.commit?.message ?? "",
@@ -82,6 +179,7 @@ async function listCommits(page: number): Promise<CommitSummary[]> {
         login: c.author?.login ?? null,
         avatar: c.author?.avatar_url ?? null,
         date: c.commit?.author?.date ?? c.commit?.committer?.date ?? "",
+        repo: r.key,
       }));
     } catch (e) {
       lastError = e;
@@ -90,10 +188,15 @@ async function listCommits(page: number): Promise<CommitSummary[]> {
   throw lastError;
 }
 
-async function listPrs() {
+async function listCommits(page: number): Promise<CommitSummary[]> {
+  const settled = await Promise.allSettled(repos.map((r) => listCommitsForRepo(r, page)));
+  return settle(settled).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+}
+
+async function listPrsForRepo(r: RepoCtx) {
   const raw =
     await $`gh pr list --json number,title,author,headRefName,updatedAt,additions,deletions,isDraft --limit 100`
-      .cwd(cwd)
+      .cwd(r.dir)
       .quiet()
       .text();
   return JSON.parse(raw).map((p: any) => ({
@@ -105,20 +208,27 @@ async function listPrs() {
     additions: p.additions ?? 0,
     deletions: p.deletions ?? 0,
     isDraft: !!p.isDraft,
+    repo: r.key,
   }));
+}
+
+async function listPrs() {
+  const settled = await Promise.allSettled(repos.map((r) => listPrsForRepo(r)));
+  return settle(settled).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
 }
 
 // Commit diffs are immutable, cache them for the lifetime of the server
 const diffCache = new Map<string, string>();
 
-async function commitDiff(sha: string): Promise<string> {
-  const cached = diffCache.get(sha);
+async function commitDiff(r: RepoCtx, sha: string): Promise<string> {
+  const cacheKey = `${r.key}:${sha}`;
+  const cached = diffCache.get(cacheKey);
   if (cached !== undefined) return cached;
-  const diff = await $`gh api repos/${repo}/commits/${sha} -H ${"Accept: application/vnd.github.diff"}`
-    .cwd(cwd)
+  const diff = await $`gh api repos/${r.nameWithOwner}/commits/${sha} -H ${"Accept: application/vnd.github.diff"}`
+    .cwd(r.dir)
     .quiet()
     .text();
-  diffCache.set(sha, diff);
+  diffCache.set(cacheKey, diff);
   return diff;
 }
 
@@ -131,9 +241,9 @@ interface UntrackedEntry {
   tooLarge?: boolean;
 }
 
-async function untrackedEntry(path: string): Promise<UntrackedEntry> {
+async function untrackedEntry(dir: string, path: string): Promise<UntrackedEntry> {
   try {
-    const file = Bun.file(`${cwd}/${path}`);
+    const file = Bun.file(`${dir}/${path}`);
     if (file.size > 512 * 1024) return { path, contents: null, tooLarge: true };
     const bytes = new Uint8Array(await file.arrayBuffer());
     if (bytes.subarray(0, 8000).includes(0)) return { path, contents: null, binary: true };
@@ -143,8 +253,17 @@ async function untrackedEntry(path: string): Promise<UntrackedEntry> {
   }
 }
 
-async function getChanges() {
-  const raw = await $`git status --porcelain=v1 -z -uall`.cwd(cwd).quiet().text();
+interface RepoChanges {
+  repo: string;
+  staged: { path: string; status: string }[];
+  unstaged: { path: string; status: string }[];
+  untracked: UntrackedEntry[];
+  stagedDiff: string;
+  unstagedDiff: string;
+}
+
+async function getChangesForRepo(r: RepoCtx): Promise<RepoChanges> {
+  const raw = await $`git status --porcelain=v1 -z -uall`.cwd(r.dir).quiet().text();
   const parts = raw.split("\0");
   const staged: { path: string; status: string }[] = [];
   const unstaged: { path: string; status: string }[] = [];
@@ -164,11 +283,41 @@ async function getChanges() {
     if (y !== " ") unstaged.push({ path, status: y });
   }
   const [stagedDiff, unstagedDiff, untracked] = await Promise.all([
-    staged.length ? $`git diff --cached`.cwd(cwd).quiet().text() : Promise.resolve(""),
-    unstaged.length ? $`git diff`.cwd(cwd).quiet().text() : Promise.resolve(""),
-    Promise.all(untrackedPaths.map(untrackedEntry)),
+    staged.length ? $`git diff --cached`.cwd(r.dir).quiet().text() : Promise.resolve(""),
+    unstaged.length ? $`git diff`.cwd(r.dir).quiet().text() : Promise.resolve(""),
+    Promise.all(untrackedPaths.map((p) => untrackedEntry(r.dir, p))),
   ]);
-  return { staged, unstaged, untracked, stagedDiff, unstagedDiff };
+  return { repo: r.key, staged, unstaged, untracked, stagedDiff, unstagedDiff };
+}
+
+async function getChanges(): Promise<RepoChanges[]> {
+  return Promise.all(repos.map(getChangesForRepo));
+}
+
+// ---- Manual patches (./diffs/*.patch in the cwd) ----
+
+interface ManualPatch {
+  name: string;
+  contents: string;
+}
+
+async function listManualPatches(): Promise<ManualPatch[]> {
+  let names: string[];
+  try {
+    names = readdirSync(`${cwd}/diffs`)
+      .filter((n) => n.endsWith(".patch"))
+      .sort();
+  } catch {
+    return []; // no ./diffs directory — just an empty list
+  }
+  return Promise.all(
+    names.map(async (name) => ({
+      name,
+      contents: await Bun.file(`${cwd}/diffs/${name}`)
+        .text()
+        .catch(() => ""),
+    })),
+  );
 }
 
 function safeRepoPath(p: unknown): p is string {
@@ -181,19 +330,19 @@ function safeRepoPath(p: unknown): p is string {
   );
 }
 
-async function runGitAction(action: string, path?: string) {
+async function runGitAction(action: string, dir: string, path?: string) {
   if (action === "stage") {
-    return path ? $`git add -- ${path}`.cwd(cwd).quiet() : $`git add -A`.cwd(cwd).quiet();
+    return path ? $`git add -- ${path}`.cwd(dir).quiet() : $`git add -A`.cwd(dir).quiet();
   }
   if (action === "unstage") {
     return path
-      ? $`git restore --staged -- ${path}`.cwd(cwd).quiet()
-      : $`git restore --staged .`.cwd(cwd).quiet();
+      ? $`git restore --staged -- ${path}`.cwd(dir).quiet()
+      : $`git restore --staged .`.cwd(dir).quiet();
   }
   if (action === "stash") {
     return path
-      ? $`git stash push -u -- ${path}`.cwd(cwd).quiet()
-      : $`git stash push -u`.cwd(cwd).quiet();
+      ? $`git stash push -u -- ${path}`.cwd(dir).quiet()
+      : $`git stash push -u`.cwd(dir).quiet();
   }
   throw new Error(`Unknown action: ${action}`);
 }
@@ -217,15 +366,15 @@ const page = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${repo} — diffshub</title>
+<title>${label} — diffshub</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: light; }
   * { box-sizing: border-box; }
   html, body, #root { height: 100%; margin: 0; }
   body {
     font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: #101012;
-    color: #e4e4e7;
+    background: #ffffff;
+    color: #18181b;
   }
   code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   button { font: inherit; color: inherit; }
@@ -234,25 +383,25 @@ const page = `<!DOCTYPE html>
   .commits {
     width: 300px; min-width: 300px;
     display: flex; flex-direction: column;
-    border-right: 1px solid #26262b;
-    background: #141417;
+    border-right: 1px solid #e4e4e7;
+    background: #f7f7f8;
   }
-  .commits-header { padding: 14px 14px 10px; border-bottom: 1px solid #26262b; }
+  .commits-header { padding: 14px 14px 10px; border-bottom: 1px solid #e4e4e7; }
   .commits-header h1 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: baseline; gap: 8px; }
-  .commits-header .repo { font-size: 11px; font-weight: 400; color: #8b8b93; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .commits-header .repo { font-size: 11px; font-weight: 400; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .commits-header input {
     width: 100%; padding: 6px 10px; font-size: 13px;
-    background: #101012; color: inherit;
-    border: 1px solid #2e2e34; border-radius: 6px; outline: none;
+    background: #ffffff; color: inherit;
+    border: 1px solid #d4d4d8; border-radius: 6px; outline: none;
   }
   .commits-header input:focus { border-color: #6e56cf; }
 
-  .tabs { display: flex; gap: 2px; margin-bottom: 10px; background: #101012; border: 1px solid #2e2e34; border-radius: 7px; padding: 2px; }
+  .tabs { display: flex; gap: 2px; margin-bottom: 10px; background: #efeff1; border: 1px solid #e4e4e7; border-radius: 7px; padding: 2px; }
   .tabs button {
     flex: 1; padding: 4px 0; font-size: 12px; cursor: pointer;
-    background: none; border: none; border-radius: 5px; color: #8b8b93;
+    background: none; border: none; border-radius: 5px; color: #71717a;
   }
-  .tabs button.on { background: #26262b; color: #e4e4e7; }
+  .tabs button.on { background: #ffffff; color: #18181b; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
 
   .commit-list { flex: 1; overflow-y: auto; padding: 6px 0; }
   .commit {
@@ -260,8 +409,8 @@ const page = `<!DOCTYPE html>
     padding: 8px 14px; border: none; border-left: 3px solid transparent;
     background: none; position: relative;
   }
-  .commit:hover { background: #1c1c21; }
-  .commit.active { background: #1e1b2e; border-left-color: #6e56cf; }
+  .commit:hover { background: #f0f0f1; }
+  .commit.active { background: #efe9fb; border-left-color: #6e56cf; }
   .commit-msg {
     display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-weight: 500; margin-bottom: 3px; padding-right: 22px;
@@ -269,58 +418,64 @@ const page = `<!DOCTYPE html>
   .rev-btn {
     position: absolute; top: 7px; right: 10px; width: 18px; height: 18px;
     display: flex; align-items: center; justify-content: center; padding: 0;
-    background: none; border: 1px solid #36363d; border-radius: 50%;
-    color: #6b6b73; font-size: 10px; cursor: pointer; opacity: 0;
+    background: none; border: 1px solid #d4d4d8; border-radius: 50%;
+    color: #a1a1aa; font-size: 10px; cursor: pointer; opacity: 0;
   }
   .commit:hover .rev-btn { opacity: 1; }
-  .commit.reviewed .rev-btn { opacity: 1; background: #14321f; border-color: #1f5c33; color: #4ade80; }
-  .commit.reviewed .commit-msg { color: #8b8b93; font-weight: 400; }
+  .commit.reviewed .rev-btn { opacity: 1; background: #dcfce7; border-color: #86efac; color: #16a34a; }
+  .commit.reviewed .commit-msg { color: #a1a1aa; font-weight: 400; }
   .spinner {
     width: 28px; height: 28px; margin: 0 auto; border-radius: 50%;
-    border: 3px solid #26262b; border-top-color: #6e56cf;
+    border: 3px solid #e4e4e7; border-top-color: #6e56cf;
     animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .commit-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #8b8b93; }
+  .commit-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #71717a; }
   .commit-meta img { width: 14px; height: 14px; border-radius: 50%; }
-  .commit-meta code { color: #8b8b93; }
+  .commit-meta code { color: #71717a; }
   .commit-ago { margin-left: auto; white-space: nowrap; }
-  .pr-stats .add { color: #4ade80; }
-  .pr-stats .del { color: #f87171; }
+  .repo-badge {
+    font-size: 10px; line-height: 1.5; padding: 0 5px; border-radius: 4px;
+    background: #efe9fb; color: #6e56cf; border: 1px solid #ddd0fb;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .modal-repos { color: #6e56cf; font-weight: 600; }
+  .pr-stats .add { color: #16a34a; }
+  .pr-stats .del { color: #dc2626; }
   .load-more {
     display: block; width: calc(100% - 28px); margin: 8px 14px; padding: 6px;
-    background: #1c1c21; color: #8b8b93; border: 1px solid #2e2e34;
+    background: #f4f4f5; color: #71717a; border: 1px solid #e4e4e7;
     border-radius: 6px; cursor: pointer; font-size: 12px;
   }
-  .load-more:hover { color: #e4e4e7; }
-  .side-note { color: #8b8b93; padding: 16px 14px; }
-  .side-note.error { color: #f87171; white-space: pre-wrap; }
+  .load-more:hover { color: #18181b; }
+  .side-note { color: #71717a; padding: 16px 14px; }
+  .side-note.error { color: #dc2626; white-space: pre-wrap; }
 
   .kbd-hints {
-    padding: 8px 14px; border-top: 1px solid #26262b;
-    font-size: 11px; color: #6b6b73; display: flex; gap: 10px; flex-wrap: wrap;
+    padding: 8px 14px; border-top: 1px solid #e4e4e7;
+    font-size: 11px; color: #a1a1aa; display: flex; gap: 10px; flex-wrap: wrap;
   }
-  .kbd-hints kbd { background: #26262b; border-radius: 3px; padding: 1px 4px; font-size: 10px; }
+  .kbd-hints kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; font-size: 10px; }
 
   .bulk-actions { display: flex; gap: 6px; padding: 8px 14px; }
   .bulk-actions button {
     flex: 1; padding: 5px 0; font-size: 11px; cursor: pointer;
-    background: #1c1c21; border: 1px solid #2e2e34; border-radius: 6px; color: #b9b9c0;
+    background: #ffffff; border: 1px solid #d4d4d8; border-radius: 6px; color: #52525b;
   }
-  .bulk-actions button:hover:not(:disabled) { color: #e4e4e7; border-color: #6e56cf; }
+  .bulk-actions button:hover:not(:disabled) { color: #18181b; border-color: #6e56cf; }
   .bulk-actions button:disabled { opacity: .5; cursor: default; }
 
   .group-label {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 14px 4px; font-size: 11px; font-weight: 600;
-    color: #8b8b93; text-transform: uppercase; letter-spacing: .04em;
+    color: #71717a; text-transform: uppercase; letter-spacing: .04em;
   }
   .group-act {
     padding: 2px 8px; font-size: 10px; cursor: pointer;
     text-transform: none; letter-spacing: 0; flex-shrink: 0;
-    background: #1c1c21; border: 1px solid #2e2e34; border-radius: 5px; color: #b9b9c0;
+    background: #ffffff; border: 1px solid #d4d4d8; border-radius: 5px; color: #52525b;
   }
-  .group-act:hover:not(:disabled) { color: #e4e4e7; border-color: #6e56cf; }
+  .group-act:hover:not(:disabled) { color: #18181b; border-color: #6e56cf; }
   .group-act:disabled { opacity: .5; cursor: default; }
   .change-row {
     display: flex; align-items: center; gap: 8px;
@@ -329,91 +484,91 @@ const page = `<!DOCTYPE html>
        them on :hover never reflows the row (no layout shift). */
     min-height: 30px;
   }
-  .change-row:hover { background: #1c1c21; }
+  .change-row:hover { background: #f0f0f1; }
   .change-row .st { width: 12px; text-align: center; font-size: 11px; flex-shrink: 0; }
-  .st-added, .st-untracked { color: #4ade80; }
-  .st-modified { color: #fbbf24; }
-  .st-deleted { color: #f87171; }
-  .st-renamed { color: #60a5fa; }
+  .st-added, .st-untracked { color: #16a34a; }
+  .st-modified { color: #d97706; }
+  .st-deleted { color: #dc2626; }
+  .st-renamed { color: #2563eb; }
   .change-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
   .change-acts { display: none; gap: 4px; flex-shrink: 0; }
   .change-row:hover .change-acts { display: flex; }
 
   .act {
     padding: 1px 7px; font-size: 11px; cursor: pointer;
-    background: #26262b; border: 1px solid #36363d; border-radius: 5px; color: #b9b9c0;
+    background: #f4f4f5; border: 1px solid #d4d4d8; border-radius: 5px; color: #52525b;
   }
-  .act:hover:not(:disabled) { color: #e4e4e7; border-color: #6e56cf; }
+  .act:hover:not(:disabled) { color: #18181b; border-color: #6e56cf; }
   .act:disabled { opacity: .5; cursor: default; }
   .hdr-acts { display: inline-flex; gap: 5px; margin-left: 10px; }
 
   .diffs { flex: 1; overflow-y: auto; padding: 16px 20px 60vh; }
-  .section-label { font-size: 12px; color: #8b8b93; text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
+  .section-label { font-size: 12px; color: #71717a; text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
   .file-diff.viewing::before {
     content: ""; position: absolute; left: -10px; top: 0; bottom: 0;
     width: 3px; border-radius: 2px; background: #6e56cf;
   }
-  .empty { color: #8b8b93; padding: 40px 0; text-align: center; }
-  .empty.error { color: #f87171; white-space: pre-wrap; text-align: left; }
+  .empty { color: #71717a; padding: 40px 0; text-align: center; }
+  .empty.error { color: #dc2626; white-space: pre-wrap; text-align: left; }
   .opaque-file {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 14px; border: 1px solid #26262b; border-radius: 8px;
-    color: #8b8b93; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+    padding: 10px 14px; border: 1px solid #e4e4e7; border-radius: 8px;
+    color: #71717a; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
   }
   .opaque-open { cursor: pointer; }
-  .opaque-open:hover { color: #e4e4e7; text-decoration: underline; }
+  .opaque-open:hover { color: #18181b; text-decoration: underline; }
 
   .tree {
     width: 280px; min-width: 280px;
-    border-left: 1px solid #26262b;
-    background: #141417;
+    border-left: 1px solid #e4e4e7;
+    background: #f7f7f8;
     display: flex; flex-direction: column;
   }
-  .meta-panel { padding: 14px; border-bottom: 1px solid #26262b; }
+  .meta-panel { padding: 14px; border-bottom: 1px solid #e4e4e7; }
   .meta-panel h2 { font-size: 13px; margin: 0 0 6px; line-height: 1.4; word-break: break-word; }
-  .meta-panel .meta-line { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #8b8b93; margin-top: 4px; }
+  .meta-panel .meta-line { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #71717a; margin-top: 4px; }
   .meta-panel .meta-line img { width: 14px; height: 14px; border-radius: 50%; }
   .meta-panel .sha-btn {
-    background: #1c1c21; border: 1px solid #2e2e34; border-radius: 5px;
-    padding: 1px 7px; font-size: 11px; cursor: pointer; color: #b9b9c0;
+    background: #ffffff; border: 1px solid #d4d4d8; border-radius: 5px;
+    padding: 1px 7px; font-size: 11px; cursor: pointer; color: #52525b;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
-  .meta-panel .sha-btn:hover { border-color: #6e56cf; color: #e4e4e7; }
+  .meta-panel .sha-btn:hover { border-color: #6e56cf; color: #18181b; }
   .tree-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px 6px;
-    --trees-bg-override: #141417;
-    --trees-bg-muted-override: #1c1c21;
-    --trees-fg-override: #e4e4e7;
-    --trees-fg-muted-override: #8b8b93;
-    --trees-border-color-override: #26262b;
-    --trees-selected-bg-override: #1e1b2e;
+    --trees-bg-override: #f7f7f8;
+    --trees-bg-muted-override: #f0f0f1;
+    --trees-fg-override: #18181b;
+    --trees-fg-muted-override: #71717a;
+    --trees-border-color-override: #e4e4e7;
+    --trees-selected-bg-override: #efe9fb;
     --trees-accent-override: #6e56cf;
   }
   .tree-body > * { flex: 1; min-height: 0; }
 
   .modal-overlay {
     position: fixed; inset: 0; z-index: 50;
-    background: rgba(0, 0, 0, .55);
+    background: rgba(0, 0, 0, .35);
     display: flex; align-items: center; justify-content: center;
   }
   .modal {
     width: 460px; max-width: calc(100vw - 40px);
-    background: #18181b; border: 1px solid #2e2e34; border-radius: 10px;
-    padding: 16px; box-shadow: 0 12px 44px rgba(0, 0, 0, .55);
+    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 10px;
+    padding: 16px; box-shadow: 0 12px 44px rgba(0, 0, 0, .18);
   }
   .modal h3 { margin: 0 0 10px; font-size: 14px; }
   .commit-input {
     width: 100%; min-height: 92px; resize: vertical;
-    background: #101012; color: inherit; font: inherit; line-height: 1.5;
-    border: 1px solid #2e2e34; border-radius: 6px; padding: 8px 10px; outline: none;
+    background: #ffffff; color: inherit; font: inherit; line-height: 1.5;
+    border: 1px solid #d4d4d8; border-radius: 6px; padding: 8px 10px; outline: none;
   }
   .commit-input:focus { border-color: #6e56cf; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .modal-actions .primary { background: #6e56cf; border-color: #6e56cf; color: #fff; }
   .modal-actions .primary:hover:not(:disabled) { background: #7d68d6; border-color: #7d68d6; }
-  .modal-hint { margin-top: 10px; font-size: 11px; color: #6b6b73; display: flex; gap: 8px; flex-wrap: wrap; }
-  .modal-hint kbd { background: #26262b; border-radius: 3px; padding: 1px 4px; }
-  .modal-hint code { color: #8b8b93; }
+  .modal-hint { margin-top: 10px; font-size: 11px; color: #a1a1aa; display: flex; gap: 8px; flex-wrap: wrap; }
+  .modal-hint kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; }
+  .modal-hint code { color: #71717a; }
 </style>
 </head>
 <body>
@@ -435,7 +590,12 @@ const server = Bun.serve({
     }
 
     if (url.pathname === "/api/meta") {
-      return json({ repo, branch });
+      return json({
+        repo: label,
+        branch: workspace ? "" : repos[0].branch,
+        workspace,
+        repos: repos.map((r) => ({ key: r.key, nameWithOwner: r.nameWithOwner, branch: r.branch })),
+      });
     }
 
     if (url.pathname === "/api/commits") {
@@ -463,9 +623,17 @@ const server = Bun.serve({
       }
     }
 
+    if (url.pathname === "/api/manual") {
+      try {
+        return json(await listManualPatches());
+      } catch (e) {
+        return new Response(errText(e), { status: 500 });
+      }
+    }
+
     if (url.pathname === "/api/reviewed") {
       if (req.method === "POST") {
-        let body: { sha?: unknown; reviewed?: unknown };
+        let body: { sha?: unknown; reviewed?: unknown; repo?: unknown };
         try {
           body = await req.json();
         } catch {
@@ -474,15 +642,16 @@ const server = Bun.serve({
         if (typeof body.sha !== "string" || !/^[0-9a-f]{7,40}$/.test(body.sha)) {
           return json({ error: "Invalid sha" }, 400);
         }
-        if (body.reviewed) markReviewedStmt.run(repo, body.sha, Date.now());
-        else unmarkReviewedStmt.run(repo, body.sha);
+        const nwo = repoByKey(typeof body.repo === "string" ? body.repo : null).nameWithOwner;
+        if (body.reviewed) markReviewedStmt.run(nwo, body.sha, Date.now());
+        else unmarkReviewedStmt.run(nwo, body.sha);
         return json({ ok: true });
       }
-      return json(listReviewedStmt.all(repo).map((r) => r.sha));
+      return json(listReviewedAllStmt.all(...reviewedRepoNames).map((r) => r.sha));
     }
 
     if (req.method === "POST" && url.pathname === "/api/git") {
-      let body: { action?: unknown; path?: unknown };
+      let body: { action?: unknown; path?: unknown; repo?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -492,11 +661,16 @@ const server = Bun.serve({
       if (action !== "stage" && action !== "unstage" && action !== "stash") {
         return json({ error: "Invalid action" }, 400);
       }
-      if (body.path !== undefined && !safeRepoPath(body.path)) {
+      const path = body.path;
+      if (path !== undefined && !safeRepoPath(path)) {
         return json({ error: "Invalid path" }, 400);
       }
+      // A specific repo (per-file / per-group action) routes to one repo; a
+      // bulk action with no repo applies to every repo in the workspace.
+      const targets =
+        typeof body.repo === "string" || path !== undefined ? [repoByKey(body.repo as string)] : repos;
       try {
-        await runGitAction(action, body.path as string | undefined);
+        for (const t of targets) await runGitAction(action, t.dir, path as string | undefined);
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -504,7 +678,7 @@ const server = Bun.serve({
     }
 
     if (req.method === "POST" && url.pathname === "/api/commit") {
-      let body: { message?: unknown };
+      let body: { message?: unknown; repos?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -513,14 +687,25 @@ const server = Bun.serve({
       if (typeof body.message !== "string" || !body.message.trim()) {
         return json({ error: "Empty commit message" }, 400);
       }
+      // Which repos to commit: the requested keys (deduped) or all of them.
+      const wanted = Array.isArray(body.repos)
+        ? [...new Set(body.repos.filter((k): k is string => typeof k === "string"))]
+        : null;
+      const targets = wanted ? repos.filter((r) => wanted.includes(r.key)) : repos;
+      if (!targets.length) return json({ error: "No repos to commit" }, 400);
       try {
         // Stash the message in a file so it never has to be shell-escaped, then
-        // commit the staged changes + push detached in the `bg` tmux server so
-        // it outlives this request. Attach with `tmux -L bg attach`.
+        // commit + push each repo that has staged changes, detached in the `bg`
+        // tmux server so it outlives this request (attach: `tmux -L bg attach`).
         const msgFile = `${stateDir}/commit-msg-${Date.now()}.txt`;
         await Bun.write(msgFile, body.message);
         const session = `diffshub-commit-${Date.now()}`;
-        const script = `git commit -F ${shq(msgFile)} && git push; rm -f ${shq(msgFile)}`;
+        const steps = targets.map(
+          (t) =>
+            `if ! git -C ${shq(t.dir)} diff --cached --quiet; then ` +
+            `git -C ${shq(t.dir)} commit -F ${shq(msgFile)} && git -C ${shq(t.dir)} push; fi`,
+        );
+        const script = `${steps.join("; ")}; rm -f ${shq(msgFile)}`;
         await $`tmux -L bg new-session -d -c ${cwd} -s ${session} ${script}`.cwd(cwd).quiet();
       } catch (e) {
         return json({ error: errText(e) }, 500);
@@ -529,7 +714,7 @@ const server = Bun.serve({
     }
 
     if (req.method === "POST" && url.pathname === "/api/open") {
-      let body: { path?: unknown; line?: unknown };
+      let body: { path?: unknown; line?: unknown; repo?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -542,9 +727,10 @@ const server = Bun.serve({
         typeof body.line === "number" && Number.isInteger(body.line) && body.line > 0
           ? body.line
           : null;
-      const target = `${cwd}/${body.path}${line ? `:${line}` : ""}`;
+      const r = repoByKey(typeof body.repo === "string" ? body.repo : null);
+      const target = `${r.dir}/${body.path}${line ? `:${line}` : ""}`;
       try {
-        await $`zed ${target}`.cwd(cwd).quiet();
+        await $`zed ${target}`.cwd(r.dir).quiet();
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -553,8 +739,9 @@ const server = Bun.serve({
 
     const prDiffMatch = url.pathname.match(/^\/api\/diff\/pr\/(\d{1,7})$/);
     if (prDiffMatch) {
+      const r = repoByKey(url.searchParams.get("repo"));
       try {
-        const diff = await $`gh pr diff ${prDiffMatch[1]}`.cwd(cwd).quiet().text();
+        const diff = await $`gh pr diff ${prDiffMatch[1]}`.cwd(r.dir).quiet().text();
         return new Response(diff, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
       } catch (e) {
         return new Response(errText(e), { status: 502 });
@@ -563,8 +750,9 @@ const server = Bun.serve({
 
     const diffMatch = url.pathname.match(/^\/api\/diff\/([0-9a-f]{7,40})$/);
     if (diffMatch) {
+      const r = repoByKey(url.searchParams.get("repo"));
       try {
-        return new Response(await commitDiff(diffMatch[1]), {
+        return new Response(await commitDiff(r, diffMatch[1]), {
           headers: { "Content-Type": "text/plain; charset=utf-8" },
         });
       } catch (e) {
@@ -578,4 +766,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`diffshub for ${repo} running at http://localhost:${server.port}`);
+console.log(`diffshub for ${label} running at http://localhost:${server.port}`);
