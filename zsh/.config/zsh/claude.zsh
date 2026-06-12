@@ -85,6 +85,38 @@ function p() {
   tmux attach -t "$name"
 }
 
+# spawn a new claude session in <dir> (default $PWD) and switch the attached
+# client to it. used by the M-n binding in .tmux.conf
+function _claude_new_here() {
+  local dir="${1:-$PWD}"
+  local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
+  local -a nouns=("${SESSION_NAME_NOUNS[@]}")
+
+  typeset -A used_letters
+  local existing cmd
+  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+    if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
+      used_letters[${existing:0:1}]=1
+    fi
+  done
+
+  local name first_letter attempts=0
+  while true; do
+    name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
+    first_letter="${name:0:1}"
+    if ! tmux has-session -t "$name" 2>/dev/null; then
+      if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
+        break
+      fi
+    fi
+    ((attempts++))
+  done
+  tmux new-session -ds "$name" -c "$dir" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$dir' claude"
+  tmux switch-client -t "$name"
+}
+
+# like p, but fast: default opus 4.8 with 1m context + fast mode
 function pf() {
   p --model claude-opus-4-8 "$@"
 }
