@@ -101,7 +101,11 @@ const ACTION_LABELS: Record<GitAction, { label: string; title: string }> = {
   stash: { label: "stash", title: "git stash push" },
 };
 
-const DIFF_OPTIONS = { themeType: "dark", stickyHeader: true } as const;
+const DIFF_OPTIONS = {
+  themeType: "dark",
+  stickyHeader: true,
+  lineHoverHighlight: "line",
+} as const;
 
 function initialView(): { tab: Tab; view: View } {
   const params = new URLSearchParams(location.search);
@@ -129,6 +133,11 @@ function App() {
 
   const [changes, setChanges] = useState<Changes | null>(null);
   const [busyPath, setBusyPath] = useState<string | null>(null);
+
+  // Commit & push dialog (Changes view, `;`)
+  const [commitOpen, setCommitOpen] = useState(false);
+  const [commitMsg, setCommitMsg] = useState("");
+  const [committing, setCommitting] = useState(false);
 
   const [diffText, setDiffText] = useState("");
   const [diffState, setDiffState] = useState<"idle" | "loading" | "error">("idle");
@@ -216,7 +225,10 @@ function App() {
   const loadChanges = useCallback(async () => {
     const res = await fetch("/api/changes");
     if (!res.ok) throw new Error(await res.text());
-    setChanges(await res.json());
+    const next: Changes = await res.json();
+    // Skip the state update (and the diff re-render it triggers) when nothing
+    // actually changed — keeps interval polling from flickering the view.
+    setChanges((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
   }, []);
 
   const runGit = useCallback(
@@ -240,6 +252,52 @@ function App() {
     [loadChanges],
   );
 
+  // Open a file (optionally at a line) in the default editor, server-side
+  const openInEditor = useCallback((path: string, line?: number) => {
+    fetch("/api/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, line }),
+    }).catch(() => {});
+  }, []);
+
+  // Click a diff line to open that file at that line — unless the user is
+  // actually selecting text, in which case leave the selection alone.
+  const onDiffLineClick = useCallback(
+    (path: string, lineNumber?: number) => {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) return;
+      openInEditor(path, typeof lineNumber === "number" ? lineNumber : undefined);
+    },
+    [openInEditor],
+  );
+
+  // Commit staged changes + push, detached in `tmux -L bg`
+  const submitCommit = useCallback(async () => {
+    const message = commitMsg.trim();
+    if (!message) return;
+    setCommitting(true);
+    try {
+      const res = await fetch("/api/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`commit failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      setCommitOpen(false);
+      setCommitMsg("");
+      // The commit/push runs async in tmux; nudge a refresh so the cleared
+      // working tree shows up (interval polling will also catch it).
+      setTimeout(() => loadChanges().catch(() => {}), 600);
+    } finally {
+      setCommitting(false);
+    }
+  }, [commitMsg, loadChanges]);
+
   const selectTab = useCallback(
     (next: Tab) => {
       setTab(next);
@@ -254,12 +312,18 @@ function App() {
     [prs, loadPrs, loadChanges],
   );
 
-  // Keep pending changes fresh while looking at them
+  // Keep pending changes fresh while looking at them: refetch on window focus
+  // and on a light interval, so a background commit/push (run in `tmux -L bg`)
+  // is reflected here within a couple of seconds without any manual refresh.
   useEffect(() => {
     if (view.kind !== "changes") return;
-    const onFocus = () => loadChanges().catch(() => {});
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    const refresh = () => loadChanges().catch(() => {});
+    window.addEventListener("focus", refresh);
+    const id = window.setInterval(refresh, 2500);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      window.clearInterval(id);
+    };
   }, [view.kind, loadChanges]);
 
   // ---- Diff fetching for commit/pr views ----
@@ -377,6 +441,18 @@ function App() {
     };
   }, [orderedKeys]);
 
+  // Path of the actively-viewed diff — drives the highlight in the file tree.
+  const activePath = useMemo(() => {
+    if (!activeKey) return null;
+    for (const s of sections) {
+      const hit = s.files.find((f) => f.key === activeKey);
+      if (hit) return hit.path;
+    }
+    return null;
+  }, [activeKey, sections]);
+  const activePathRef = useRef(activePath);
+  activePathRef.current = activePath;
+
   // ---- Per-file collapse, toggled with `c` on the actively viewed file ----
   const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(new Set());
   useEffect(() => setCollapsedKeys(new Set()), [view]);
@@ -399,10 +475,13 @@ function App() {
   const onTreeSelect = useRef<(paths: readonly string[]) => void>(() => {});
   onTreeSelect.current = (paths) => {
     if (!paths[0]) return;
+    // Ignore the selection we set ourselves to mirror the active diff — only
+    // react to the user actually picking a different file in the tree.
+    if (paths[0] === activePathRef.current) return;
     for (const section of sections) {
       const hit = section.files.find((f) => f.path === paths[0]);
       if (hit) {
-        fileEls.current.get(hit.key)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        fileEls.current.get(hit.key)?.scrollIntoView({ block: "start" });
         return;
       }
     }
@@ -434,7 +513,18 @@ function App() {
   useEffect(() => {
     model.resetPaths([...treeStatusByPath.keys()]);
     model.setGitStatus([...treeStatusByPath].map(([path, status]) => ({ path, status })));
+    // resetPaths clears selection — re-apply the active diff's highlight.
+    if (activePathRef.current) model.getItem(activePathRef.current)?.select();
   }, [treeStatusByPath, model]);
+
+  // Mirror the actively-viewed diff onto the tree's selection as you scroll.
+  useEffect(() => {
+    if (!activePath) return;
+    const selected = model.getSelectedPaths();
+    if (selected.length === 1 && selected[0] === activePath) return;
+    for (const p of selected) if (p !== activePath) model.getItem(p)?.deselect();
+    model.getItem(activePath)?.select();
+  }, [activePath, model]);
 
   // ---- Sidebar lists ----
   const q = filter.toLowerCase();
@@ -489,10 +579,17 @@ function App() {
       if (e.composedPath().some((n) => n instanceof HTMLElement && n.classList?.contains("tree"))) {
         return;
       }
-      if (e.key === ";" && tab === "commits" && view.kind === "commit") {
-        e.preventDefault();
-        toggleReviewed(view.sha);
-        return;
+      if (e.key === ";") {
+        if (view.kind === "changes") {
+          e.preventDefault();
+          setCommitOpen(true);
+          return;
+        }
+        if (tab === "commits" && view.kind === "commit") {
+          e.preventDefault();
+          toggleReviewed(view.sha);
+          return;
+        }
       }
       if (e.key === "c") {
         e.preventDefault();
@@ -538,7 +635,7 @@ function App() {
   }, [selectCommit, selectPr, toggleReviewed, toggleCollapsed]);
 
   const scrollToKey = (key: string) => {
-    fileEls.current.get(key)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    fileEls.current.get(key)?.scrollIntoView({ block: "start" });
   };
 
   const actionButtons = (file: SectionFile) =>
@@ -687,7 +784,19 @@ function App() {
             {changeGroups.map((group) => (
               <div key={group.label}>
                 <div className="group-label">
-                  {group.label} ({group.files.length})
+                  <span>
+                    {group.label} ({group.files.length})
+                  </span>
+                  {group.label === "Unstaged" && (
+                    <button
+                      className="group-act"
+                      title="git add -A"
+                      disabled={busyPath !== null}
+                      onClick={() => runGit("stage")}
+                    >
+                      stage all
+                    </button>
+                  )}
                 </div>
                 {group.files.map((f) => (
                   <div key={f.key} className="change-row" onClick={() => scrollToKey(f.key)}>
@@ -709,7 +818,7 @@ function App() {
             <kbd>↑/↓</kbd> navigate
           </span>
           <span>
-            <kbd>;</kbd> reviewed
+            <kbd>;</kbd> {tab === "changes" ? "commit" : "reviewed"}
           </span>
           <span>
             <kbd>c</kbd> collapse
@@ -751,7 +860,11 @@ function App() {
                 {f.fileDiff && (
                   <FileDiff
                     fileDiff={f.fileDiff}
-                    options={{ ...DIFF_OPTIONS, collapsed: collapsedKeys.has(f.key) }}
+                    options={{
+                      ...DIFF_OPTIONS,
+                      collapsed: collapsedKeys.has(f.key),
+                      onLineClick: (p: { lineNumber?: number }) => onDiffLineClick(f.path, p.lineNumber),
+                    }}
                     disableWorkerPool
                     renderHeaderMetadata={
                       f.actions.length ? () => <span className="hdr-acts">{actionButtons(f)}</span> : undefined
@@ -763,13 +876,21 @@ function App() {
                     <MultiFileDiff
                       oldFile={{ name: f.path, contents: "" }}
                       newFile={{ name: f.path, contents: f.untracked.contents }}
-                      options={{ ...DIFF_OPTIONS, collapsed: collapsedKeys.has(f.key) }}
+                      options={{
+                        ...DIFF_OPTIONS,
+                        collapsed: collapsedKeys.has(f.key),
+                        onLineClick: (p: { lineNumber?: number }) => onDiffLineClick(f.path, p.lineNumber),
+                      }}
                       disableWorkerPool
                       renderHeaderMetadata={() => <span className="hdr-acts">{actionButtons(f)}</span>}
                     />
                   ) : (
                     <div className="opaque-file">
-                      <span>
+                      <span
+                        className="opaque-open"
+                        title="Open in editor"
+                        onClick={() => openInEditor(f.path)}
+                      >
                         {f.path} — {f.untracked.binary ? "binary file" : "file too large to preview"}
                       </span>
                       <span className="hdr-acts">{actionButtons(f)}</span>
@@ -860,6 +981,49 @@ function App() {
           />
         </div>
       </aside>
+
+      {commitOpen && (
+        <div className="modal-overlay" onClick={() => !committing && setCommitOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Commit &amp; push staged changes</h3>
+            <textarea
+              autoFocus
+              className="commit-input"
+              placeholder="Commit message…"
+              value={commitMsg}
+              onChange={(e) => setCommitMsg(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Escape") setCommitOpen(false);
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitCommit();
+              }}
+            />
+            <div className="modal-actions">
+              <button className="act" disabled={committing} onClick={() => setCommitOpen(false)}>
+                Cancel
+              </button>
+              <button
+                className="act primary"
+                disabled={committing || !commitMsg.trim()}
+                onClick={submitCommit}
+              >
+                {committing ? "Committing…" : "Commit & push"}
+              </button>
+            </div>
+            <div className="modal-hint">
+              <span>
+                Runs in <code>tmux -L bg</code>
+              </span>
+              <span>
+                <kbd>⌘↵</kbd> commit
+              </span>
+              <span>
+                <kbd>esc</kbd> cancel
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

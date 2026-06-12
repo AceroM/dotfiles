@@ -54,6 +54,9 @@ function errText(e: any): string {
   return stderr.trim() || String(e?.message ?? e);
 }
 
+// Single-quote a string for safe interpolation into a /bin/sh command line
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
 interface CommitSummary {
   sha: string;
   message: string;
@@ -308,12 +311,23 @@ const page = `<!DOCTYPE html>
   .bulk-actions button:disabled { opacity: .5; cursor: default; }
 
   .group-label {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 14px 4px; font-size: 11px; font-weight: 600;
     color: #8b8b93; text-transform: uppercase; letter-spacing: .04em;
   }
+  .group-act {
+    padding: 2px 8px; font-size: 10px; cursor: pointer;
+    text-transform: none; letter-spacing: 0; flex-shrink: 0;
+    background: #1c1c21; border: 1px solid #2e2e34; border-radius: 5px; color: #b9b9c0;
+  }
+  .group-act:hover:not(:disabled) { color: #e4e4e7; border-color: #6e56cf; }
+  .group-act:disabled { opacity: .5; cursor: default; }
   .change-row {
     display: flex; align-items: center; gap: 8px;
     padding: 5px 14px; cursor: pointer;
+    /* Reserve the height the hover-revealed action buttons need so showing
+       them on :hover never reflows the row (no layout shift). */
+    min-height: 30px;
   }
   .change-row:hover { background: #1c1c21; }
   .change-row .st { width: 12px; text-align: center; font-size: 11px; flex-shrink: 0; }
@@ -347,6 +361,8 @@ const page = `<!DOCTYPE html>
     padding: 10px 14px; border: 1px solid #26262b; border-radius: 8px;
     color: #8b8b93; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
   }
+  .opaque-open { cursor: pointer; }
+  .opaque-open:hover { color: #e4e4e7; text-decoration: underline; }
 
   .tree {
     width: 280px; min-width: 280px;
@@ -374,6 +390,30 @@ const page = `<!DOCTYPE html>
     --trees-accent-override: #6e56cf;
   }
   .tree-body > * { flex: 1; min-height: 0; }
+
+  .modal-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0, 0, 0, .55);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal {
+    width: 460px; max-width: calc(100vw - 40px);
+    background: #18181b; border: 1px solid #2e2e34; border-radius: 10px;
+    padding: 16px; box-shadow: 0 12px 44px rgba(0, 0, 0, .55);
+  }
+  .modal h3 { margin: 0 0 10px; font-size: 14px; }
+  .commit-input {
+    width: 100%; min-height: 92px; resize: vertical;
+    background: #101012; color: inherit; font: inherit; line-height: 1.5;
+    border: 1px solid #2e2e34; border-radius: 6px; padding: 8px 10px; outline: none;
+  }
+  .commit-input:focus { border-color: #6e56cf; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .modal-actions .primary { background: #6e56cf; border-color: #6e56cf; color: #fff; }
+  .modal-actions .primary:hover:not(:disabled) { background: #7d68d6; border-color: #7d68d6; }
+  .modal-hint { margin-top: 10px; font-size: 11px; color: #6b6b73; display: flex; gap: 8px; flex-wrap: wrap; }
+  .modal-hint kbd { background: #26262b; border-radius: 3px; padding: 1px 4px; }
+  .modal-hint code { color: #8b8b93; }
 </style>
 </head>
 <body>
@@ -457,6 +497,54 @@ const server = Bun.serve({
       }
       try {
         await runGitAction(action, body.path as string | undefined);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json({ ok: true });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/commit") {
+      let body: { message?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.message !== "string" || !body.message.trim()) {
+        return json({ error: "Empty commit message" }, 400);
+      }
+      try {
+        // Stash the message in a file so it never has to be shell-escaped, then
+        // commit the staged changes + push detached in the `bg` tmux server so
+        // it outlives this request. Attach with `tmux -L bg attach`.
+        const msgFile = `${stateDir}/commit-msg-${Date.now()}.txt`;
+        await Bun.write(msgFile, body.message);
+        const session = `diffshub-commit-${Date.now()}`;
+        const script = `git commit -F ${shq(msgFile)} && git push; rm -f ${shq(msgFile)}`;
+        await $`tmux -L bg new-session -d -c ${cwd} -s ${session} ${script}`.cwd(cwd).quiet();
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json({ ok: true });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/open") {
+      let body: { path?: unknown; line?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (!safeRepoPath(body.path)) {
+        return json({ error: "Invalid path" }, 400);
+      }
+      const line =
+        typeof body.line === "number" && Number.isInteger(body.line) && body.line > 0
+          ? body.line
+          : null;
+      const target = `${cwd}/${body.path}${line ? `:${line}` : ""}`;
+      try {
+        await $`zed ${target}`.cwd(cwd).quiet();
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
