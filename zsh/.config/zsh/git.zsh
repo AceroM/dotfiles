@@ -77,7 +77,13 @@ function nss() {
 }
 # nd <path...> — full patch for one or more files from the PR (base defaults to main, override with ND_BASE)
 function nd() { git diff "${ND_BASE:-main}...HEAD" -- "$@" }
-function dg() { git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@" }
+function dg() {
+  if [[ -f ./scripts/dg.sh ]]; then
+    ./scripts/dg.sh "$@"
+    return
+  fi
+  git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@"
+}
 function did() { git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@" }
 function si() { git diff --staged }
 function gr() { git reset --hard HEAD }
