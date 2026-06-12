@@ -60,9 +60,10 @@ function _t_switch_next_and_kill() {
 }
 
 # attach to <name> (creating it if missing, with optional <cmd>);
-# no args: attach to an in-progress claude session if there is one, else open the picker
+# no args: attach to an in-progress claude session if there is one, else fall back
+# per <fallback>: "first" attaches to the first session, "picker" opens choose-tree
 function _t_attach() {
-  local sock="$1" name="$2" session_cmd="$3"
+  local sock="$1" fallback="$2" name="$3" session_cmd="$4"
   if [[ -n "$name" ]]; then
     if _tm "$sock" has-session -t "$name" 2>/dev/null; then
       _tm "$sock" attach-session -t "$name"
@@ -75,8 +76,11 @@ function _t_attach() {
     local busy="$(next_priority_session "$sock")"
     if [[ -n "$busy" ]]; then
       _tm "$sock" attach-session -t "$busy"
-    else
+    elif [[ "$fallback" == picker ]]; then
       _tm "$sock" attach-session \; choose-tree -Zs -F "$_T_CHOOSE_FORMAT"
+    else
+      local first="$(_tm "$sock" list-sessions -F '#S' 2>/dev/null | head -1)"
+      _tm "$sock" attach-session -t "$first"
     fi
   else
     local new_name="$(_session_random_name "$sock")"
@@ -126,7 +130,7 @@ alias tx='tmux source-file ~/.tmux.conf; tmux -L bg source-file ~/.tmux.conf 2>/
 alias tz='tx'
 
 # ── claude server (default socket) ──────────────────────────────────
-function a() { _t_attach "" "$@" }
+function a() { _t_attach "" first "$@" }
 function l() { _t_list "" }
 function k() { _t_kill "" "$@" }
 function r() { _t_read "" "$@" }
@@ -141,9 +145,9 @@ function bg() { # shadows the zsh builtin; use `builtin bg` for job control
       return
     fi
   fi
-  _t_attach bg "$@"
+  _t_attach bg first "$@"
 }
-function ba() { _t_attach bg "$@" } # picker (old no-arg bg behavior)
+function ba() { _t_attach bg picker "$@" } # picker (old no-arg bg behavior)
 function bl() { _t_list bg }
 alias bgl='bl'
 function bk() { _t_kill bg "$@" }
