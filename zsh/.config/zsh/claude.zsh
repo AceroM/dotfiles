@@ -85,6 +85,10 @@ function p() {
   tmux attach -t "$name"
 }
 
+function pf() {
+  p --model claude-opus-4-8 "$@"
+}
+
 function tn() {
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
