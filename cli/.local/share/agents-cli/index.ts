@@ -274,7 +274,12 @@ function buildPage(files: FileEntry[], active: string | null): string {
     try { localStorage.setItem("sidebarCollapsed", v ? "1" : "0"); } catch {}
   }
   collapseBtn.addEventListener("click", () => setCollapsed(true));
-  expandBtn.addEventListener("click", () => setCollapsed(false));
+  expandBtn.addEventListener("click", () => {
+    // On mobile the chevron sits over the burger; toggle the slide-in sidebar
+    // instead of the desktop-only collapsed state.
+    if (window.matchMedia("(max-width: 767px)").matches) toggleMenu();
+    else setCollapsed(false);
+  });
 
   // Navigate without full page reload
   function openItem(el) {
