@@ -34,7 +34,7 @@ _up_claude_status() {
 }
 
 _up_claude_update() {
-  brew upgrade claude-code
+  claude upgrade
 }
 
 _up_wrangler_status() {
