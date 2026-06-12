@@ -1,0 +1,16 @@
+{
+  "name": "diffshub-cli",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pierre/diffs": "1.2.10",
+    "@pierre/trees": "1.0.0-beta.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
+  }
+}
