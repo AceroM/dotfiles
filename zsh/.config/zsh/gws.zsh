@@ -4,6 +4,6 @@ function wa() {
 }
 
 # list files
-function wd() {
+function wf() {
   gws drive files list --params '{"q": "'\'$1\'' in parents and trashed=false", "fields": "files(id,name,mimeType,modifiedTime,size)"}' 2>&1
 }
