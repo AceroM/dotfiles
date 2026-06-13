@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // ---- Resolve target repo(s) ----
 // Single-repo mode: cwd is a git repo (today's behaviour).
-// Workspace mode: cwd isn't a git repo but holds sub-repos (e.g. ~/porio with
+// Workspace mode: cwd isn't a git repo but holds sub-repos (e.g. ~/work with
 // app/ + web/) — combine commits/PRs/changes across them. The repo set comes
 // from $DIFFSHUB_REPOS, then ./.diffshub.json, then the app+web default, then a
 // scan of every immediate child git repo.

@@ -7,8 +7,8 @@
 #   wi <name>    re-run the setup hook (env files, deps) on a worktree
 # Repo resolution lets them run from anywhere: the repo you're in (linked
 # worktrees resolve back to the main checkout) → ./app (the orchestrator-root
-# case, e.g. ~/porio) → $WORKTREES_DEFAULT_REPO.
-: ${WORKTREES_DEFAULT_REPO:=$HOME/porio/app}
+# case, e.g. ~/work) → $WORKTREES_DEFAULT_REPO.
+: ${WORKTREES_DEFAULT_REPO:=$HOME/work/app}
 
 # zsh expands aliases while parsing function definitions, so a stale alias on
 # any of these names (e.g. worktrunk's old `ws`) breaks re-sourcing in a live

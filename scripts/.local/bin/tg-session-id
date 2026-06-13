@@ -8,7 +8,7 @@
 # Used by:
 #   - ~/.local/bin/claude-tg-notify  (hook footer)
 #   - ~/.claude/commands/ts.md       (/ts skill footer)
-#   - /Users/miguel/porio/tg/        (webhook reverse lookup)
+#   - /Users/miguel/work/tg/         (webhook reverse lookup)
 
 set -euo pipefail
 
