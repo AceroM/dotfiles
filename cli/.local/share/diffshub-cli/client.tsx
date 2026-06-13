@@ -1,4 +1,16 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type Dispatch,
+  type MutableRefObject,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   QueryClient,
@@ -11,6 +23,14 @@ import { parsePatchFiles, type FileDiffMetadata, type SelectedLineRange } from "
 import { FileDiff, MultiFileDiff } from "@pierre/diffs/react";
 import type { GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
+import {
+  GitCommitHorizontal,
+  GitPullRequest,
+  FileDiff as FileDiffIcon,
+  FileStack,
+  SquareTerminal,
+  Sparkles,
+} from "lucide-react";
 
 interface Commit {
   sha: string;
@@ -92,13 +112,43 @@ interface DiffSelection {
   range: SelectedLineRange;
 }
 
-type Tab = "commits" | "prs" | "changes" | "manual";
+type Tab = "commits" | "prs" | "changes" | "manual" | "tmux";
 
-const TAB_ORDER: Tab[] = ["commits", "prs", "changes", "manual"];
+const TAB_ORDER: Tab[] = ["commits", "prs", "changes", "manual", "tmux"];
 
 interface ManualPatch {
   name: string;
   contents: string;
+}
+
+// A claude session running in a tmux session (Tmux tab).
+interface TmuxSession {
+  name: string;
+  cwd: string;
+  task: string; // what claude is doing (cleaned pane title), "" if not meaningful
+  busy: boolean; // claude is actively working
+  sessionId: string;
+  hasTranscript: boolean;
+  mtime: number;
+}
+
+// One rendered line of a session's transcript.
+interface TranscriptMsg {
+  role: "user" | "assistant" | "tool";
+  kind: "text" | "tool_use" | "tool_result";
+  text: string;
+  tool?: string;
+  ts?: string;
+}
+
+interface Transcript {
+  session: string;
+  cwd: string;
+  sessionId: string;
+  path: string | null;
+  messages: TranscriptMsg[];
+  model: string;
+  title: string;
 }
 
 type View =
@@ -106,6 +156,7 @@ type View =
   | { kind: "pr"; number: number; repo?: string }
   | { kind: "changes" }
   | { kind: "manual"; name: string }
+  | { kind: "tmux"; session: string }
   | { kind: "none" };
 
 type GitAction = "stage" | "unstage" | "stash";
@@ -163,6 +214,11 @@ const DIFF_OPTIONS = {
   lineHoverHighlight: "line",
   enableLineSelection: true,
 } as const;
+
+// How often the Tmux tab re-reads the session list / open transcript, but only
+// while a claude session is actively working (see the queries below). At idle we
+// stop polling entirely.
+const TMUX_POLL_MS = 2000;
 
 // ---- Fetch helpers shared by every query ----
 async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -290,6 +346,224 @@ function ContentSpinner({ label }: { label: string }) {
   );
 }
 
+// ---- Lightweight markdown rendering for assistant messages ----
+// Not a full CommonMark parser — just enough (code blocks, headings, lists,
+// quotes, **bold**/*italic*/`code`/[links]) to make claude's markdown read like
+// a chat. Inline formatting within a single line/segment.
+function parseInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const re = /`([^`]+)`|\*\*([^*]+?)\*\*|__([^_]+?)__|\*([^*\n]+?)\*|\[([^\]]+)\]\(([^)\s]+)\)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let k = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    if (m[1] != null) nodes.push(<code key={k++} className="md-code-inline">{m[1]}</code>);
+    else if (m[2] != null) nodes.push(<strong key={k++}>{m[2]}</strong>);
+    else if (m[3] != null) nodes.push(<strong key={k++}>{m[3]}</strong>);
+    else if (m[4] != null) nodes.push(<em key={k++}>{m[4]}</em>);
+    else if (m[5] != null)
+      nodes.push(
+        <a key={k++} href={m[6]} target="_blank" rel="noreferrer">
+          {m[5]}
+        </a>,
+      );
+    last = re.lastIndex;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+// A fenced code block with a language label + copy button (ChatGPT-style).
+const CodeBlock = memo(function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="md-code">
+      <div className="md-code-head">
+        <span className="lang">{lang || "code"}</span>
+        <button
+          className="copy"
+          onClick={() => {
+            navigator.clipboard.writeText(code).catch(() => {});
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }}
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre>
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+});
+
+const isUl = (l: string) => /^\s*[-*+]\s+/.test(l);
+const isOl = (l: string) => /^\s*\d+[.)]\s+/.test(l);
+const isHeading = (l: string) => /^#{1,6}\s+/.test(l);
+const isQuote = (l: string) => /^>\s?/.test(l);
+
+function renderBlocks(src: string): ReactNode[] {
+  const lines = src.split("\n");
+  const out: ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^```(.*)$/);
+    if (fence) {
+      const body: string[] = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) body.push(lines[i++]);
+      i++; // skip closing fence
+      out.push(<CodeBlock key={key++} lang={fence[1].trim()} code={body.join("\n")} />);
+      continue;
+    }
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const level = h[1].length;
+      out.push(
+        <div key={key++} className={`md-h h${level}`}>
+          {parseInline(h[2])}
+        </div>,
+      );
+      i++;
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      out.push(<hr key={key++} className="md-hr" />);
+      i++;
+      continue;
+    }
+    if (isQuote(line)) {
+      const body: string[] = [];
+      while (i < lines.length && isQuote(lines[i])) body.push(lines[i++].replace(/^>\s?/, ""));
+      out.push(
+        <blockquote key={key++} className="md-quote">
+          {renderBlocks(body.join("\n"))}
+        </blockquote>,
+      );
+      continue;
+    }
+    if (isUl(line)) {
+      const items: ReactNode[] = [];
+      while (i < lines.length && isUl(lines[i]))
+        items.push(<li key={items.length}>{parseInline(lines[i++].replace(/^\s*[-*+]\s+/, ""))}</li>);
+      out.push(
+        <ul key={key++} className="md-ul">
+          {items}
+        </ul>,
+      );
+      continue;
+    }
+    if (isOl(line)) {
+      const items: ReactNode[] = [];
+      while (i < lines.length && isOl(lines[i]))
+        items.push(<li key={items.length}>{parseInline(lines[i++].replace(/^\s*\d+[.)]\s+/, ""))}</li>);
+      out.push(
+        <ol key={key++} className="md-ol">
+          {items}
+        </ol>,
+      );
+      continue;
+    }
+    // Paragraph: gather consecutive plain lines, soft-wrapped with <br/>.
+    const para: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^```/.test(lines[i]) &&
+      !isHeading(lines[i]) &&
+      !isQuote(lines[i]) &&
+      !isUl(lines[i]) &&
+      !isOl(lines[i])
+    )
+      para.push(lines[i++]);
+    const inlined: ReactNode[] = [];
+    para.forEach((p, idx) => {
+      if (idx > 0) inlined.push(<br key={`b${idx}`} />);
+      inlined.push(...parseInline(p));
+    });
+    out.push(<p key={key++}>{inlined}</p>);
+  }
+  return out;
+}
+
+const Markdown = memo(function Markdown({ text }: { text: string }) {
+  const blocks = useMemo(() => renderBlocks(text), [text]);
+  return <div className="md">{blocks}</div>;
+});
+
+// One conversation turn: a user turn is a right-aligned bubble; an assistant turn
+// is a left avatar + content stack (markdown text, tool calls, tool results).
+const TranscriptTurn = memo(function TranscriptTurn({
+  role,
+  msgs,
+}: {
+  role: "user" | "assistant";
+  msgs: TranscriptMsg[];
+}) {
+  if (role === "user") {
+    return (
+      <div className="turn user">
+        {msgs.map((m, i) => (
+          <div key={i} className="bubble">
+            {m.text}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div className="turn assistant">
+      <div className="avatar">
+        <Sparkles size={15} />
+      </div>
+      <div className="content">
+        {msgs.map((m, i) => {
+          if (m.kind === "tool_use")
+            return (
+              <div key={i} className="tool-use">
+                <span className="tool-name">{m.tool}</span>
+                {m.text ? <span className="tool-arg">{m.text}</span> : null}
+              </div>
+            );
+          if (m.kind === "tool_result")
+            return (
+              <div key={i} className="tool-result">
+                <pre>{m.text}</pre>
+              </div>
+            );
+          return <Markdown key={i} text={m.text} />;
+        })}
+      </div>
+    </div>
+  );
+});
+
+interface Turn {
+  role: "user" | "assistant";
+  msgs: TranscriptMsg[];
+}
+// Group the flat message list into chat turns: a `user` text message starts a
+// user turn; everything else (assistant text, tool_use, tool_result) collects
+// into the surrounding assistant turn.
+function groupTurns(messages: TranscriptMsg[]): Turn[] {
+  const turns: Turn[] = [];
+  for (const m of messages) {
+    const role: Turn["role"] = m.role === "user" ? "user" : "assistant";
+    const last = turns[turns.length - 1];
+    if (last && last.role === role) last.msgs.push(m);
+    else turns.push({ role, msgs: [m] });
+  }
+  return turns;
+}
+
 function initialView(): { tab: Tab; view: View; dir: number | null } {
   const params = new URLSearchParams(location.search);
   const dirRaw = params.get("dir");
@@ -298,6 +572,9 @@ function initialView(): { tab: Tab; view: View; dir: number | null } {
   const pr = params.get("pr");
   if (pr) return { tab: "prs", view: { kind: "pr", number: parseInt(pr, 10), repo }, dir };
   if (params.get("view") === "changes") return { tab: "changes", view: { kind: "changes" }, dir };
+  const tmuxSession = params.get("tmux");
+  if (tmuxSession !== null)
+    return { tab: "tmux", view: { kind: "tmux", session: tmuxSession }, dir };
   const manual = params.get("manual");
   if (manual) return { tab: "manual", view: { kind: "manual", name: manual }, dir };
   const sha = params.get("sha");
@@ -408,6 +685,34 @@ function App() {
   });
   const changes = changesQuery.data ?? null;
 
+  // ---- Tmux tab: claude sessions + the selected session's transcript ----
+  // These are global (not dir-scoped) — they reflect every claude tmux session.
+  // Poll the session list only while some claude session is actively working, so
+  // the busy dots + task lines stay live during a run but we stay quiet at idle.
+  const tmuxQuery = useQuery({
+    queryKey: ["tmux-sessions"],
+    queryFn: ({ signal }) =>
+      fetchJSON<{ sessions: TmuxSession[] }>("/api/tmux/sessions", signal).then((r) => r.sessions),
+    enabled: tab === "tmux",
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => (query.state.data?.some((s) => s.busy) ? TMUX_POLL_MS : false),
+  });
+  const tmuxSessions = tmuxQuery.data ?? null;
+  const selectedSession = view.kind === "tmux" ? view.session : "";
+  // Stream the open transcript only while its session is busy; once claude goes
+  // idle we stop polling so you can scroll back without being yanked to the end.
+  const selectedBusy = !!tmuxSessions?.find((s) => s.name === selectedSession)?.busy;
+  const transcriptQuery = useQuery({
+    queryKey: ["tmux-transcript", selectedSession],
+    queryFn: ({ signal }) =>
+      fetchJSON<Transcript>(`/api/tmux/transcript?session=${encodeURIComponent(selectedSession)}`, signal),
+    enabled: tab === "tmux" && !!selectedSession,
+    refetchOnWindowFocus: false,
+    refetchInterval: selectedBusy ? TMUX_POLL_MS : false,
+  });
+  const selectedSessionRef = useRef(selectedSession);
+  selectedSessionRef.current = selectedSession;
+
   const [busyPath, setBusyPath] = useState<string | null>(null);
 
   // Commit & push dialog (Changes view, `;`)
@@ -421,6 +726,14 @@ function App() {
   const [claudePrompt, setClaudePrompt] = useState("");
   const [launching, setLaunching] = useState(false);
   const [launchedSession, setLaunchedSession] = useState<string | null>(null);
+  // True while a pasted image is being uploaded to /tmp/images (⌃V in the dialog).
+  const [imgUploading, setImgUploading] = useState(false);
+
+  // Reply composer (Tmux tab) — types a reply into the selected session's pane.
+  const [replyText, setReplyText] = useState("");
+  const [replySending, setReplySending] = useState(false);
+  const [replyImgUploading, setReplyImgUploading] = useState(false);
+  const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Directory dropdown (top-left) + settings dialog (manage directories).
   const [dirMenuOpen, setDirMenuOpen] = useState(false);
@@ -533,6 +846,18 @@ function App() {
   const fileEls = useRef(new Map<string, HTMLDivElement>());
   const mainEl = useRef<HTMLDivElement | null>(null);
   const searchEl = useRef<HTMLInputElement | null>(null);
+
+  // Whenever a transcript loads/refreshes, jump to the bottom so the newest part
+  // of the conversation is in view. While the session is busy this polls (see
+  // selectedBusy), so streamed-in messages auto-scroll to the end; structural
+  // sharing means an unchanged poll keeps the same data ref and won't re-scroll.
+  const transcriptData = transcriptQuery.data;
+  const turns = useMemo(() => groupTurns(transcriptData?.messages ?? []), [transcriptData]);
+  useEffect(() => {
+    if (tab !== "tmux" || !transcriptData) return;
+    const el = mainEl.current;
+    if (el) requestAnimationFrame(() => el.scrollTo({ top: el.scrollHeight }));
+  }, [tab, transcriptData, selectedSession]);
 
   // ---- Reviewed commits (persisted server-side in sqlite) ----
   const reviewedQuery = useQuery({
@@ -653,6 +978,98 @@ function App() {
     }
   }, [commitMsg, changes, queryClient, qd]);
 
+  // Insert text at the current caret of a textarea-backed input (used to drop a
+  // pasted image's /tmp path into the prompt/reply), restoring the caret after.
+  const insertAtCaret = useCallback(
+    (
+      ref: MutableRefObject<HTMLTextAreaElement | null>,
+      setValue: Dispatch<SetStateAction<string>>,
+      insert: string,
+    ) => {
+      const el = ref.current;
+      setValue((prev) => {
+        const start = el?.selectionStart ?? prev.length;
+        const end = el?.selectionEnd ?? start;
+        const next = prev.slice(0, start) + insert + prev.slice(end);
+        const pos = start + insert.length;
+        requestAnimationFrame(() => {
+          const e2 = ref.current;
+          if (e2) {
+            e2.focus();
+            e2.setSelectionRange(pos, pos);
+          }
+        });
+        return next;
+      });
+    },
+    [],
+  );
+  const insertIntoPrompt = useCallback(
+    (insert: string) => insertAtCaret(claudeTextareaRef, setClaudePrompt, insert),
+    [insertAtCaret],
+  );
+  const insertIntoReply = useCallback(
+    (insert: string) => insertAtCaret(replyTextareaRef, setReplyText, insert),
+    [insertAtCaret],
+  );
+
+  // Paste an image (⌃V): read it as base64, upload to the server which saves it
+  // under /tmp/images/<random>.<ext>, then insert that absolute path so the
+  // claude session can Read it (Read works on /tmp without a permission prompt
+  // and renders images visually). Non-image pastes fall through to normal paste.
+  const handleImagePaste = useCallback(
+    async (
+      e: ClipboardEvent<HTMLTextAreaElement>,
+      insert: (path: string) => void,
+      setUploading: (b: boolean) => void,
+    ) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imgItem = Array.from(items).find(
+        (it) => it.kind === "file" && it.type.startsWith("image/"),
+      );
+      if (!imgItem) return; // not an image — let the normal text paste happen
+      e.preventDefault();
+      const file = imgItem.getAsFile();
+      if (!file) return;
+      setUploading(true);
+      try {
+        const dataUrl: string = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(r.error);
+          r.readAsDataURL(file);
+        });
+        const res = await fetch("/api/upload-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: dataUrl }),
+        });
+        const body = await res.json().catch(() => ({}) as any);
+        if (!res.ok) {
+          alert(`image paste failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+        if (typeof body.path === "string") insert(`${body.path} `);
+      } catch (err) {
+        alert(`image paste failed: ${String((err as any)?.message ?? err)}`);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [],
+  );
+  const handleClaudePaste = useCallback(
+    (e: ClipboardEvent<HTMLTextAreaElement>) =>
+      handleImagePaste(e, insertIntoPrompt, setImgUploading),
+    [handleImagePaste, insertIntoPrompt],
+  );
+  const handleReplyPaste = useCallback(
+    (e: ClipboardEvent<HTMLTextAreaElement>) =>
+      handleImagePaste(e, insertIntoReply, setReplyImgUploading),
+    [handleImagePaste, insertIntoReply],
+  );
+
   // Launch a new interactive claude session in the active directory (detached).
   const submitClaude = useCallback(async () => {
     const prompt = claudePrompt.trim();
@@ -677,6 +1094,36 @@ function App() {
       setLaunching(false);
     }
   }, [claudePrompt, qd]);
+
+  // Send a reply into the selected session's claude pane (server pastes the text
+  // + Enter), then refresh the transcript + session list once so the new turn and
+  // the busy dot show up.
+  const submitReply = useCallback(async () => {
+    const text = replyText.trim();
+    const session = selectedSessionRef.current;
+    if (!text || !session) return;
+    setReplySending(true);
+    try {
+      const res = await fetch("/api/tmux/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session, text }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`reply failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      setReplyText("");
+      // Give claude a beat to accept the keys before reading the transcript back.
+      setTimeout(() => {
+        queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
+        queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+      }, 500);
+    } finally {
+      setReplySending(false);
+    }
+  }, [replyText, queryClient]);
 
   // `x` — stage everything, then hand the commit off to a detached claude
   // session that writes the message itself (and pushes). Skips the `;` dialog
@@ -717,9 +1164,63 @@ function App() {
         setView({ kind: "manual", name: "" });
         history.replaceState(null, "", navUrl("manual="));
       }
+      if (next === "tmux") {
+        setView({ kind: "tmux", session: "" });
+        history.replaceState(null, "", navUrl("tmux="));
+      }
     },
     [navUrl],
   );
+
+  const selectTmux = useCallback(
+    (session: string) => {
+      setView({ kind: "tmux", session });
+      history.replaceState(null, "", navUrl(`tmux=${encodeURIComponent(session)}`));
+    },
+    [navUrl],
+  );
+
+  // Kill a tmux session, then refresh the list and move the selection to a
+  // neighbour so browsing-and-killing stays on the keyboard.
+  const killSession = useCallback(
+    async (name: string) => {
+      const list = tmuxSessions ?? [];
+      const idx = list.findIndex((s) => s.name === name);
+      const next = list[idx + 1]?.name ?? list[idx - 1]?.name ?? "";
+      try {
+        const res = await fetch("/api/tmux/kill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: name }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}) as any);
+          alert(`kill failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+      } catch (e) {
+        alert(`kill failed: ${errMessage(e)}`);
+        return;
+      }
+      if (selectedSessionRef.current === name) selectTmux(next);
+      tmuxQuery.refetch();
+    },
+    [tmuxSessions, selectTmux, tmuxQuery],
+  );
+
+  // On the Tmux tab, auto-select the first session once the list loads (or when
+  // the selected session disappears, e.g. after a kill) so the transcript pane
+  // always shows something to read.
+  useEffect(() => {
+    if (tab !== "tmux" || !tmuxSessions) return;
+    const exists = selectedSession && tmuxSessions.some((s) => s.name === selectedSession);
+    if (!exists && tmuxSessions.length) selectTmux(tmuxSessions[0].name);
+  }, [tab, tmuxSessions, selectedSession, selectTmux]);
+
+  // Drop any half-typed reply when the selected session changes.
+  useEffect(() => {
+    setReplyText("");
+  }, [selectedSession]);
 
   const selectCommit = useCallback(
     (sha: string, repo?: string) => {
@@ -1180,6 +1681,18 @@ function App() {
         : manualPatches,
     [manualPatches, q],
   );
+  const visibleTmux = useMemo(
+    () =>
+      q && tmuxSessions
+        ? tmuxSessions.filter(
+            (s) =>
+              s.name.toLowerCase().includes(q) ||
+              s.cwd.toLowerCase().includes(q) ||
+              s.task.toLowerCase().includes(q),
+          )
+        : tmuxSessions,
+    [tmuxSessions, q],
+  );
   // File count per patch for the sidebar (parsePatchFiles is cached by key).
   const manualFileCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1224,6 +1737,8 @@ function App() {
     visibleCommits,
     visiblePrs,
     visibleManual,
+    visibleTmux,
+    selectedTmux: selectedSession,
     selection,
     orderedKeys,
     sections,
@@ -1239,6 +1754,8 @@ function App() {
     visibleCommits,
     visiblePrs,
     visibleManual,
+    visibleTmux,
+    selectedTmux: selectedSession,
     selection,
     orderedKeys,
     sections,
@@ -1250,7 +1767,8 @@ function App() {
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const { tab, view, visibleCommits, visiblePrs, visibleManual } = keyCtx.current;
+      const { tab, view, visibleCommits, visiblePrs, visibleManual, visibleTmux, selectedTmux } =
+        keyCtx.current;
       const target = (e.composedPath()[0] ?? e.target) as HTMLElement;
       const typing =
         target instanceof HTMLInputElement ||
@@ -1300,7 +1818,7 @@ function App() {
         selectTab(TAB_ORDER[(idx + delta) % TAB_ORDER.length]);
         return;
       }
-      // 1–4 jump straight to a tab
+      // 1–5 jump straight to a tab
       if (e.key >= "1" && e.key <= String(TAB_ORDER.length)) {
         e.preventDefault();
         selectTab(TAB_ORDER[Number(e.key) - 1]);
@@ -1381,6 +1899,13 @@ function App() {
       // refetches.
       if (e.key === " ") {
         e.preventDefault();
+        // Tmux tab re-reads the session list + the open transcript from disk.
+        if (tab === "tmux") {
+          queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+          if (selectedTmux)
+            queryClient.refetchQueries({ queryKey: ["tmux-transcript", selectedTmux] });
+          return;
+        }
         const listKey: string[] =
           tab === "commits"
             ? ["commits"]
@@ -1421,11 +1946,15 @@ function App() {
         setClaudeOpen(true);
         return;
       }
-      // `x` stages everything and launches a claude session to author the commit
-      // message and push — Changes view only, and only when there's something to
-      // commit (no point spinning up a session over a clean tree).
+      // `x` kills the selected session on the Tmux tab; otherwise it stages
+      // everything and launches a claude session to author the commit message and
+      // push (Changes view only, and only when there's something to commit).
       if (e.key === "x") {
         e.preventDefault();
+        if (tab === "tmux") {
+          if (selectedTmux) void killSession(selectedTmux);
+          return;
+        }
         const dirty = (keyCtx.current.changes ?? []).some(
           (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
         );
@@ -1482,11 +2011,25 @@ function App() {
         document
           .getElementById(`row-manual-${visibleManual[next].name}`)
           ?.scrollIntoView({ block: "nearest" });
+      } else if (tab === "tmux" && visibleTmux?.length) {
+        e.preventDefault();
+        const idx = visibleTmux.findIndex((s) => s.name === selectedTmux);
+        const next = down
+          ? idx + 1 >= visibleTmux.length
+            ? 0
+            : idx + 1
+          : idx <= 0
+            ? visibleTmux.length - 1
+            : idx - 1;
+        selectTmux(visibleTmux[next].name);
+        document
+          .getElementById(`row-tmux-${visibleTmux[next].name}`)
+          ?.scrollIntoView({ block: "nearest" });
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectCommit, selectPr, selectManual, selectTab, toggleReviewed, toggleCollapsed, runGit, commitWithClaude, queryClient]);
+  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, killSession, toggleReviewed, toggleCollapsed, runGit, commitWithClaude, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -1594,17 +2137,51 @@ function App() {
             )}
           </div>
           <div className="tabs">
-            <button className={tab === "commits" ? "on" : ""} onClick={() => selectTab("commits")}>
-              Commits
+            <button
+              className={tab === "commits" ? "on" : ""}
+              data-tip="Commits"
+              aria-label="Commits"
+              onClick={() => selectTab("commits")}
+            >
+              <GitCommitHorizontal />
             </button>
-            <button className={tab === "prs" ? "on" : ""} onClick={() => selectTab("prs")}>
-              PRs
+            <button
+              className={tab === "prs" ? "on" : ""}
+              data-tip="Pull requests"
+              aria-label="Pull requests"
+              onClick={() => selectTab("prs")}
+            >
+              <GitPullRequest />
             </button>
-            <button className={tab === "changes" ? "on" : ""} onClick={() => selectTab("changes")}>
-              Changes
+            <button
+              className={tab === "changes" ? "on" : ""}
+              data-tip="Changes"
+              aria-label="Changes"
+              onClick={() => selectTab("changes")}
+            >
+              <FileDiffIcon />
             </button>
-            <button className={tab === "manual" ? "on" : ""} onClick={() => selectTab("manual")}>
-              Manual{manualPatches && manualPatches.length > 0 ? ` (${manualPatches.length})` : ""}
+            <button
+              className={tab === "manual" ? "on" : ""}
+              data-tip="Manual patches"
+              aria-label="Manual patches"
+              onClick={() => selectTab("manual")}
+            >
+              <FileStack />
+              {manualPatches && manualPatches.length > 0 && (
+                <span className="tab-badge">{manualPatches.length}</span>
+              )}
+            </button>
+            <button
+              className={tab === "tmux" ? "on" : ""}
+              data-tip="Tmux sessions"
+              aria-label="Tmux sessions"
+              onClick={() => selectTab("tmux")}
+            >
+              <SquareTerminal />
+              {tmuxSessions && tmuxSessions.length > 0 && (
+                <span className="tab-badge">{tmuxSessions.length}</span>
+              )}
             </button>
           </div>
           {tab !== "changes" && (
@@ -1616,7 +2193,9 @@ function App() {
                   ? "Filter commits…"
                   : tab === "prs"
                     ? "Filter PRs…"
-                    : "Filter patches…"
+                    : tab === "tmux"
+                      ? "Filter sessions…"
+                      : "Filter patches…"
               }
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -1793,13 +2372,56 @@ function App() {
             ))}
           </div>
         )}
+
+        {tab === "tmux" && (
+          <div className="commit-list">
+            {tmuxQuery.isPending && <SkeletonList />}
+            {tmuxQuery.isError && (
+              <div className="side-note error">{errMessage(tmuxQuery.error)}</div>
+            )}
+            {visibleTmux?.map((s) => (
+              <div
+                key={s.name}
+                id={`row-tmux-${s.name}`}
+                className={`commit${selectedSession === s.name ? " active" : ""}`}
+                onClick={() => selectTmux(s.name)}
+              >
+                <div className="sess-top">
+                  <span className={`sess-busy${s.busy ? " on" : ""}`} />
+                  <span className="sess-name">{s.name}</span>
+                </div>
+                {s.task && <div className="sess-task">{s.task}</div>}
+                <div className="sess-cwd">{s.cwd.replace(/^.*\//, "") || s.cwd}</div>
+                <button
+                  className="kill-btn"
+                  title={`Kill ${s.name} (x)`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void killSession(s.name);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            {tmuxSessions !== null && tmuxSessions.length === 0 && (
+              <div className="side-note">No claude tmux sessions</div>
+            )}
+          </div>
+        )}
+
         <div className="kbd-hints">
           <span>
-            <kbd>1-4</kbd>/<kbd>←/→</kbd> tabs
+            <kbd>1-5</kbd>/<kbd>←/→</kbd> tabs
           </span>
           <span>
             <kbd>↑/↓</kbd> list
           </span>
+          {tab === "tmux" && (
+            <span>
+              <kbd>x</kbd> kill <kbd>space</kbd> refresh
+            </span>
+          )}
           <span>
             <kbd>j/k/d/u</kbd> scroll
           </span>
@@ -1832,7 +2454,102 @@ function App() {
         </div>
       </nav>
 
-      <main className="diffs" ref={mainEl}>
+      <main className={`diffs${tab === "tmux" ? " tmux" : ""}`} ref={mainEl}>
+        {tab === "tmux" && (
+          <div className="transcript">
+            {!selectedSession && <div className="transcript-empty">Select a session on the left</div>}
+            {selectedSession && transcriptQuery.isPending && (
+              <ContentSpinner label="Loading transcript…" />
+            )}
+            {transcriptQuery.isError && (
+              <div className="empty error">{errMessage(transcriptQuery.error)}</div>
+            )}
+            {transcriptData && (
+              <>
+                <div className="transcript-head">
+                  <h2>{transcriptData.title || transcriptData.session}</h2>
+                  <span className="t-sub">
+                    {transcriptData.cwd}
+                    {transcriptData.model ? ` · ${transcriptData.model}` : ""}
+                  </span>
+                </div>
+                {transcriptData.messages.length === 0 ? (
+                  <div className="transcript-empty">
+                    {transcriptData.path
+                      ? "No conversation yet — press space to refresh"
+                      : "No transcript found for this session"}
+                  </div>
+                ) : (
+                  turns.map((t, i) => <TranscriptTurn key={i} role={t.role} msgs={t.msgs} />)
+                )}
+                {selectedBusy && (
+                  <div className="turn assistant">
+                    <div className="avatar">
+                      <Sparkles size={15} />
+                    </div>
+                    <div className="content">
+                      <div className="typing">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+            {selectedSession && (
+              <div className="reply-box">
+                <textarea
+                  ref={replyTextareaRef}
+                  className="reply-input"
+                  placeholder={`Reply to ${selectedSession}…  (⌃V to paste an image, ↵ to send, ⇧↵ for newline)`}
+                  value={replyText}
+                  onChange={(e) => setReplyText(e.target.value)}
+                  onPaste={handleReplyPaste}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Escape") {
+                      e.currentTarget.blur();
+                      return;
+                    }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      submitReply();
+                    }
+                  }}
+                />
+                <div className="reply-bar">
+                  <span className="reply-hint">
+                    {replyImgUploading ? (
+                      "Uploading image…"
+                    ) : (
+                      <>
+                        <span>
+                          <kbd>⌃V</kbd> image
+                        </span>
+                        <span>
+                          <kbd>↵</kbd> send
+                        </span>
+                        <span>
+                          <kbd>⇧↵</kbd> newline
+                        </span>
+                      </>
+                    )}
+                  </span>
+                  <span className="spacer" />
+                  <button
+                    className="act primary"
+                    disabled={replySending || !replyText.trim()}
+                    onClick={submitReply}
+                  >
+                    {replySending ? "Sending…" : "Send"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
         {diffLoading && <ContentSpinner label="Loading diff…" />}
         {view.kind === "changes" && changes === null && <ContentSpinner label="Loading changes…" />}
         {view.kind === "manual" && manualPatches === null && !manualError && (
@@ -1904,6 +2621,7 @@ function App() {
         </div>
       )}
 
+      {tab !== "tmux" && (
       <aside className="tree">
         <div className="meta-panel">
           {view.kind === "commit" && (
@@ -2004,6 +2722,7 @@ function App() {
           />
         </div>
       </aside>
+      )}
 
       {commitOpen && (
         <div className="modal-overlay" onClick={() => !committing && setCommitOpen(false)}>
@@ -2074,12 +2793,13 @@ function App() {
                 autoFocus
                 ref={claudeTextareaRef}
                 className="commit-input"
-                placeholder="Prompt for a new Claude Code session…  (type @ to reference a file)"
+                placeholder="Prompt for a new Claude Code session…  (type @ to reference a file, ⌃V to paste an image)"
                 value={claudePrompt}
                 onChange={(e) => {
                   setClaudePrompt(e.target.value);
                   syncFileToken(e.target);
                 }}
+                onPaste={handleClaudePaste}
                 onClick={(e) => syncFileToken(e.currentTarget)}
                 onKeyUp={(e) => {
                   // Track caret moves (arrows/home/end) so the @token stays current,
@@ -2158,7 +2878,16 @@ function App() {
             </div>
             <div className="modal-hint">
               <span>
-                Detached <code>claude</code> in tmux
+                {imgUploading ? (
+                  "Uploading image…"
+                ) : (
+                  <>
+                    Detached <code>claude</code> in tmux
+                  </>
+                )}
+              </span>
+              <span>
+                <kbd>⌃V</kbd> paste image
               </span>
               <span>
                 <kbd>⌘↵</kbd> / <kbd>⌥↵</kbd> launch

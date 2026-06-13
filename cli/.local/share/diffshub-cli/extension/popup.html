@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>diffshub</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        width: 320px; margin: 0; padding: 14px;
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #fff; color: #18181b;
+      }
+      h1 { font-size: 14px; margin: 0 0 2px; }
+      .origin { font-size: 11px; color: #71717a; word-break: break-all; margin-bottom: 12px; }
+      label { display: block; font-size: 11px; color: #71717a; margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+      select, input {
+        width: 100%; padding: 7px 9px; font: inherit; font-size: 13px;
+        background: #fff; color: inherit; border: 1px solid #d4d4d8; border-radius: 6px; outline: none;
+      }
+      select:focus, input:focus { border-color: #6e56cf; }
+      .err { color: #dc2626; font-size: 11px; margin-top: 6px; white-space: pre-wrap; }
+      .hint { margin-top: 14px; font-size: 11px; color: #a1a1aa; border-top: 1px solid #e4e4e7; padding-top: 10px; }
+      .hint kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; }
+      .note { font-size: 11px; color: #a1a1aa; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

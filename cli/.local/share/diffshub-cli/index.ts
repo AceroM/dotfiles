@@ -314,10 +314,18 @@ getWorkspace(defaultDirId)
   .then((ws) => indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => {}))
   .catch(() => {});
 
+// Permissive CORS so the Chrome extension's content scripts can call the API
+// from any origin (the server is localhost-only and personal).
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 function json(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...CORS },
   });
 }
 
@@ -406,29 +414,311 @@ async function pickClaudeSessionName(): Promise<string> {
   return name;
 }
 
+// Paste text into a running pane via a tmux buffer (robust for multi-line input
+// and special characters, unlike literal send-keys) and submit it with Enter.
+async function pasteAndSubmit(name: string, text: string): Promise<void> {
+  const bufFile = `${stateDir}/claude-prompt-${Date.now()}.txt`;
+  await Bun.write(bufFile, text);
+  const buf = `diffshub-${name}`;
+  await $`tmux -L default load-buffer -b ${buf} ${bufFile}`.quiet();
+  await $`tmux -L default paste-buffer -d -b ${buf} -t ${`${name}:0.0`}`.quiet();
+  await $`tmux -L default send-keys -t ${`${name}:0.0`} Enter`.quiet();
+  await $`rm -f ${bufFile}`.quiet();
+}
+
 // Paste the prompt into a freshly-started claude session and submit it. Runs
 // fire-and-forget after a short delay so claude's TUI is ready to receive it.
 async function sendClaudePrompt(name: string, prompt: string): Promise<void> {
   try {
     await Bun.sleep(1000);
-    const bufFile = `${stateDir}/claude-prompt-${Date.now()}.txt`;
-    await Bun.write(bufFile, prompt);
-    const buf = `diffshub-${name}`;
-    await $`tmux -L default load-buffer -b ${buf} ${bufFile}`.quiet();
-    await $`tmux -L default paste-buffer -d -b ${buf} -t ${`${name}:0.0`}`.quiet();
-    await $`tmux -L default send-keys -t ${`${name}:0.0`} Enter`.quiet();
-    await $`rm -f ${bufFile}`.quiet();
+    await pasteAndSubmit(name, prompt);
   } catch {}
 }
 
 // Launch an interactive claude session detached in the directory (mirrors `p`),
 // returning the session name so the caller can `tmux attach -t <name>`.
+// We mint the claude session id ourselves (`--session-id`) and stamp it onto the
+// tmux session as the `@claude_session` user option, so the Tmux tab can map this
+// session straight to its ~/.claude transcript (see resolveTranscript).
 async function newClaudeSession(dir: string, prompt: string): Promise<string> {
   const name = await pickClaudeSessionName();
-  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude`;
+  const sid = crypto.randomUUID();
+  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
+  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
   if (prompt.trim()) void sendClaudePrompt(name, prompt);
   return name;
+}
+
+// ---- Tmux tab: claude sessions <-> ~/.claude transcripts ----
+// claude stores each session's transcript at
+//   ~/.claude/projects/<munged-cwd>/<session-id>.jsonl
+// where the munged dir replaces every non-alphanumeric char with "-"
+// (e.g. /Users/me/.dotfiles -> -Users-me--dotfiles).
+const claudeProjectsRoot = `${process.env.HOME}/.claude/projects`;
+const mungeDir = (p: string) => p.replace(/[^a-zA-Z0-9]/g, "-");
+
+// Find a transcript by session id regardless of which project dir it landed in
+// (robust against any munging quirks): scan project dirs for "<sid>.jsonl".
+function findTranscriptBySid(sid: string): string | null {
+  if (!/^[0-9a-fA-F-]{8,}$/.test(sid)) return null;
+  let subdirs: string[] = [];
+  try {
+    subdirs = readdirSync(claudeProjectsRoot);
+  } catch {
+    return null;
+  }
+  for (const sub of subdirs) {
+    const candidate = `${claudeProjectsRoot}/${sub}/${sid}.jsonl`;
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+// For untagged (legacy) sessions we can't go straight from session id to file, so
+// we disambiguate within a cwd's project folder by matching the tmux pane title
+// to a transcript's ai-title (claude keeps both in sync). This is what lets two
+// sessions sharing one directory map to their own transcripts.
+interface Candidate {
+  path: string;
+  mtime: number;
+  aiTitle: string;
+}
+
+// Read the most recent ai-title from a transcript. claude rewrites it throughout
+// the session, so it's reliably in the tail — we only read the last chunk.
+async function tailAiTitle(path: string): Promise<string> {
+  try {
+    const file = Bun.file(path);
+    const size = file.size;
+    const text = await file.slice(size > 65536 ? size - 65536 : 0).text();
+    let title = "";
+    for (const line of text.split("\n")) {
+      if (!line.includes('"ai-title"')) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d?.type === "ai-title" && typeof d.aiTitle === "string") title = d.aiTitle;
+      } catch {}
+    }
+    return title;
+  } catch {
+    return "";
+  }
+}
+
+// The recent .jsonl transcripts in a cwd's project folder, newest first, each
+// with its ai-title. Capped so a busy folder stays cheap.
+async function dirCandidates(cwd: string): Promise<Candidate[]> {
+  const dir = `${claudeProjectsRoot}/${mungeDir(cwd)}`;
+  let files: string[] = [];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    return [];
+  }
+  const recent = files
+    .map((f) => {
+      const path = `${dir}/${f}`;
+      let mtime = 0;
+      try {
+        mtime = statSync(path).mtimeMs;
+      } catch {}
+      return { path, mtime };
+    })
+    .sort((a, b) => b.mtime - a.mtime)
+    // Cap so a giant folder stays bounded; live sessions (incl. idle ones whose
+    // files are older) need a wide enough net to title-match against.
+    .slice(0, 400);
+  return Promise.all(recent.map(async (c) => ({ ...c, aiTitle: await tailAiTitle(c.path) })));
+}
+
+// Tolerant title comparison — terminal titles can be truncated, so accept a
+// prefix match (of meaningful length) either direction.
+function titlesMatch(a: string, b: string): boolean {
+  const x = a.trim().toLowerCase();
+  const y = b.trim().toLowerCase();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return Math.min(x.length, y.length) >= 12 && (x.startsWith(y) || y.startsWith(x));
+}
+
+// Resolve a tmux session to its transcript. Tagged sessions (@claude_session) map
+// directly by id; untagged ones match by ai-title within the cwd, falling back to
+// the most recently modified transcript there.
+async function resolveTranscript(
+  cwd: string,
+  sid: string,
+  task: string,
+  cache?: Map<string, Candidate[]>,
+): Promise<string | null> {
+  if (sid) {
+    const byId = findTranscriptBySid(sid);
+    if (byId) return byId;
+    const expected = `${claudeProjectsRoot}/${mungeDir(cwd)}/${sid}.jsonl`;
+    if (existsSync(expected)) return expected;
+  }
+  let cands = cache?.get(cwd);
+  if (!cands) {
+    cands = await dirCandidates(cwd);
+    cache?.set(cwd, cands);
+  }
+  if (task) {
+    const hit = cands.find((c) => titlesMatch(c.aiTitle, task));
+    if (hit) return hit.path;
+  }
+  return cands[0]?.path ?? null;
+}
+
+// Strip claude's leading status glyph (spinner / ✳) from a pane title, leaving
+// the task summary. Returns "" when the title isn't a meaningful task.
+function cleanTitle(title: string, name: string, cmd: string): string {
+  let task = (title ?? "").replace(/^[^\x00-\x7f]\s*/u, "").trim();
+  // Drop non-task titles: the session/command name, a bare shell, or claude's
+  // default "Claude Code" placeholder shown before it generates a real title.
+  if (task === name || task === "zsh" || task === cmd || task === "Claude Code" || task === "claude")
+    task = "";
+  return task;
+}
+
+interface TmuxSession {
+  name: string;
+  cwd: string;
+  task: string; // what claude is doing (cleaned pane title), "" if not meaningful
+  busy: boolean; // claude is actively working (braille-spinner pane title)
+  sessionId: string; // @claude_session if tagged, else ""
+  hasTranscript: boolean;
+  mtime: number; // transcript mtime (ms), 0 if none — used for sorting
+}
+
+// List tmux sessions on the default socket that are running claude, each resolved
+// to its transcript. `pane_current_command` is claude's version string (e.g.
+// "2.1.177") once it's running, so we match that, "claude", or "node".
+async function listClaudeSessions(): Promise<TmuxSession[]> {
+  const SEP = "\x1f";
+  const fmt = ["#{session_name}", "#{pane_current_path}", "#{pane_current_command}", "#{pane_title}", "#{@claude_session}"].join(SEP);
+  let raw = "";
+  try {
+    raw = await $`tmux -L default list-sessions -F ${fmt}`.quiet().text();
+  } catch {
+    return [];
+  }
+  const cache = new Map<string, Candidate[]>(); // dir -> candidates, reused across same-dir sessions
+  const out: TmuxSession[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const [name, cwd, cmd, title, sid] = line.split(SEP);
+    if (!name) continue;
+    const isClaude = /claude|node/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd);
+    if (!isClaude) continue;
+    // Pane title is claude's status: a leading braille glyph (U+2800–U+28FF)
+    // means it's actively working; "✳" (and other leading glyphs) mean idle.
+    const busy = /^[⠀-⣿]/u.test(title ?? "");
+    const task = cleanTitle(title ?? "", name, cmd ?? "");
+    const path = await resolveTranscript(cwd ?? "", sid ?? "", task, cache);
+    let mtime = 0;
+    if (path) {
+      try {
+        mtime = statSync(path).mtimeMs;
+      } catch {}
+    }
+    out.push({ name, cwd: cwd ?? "", task, busy, sessionId: sid ?? "", hasTranscript: !!path, mtime });
+  }
+  // Most recently active first.
+  out.sort((a, b) => b.mtime - a.mtime);
+  return out;
+}
+
+interface TranscriptMsg {
+  role: "user" | "assistant" | "tool";
+  kind: "text" | "tool_use" | "tool_result";
+  text: string;
+  tool?: string; // tool name for tool_use
+  ts?: string; // ISO timestamp
+}
+
+// One-line-ish summary of a tool call's input for the transcript.
+function summarizeToolInput(name: string, input: any): string {
+  if (input == null || typeof input !== "object") return "";
+  const pick = (k: string) => (typeof input[k] === "string" ? input[k] : "");
+  if (name === "Bash") return pick("command");
+  if (name === "Read" || name === "Edit" || name === "Write" || name === "NotebookEdit")
+    return pick("file_path") || pick("notebook_path");
+  if (name === "Grep") return [pick("pattern"), pick("path") && `in ${pick("path")}`].filter(Boolean).join(" ");
+  if (name === "Glob") return pick("pattern");
+  if (name === "Task") return pick("description") || pick("subagent_type");
+  if (name === "TodoWrite") return Array.isArray(input.todos) ? `${input.todos.length} todos` : "";
+  const s = JSON.stringify(input);
+  return s.length > 200 ? s.slice(0, 200) + "…" : s;
+}
+
+function blockText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content
+      .map((b: any) => (typeof b === "string" ? b : b?.type === "text" ? b.text : b?.text ?? ""))
+      .filter(Boolean)
+      .join("\n");
+  return "";
+}
+
+// Parse a claude .jsonl transcript into a readable conversation, keeping only the
+// last `limit` messages (the "latest part" the Tmux tab shows). Text is truncated
+// so a multi-MB transcript stays a small payload.
+function parseTranscript(text: string, limit: number): { messages: TranscriptMsg[]; model: string; title: string } {
+  const msgs: TranscriptMsg[] = [];
+  let model = "";
+  let title = "";
+  const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (d?.type === "ai-title" && typeof d.aiTitle === "string") title = d.aiTitle;
+    if (d?.isSidechain) continue; // skip subagent side-conversations
+    const type = d?.type;
+    if (type !== "user" && type !== "assistant") continue;
+    const msg = d.message;
+    if (!msg) continue;
+    const ts = typeof d.timestamp === "string" ? d.timestamp : undefined;
+    if (type === "assistant" && typeof msg.model === "string") model = msg.model;
+    const content = msg.content;
+    if (type === "user") {
+      if (typeof content === "string") {
+        if (content.trim()) msgs.push({ role: "user", kind: "text", text: trunc(content, 8000), ts });
+      } else if (Array.isArray(content)) {
+        for (const b of content) {
+          if (b?.type === "text" && b.text?.trim())
+            msgs.push({ role: "user", kind: "text", text: trunc(b.text, 8000), ts });
+          else if (b?.type === "tool_result") {
+            const t = blockText(b.content) || (typeof b.content === "string" ? b.content : "");
+            msgs.push({ role: "tool", kind: "tool_result", text: trunc(t || "(tool result)", 2000), ts });
+          }
+        }
+      }
+    } else {
+      if (Array.isArray(content)) {
+        for (const b of content) {
+          if (b?.type === "text" && b.text?.trim())
+            msgs.push({ role: "assistant", kind: "text", text: trunc(b.text, 8000), ts });
+          else if (b?.type === "tool_use")
+            msgs.push({
+              role: "assistant",
+              kind: "tool_use",
+              tool: b.name,
+              text: trunc(summarizeToolInput(b.name, b.input), 1000),
+              ts,
+            });
+        }
+      } else if (typeof content === "string" && content.trim()) {
+        msgs.push({ role: "assistant", kind: "text", text: trunc(content, 8000), ts });
+      }
+    }
+  }
+  return { messages: msgs.slice(-limit), model, title };
 }
 
 interface CommitSummary {
@@ -765,10 +1055,167 @@ const page = `<!DOCTYPE html>
 
   .tabs { display: flex; gap: 2px; margin-bottom: 10px; background: #efeff1; border: 1px solid #e4e4e7; border-radius: 7px; padding: 2px; }
   .tabs button {
-    flex: 1; padding: 4px 0; font-size: 12px; cursor: pointer;
+    flex: 1; height: 30px; cursor: pointer; position: relative;
+    display: flex; align-items: center; justify-content: center;
     background: none; border: none; border-radius: 5px; color: #71717a;
   }
-  .tabs button.on { background: #ffffff; color: #18181b; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+  .tabs button:hover { color: #18181b; }
+  .tabs button.on { background: #ffffff; color: #6e56cf; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+  .tabs button svg { width: 16px; height: 16px; display: block; }
+  /* count badge (e.g. number of manual patches / tmux sessions) */
+  .tabs button .tab-badge {
+    position: absolute; top: 1px; right: 4px; min-width: 13px; height: 13px;
+    padding: 0 3px; border-radius: 7px; background: #6e56cf; color: #fff;
+    font-size: 9px; line-height: 13px; font-weight: 600; text-align: center;
+  }
+  /* hover tooltip driven by data-tip */
+  .tabs button[data-tip]::after {
+    content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%;
+    transform: translateX(-50%); white-space: nowrap; pointer-events: none;
+    background: #18181b; color: #fff; font-size: 11px; padding: 3px 7px;
+    border-radius: 5px; opacity: 0; transition: opacity .12s ease .15s; z-index: 30;
+  }
+  .tabs button[data-tip]::before {
+    content: ""; position: absolute; top: calc(100% + 1px); left: 50%;
+    transform: translateX(-50%); border: 5px solid transparent;
+    border-bottom-color: #18181b; opacity: 0; transition: opacity .12s ease .15s; z-index: 30;
+  }
+  .tabs button[data-tip]:hover::after, .tabs button[data-tip]:hover::before { opacity: 1; }
+
+  /* ---- Tmux tab: session list rows ---- */
+  .sess-busy {
+    flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%;
+    background: #d4d4d8; margin-right: 7px;
+  }
+  .sess-busy.on { background: #6e56cf; box-shadow: 0 0 0 0 rgba(110,86,207,.5); animation: sessPulse 1.4s ease-in-out infinite; }
+  @keyframes sessPulse { 0% { box-shadow: 0 0 0 0 rgba(110,86,207,.5); } 70% { box-shadow: 0 0 0 5px rgba(110,86,207,0); } 100% { box-shadow: 0 0 0 0 rgba(110,86,207,0); } }
+  .commit .sess-top { display: flex; align-items: center; }
+  .sess-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .commit .sess-task { color: #71717a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; margin-top: 2px; padding-right: 22px; }
+  .commit .sess-cwd { color: #a1a1aa; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; }
+  .kill-btn {
+    position: absolute; top: 9px; right: 10px; width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+    background: none; border: 1px solid #d4d4d8; border-radius: 50%;
+    color: #a1a1aa; font-size: 11px; cursor: pointer; opacity: 0;
+  }
+  .commit:hover .kill-btn { opacity: 1; }
+  .kill-btn:hover { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
+
+  /* ---- Tmux tab: transcript (ChatGPT-style chat) ---- */
+  .transcript { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+  .transcript-head {
+    position: sticky; top: 0; z-index: 5; background: #ffffff;
+    margin: 0 0 2px; padding: 10px 0;
+    border-bottom: 1px solid #e4e4e7; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  }
+  /* Opaque shield filling any strip above the stuck header (e.g. the scroll
+     container's top padding) so scrolled messages never peek above the title. */
+  .transcript-head::before {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 20px; background: #ffffff;
+  }
+  .transcript-head h2 { font-size: 14px; margin: 0; }
+  .transcript-head .t-sub { font-size: 11px; color: #71717a; }
+  /* Chat turns */
+  .turn { display: flex; gap: 11px; align-items: flex-start; }
+  .turn.user { flex-direction: column; align-items: flex-end; gap: 6px; }
+  .turn.user .bubble {
+    max-width: 80%; background: #f4f4f5; color: #18181b;
+    border-radius: 18px; padding: 10px 15px; text-align: left;
+    white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.55;
+  }
+  .turn.assistant .avatar {
+    width: 26px; height: 26px; flex-shrink: 0; margin-top: 1px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; color: #ffffff; background: linear-gradient(135deg, #8771dd, #6e56cf);
+  }
+  .turn.assistant .content {
+    flex: 1; min-width: 0; padding-top: 2px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+
+  /* Tool calls inside an assistant turn */
+  .tool-use {
+    align-self: flex-start; max-width: 100%;
+    display: inline-flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    color: #52525b; background: #f4f4f5; border: 1px solid #e4e4e7; border-radius: 6px; padding: 4px 9px;
+  }
+  .tool-use .tool-name { color: #6e56cf; font-weight: 600; }
+  .tool-use .tool-name::before { content: "⚒ "; opacity: .8; }
+  .tool-use .tool-arg { color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tool-result {
+    align-self: flex-start; max-width: 100%;
+    background: #fafafa; border: 1px solid #e4e4e7; border-radius: 6px;
+  }
+  .tool-result pre {
+    margin: 0; padding: 7px 10px; max-height: 9em; overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    color: #71717a; white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* "Claude is working" typing indicator */
+  .typing { display: inline-flex; gap: 4px; padding: 6px 2px; }
+  .typing span { width: 6px; height: 6px; border-radius: 50%; background: #b8a9ec; animation: typing 1.2s infinite ease-in-out; }
+  .typing span:nth-child(2) { animation-delay: .15s; }
+  .typing span:nth-child(3) { animation-delay: .3s; }
+  @keyframes typing { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+
+  /* Markdown rendering of assistant messages */
+  .md { font-size: 14px; line-height: 1.62; color: #1f2328; word-break: break-word; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 10px; white-space: pre-wrap; }
+  .md .md-h { font-weight: 650; line-height: 1.3; margin: 18px 0 8px; }
+  .md .md-h.h1 { font-size: 19px; }
+  .md .md-h.h2 { font-size: 16px; }
+  .md .md-h.h3, .md .md-h.h4, .md .md-h.h5, .md .md-h.h6 { font-size: 14px; }
+  .md ul, .md ol { margin: 0 0 10px; padding-left: 22px; }
+  .md li { margin: 3px 0; }
+  .md a { color: #6e56cf; text-decoration: underline; }
+  .md a:hover { color: #5a45b0; }
+  .md strong { font-weight: 650; }
+  .md em { font-style: italic; }
+  .md blockquote.md-quote { margin: 0 0 10px; padding: 2px 0 2px 13px; border-left: 3px solid #e4e4e7; color: #52525b; }
+  .md hr.md-hr { border: none; border-top: 1px solid #e4e4e7; margin: 16px 0; }
+  .md-code-inline {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em;
+    background: #f0f0f1; border: 1px solid #e7e7ea; border-radius: 5px; padding: .5px 5px;
+  }
+  /* Fenced code blocks */
+  .md-code { margin: 0 0 10px; border: 1px solid #e4e4e7; border-radius: 8px; overflow: hidden; background: #fcfcfd; }
+  .md-code-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 8px 4px 11px; background: #f4f4f5; border-bottom: 1px solid #e4e4e7;
+    font-size: 11px; color: #71717a;
+  }
+  .md-code-head .lang { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: lowercase; }
+  .md-code-head .copy { background: none; border: none; cursor: pointer; color: #71717a; font-size: 11px; padding: 2px 7px; border-radius: 5px; }
+  .md-code-head .copy:hover { background: #e4e4e7; color: #18181b; }
+  .md-code pre { margin: 0; padding: 11px 12px; overflow-x: auto; }
+  .md-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.55; color: #1f2328; white-space: pre; }
+  .transcript-empty { color: #71717a; padding: 40px 0; text-align: center; }
+
+  /* Reply composer pinned to the bottom of the transcript column. Mirrors the
+     New Claude session textarea: multi-line, ⌃V image paste, ↵ to send. */
+  .reply-box {
+    position: sticky; bottom: 0; z-index: 4;
+    margin-top: 6px; padding: 10px 0 14px;
+    background: #ffffff; border-top: 1px solid #e4e4e7;
+  }
+  .reply-input {
+    width: 100%; min-height: 46px; max-height: 220px; resize: vertical;
+    background: #ffffff; color: inherit; font: inherit; line-height: 1.5;
+    border: 1px solid #d4d4d8; border-radius: 8px; padding: 8px 10px; outline: none;
+  }
+  .reply-input:focus { border-color: #6e56cf; }
+  .reply-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .reply-bar .spacer { flex: 1; }
+  .reply-bar .act { padding: 5px 16px; font-size: 12px; border-radius: 7px; }
+  .reply-bar .act.primary { background: #6e56cf; border-color: #6e56cf; color: #fff; }
+  .reply-bar .act.primary:hover:not(:disabled) { background: #7d68d6; border-color: #7d68d6; }
+  .reply-hint { font-size: 11px; color: #a1a1aa; display: flex; gap: 10px; flex-wrap: wrap; }
+  .reply-hint kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; }
 
   .commit-list { flex: 1; overflow-y: auto; padding: 6px 0; }
   .commit {
@@ -913,6 +1360,9 @@ const page = `<!DOCTYPE html>
   .hdr-acts { display: inline-flex; gap: 5px; margin-left: 10px; }
 
   .diffs { flex: 1; overflow-y: auto; padding: 16px 20px 60vh; }
+  /* Tmux tab: drop the top/bottom padding so the sticky title and the reply
+     composer sit flush against the column edges. */
+  .diffs.tmux { padding: 0 20px; }
   .section-label { font-size: 12px; color: #71717a; text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
   .file-diff.viewing::before {
@@ -1087,6 +1537,9 @@ const server = Bun.serve({
   idleTimeout: 255,
   async fetch(req) {
     const url = new URL(req.url);
+
+    // CORS preflight for the extension's cross-origin API calls.
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
     if (url.pathname === "/client.js") {
       return new Response(clientJS, {
@@ -1407,6 +1860,52 @@ const server = Bun.serve({
       return json({ ok: true });
     }
 
+    // Save a pasted image (base64 data URL or bare base64) to /tmp/images/<random>
+    // and return its absolute path, so the New Claude session prompt can reference
+    // it. claude's Read tool reads absolute paths (incl. /tmp) with no permission
+    // prompt and renders images visually, so the detached session can see it.
+    if (req.method === "POST" && url.pathname === "/api/upload-image") {
+      let imgBody: { data?: unknown };
+      try {
+        imgBody = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof imgBody.data !== "string" || !imgBody.data) {
+        return json({ error: "Missing image data" }, 400);
+      }
+      const m = imgBody.data.match(/^data:(image\/[a-z0-9.+-]+)?;base64,(.*)$/is);
+      const mime = (m?.[1] ?? "image/png").toLowerCase();
+      const b64 = m ? m[2] : imgBody.data;
+      const ext =
+        ({
+          "image/png": "png",
+          "image/jpeg": "jpg",
+          "image/jpg": "jpg",
+          "image/gif": "gif",
+          "image/webp": "webp",
+          "image/bmp": "bmp",
+          "image/svg+xml": "svg",
+        } as Record<string, string>)[mime] ?? "png";
+      let buf: Buffer;
+      try {
+        buf = Buffer.from(b64, "base64");
+      } catch {
+        return json({ error: "Invalid base64" }, 400);
+      }
+      if (buf.length === 0) return json({ error: "Empty image" }, 400);
+      if (buf.length > 32 * 1024 * 1024) return json({ error: "Image too large (max 32MB)" }, 413);
+      try {
+        const imgDir = "/tmp/images";
+        mkdirSync(imgDir, { recursive: true });
+        const imgPath = `${imgDir}/${crypto.randomUUID()}.${ext}`;
+        await Bun.write(imgPath, buf);
+        return json({ ok: true, path: imgPath });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
     if (req.method === "POST" && url.pathname === "/api/claude") {
       let ws: Workspace;
       try {
@@ -1426,6 +1925,81 @@ const server = Bun.serve({
       try {
         const session = await newClaudeSession(ws.path, body.prompt);
         return json({ ok: true, session });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // ---- Tmux tab ----
+    // List claude tmux sessions (global, not dir-scoped) with transcript status.
+    if (req.method === "GET" && url.pathname === "/api/tmux/sessions") {
+      try {
+        return json({ sessions: await listClaudeSessions() });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Read one session's transcript (the latest `limit` messages).
+    if (req.method === "GET" && url.pathname === "/api/tmux/transcript") {
+      const name = url.searchParams.get("session") ?? "";
+      if (!name) return json({ error: "Missing session" }, 400);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "150", 10) || 150, 1), 1000);
+      try {
+        const SEP = "\x1f";
+        const info = (
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}"].join(SEP)}`.quiet().text()
+        ).trim();
+        const [cwd, sid, cmd, paneTitle] = info.split(SEP);
+        const task = cleanTitle(paneTitle ?? "", name, cmd ?? "");
+        const path = await resolveTranscript(cwd ?? "", sid ?? "", task);
+        if (!path || !existsSync(path)) {
+          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "" });
+        }
+        const text = await Bun.file(path).text();
+        const { messages, model, title } = parseTranscript(text, limit);
+        return json({ session: name, cwd, sessionId: sid, path, messages, model, title });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Kill a tmux session.
+    if (req.method === "POST" && url.pathname === "/api/tmux/kill") {
+      let body: { session?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.session !== "string" || !body.session) {
+        return json({ error: "Missing session" }, 400);
+      }
+      try {
+        await $`tmux -L default kill-session -t ${body.session}`.quiet();
+        return json({ ok: true });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Send a reply into a session's claude pane: paste the text + Enter.
+    if (req.method === "POST" && url.pathname === "/api/tmux/send") {
+      let body: { session?: unknown; text?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.session !== "string" || !body.session) {
+        return json({ error: "Missing session" }, 400);
+      }
+      if (typeof body.text !== "string" || !body.text.trim()) {
+        return json({ error: "Empty reply" }, 400);
+      }
+      try {
+        await pasteAndSubmit(body.session, body.text);
+        return json({ ok: true });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -1539,7 +2113,9 @@ const server = Bun.serve({
       if (!r) return new Response("No repo", { status: 404 });
       try {
         const diff = await $`gh pr diff ${prDiffMatch[1]}`.cwd(r.dir).quiet().text();
-        return new Response(diff, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        return new Response(diff, {
+          headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS },
+        });
       } catch (e) {
         return new Response(errText(e), { status: 502 });
       }
@@ -1557,7 +2133,7 @@ const server = Bun.serve({
       if (!r) return new Response("No repo", { status: 404 });
       try {
         return new Response(await commitDiff(r, diffMatch[1]), {
-          headers: { "Content-Type": "text/plain; charset=utf-8" },
+          headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS },
         });
       } catch (e) {
         return new Response(errText(e), { status: 502 });
