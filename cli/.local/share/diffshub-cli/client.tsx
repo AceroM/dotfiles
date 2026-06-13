@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
+import { parsePatchFiles, type FileDiffMetadata, type SelectedLineRange } from "@pierre/diffs";
 import { FileDiff, MultiFileDiff } from "@pierre/diffs/react";
 import type { GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
@@ -59,7 +59,14 @@ interface Meta {
   repo: string;
   branch: string;
   workspace: boolean;
+  editor: string;
   repos: RepoMeta[];
+}
+
+// A line range highlighted in one rendered diff, driving the action bar.
+interface DiffSelection {
+  fileKey: string;
+  range: SelectedLineRange;
 }
 
 type Tab = "commits" | "prs" | "changes" | "manual";
@@ -128,7 +135,95 @@ const DIFF_OPTIONS = {
   themeType: "light",
   stickyHeader: true,
   lineHoverHighlight: "line",
+  enableLineSelection: true,
 } as const;
+
+// One file's rendered diff. Memoized so that highlighting lines (which only
+// changes `selectedRange`/`viewing` for the active file) re-renders just that
+// file, not every diff on the page.
+interface DiffRowProps {
+  file: SectionFile;
+  viewing: boolean;
+  collapsed: boolean;
+  selectedRange: SelectedLineRange | null;
+  busy: boolean;
+  registerEl: (key: string, el: HTMLDivElement | null) => void;
+  onSelect: (fileKey: string, range: SelectedLineRange | null) => void;
+  onAct: (action: GitAction, path: string, repo?: string) => void;
+  onOpenOpaque: (path: string, repo?: string) => void;
+}
+
+const DiffRow = memo(function DiffRow({
+  file,
+  viewing,
+  collapsed,
+  selectedRange,
+  busy,
+  registerEl,
+  onSelect,
+  onAct,
+  onOpenOpaque,
+}: DiffRowProps) {
+  const acts = file.actions.map((a) => (
+    <button
+      key={a}
+      className="act"
+      title={ACTION_LABELS[a].title}
+      disabled={busy}
+      onClick={(e) => {
+        e.stopPropagation();
+        onAct(a, file.path, file.repo);
+      }}
+    >
+      {ACTION_LABELS[a].label}
+    </button>
+  ));
+  // Passing `selectedLines` puts the diff in controlled-selection mode, so the
+  // highlight is driven entirely from App state — selecting in one file clears
+  // the highlight in every other.
+  const selectionOptions = {
+    collapsed,
+    onLineSelectionChange: (r: SelectedLineRange | null) => onSelect(file.key, r),
+    onLineSelected: (r: SelectedLineRange | null) => onSelect(file.key, r),
+  };
+  return (
+    <div className={`file-diff${viewing ? " viewing" : ""}`} ref={(el) => registerEl(file.key, el)}>
+      {file.fileDiff && (
+        <FileDiff
+          fileDiff={file.fileDiff}
+          selectedLines={selectedRange}
+          options={{ ...DIFF_OPTIONS, ...selectionOptions }}
+          disableWorkerPool
+          renderHeaderMetadata={
+            file.actions.length ? () => <span className="hdr-acts">{acts}</span> : undefined
+          }
+        />
+      )}
+      {file.untracked &&
+        (file.untracked.contents !== null ? (
+          <MultiFileDiff
+            oldFile={{ name: file.path, contents: "" }}
+            newFile={{ name: file.path, contents: file.untracked.contents }}
+            selectedLines={selectedRange}
+            options={{ ...DIFF_OPTIONS, ...selectionOptions }}
+            disableWorkerPool
+            renderHeaderMetadata={() => <span className="hdr-acts">{acts}</span>}
+          />
+        ) : (
+          <div className="opaque-file">
+            <span
+              className="opaque-open"
+              title="Open in editor"
+              onClick={() => onOpenOpaque(file.path, file.repo)}
+            >
+              {file.path} — {file.untracked.binary ? "binary file" : "file too large to preview"}
+            </span>
+            <span className="hdr-acts">{acts}</span>
+          </div>
+        ))}
+    </div>
+  );
+});
 
 function initialView(): { tab: Tab; view: View } {
   const params = new URLSearchParams(location.search);
@@ -173,6 +268,9 @@ function App() {
   const [diffState, setDiffState] = useState<"idle" | "loading" | "error">("idle");
   const [diffError, setDiffError] = useState("");
   const [filter, setFilter] = useState("");
+
+  // Highlighted diff lines + the floating action bar they drive.
+  const [selection, setSelection] = useState<DiffSelection | null>(null);
 
   const fileEls = useRef(new Map<string, HTMLDivElement>());
   const mainEl = useRef<HTMLDivElement | null>(null);
@@ -282,7 +380,7 @@ function App() {
   const loadChanges = useCallback(async () => {
     const res = await fetch("/api/changes");
     if (!res.ok) throw new Error(await res.text());
-    const next: Changes = await res.json();
+    const next: RepoChanges[] = await res.json();
     // Skip the state update (and the diff re-render it triggers) when nothing
     // actually changed — keeps interval polling from flickering the view.
     setChanges((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
@@ -317,17 +415,23 @@ function App() {
       body: JSON.stringify({ path, line, repo }),
     }).catch(() => {});
   }, []);
-
-  // Click a diff line to open that file at that line — unless the user is
-  // actually selecting text, in which case leave the selection alone.
-  const onDiffLineClick = useCallback(
-    (path: string, lineNumber?: number, repo?: string) => {
-      const sel = window.getSelection();
-      if (sel && !sel.isCollapsed) return;
-      openInEditor(path, typeof lineNumber === "number" ? lineNumber : undefined, repo);
-    },
+  const onOpenOpaque = useCallback(
+    (path: string, repo?: string) => openInEditor(path, undefined, repo),
     [openInEditor],
   );
+
+  // Stable ref registrar + selection handler for the memoized diff rows.
+  const registerEl = useCallback((key: string, el: HTMLDivElement | null) => {
+    if (el) fileEls.current.set(key, el);
+    else fileEls.current.delete(key);
+  }, []);
+  const onDiffSelect = useCallback((fileKey: string, range: SelectedLineRange | null) => {
+    setSelection((prev) => {
+      if (range) return { fileKey, range };
+      // A cleared selection only clears the bar if it was this file's.
+      return prev && prev.fileKey === fileKey ? null : prev;
+    });
+  }, []);
 
   // Commit staged changes + push, detached in `tmux -L bg`. In a workspace this
   // commits every repo that currently has something staged.
@@ -506,7 +610,12 @@ function App() {
     if (view.kind === "manual" && manualPatches) {
       const patch = manualPatches.find((p) => p.name === view.name);
       if (!patch) return [];
-      const files = parsePatchFiles(patch.contents, `manual-${patch.name}`).flatMap((p) => p.files);
+      // Include the content length in the cache key so editing a patch (Delete)
+      // busts the render cache instead of showing the pre-edit diff.
+      const files = parsePatchFiles(
+        patch.contents,
+        `manual-${patch.name}-${patch.contents.length}`,
+      ).flatMap((p) => p.files);
       return [
         {
           label: null,
@@ -522,6 +631,67 @@ function App() {
     }
     return [];
   }, [view, diffText, diffState, changes, manualPatches, workspace]);
+
+  // ---- Highlighted-line action bar (Delete / Open in $EDITOR) ----
+  const selFile = useMemo(
+    () =>
+      selection
+        ? (sections.flatMap((s) => s.files).find((f) => f.key === selection.fileKey) ?? null)
+        : null,
+    [selection, sections],
+  );
+  // Only added (new-side) lines can be deleted, and only where there's a local
+  // file to edit: the working tree (Changes) or the ./diffs patch (Manual).
+  const selSide = selection?.range.side ?? "additions";
+  const selLo = selection ? Math.min(selection.range.start, selection.range.end) : 0;
+  const selHi = selection ? Math.max(selection.range.start, selection.range.end) : 0;
+  const canDelete =
+    !!selFile && (view.kind === "manual" || view.kind === "changes") && selSide === "additions";
+
+  const openSelection = useCallback(() => {
+    if (!selFile || !selection) return;
+    openInEditor(selFile.path, Math.min(selection.range.start, selection.range.end), selFile.repo);
+    setSelection(null);
+  }, [selFile, selection, openInEditor]);
+
+  const deleteSelection = useCallback(async () => {
+    if (!selFile || !selection) return;
+    const lo = Math.min(selection.range.start, selection.range.end);
+    const hi = Math.max(selection.range.start, selection.range.end);
+    const side = selection.range.side ?? "additions";
+    let payload: Record<string, unknown> | null = null;
+    if (view.kind === "manual") {
+      payload = { source: "patch", name: view.name, path: selFile.path, start: lo, end: hi, side };
+    } else if (view.kind === "changes") {
+      payload = {
+        source: "working",
+        path: selFile.path,
+        repo: selFile.repo,
+        start: lo,
+        end: hi,
+        side,
+      };
+    }
+    if (!payload) return;
+    try {
+      const res = await fetch("/api/delete-lines", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`Delete failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+    } catch (err) {
+      alert(`Delete failed: ${String((err as any)?.message ?? err)}`);
+      return;
+    }
+    setSelection(null);
+    if (view.kind === "manual") loadManual();
+    else loadChanges().catch(() => {});
+  }, [selFile, selection, view, loadManual, loadChanges]);
 
   // ---- Actively viewing file: the file under the sticky header line ----
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -569,7 +739,10 @@ function App() {
 
   // ---- Per-file collapse, toggled with `c` on the actively viewed file ----
   const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(new Set());
-  useEffect(() => setCollapsedKeys(new Set()), [view]);
+  useEffect(() => {
+    setCollapsedKeys(new Set());
+    setSelection(null);
+  }, [view]);
   const activeKeyRef = useRef(activeKey);
   activeKeyRef.current = activeKey;
   const toggleCollapsed = useCallback(() => {
@@ -675,7 +848,10 @@ function App() {
       try {
         counts.set(
           p.name,
-          parsePatchFiles(p.contents, `manual-${p.name}`).reduce((n, x) => n + x.files.length, 0),
+          parsePatchFiles(p.contents, `manual-${p.name}-${p.contents.length}`).reduce(
+            (n, x) => n + x.files.length,
+            0,
+          ),
         );
       } catch {
         counts.set(p.name, 0);
@@ -701,8 +877,8 @@ function App() {
   const stagedRepos = (changes ?? []).filter((rc) => rc.staged.length).map((rc) => rc.repo);
 
   // ---- Keyboard navigation (agents-cli style) ----
-  const keyCtx = useRef({ tab, view, visibleCommits, visiblePrs, visibleManual });
-  keyCtx.current = { tab, view, visibleCommits, visiblePrs, visibleManual };
+  const keyCtx = useRef({ tab, view, visibleCommits, visiblePrs, visibleManual, selection });
+  keyCtx.current = { tab, view, visibleCommits, visiblePrs, visibleManual, selection };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const { tab, view, visibleCommits, visiblePrs, visibleManual } = keyCtx.current;
@@ -721,6 +897,12 @@ function App() {
         return;
       }
       if (typing) return;
+      // Escape dismisses the line-selection action bar.
+      if (e.key === "Escape" && keyCtx.current.selection) {
+        e.preventDefault();
+        setSelection(null);
+        return;
+      }
       // Leave keys alone while focus is inside the file tree (it has its own nav)
       if (e.composedPath().some((n) => n instanceof HTMLElement && n.classList?.contains("tree"))) {
         return;
@@ -1070,60 +1252,47 @@ function App() {
           <div key={section.label ?? "main"}>
             {section.label && <h3 className="section-label">{section.label}</h3>}
             {section.files.map((f) => (
-              <div
+              <DiffRow
                 key={f.key}
-                className={`file-diff${f.key === activeKey ? " viewing" : ""}`}
-                ref={(el) => {
-                  if (el) fileEls.current.set(f.key, el);
-                  else fileEls.current.delete(f.key);
-                }}
-              >
-                {f.fileDiff && (
-                  <FileDiff
-                    fileDiff={f.fileDiff}
-                    options={{
-                      ...DIFF_OPTIONS,
-                      collapsed: collapsedKeys.has(f.key),
-                      onLineClick: (p: { lineNumber?: number }) =>
-                        onDiffLineClick(f.path, p.lineNumber, f.repo),
-                    }}
-                    disableWorkerPool
-                    renderHeaderMetadata={
-                      f.actions.length ? () => <span className="hdr-acts">{actionButtons(f)}</span> : undefined
-                    }
-                  />
-                )}
-                {f.untracked &&
-                  (f.untracked.contents !== null ? (
-                    <MultiFileDiff
-                      oldFile={{ name: f.path, contents: "" }}
-                      newFile={{ name: f.path, contents: f.untracked.contents }}
-                      options={{
-                        ...DIFF_OPTIONS,
-                        collapsed: collapsedKeys.has(f.key),
-                        onLineClick: (p: { lineNumber?: number }) =>
-                        onDiffLineClick(f.path, p.lineNumber, f.repo),
-                      }}
-                      disableWorkerPool
-                      renderHeaderMetadata={() => <span className="hdr-acts">{actionButtons(f)}</span>}
-                    />
-                  ) : (
-                    <div className="opaque-file">
-                      <span
-                        className="opaque-open"
-                        title="Open in editor"
-                        onClick={() => openInEditor(f.path, undefined, f.repo)}
-                      >
-                        {f.path} — {f.untracked.binary ? "binary file" : "file too large to preview"}
-                      </span>
-                      <span className="hdr-acts">{actionButtons(f)}</span>
-                    </div>
-                  ))}
-              </div>
+                file={f}
+                viewing={f.key === activeKey}
+                collapsed={collapsedKeys.has(f.key)}
+                selectedRange={selection?.fileKey === f.key ? selection.range : null}
+                busy={busyPath !== null}
+                registerEl={registerEl}
+                onSelect={onDiffSelect}
+                onAct={runGit}
+                onOpenOpaque={onOpenOpaque}
+              />
             ))}
           </div>
         ))}
       </main>
+
+      {selection && selFile && (
+        <div className="sel-bar">
+          <span className="sel-info">
+            <code>{selFile.path.split("/").pop()}</code> {selSide === "deletions" ? "old " : ""}
+            {selHi > selLo ? `L${selLo}–${selHi}` : `L${selLo}`}
+          </span>
+          {(view.kind === "manual" || view.kind === "changes") && (
+            <button
+              className="sel-act danger"
+              disabled={!canDelete}
+              title={canDelete ? "Delete these lines" : "Select added (+) lines to delete"}
+              onClick={deleteSelection}
+            >
+              Delete
+            </button>
+          )}
+          <button className="sel-act" onClick={openSelection}>
+            Open in {meta?.editor ?? "editor"}
+          </button>
+          <button className="sel-x" title="Dismiss (esc)" onClick={() => setSelection(null)}>
+            ✕
+          </button>
+        </div>
+      )}
 
       <aside className="tree">
         <div className="meta-panel">

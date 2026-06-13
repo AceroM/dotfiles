@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { removeFileLines, removePatchAdditions } from "./patch-edit";
 
 const cwd = process.cwd();
 const port = parseInt(process.argv[2] || "3433", 10); // 3433 = DIFF on a phone keypad
@@ -143,6 +144,28 @@ function errText(e: any): string {
 
 // Single-quote a string for safe interpolation into a /bin/sh command line
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+// Resolve the user's editor ($VISUAL/$EDITOR, default zed) and build an argv
+// that jumps to a line for the editors that understand it.
+function editorTokens(): string[] {
+  const raw = (process.env.VISUAL || process.env.EDITOR || "zed").trim();
+  return raw ? raw.split(/\s+/) : ["zed"];
+}
+function editorName(): string {
+  const bin = editorTokens()[0];
+  return bin.split("/").pop() || bin;
+}
+function editorArgv(fileAbs: string, line: number | null): string[] {
+  const tokens = editorTokens();
+  if (line == null) return [...tokens, fileAbs];
+  const name = editorName();
+  if (/^(code|codium|code-insiders|vscodium|cursor|windsurf)$/.test(name))
+    return [...tokens, "--goto", `${fileAbs}:${line}`];
+  if (/^(vim|nvim|vi|view|nano|micro|emacs|emacsclient|kak|hx|helix)$/.test(name))
+    return [...tokens, `+${line}`, fileAbs];
+  // zed, subl, JetBrains and unknown GUI editors take a `path:line` argument
+  return [...tokens, `${fileAbs}:${line}`];
+}
 
 interface CommitSummary {
   sha: string;
@@ -569,6 +592,32 @@ const page = `<!DOCTYPE html>
   .modal-hint { margin-top: 10px; font-size: 11px; color: #a1a1aa; display: flex; gap: 8px; flex-wrap: wrap; }
   .modal-hint kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; }
   .modal-hint code { color: #71717a; }
+
+  /* Floating action bar shown when diff lines are highlighted */
+  .sel-bar {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    z-index: 40; display: flex; align-items: center; gap: 8px;
+    padding: 7px 8px 7px 14px;
+    background: #18181b; color: #fafafa;
+    border-radius: 10px; box-shadow: 0 10px 34px rgba(0, 0, 0, .28);
+    font-size: 12px;
+  }
+  .sel-bar .sel-info { color: #d4d4d8; white-space: nowrap; margin-right: 2px; }
+  .sel-bar .sel-info code { color: #fafafa; }
+  .sel-bar .sel-act {
+    padding: 4px 11px; font-size: 12px; cursor: pointer;
+    background: #3f3f46; border: 1px solid #52525b; border-radius: 6px; color: #fafafa;
+  }
+  .sel-bar .sel-act:hover:not(:disabled) { background: #52525b; }
+  .sel-bar .sel-act:disabled { opacity: .45; cursor: default; }
+  .sel-bar .sel-act.danger { background: #b91c1c; border-color: #b91c1c; }
+  .sel-bar .sel-act.danger:hover:not(:disabled) { background: #dc2626; border-color: #dc2626; }
+  .sel-bar .sel-x {
+    width: 22px; height: 22px; padding: 0; cursor: pointer; font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+    background: none; border: none; color: #a1a1aa;
+  }
+  .sel-bar .sel-x:hover { color: #fafafa; }
 </style>
 </head>
 <body>
@@ -594,6 +643,7 @@ const server = Bun.serve({
         repo: label,
         branch: workspace ? "" : repos[0].branch,
         workspace,
+        editor: editorName(),
         repos: repos.map((r) => ({ key: r.key, nameWithOwner: r.nameWithOwner, branch: r.branch })),
       });
     }
@@ -728,13 +778,72 @@ const server = Bun.serve({
           ? body.line
           : null;
       const r = repoByKey(typeof body.repo === "string" ? body.repo : null);
-      const target = `${r.dir}/${body.path}${line ? `:${line}` : ""}`;
       try {
-        await $`zed ${target}`.cwd(r.dir).quiet();
+        // Fire-and-forget: GUI editors fork and return; we don't await so a
+        // terminal editor (vim/etc) wouldn't hang the request.
+        Bun.spawn(editorArgv(`${r.dir}/${body.path}`, line), {
+          cwd: r.dir,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
       return json({ ok: true });
+    }
+
+    // Delete the highlighted lines from whatever is backing the diff: the
+    // working-tree file (Changes view) or the ./diffs/*.patch (Manual view).
+    // Only added (new-side) lines are removable — see patch-edit.ts.
+    if (req.method === "POST" && url.pathname === "/api/delete-lines") {
+      let body: {
+        source?: unknown;
+        name?: unknown;
+        path?: unknown;
+        repo?: unknown;
+        start?: unknown;
+        end?: unknown;
+        side?: unknown;
+      };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const start = Number(body.start);
+      const end = Number(body.end);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1) {
+        return json({ error: "Invalid line range" }, 400);
+      }
+      const lo = Math.min(start, end);
+      const hi = Math.max(start, end);
+      if (body.side === "deletions") {
+        return json({ error: "Select added (+) lines to delete" }, 400);
+      }
+      if (!safeRepoPath(body.path)) {
+        return json({ error: "Invalid path" }, 400);
+      }
+      try {
+        if (body.source === "working") {
+          const r = repoByKey(typeof body.repo === "string" ? body.repo : null);
+          const fileAbs = `${r.dir}/${body.path}`;
+          await Bun.write(fileAbs, removeFileLines(await Bun.file(fileAbs).text(), lo, hi));
+          return json({ ok: true });
+        }
+        if (body.source === "patch") {
+          if (typeof body.name !== "string" || !/^[^/\0]+\.patch$/.test(body.name)) {
+            return json({ error: "Invalid patch name" }, 400);
+          }
+          const patchPath = `${cwd}/diffs/${body.name}`;
+          const edited = removePatchAdditions(await Bun.file(patchPath).text(), body.path, lo, hi);
+          await Bun.write(patchPath, edited);
+          return json({ ok: true });
+        }
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json({ error: "Invalid source" }, 400);
     }
 
     const prDiffMatch = url.pathname.match(/^\/api\/diff\/pr\/(\d{1,7})$/);
