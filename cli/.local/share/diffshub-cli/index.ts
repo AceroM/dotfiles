@@ -167,6 +167,86 @@ function editorArgv(fileAbs: string, line: number | null): string[] {
   return [...tokens, `${fileAbs}:${line}`];
 }
 
+// ---- New Claude session (mirrors the `p` shell function) ----
+// The `p` zsh function reads these pools (exported as zsh arrays, not env vars,
+// so we mirror them here) to pick an adjective-noun session name, then launches
+// claude in a detached tmux session and pastes the first prompt. We can't call
+// `p` directly — it ends by attaching, which needs a TTY this server doesn't
+// have — so we reproduce its session-creation half and skip the attach.
+// All claude tmux commands pass `-L default` explicitly: this server often runs
+// inside a `bg`-socket tmux pane, so a bare `tmux` would inherit $TMUX and land
+// the session on the `bg` socket instead of the default one claude lives on.
+const SESSION_ADJECTIVES = [
+  "amber", "brave", "calm", "dapper", "eager", "fabled", "gentle", "hardy", "icy",
+  "jaunty", "keen", "lucid", "misty", "noble", "odd", "plucky", "quick", "radiant",
+  "sunny", "tidy", "upbeat", "vivid", "witty", "xtra", "young", "zesty",
+];
+const SESSION_NOUNS = [
+  "anchor", "beacon", "citadel", "dragon", "ember", "falcon", "grove", "harbor",
+  "island", "junction", "kingdom", "lantern", "meadow", "nebula", "oasis", "prairie",
+  "quarry", "rocket", "summit", "temple", "urchin", "valley", "workshop", "xenon",
+  "yard", "zephyr",
+];
+
+// Pick an unused adjective-noun name, avoiding the first letter of any session
+// already running claude/node (same heuristic as `p`).
+async function pickClaudeSessionName(): Promise<string> {
+  let sessions: string[] = [];
+  try {
+    sessions = (await $`tmux -L default list-sessions -F ${"#S"}`.quiet().text())
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {}
+  const existing = new Set(sessions);
+  const usedLetters = new Set<string>();
+  await Promise.all(
+    sessions.map(async (s) => {
+      try {
+        const cmd = (
+          await $`tmux -L default display-message -p -t ${`${s}:0.0`} ${"#{pane_current_command}"}`.quiet().text()
+        ).trim();
+        if (/claude|node/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd)) usedLetters.add(s[0]);
+      } catch {}
+    }),
+  );
+  let name = "";
+  let attempts = 0;
+  while (true) {
+    const adj = SESSION_ADJECTIVES[Math.floor(Math.random() * SESSION_ADJECTIVES.length)];
+    const noun = SESSION_NOUNS[Math.floor(Math.random() * SESSION_NOUNS.length)];
+    name = `${adj}-${noun}`;
+    if (!existing.has(name) && (!usedLetters.has(name[0]) || attempts > 50)) break;
+    attempts++;
+  }
+  return name;
+}
+
+// Paste the prompt into a freshly-started claude session and submit it. Runs
+// fire-and-forget after a short delay so claude's TUI is ready to receive it.
+async function sendClaudePrompt(name: string, prompt: string): Promise<void> {
+  try {
+    await Bun.sleep(1000);
+    const bufFile = `${stateDir}/claude-prompt-${Date.now()}.txt`;
+    await Bun.write(bufFile, prompt);
+    const buf = `diffshub-${name}`;
+    await $`tmux -L default load-buffer -b ${buf} ${bufFile}`.quiet();
+    await $`tmux -L default paste-buffer -d -b ${buf} -t ${`${name}:0.0`}`.quiet();
+    await $`tmux -L default send-keys -t ${`${name}:0.0`} Enter`.quiet();
+    await $`rm -f ${bufFile}`.quiet();
+  } catch {}
+}
+
+// Launch an interactive claude session detached in the dh directory (mirrors
+// `p`), returning the session name so the caller can `tmux attach -t <name>`.
+async function newClaudeSession(prompt: string): Promise<string> {
+  const name = await pickClaudeSessionName();
+  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(cwd)} claude`;
+  await $`tmux -L default new-session -ds ${name} -c ${cwd} ${claudeCmd}`.quiet();
+  if (prompt.trim()) void sendClaudePrompt(name, prompt);
+  return name;
+}
+
 interface CommitSummary {
   sha: string;
   message: string;
@@ -278,6 +358,13 @@ async function untrackedEntry(dir: string, path: string): Promise<UntrackedEntry
 
 interface RepoChanges {
   repo: string;
+  // Worktree segment header shown in the sidebar (branch / "repo · branch" /
+  // empty when there's just the one working tree). The client also derives the
+  // file-tree namespace from it.
+  segment: string;
+  // Absolute worktree directory — echoed back by the client to route git/open/
+  // delete/commit actions to the right working tree (validated server-side).
+  dir: string;
   staged: { path: string; status: string }[];
   unstaged: { path: string; status: string }[];
   untracked: UntrackedEntry[];
@@ -285,8 +372,41 @@ interface RepoChanges {
   unstagedDiff: string;
 }
 
-async function getChangesForRepo(r: RepoCtx): Promise<RepoChanges> {
-  const raw = await $`git status --porcelain=v1 -z -uall`.cwd(r.dir).quiet().text();
+interface Worktree {
+  dir: string;
+  branch: string;
+}
+
+// Every worktree dir we've reported to the client, refreshed on each
+// /api/changes. Git/open/delete/commit actions are only allowed to target a
+// dir in this set, so an echoed-back path can't escape the known worktrees.
+const worktreeDirs = new Set<string>();
+
+async function listWorktrees(repoDir: string): Promise<Worktree[]> {
+  let out: string;
+  try {
+    out = await $`git -C ${repoDir} worktree list --porcelain`.quiet().text();
+  } catch {
+    return [{ dir: repoDir, branch: "" }];
+  }
+  const worktrees: Worktree[] = [];
+  for (const block of out.split("\n\n")) {
+    let dir = "";
+    let branch = "";
+    let bare = false;
+    for (const line of block.split("\n")) {
+      if (line.startsWith("worktree ")) dir = line.slice("worktree ".length).trim();
+      else if (line.startsWith("branch ")) branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+      else if (line === "bare") bare = true;
+    }
+    if (dir && !bare) worktrees.push({ dir, branch });
+  }
+  return worktrees.length ? worktrees : [{ dir: repoDir, branch: "" }];
+}
+
+// Working-tree status for a single directory (one worktree).
+async function statusDir(dir: string) {
+  const raw = await $`git status --porcelain=v1 -z -uall`.cwd(dir).quiet().text();
   const parts = raw.split("\0");
   const staged: { path: string; status: string }[] = [];
   const unstaged: { path: string; status: string }[] = [];
@@ -306,15 +426,45 @@ async function getChangesForRepo(r: RepoCtx): Promise<RepoChanges> {
     if (y !== " ") unstaged.push({ path, status: y });
   }
   const [stagedDiff, unstagedDiff, untracked] = await Promise.all([
-    staged.length ? $`git diff --cached`.cwd(r.dir).quiet().text() : Promise.resolve(""),
-    unstaged.length ? $`git diff`.cwd(r.dir).quiet().text() : Promise.resolve(""),
-    Promise.all(untrackedPaths.map((p) => untrackedEntry(r.dir, p))),
+    staged.length ? $`git diff --cached`.cwd(dir).quiet().text() : Promise.resolve(""),
+    unstaged.length ? $`git diff`.cwd(dir).quiet().text() : Promise.resolve(""),
+    Promise.all(untrackedPaths.map((p) => untrackedEntry(dir, p))),
   ]);
-  return { repo: r.key, staged, unstaged, untracked, stagedDiff, unstagedDiff };
+  return { staged, unstaged, untracked, stagedDiff, unstagedDiff };
+}
+
+async function getChangesForRepo(r: RepoCtx): Promise<RepoChanges[]> {
+  const worktrees = await listWorktrees(r.dir);
+  const multiWt = worktrees.length > 1;
+  return Promise.all(
+    worktrees.map(async (wt) => {
+      const status = await statusDir(wt.dir);
+      const wtLabel = wt.branch || wt.dir.split("/").pop() || wt.dir;
+      const segment =
+        workspace && multiWt
+          ? `${r.key} · ${wtLabel}`
+          : multiWt
+            ? wtLabel
+            : workspace
+              ? r.key
+              : "";
+      return { repo: r.key, segment, dir: wt.dir, ...status };
+    }),
+  );
 }
 
 async function getChanges(): Promise<RepoChanges[]> {
-  return Promise.all(repos.map(getChangesForRepo));
+  const all = (await Promise.all(repos.map(getChangesForRepo))).flat();
+  worktreeDirs.clear();
+  for (const rc of all) worktreeDirs.add(rc.dir);
+  return all;
+}
+
+// Resolve a client-supplied worktree dir to a real directory, only allowing a
+// dir we've already reported; falls back to the repo's main dir.
+function dirForWorktree(worktree: unknown, repoKey: unknown): string {
+  if (typeof worktree === "string" && worktreeDirs.has(worktree)) return worktree;
+  return repoByKey(typeof repoKey === "string" ? repoKey : null).dir;
 }
 
 // ---- Manual patches (./diffs/*.patch in the cwd) ----
@@ -448,11 +598,30 @@ const page = `<!DOCTYPE html>
   .commit.reviewed .rev-btn { opacity: 1; background: #dcfce7; border-color: #86efac; color: #16a34a; }
   .commit.reviewed .commit-msg { color: #a1a1aa; font-weight: 400; }
   .spinner {
-    width: 28px; height: 28px; margin: 0 auto; border-radius: 50%;
-    border: 3px solid #e4e4e7; border-top-color: #6e56cf;
+    width: 34px; height: 34px; margin: 0 auto; border-radius: 50%;
+    border: 4px solid #e4e4e7; border-top-color: #6e56cf;
     animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* Sole child of the diff column while loading — center the spinner in the
+     visible area rather than tucking it up near the top. */
+  .loading-wrap {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 75vh; color: #71717a;
+  }
+
+  /* Sidebar skeleton placeholders, shown while a tab's list is loading */
+  .skel-list { padding: 6px 0; }
+  .skel-row { padding: 8px 14px; }
+  .skel-bar {
+    border-radius: 4px;
+    background-image: linear-gradient(90deg, #e8e8eb, #f1f1f3, #e8e8eb);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  .skel-bar.title { height: 9px; margin-bottom: 8px; }
+  .skel-bar.meta { height: 7px; width: 45%; }
+  @keyframes shimmer { 0% { background-position-x: 100%; } 100% { background-position-x: -100%; } }
   .commit-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #71717a; }
   .commit-meta img { width: 14px; height: 14px; border-radius: 50%; }
   .commit-meta code { color: #71717a; }
@@ -488,6 +657,30 @@ const page = `<!DOCTYPE html>
   .bulk-actions button:hover:not(:disabled) { color: #18181b; border-color: #6e56cf; }
   .bulk-actions button:disabled { opacity: .5; cursor: default; }
 
+  .auto-refresh-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px 2px; font-size: 11px; color: #71717a;
+  }
+  .switch {
+    position: relative; width: 30px; height: 17px; flex-shrink: 0; padding: 0;
+    background: #d4d4d8; border: none; border-radius: 999px; cursor: pointer;
+    transition: background .15s;
+  }
+  .switch.on { background: #6e56cf; }
+  .switch-knob {
+    position: absolute; top: 2px; left: 2px; width: 13px; height: 13px;
+    background: #ffffff; border-radius: 50%; transition: transform .15s;
+  }
+  .switch.on .switch-knob { transform: translateX(13px); }
+  .switch-state { min-width: 18px; font-variant-numeric: tabular-nums; }
+
+  .wt-label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 14px 2px; font-size: 11px; font-weight: 700;
+    color: #6e56cf; letter-spacing: .02em;
+  }
+  .wt-label::before { content: "⎇"; opacity: .75; font-size: 12px; }
+  .wt-label + .group-label { padding-top: 4px; }
   .group-label {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 14px 4px; font-size: 11px; font-weight: 600;
@@ -641,6 +834,7 @@ const server = Bun.serve({
     if (url.pathname === "/api/meta") {
       return json({
         repo: label,
+        cwd,
         branch: workspace ? "" : repos[0].branch,
         workspace,
         editor: editorName(),
@@ -701,7 +895,7 @@ const server = Bun.serve({
     }
 
     if (req.method === "POST" && url.pathname === "/api/git") {
-      let body: { action?: unknown; path?: unknown; repo?: unknown };
+      let body: { action?: unknown; path?: unknown; repo?: unknown; worktree?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -715,12 +909,20 @@ const server = Bun.serve({
       if (path !== undefined && !safeRepoPath(path)) {
         return json({ error: "Invalid path" }, 400);
       }
-      // A specific repo (per-file / per-group action) routes to one repo; a
-      // bulk action with no repo applies to every repo in the workspace.
-      const targets =
-        typeof body.repo === "string" || path !== undefined ? [repoByKey(body.repo as string)] : repos;
+      // A per-file or per-worktree action targets one worktree; a bulk action
+      // with no worktree/repo applies to every known worktree.
+      let dirs: string[];
+      if (path !== undefined) {
+        dirs = [dirForWorktree(body.worktree, body.repo)];
+      } else if (typeof body.worktree === "string" && worktreeDirs.has(body.worktree)) {
+        dirs = [body.worktree];
+      } else if (typeof body.repo === "string") {
+        dirs = [repoByKey(body.repo).dir];
+      } else {
+        dirs = worktreeDirs.size ? [...worktreeDirs] : repos.map((r) => r.dir);
+      }
       try {
-        for (const t of targets) await runGitAction(action, t.dir, path as string | undefined);
+        for (const dir of dirs) await runGitAction(action, dir, path as string | undefined);
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -728,7 +930,7 @@ const server = Bun.serve({
     }
 
     if (req.method === "POST" && url.pathname === "/api/commit") {
-      let body: { message?: unknown; repos?: unknown };
+      let body: { message?: unknown; worktrees?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -737,23 +939,29 @@ const server = Bun.serve({
       if (typeof body.message !== "string" || !body.message.trim()) {
         return json({ error: "Empty commit message" }, 400);
       }
-      // Which repos to commit: the requested keys (deduped) or all of them.
-      const wanted = Array.isArray(body.repos)
-        ? [...new Set(body.repos.filter((k): k is string => typeof k === "string"))]
+      // Which worktrees to commit: the requested dirs (deduped, validated) or
+      // every known worktree.
+      const wantedDirs = Array.isArray(body.worktrees)
+        ? [...new Set(body.worktrees.filter((d): d is string => typeof d === "string" && worktreeDirs.has(d)))]
         : null;
-      const targets = wanted ? repos.filter((r) => wanted.includes(r.key)) : repos;
-      if (!targets.length) return json({ error: "No repos to commit" }, 400);
+      const targetDirs =
+        wantedDirs && wantedDirs.length
+          ? wantedDirs
+          : worktreeDirs.size
+            ? [...worktreeDirs]
+            : repos.map((r) => r.dir);
+      if (!targetDirs.length) return json({ error: "Nothing to commit" }, 400);
       try {
         // Stash the message in a file so it never has to be shell-escaped, then
-        // commit + push each repo that has staged changes, detached in the `bg`
-        // tmux server so it outlives this request (attach: `tmux -L bg attach`).
+        // commit + push each worktree that has staged changes, detached in the
+        // `bg` tmux server so it outlives this request (attach: `tmux -L bg attach`).
         const msgFile = `${stateDir}/commit-msg-${Date.now()}.txt`;
         await Bun.write(msgFile, body.message);
         const session = `diffshub-commit-${Date.now()}`;
-        const steps = targets.map(
-          (t) =>
-            `if ! git -C ${shq(t.dir)} diff --cached --quiet; then ` +
-            `git -C ${shq(t.dir)} commit -F ${shq(msgFile)} && git -C ${shq(t.dir)} push; fi`,
+        const steps = targetDirs.map(
+          (dir) =>
+            `if ! git -C ${shq(dir)} diff --cached --quiet; then ` +
+            `git -C ${shq(dir)} commit -F ${shq(msgFile)} && git -C ${shq(dir)} push; fi`,
         );
         const script = `${steps.join("; ")}; rm -f ${shq(msgFile)}`;
         await $`tmux -L bg new-session -d -c ${cwd} -s ${session} ${script}`.cwd(cwd).quiet();
@@ -763,8 +971,26 @@ const server = Bun.serve({
       return json({ ok: true });
     }
 
+    if (req.method === "POST" && url.pathname === "/api/claude") {
+      let body: { prompt?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.prompt !== "string" || !body.prompt.trim()) {
+        return json({ error: "Empty prompt" }, 400);
+      }
+      try {
+        const session = await newClaudeSession(body.prompt);
+        return json({ ok: true, session });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
     if (req.method === "POST" && url.pathname === "/api/open") {
-      let body: { path?: unknown; line?: unknown; repo?: unknown };
+      let body: { path?: unknown; line?: unknown; repo?: unknown; worktree?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -777,12 +1003,12 @@ const server = Bun.serve({
         typeof body.line === "number" && Number.isInteger(body.line) && body.line > 0
           ? body.line
           : null;
-      const r = repoByKey(typeof body.repo === "string" ? body.repo : null);
+      const dir = dirForWorktree(body.worktree, body.repo);
       try {
         // Fire-and-forget: GUI editors fork and return; we don't await so a
         // terminal editor (vim/etc) wouldn't hang the request.
-        Bun.spawn(editorArgv(`${r.dir}/${body.path}`, line), {
-          cwd: r.dir,
+        Bun.spawn(editorArgv(`${dir}/${body.path}`, line), {
+          cwd: dir,
           stdin: "ignore",
           stdout: "ignore",
           stderr: "ignore",
@@ -802,6 +1028,7 @@ const server = Bun.serve({
         name?: unknown;
         path?: unknown;
         repo?: unknown;
+        worktree?: unknown;
         start?: unknown;
         end?: unknown;
         side?: unknown;
@@ -826,8 +1053,8 @@ const server = Bun.serve({
       }
       try {
         if (body.source === "working") {
-          const r = repoByKey(typeof body.repo === "string" ? body.repo : null);
-          const fileAbs = `${r.dir}/${body.path}`;
+          const dir = dirForWorktree(body.worktree, body.repo);
+          const fileAbs = `${dir}/${body.path}`;
           await Bun.write(fileAbs, removeFileLines(await Bun.file(fileAbs).text(), lo, hi));
           return json({ ok: true });
         }

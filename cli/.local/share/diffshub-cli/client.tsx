@@ -1,5 +1,12 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { parsePatchFiles, type FileDiffMetadata, type SelectedLineRange } from "@pierre/diffs";
 import { FileDiff, MultiFileDiff } from "@pierre/diffs/react";
 import type { GitStatusEntry } from "@pierre/trees";
@@ -39,9 +46,12 @@ interface UntrackedEntry {
   tooLarge?: boolean;
 }
 
-// Working-tree changes for one repo (the API returns one of these per repo).
+// Working-tree changes for one worktree (the API returns one of these per
+// worktree, across every repo).
 interface RepoChanges {
   repo: string;
+  segment: string; // worktree segment header ("" when there's a single worktree)
+  dir: string; // absolute worktree dir, echoed back to route git ops
   staged: ChangeEntry[];
   unstaged: ChangeEntry[];
   untracked: UntrackedEntry[];
@@ -57,6 +67,7 @@ interface RepoMeta {
 
 interface Meta {
   repo: string;
+  cwd: string; // absolute dir new claude sessions launch in; roots @-file refs
   branch: string;
   workspace: boolean;
   editor: string;
@@ -90,8 +101,9 @@ type GitAction = "stage" | "unstage" | "stash";
 interface SectionFile {
   key: string;
   path: string; // repo-relative path used for git ops
-  treePath: string; // possibly repo-namespaced path used by the file tree
+  treePath: string; // possibly namespaced path used by the file tree
   repo?: string; // which workspace repo this file belongs to
+  worktree?: string; // absolute worktree dir this file lives in
   fileDiff?: FileDiffMetadata;
   untracked?: UntrackedEntry;
   actions: GitAction[];
@@ -99,7 +111,9 @@ interface SectionFile {
 
 interface Section {
   label: string | null;
+  segment?: string; // worktree segment this group belongs to
   repo?: string;
+  dir?: string; // absolute worktree dir
   files: SectionFile[];
 }
 
@@ -138,6 +152,20 @@ const DIFF_OPTIONS = {
   enableLineSelection: true,
 } as const;
 
+// ---- Fetch helpers shared by every query ----
+async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<T>;
+}
+async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(await res.text());
+  return res.text();
+}
+const errMessage = (e: unknown): string =>
+  e ? String((e as { message?: unknown }).message ?? e) : "";
+
 // One file's rendered diff. Memoized so that highlighting lines (which only
 // changes `selectedRange`/`viewing` for the active file) re-renders just that
 // file, not every diff on the page.
@@ -149,8 +177,8 @@ interface DiffRowProps {
   busy: boolean;
   registerEl: (key: string, el: HTMLDivElement | null) => void;
   onSelect: (fileKey: string, range: SelectedLineRange | null) => void;
-  onAct: (action: GitAction, path: string, repo?: string) => void;
-  onOpenOpaque: (path: string, repo?: string) => void;
+  onAct: (action: GitAction, path: string, repo?: string, worktree?: string) => void;
+  onOpenOpaque: (path: string, repo?: string, worktree?: string) => void;
 }
 
 const DiffRow = memo(function DiffRow({
@@ -172,7 +200,7 @@ const DiffRow = memo(function DiffRow({
       disabled={busy}
       onClick={(e) => {
         e.stopPropagation();
-        onAct(a, file.path, file.repo);
+        onAct(a, file.path, file.repo, file.worktree);
       }}
     >
       {ACTION_LABELS[a].label}
@@ -214,7 +242,7 @@ const DiffRow = memo(function DiffRow({
             <span
               className="opaque-open"
               title="Open in editor"
-              onClick={() => onOpenOpaque(file.path, file.repo)}
+              onClick={() => onOpenOpaque(file.path, file.repo, file.worktree)}
             >
               {file.path} — {file.untracked.binary ? "binary file" : "file too large to preview"}
             </span>
@@ -224,6 +252,31 @@ const DiffRow = memo(function DiffRow({
     </div>
   );
 });
+
+// Sidebar list placeholder shown while a tab's data is still loading. Widths
+// vary deterministically per row so it reads as a list, not a solid block.
+function SkeletonList({ rows = 7 }: { rows?: number }) {
+  return (
+    <div className="skel-list" aria-busy="true" aria-label="Loading">
+      {Array.from({ length: rows }, (_, i) => (
+        <div className="skel-row" key={i}>
+          <div className="skel-bar title" style={{ width: `${55 + ((i * 13) % 35)}%` }} />
+          <div className="skel-bar meta" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Centered spinner for the diff/content column while it loads. No label text —
+// just the spinner, sitting in the middle of the column.
+function ContentSpinner({ label }: { label: string }) {
+  return (
+    <div className="loading-wrap">
+      <div className="spinner" aria-label={label} />
+    </div>
+  );
+}
 
 function initialView(): { tab: Tab; view: View } {
   const params = new URLSearchParams(location.search);
@@ -240,34 +293,127 @@ function initialView(): { tab: Tab; view: View } {
 
 function App() {
   const initial = useMemo(initialView, []);
-  const [meta, setMeta] = useState<Meta | null>(null);
-  const workspace = !!meta?.workspace;
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>(initial.tab);
   const [view, setView] = useState<View>(initial.view);
 
-  const [commits, setCommits] = useState<Commit[]>([]);
-  const [page, setPage] = useState(1);
-  const [hasMore, setHasMore] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
+  // Whether the Changes view auto-refreshes (polling + window focus). Toggle
+  // with `v`; `space` forces a one-off refresh of whatever tab you're on.
+  // Defaults to off and persists across reloads via localStorage.
+  const [autoRefresh, setAutoRefresh] = useState(() => {
+    try {
+      return localStorage.getItem("autoRefresh") === "true";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("autoRefresh", String(autoRefresh));
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [autoRefresh]);
 
-  const [prs, setPrs] = useState<PR[] | null>(null);
-  const [prError, setPrError] = useState("");
+  // ---- Server data (TanStack Query) ----
+  const metaQuery = useQuery({
+    queryKey: ["meta"],
+    queryFn: ({ signal }) => fetchJSON<Meta>("/api/meta", signal),
+    staleTime: Infinity,
+  });
+  const meta = metaQuery.data ?? null;
+  const workspace = !!meta?.workspace;
 
-  const [changes, setChanges] = useState<RepoChanges[] | null>(null);
+  // Commits are paginated; useInfiniteQuery stitches the pages together and the
+  // "Load more" button just asks for the next one.
+  const commitsQuery = useInfiniteQuery({
+    queryKey: ["commits"],
+    queryFn: ({ pageParam, signal }) =>
+      fetchJSON<Commit[]>(`/api/commits?page=${pageParam}`, signal),
+    initialPageParam: 1,
+    getNextPageParam: (lastPage, allPages) => (lastPage.length > 0 ? allPages.length + 1 : undefined),
+  });
+  const commits = useMemo(() => commitsQuery.data?.pages.flat() ?? [], [commitsQuery.data]);
+  const hasMore = commitsQuery.hasNextPage;
+  const loadingMore = commitsQuery.isFetchingNextPage;
+
+  const prsQuery = useQuery({
+    queryKey: ["prs"],
+    queryFn: ({ signal }) => fetchJSON<PR[]>("/api/prs", signal),
+    enabled: tab === "prs",
+  });
+  const prs = prsQuery.data ?? null;
+  const prError = errMessage(prsQuery.error);
+
+  const manualQuery = useQuery({
+    queryKey: ["manual"],
+    queryFn: ({ signal }) => fetchJSON<ManualPatch[]>("/api/manual", signal),
+    enabled: tab === "manual" || initial.tab === "manual",
+  });
+  const manualPatches = manualQuery.data ?? null;
+  const manualError = errMessage(manualQuery.error);
+
+  const changesQuery = useQuery({
+    queryKey: ["changes"],
+    queryFn: ({ signal }) => fetchJSON<RepoChanges[]>("/api/changes", signal),
+    enabled: tab === "changes",
+    // Poll + refetch-on-focus only while auto-refresh is on. Structural sharing
+    // keeps `data` referentially stable when nothing changed, so a poll that
+    // finds no diff doesn't re-render the view — replacing the old manual
+    // JSON.stringify dedup.
+    refetchInterval: autoRefresh && tab === "changes" ? 2500 : false,
+    refetchOnWindowFocus: autoRefresh,
+  });
+  const changes = changesQuery.data ?? null;
+
   const [busyPath, setBusyPath] = useState<string | null>(null);
-
-  const [manualPatches, setManualPatches] = useState<ManualPatch[] | null>(null);
-  const [manualError, setManualError] = useState("");
 
   // Commit & push dialog (Changes view, `;`)
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const [committing, setCommitting] = useState(false);
 
-  const [diffText, setDiffText] = useState("");
-  const [diffState, setDiffState] = useState<"idle" | "loading" | "error">("idle");
-  const [diffError, setDiffError] = useState("");
+  // New Claude session dialog (`'`) — launches an interactive claude tmux
+  // session in the dh directory, detached, seeded with the typed prompt.
+  const [claudeOpen, setClaudeOpen] = useState(false);
+  const [claudePrompt, setClaudePrompt] = useState("");
+  const [launching, setLaunching] = useState(false);
+  const [launchedSession, setLaunchedSession] = useState<string | null>(null);
+
+  // Auto-dismiss the "Launched" banner after a short period.
+  useEffect(() => {
+    if (!launchedSession) return;
+    const id = window.setTimeout(() => setLaunchedSession(null), 5000);
+    return () => window.clearTimeout(id);
+  }, [launchedSession]);
+
   const [filter, setFilter] = useState("");
+
+  // ---- Diff for the active commit/PR view ----
+  // Keyed by sha/number+repo so revisiting one is instant from cache; commit
+  // diffs are immutable so they never go stale.
+  const diffKey = useMemo<readonly unknown[]>(() => {
+    if (view.kind === "commit") return ["diff", "commit", view.sha, view.repo ?? null];
+    if (view.kind === "pr") return ["diff", "pr", view.number, view.repo ?? null];
+    return ["diff", "none"];
+  }, [view]);
+  const diffQuery = useQuery({
+    queryKey: diffKey,
+    queryFn: ({ signal }) => {
+      if (view.kind !== "commit" && view.kind !== "pr") throw new Error("no diff");
+      const rp = view.repo ? `?repo=${encodeURIComponent(view.repo)}` : "";
+      const url =
+        view.kind === "commit" ? `/api/diff/${view.sha}${rp}` : `/api/diff/pr/${view.number}${rp}`;
+      return fetchText(url, signal);
+    },
+    enabled: view.kind === "commit" || view.kind === "pr",
+    staleTime: Infinity,
+  });
+  const diffText = diffQuery.data ?? "";
+  const diffLoading = (view.kind === "commit" || view.kind === "pr") && diffQuery.isPending;
+  const diffError = errMessage(diffQuery.error);
+  const diffKeyRef = useRef(diffKey);
+  diffKeyRef.current = diffKey;
 
   // Highlighted diff lines + the floating action bar they drive.
   const [selection, setSelection] = useState<DiffSelection | null>(null);
@@ -276,124 +422,57 @@ function App() {
   const mainEl = useRef<HTMLDivElement | null>(null);
   const searchEl = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    fetch("/api/meta")
-      .then((r) => r.json())
-      .then(setMeta)
-      .catch(() => {});
-  }, []);
-
   // ---- Reviewed commits (persisted server-side in sqlite) ----
-  const [reviewed, setReviewed] = useState<Set<string>>(new Set());
-  const reviewedRef = useRef(reviewed);
-  reviewedRef.current = reviewed;
-  useEffect(() => {
-    fetch("/api/reviewed")
-      .then((r) => r.json())
-      .then((shas: string[]) => setReviewed(new Set(shas)))
-      .catch(() => {});
-  }, []);
-  const toggleReviewed = useCallback((sha: string, repo?: string) => {
-    const on = !reviewedRef.current.has(sha);
-    setReviewed((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(sha);
-      else next.delete(sha);
-      return next;
-    });
-    fetch("/api/reviewed", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sha, reviewed: on, repo }),
-    }).catch(() => {});
-  }, []);
+  const reviewedQuery = useQuery({
+    queryKey: ["reviewed"],
+    queryFn: ({ signal }) => fetchJSON<string[]>("/api/reviewed", signal),
+    staleTime: Infinity,
+  });
+  const reviewed = useMemo(() => new Set(reviewedQuery.data ?? []), [reviewedQuery.data]);
+  // Optimistically flip the reviewed flag in the cache, then persist; roll the
+  // cache back to its previous value if the request fails.
+  const toggleReviewed = useCallback(
+    (sha: string, repo?: string) => {
+      const prev = queryClient.getQueryData<string[]>(["reviewed"]) ?? [];
+      const on = !prev.includes(sha);
+      queryClient.setQueryData<string[]>(
+        ["reviewed"],
+        on ? [...prev, sha] : prev.filter((s) => s !== sha),
+      );
+      fetch("/api/reviewed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sha, reviewed: on, repo }),
+      }).catch(() => queryClient.setQueryData(["reviewed"], prev));
+    },
+    [queryClient],
+  );
 
   // ---- Commits ----
-  const loadCommits = useCallback(async (pageNum: number) => {
-    setLoadingMore(true);
-    try {
-      const res = await fetch(`/api/commits?page=${pageNum}`);
-      if (!res.ok) throw new Error(await res.text());
-      const batch: Commit[] = await res.json();
-      setCommits((prev) => (pageNum === 1 ? batch : [...prev, ...batch]));
-      setHasMore(batch.length > 0);
-      setPage(pageNum);
-      return batch;
-    } finally {
-      setLoadingMore(false);
-    }
-  }, []);
-
+  // Land on the newest commit once the first page arrives — unless the URL
+  // already pinned a specific commit/PR/changes/manual view.
   useEffect(() => {
-    loadCommits(1)
-      .then((batch) => {
-        setView((v) =>
-          v.kind === "none" && batch[0]
-            ? { kind: "commit", sha: batch[0].sha, repo: batch[0].repo }
-            : v,
-        );
-      })
-      .catch((err) => {
-        setDiffState("error");
-        setDiffError(`Failed to list commits: ${err.message}`);
-      });
-  }, [loadCommits]);
-
-  // ---- PRs ----
-  const loadPrs = useCallback(() => {
-    fetch("/api/prs")
-      .then(async (res) => {
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
-      })
-      .then((list: PR[]) => {
-        setPrs(list);
-        setPrError("");
-      })
-      .catch((err) => setPrError(String(err.message ?? err)));
-  }, []);
+    const first = commits[0];
+    if (!first) return;
+    setView((v) => (v.kind === "none" ? { kind: "commit", sha: first.sha, repo: first.repo } : v));
+  }, [commits]);
 
   // ---- Manual patches (./diffs/*.patch in the cwd) ----
-  const loadManual = useCallback(() => {
-    fetch("/api/manual")
-      .then(async (res) => {
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
-      })
-      .then((list: ManualPatch[]) => {
-        setManualPatches(list);
-        setManualError("");
-        // Auto-select the first patch when nothing is selected yet.
-        setView((v) =>
-          v.kind === "manual" && !v.name && list[0] ? { kind: "manual", name: list[0].name } : v,
-        );
-      })
-      .catch((err) => setManualError(String(err.message ?? err)));
-  }, []);
-
-  // Load patches on mount when opened directly on the Manual tab (e.g. ?manual=)
+  // Auto-select the first patch when the Manual tab is open with none chosen.
   useEffect(() => {
-    if (initial.tab === "manual") loadManual();
-  }, [initial.tab, loadManual]);
-
-  // ---- Pending changes ----
-  const loadChanges = useCallback(async () => {
-    const res = await fetch("/api/changes");
-    if (!res.ok) throw new Error(await res.text());
-    const next: RepoChanges[] = await res.json();
-    // Skip the state update (and the diff re-render it triggers) when nothing
-    // actually changed — keeps interval polling from flickering the view.
-    setChanges((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
-  }, []);
+    const first = manualPatches?.[0];
+    if (!first) return;
+    setView((v) => (v.kind === "manual" && !v.name ? { kind: "manual", name: first.name } : v));
+  }, [manualPatches]);
 
   const runGit = useCallback(
-    async (action: GitAction, path?: string, repo?: string) => {
-      setBusyPath(path ?? (repo ? `*${repo}` : "*"));
+    async (action: GitAction, path?: string, repo?: string, worktree?: string) => {
+      setBusyPath(path ?? worktree ?? (repo ? `*${repo}` : "*"));
       try {
         const res = await fetch("/api/git", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, path, repo }),
+          body: JSON.stringify({ action, path, repo, worktree }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}) as any);
@@ -401,22 +480,25 @@ function App() {
         }
       } finally {
         setBusyPath(null);
-        loadChanges().catch(() => {});
+        queryClient.invalidateQueries({ queryKey: ["changes"] });
       }
     },
-    [loadChanges],
+    [queryClient],
   );
 
   // Open a file (optionally at a line) in the default editor, server-side
-  const openInEditor = useCallback((path: string, line?: number, repo?: string) => {
-    fetch("/api/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, line, repo }),
-    }).catch(() => {});
-  }, []);
+  const openInEditor = useCallback(
+    (path: string, line?: number, repo?: string, worktree?: string) => {
+      fetch("/api/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, line, repo, worktree }),
+      }).catch(() => {});
+    },
+    [],
+  );
   const onOpenOpaque = useCallback(
-    (path: string, repo?: string) => openInEditor(path, undefined, repo),
+    (path: string, repo?: string, worktree?: string) => openInEditor(path, undefined, repo, worktree),
     [openInEditor],
   );
 
@@ -438,13 +520,13 @@ function App() {
   const submitCommit = useCallback(async () => {
     const message = commitMsg.trim();
     if (!message) return;
-    const repos = (changes ?? []).filter((rc) => rc.staged.length).map((rc) => rc.repo);
+    const worktrees = (changes ?? []).filter((rc) => rc.staged.length).map((rc) => rc.dir);
     setCommitting(true);
     try {
       const res = await fetch("/api/commit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, repos }),
+        body: JSON.stringify({ message, worktrees }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}) as any);
@@ -453,72 +535,53 @@ function App() {
       }
       setCommitOpen(false);
       setCommitMsg("");
-      // The commit/push runs async in tmux; nudge a refresh so the cleared
+      // The commit/push runs async in tmux; nudge a refetch so the cleared
       // working tree shows up (interval polling will also catch it).
-      setTimeout(() => loadChanges().catch(() => {}), 600);
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["changes"] }), 600);
     } finally {
       setCommitting(false);
     }
-  }, [commitMsg, changes, loadChanges]);
+  }, [commitMsg, changes, queryClient]);
 
-  const selectTab = useCallback(
-    (next: Tab) => {
-      setTab(next);
-      setFilter("");
-      if (next === "prs" && prs === null) loadPrs();
-      if (next === "changes") {
-        setView({ kind: "changes" });
-        history.replaceState(null, "", "/?view=changes");
-        loadChanges().catch(() => {});
-      }
-      if (next === "manual") {
-        setView({ kind: "manual", name: "" });
-        history.replaceState(null, "", "/?manual=");
-        loadManual();
-      }
-    },
-    [prs, loadPrs, loadChanges, loadManual],
-  );
-
-  // Keep pending changes fresh while looking at them: refetch on window focus
-  // and on a light interval, so a background commit/push (run in `tmux -L bg`)
-  // is reflected here within a couple of seconds without any manual refresh.
-  useEffect(() => {
-    if (view.kind !== "changes") return;
-    const refresh = () => loadChanges().catch(() => {});
-    window.addEventListener("focus", refresh);
-    const id = window.setInterval(refresh, 2500);
-    return () => {
-      window.removeEventListener("focus", refresh);
-      window.clearInterval(id);
-    };
-  }, [view.kind, loadChanges]);
-
-  // ---- Diff fetching for commit/pr views ----
-  useEffect(() => {
-    if (view.kind !== "commit" && view.kind !== "pr") return;
-    const rp = view.repo ? `?repo=${encodeURIComponent(view.repo)}` : "";
-    const url =
-      view.kind === "commit" ? `/api/diff/${view.sha}${rp}` : `/api/diff/pr/${view.number}${rp}`;
-    const controller = new AbortController();
-    setDiffState("loading");
-    fetch(url, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(await res.text());
-        return res.text();
-      })
-      .then((text) => {
-        setDiffText(text);
-        setDiffState("idle");
-        mainEl.current?.scrollTo({ top: 0 });
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return;
-        setDiffState("error");
-        setDiffError(String(err.message ?? err));
+  // Launch a new interactive claude session in the dh directory (detached).
+  const submitClaude = useCallback(async () => {
+    const prompt = claudePrompt.trim();
+    if (!prompt) return;
+    setLaunching(true);
+    try {
+      const res = await fetch("/api/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
       });
-    return () => controller.abort();
-  }, [view]);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`launch failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      const body = await res.json().catch(() => ({}) as any);
+      setClaudeOpen(false);
+      setClaudePrompt("");
+      setLaunchedSession(typeof body.session === "string" ? body.session : null);
+    } finally {
+      setLaunching(false);
+    }
+  }, [claudePrompt]);
+
+  const selectTab = useCallback((next: Tab) => {
+    setTab(next);
+    setFilter("");
+    // The per-tab queries fetch themselves via their `enabled` flag; we only
+    // need to point the view at the right thing and update the URL.
+    if (next === "changes") {
+      setView({ kind: "changes" });
+      history.replaceState(null, "", "/?view=changes");
+    }
+    if (next === "manual") {
+      setView({ kind: "manual", name: "" });
+      history.replaceState(null, "", "/?manual=");
+    }
+  }, []);
 
   const selectCommit = useCallback((sha: string, repo?: string) => {
     setView({ kind: "commit", sha, repo });
@@ -539,13 +602,14 @@ function App() {
 
   // ---- Sections rendered in the center column ----
   const sections = useMemo<Section[]>(() => {
-    // Namespace tree paths by repo in a workspace so app/src/x and web/src/x
-    // don't collide in the (path-keyed) file tree.
-    const tp = (repo: string | undefined, name: string) =>
-      workspace && repo ? `${repo}/${name}` : name;
+    // Namespace tree paths by worktree segment so the same path in different
+    // worktrees/repos (e.g. app/src/x and web/src/x) doesn't collide in the
+    // (path-keyed) file tree.
+    const tpath = (segment: string, name: string) =>
+      segment ? `${segment.replace(/ · /g, "/")}/${name}` : name;
 
     if (view.kind === "commit" || view.kind === "pr") {
-      if (diffState !== "idle") return [];
+      if (!diffText) return [];
       const cacheKey = view.kind === "commit" ? view.sha : `pr-${view.number}`;
       const files = parsePatchFiles(diffText, cacheKey).flatMap((p) => p.files);
       return [
@@ -565,17 +629,20 @@ function App() {
     if (view.kind === "changes" && changes) {
       const out: Section[] = [];
       for (const rc of changes) {
-        const tag = workspace ? `${rc.repo} · ` : "";
+        const idns = rc.segment || rc.repo; // unique per worktree change-source
         if (rc.staged.length) {
           const files = parsePatchFiles(rc.stagedDiff).flatMap((p) => p.files);
           out.push({
-            label: `${tag}Staged`,
+            label: "Staged",
+            segment: rc.segment,
             repo: rc.repo,
+            dir: rc.dir,
             files: files.map((f) => ({
-              key: `staged:${rc.repo}:${f.name}`,
+              key: `staged:${idns}:${f.name}`,
               path: f.name,
-              treePath: tp(rc.repo, f.name),
+              treePath: tpath(rc.segment, f.name),
               repo: rc.repo,
+              worktree: rc.dir,
               fileDiff: f,
               actions: ["unstage", "stash"],
             })),
@@ -584,25 +651,33 @@ function App() {
         const unstagedFiles: SectionFile[] = parsePatchFiles(rc.unstagedDiff)
           .flatMap((p) => p.files)
           .map((f) => ({
-            key: `unstaged:${rc.repo}:${f.name}`,
+            key: `unstaged:${idns}:${f.name}`,
             path: f.name,
-            treePath: tp(rc.repo, f.name),
+            treePath: tpath(rc.segment, f.name),
             repo: rc.repo,
+            worktree: rc.dir,
             fileDiff: f,
             actions: ["stage", "stash"] as GitAction[],
           }));
         for (const u of rc.untracked) {
           unstagedFiles.push({
-            key: `untracked:${rc.repo}:${u.path}`,
+            key: `untracked:${idns}:${u.path}`,
             path: u.path,
-            treePath: tp(rc.repo, u.path),
+            treePath: tpath(rc.segment, u.path),
             repo: rc.repo,
+            worktree: rc.dir,
             untracked: u,
             actions: ["stage", "stash"],
           });
         }
         if (unstagedFiles.length) {
-          out.push({ label: `${tag}Unstaged`, repo: rc.repo, files: unstagedFiles });
+          out.push({
+            label: "Unstaged",
+            segment: rc.segment,
+            repo: rc.repo,
+            dir: rc.dir,
+            files: unstagedFiles,
+          });
         }
       }
       return out;
@@ -630,7 +705,7 @@ function App() {
       ];
     }
     return [];
-  }, [view, diffText, diffState, changes, manualPatches, workspace]);
+  }, [view, diffText, changes, manualPatches, workspace]);
 
   // ---- Highlighted-line action bar (Delete / Open in $EDITOR) ----
   const selFile = useMemo(
@@ -648,9 +723,27 @@ function App() {
   const canDelete =
     !!selFile && (view.kind === "manual" || view.kind === "changes") && selSide === "additions";
 
+  // A Claude Code @-file reference (cwd-relative path + line range) for the
+  // active line selection, e.g. `@cli/client.tsx#172-175`. Seeded into the
+  // New-session prompt when it's opened with `'` while lines are highlighted.
+  const claudeRef = useMemo(() => {
+    if (!selection || !selFile) return "";
+    const abs = selFile.worktree ? `${selFile.worktree}/${selFile.path}` : selFile.path;
+    const rel =
+      meta?.cwd && abs.startsWith(`${meta.cwd}/`) ? abs.slice(meta.cwd.length + 1) : selFile.path;
+    return `@${rel}#${selHi > selLo ? `${selLo}-${selHi}` : selLo}`;
+  }, [selection, selFile, meta, selLo, selHi]);
+  const claudeRefRef = useRef(claudeRef);
+  claudeRefRef.current = claudeRef;
+
   const openSelection = useCallback(() => {
     if (!selFile || !selection) return;
-    openInEditor(selFile.path, Math.min(selection.range.start, selection.range.end), selFile.repo);
+    openInEditor(
+      selFile.path,
+      Math.min(selection.range.start, selection.range.end),
+      selFile.repo,
+      selFile.worktree,
+    );
     setSelection(null);
   }, [selFile, selection, openInEditor]);
 
@@ -667,6 +760,7 @@ function App() {
         source: "working",
         path: selFile.path,
         repo: selFile.repo,
+        worktree: selFile.worktree,
         start: lo,
         end: hi,
         side,
@@ -685,13 +779,12 @@ function App() {
         return;
       }
     } catch (err) {
-      alert(`Delete failed: ${String((err as any)?.message ?? err)}`);
+      alert(`Delete failed: ${errMessage(err)}`);
       return;
     }
     setSelection(null);
-    if (view.kind === "manual") loadManual();
-    else loadChanges().catch(() => {});
-  }, [selFile, selection, view, loadManual, loadChanges]);
+    queryClient.invalidateQueries({ queryKey: [view.kind === "manual" ? "manual" : "changes"] });
+  }, [selFile, selection, view, queryClient]);
 
   // ---- Actively viewing file: the file under the sticky header line ----
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -742,6 +835,8 @@ function App() {
   useEffect(() => {
     setCollapsedKeys(new Set());
     setSelection(null);
+    // Scroll the diff column back to the top when the viewed commit/PR changes.
+    if (view.kind === "commit" || view.kind === "pr") mainEl.current?.scrollTo({ top: 0 });
   }, [view]);
   const activeKeyRef = useRef(activeKey);
   activeKeyRef.current = activeKey;
@@ -873,8 +968,10 @@ function App() {
   const changeCount = changes
     ? changes.reduce((n, rc) => n + rc.staged.length + rc.unstaged.length + rc.untracked.length, 0)
     : null;
-  // Repos with something staged — what the commit dialog will actually commit.
-  const stagedRepos = (changes ?? []).filter((rc) => rc.staged.length).map((rc) => rc.repo);
+  // Worktrees with something staged — what the commit dialog will actually commit.
+  const stagedWorktrees = (changes ?? [])
+    .filter((rc) => rc.staged.length)
+    .map((rc) => rc.segment || rc.repo || "working tree");
 
   // ---- Keyboard navigation (agents-cli style) ----
   const keyCtx = useRef({ tab, view, visibleCommits, visiblePrs, visibleManual, selection });
@@ -915,6 +1012,37 @@ function App() {
         selectTab(TAB_ORDER[(idx + delta) % TAB_ORDER.length]);
         return;
       }
+      // 1–4 jump straight to a tab
+      if (e.key >= "1" && e.key <= String(TAB_ORDER.length)) {
+        e.preventDefault();
+        selectTab(TAB_ORDER[Number(e.key) - 1]);
+        return;
+      }
+      // `v` toggles auto-refresh while on the Changes tab
+      if (e.key === "v" && tab === "changes") {
+        e.preventDefault();
+        setAutoRefresh((v) => !v);
+        return;
+      }
+      // Space forces a refresh of the current tab: resetting the query drops its
+      // cached data, so the sidebar skeleton + content spinner flash while it
+      // refetches.
+      if (e.key === " ") {
+        e.preventDefault();
+        const listKey: string[] =
+          tab === "commits"
+            ? ["commits"]
+            : tab === "prs"
+              ? ["prs"]
+              : tab === "changes"
+                ? ["changes"]
+                : ["manual"];
+        queryClient.resetQueries({ queryKey: listKey });
+        if (view.kind === "commit" || view.kind === "pr") {
+          queryClient.resetQueries({ queryKey: diffKeyRef.current });
+        }
+        return;
+      }
       if (e.key === ";") {
         if (view.kind === "changes") {
           e.preventDefault();
@@ -930,6 +1058,15 @@ function App() {
       if (e.key === "c") {
         e.preventDefault();
         toggleCollapsed();
+        return;
+      }
+      if (e.key === "'") {
+        e.preventDefault();
+        // If lines are highlighted, clear the prompt and replace it with their
+        // @-file reference so the new session lands with just that context.
+        const ref = claudeRefRef.current;
+        if (ref) setClaudePrompt(`${ref} `);
+        setClaudeOpen(true);
         return;
       }
       const down = e.key === "ArrowDown" || e.key === "j";
@@ -986,7 +1123,7 @@ function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectCommit, selectPr, selectManual, selectTab, toggleReviewed, toggleCollapsed]);
+  }, [selectCommit, selectPr, selectManual, selectTab, toggleReviewed, toggleCollapsed, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -1001,16 +1138,34 @@ function App() {
         disabled={busyPath !== null}
         onClick={(e) => {
           e.stopPropagation();
-          runGit(a, file.path, file.repo);
+          runGit(a, file.path, file.repo, file.worktree);
         }}
       >
         {ACTION_LABELS[a].label}
       </button>
     ));
 
-  const changeGroups: { label: string; repo?: string; files: SectionFile[] }[] = sections
+  const changeGroups: {
+    label: string;
+    segment: string;
+    repo?: string;
+    dir?: string;
+    files: SectionFile[];
+  }[] = sections
     .filter((s) => s.label)
-    .map((s) => ({ label: s.label!, repo: s.repo, files: s.files }));
+    .map((s) => ({ label: s.label!, segment: s.segment ?? "", repo: s.repo, dir: s.dir, files: s.files }));
+
+  // Group the staged/unstaged groups under their worktree segment so the
+  // sidebar shows each worktree (when there's more than one) with its files.
+  const worktreeSegments: { segment: string; groups: typeof changeGroups }[] = [];
+  for (const g of changeGroups) {
+    let seg = worktreeSegments.find((w) => w.segment === g.segment);
+    if (!seg) {
+      seg = { segment: g.segment, groups: [] };
+      worktreeSegments.push(seg);
+    }
+    seg.groups.push(g);
+  }
 
   return (
     <div className="layout">
@@ -1033,7 +1188,7 @@ function App() {
               PRs
             </button>
             <button className={tab === "changes" ? "on" : ""} onClick={() => selectTab("changes")}>
-              Changes{changeCount !== null && changeCount > 0 ? ` (${changeCount})` : ""}
+              Changes
             </button>
             <button className={tab === "manual" ? "on" : ""} onClick={() => selectTab("manual")}>
               Manual{manualPatches && manualPatches.length > 0 ? ` (${manualPatches.length})` : ""}
@@ -1058,6 +1213,10 @@ function App() {
 
         {tab === "commits" && (
           <div className="commit-list">
+            {commitsQuery.isPending && <SkeletonList />}
+            {commitsQuery.isError && (
+              <div className="side-note error">{errMessage(commitsQuery.error)}</div>
+            )}
             {visibleCommits.map((c) => (
               <div
                 key={`${c.repo}:${c.sha}`}
@@ -1089,7 +1248,7 @@ function App() {
               <button
                 className="load-more"
                 disabled={loadingMore}
-                onClick={() => loadCommits(page + 1).catch(() => {})}
+                onClick={() => commitsQuery.fetchNextPage()}
               >
                 {loadingMore ? "Loading…" : "Load more"}
               </button>
@@ -1099,7 +1258,7 @@ function App() {
 
         {tab === "prs" && (
           <div className="commit-list">
-            {prs === null && !prError && <div className="side-note">Loading PRs…</div>}
+            {prs === null && !prError && <SkeletonList />}
             {prError && <div className="side-note error">{prError}</div>}
             {visiblePrs?.map((p) => (
               <button
@@ -1131,7 +1290,7 @@ function App() {
 
         {tab === "manual" && (
           <div className="commit-list">
-            {manualPatches === null && !manualError && <div className="side-note">Loading…</div>}
+            {manualPatches === null && !manualError && <SkeletonList />}
             {manualError && <div className="side-note error">{manualError}</div>}
             {visibleManual?.map((p) => (
               <button
@@ -1156,6 +1315,19 @@ function App() {
 
         {tab === "changes" && (
           <div className="commit-list">
+            <div className="auto-refresh-bar">
+              <span>Auto-refresh</span>
+              <button
+                className={`switch${autoRefresh ? " on" : ""}`}
+                role="switch"
+                aria-checked={autoRefresh}
+                title="Toggle auto-refresh (V)"
+                onClick={() => setAutoRefresh((v) => !v)}
+              >
+                <span className="switch-knob" />
+              </button>
+              <span className="switch-state">{autoRefresh ? "On" : "Off"}</span>
+            </div>
             <div className="bulk-actions">
               <button disabled={busyPath !== null} onClick={() => runGit("stage")}>
                 Stage all
@@ -1167,36 +1339,41 @@ function App() {
                 Stash all
               </button>
             </div>
-            {changes === null && <div className="side-note">Loading…</div>}
+            {changes === null && <SkeletonList />}
             {changes !== null && changeCount === 0 && (
               <div className="side-note">Working tree clean ✨</div>
             )}
-            {changeGroups.map((group) => (
-              <div key={group.label}>
-                <div className="group-label">
-                  <span>
-                    {group.label} ({group.files.length})
-                  </span>
-                  {group.label.endsWith("Unstaged") && (
-                    <button
-                      className="group-act"
-                      title="git add -A"
-                      disabled={busyPath !== null}
-                      onClick={() => runGit("stage", undefined, group.repo)}
-                    >
-                      stage all
-                    </button>
-                  )}
-                </div>
-                {group.files.map((f) => (
-                  <div key={f.key} className="change-row" onClick={() => scrollToKey(f.key)}>
-                    <code className={`st st-${f.untracked ? "untracked" : (f.fileDiff && STATUS_FOR_CHANGE[f.fileDiff.type]) || "modified"}`}>
-                      {f.untracked ? "?" : f.fileDiff?.type === "new" ? "A" : f.fileDiff?.type === "deleted" ? "D" : f.fileDiff?.type.startsWith("rename") ? "R" : "M"}
-                    </code>
-                    <span className="change-path" title={f.path}>
-                      {f.path}
-                    </span>
-                    <span className="change-acts">{actionButtons(f)}</span>
+            {worktreeSegments.map((seg) => (
+              <div key={seg.segment || "_"}>
+                {seg.segment && <div className="wt-label">{seg.segment}</div>}
+                {seg.groups.map((group) => (
+                  <div key={group.label}>
+                    <div className="group-label">
+                      <span>
+                        {group.label} ({group.files.length})
+                      </span>
+                      {group.label === "Unstaged" && (
+                        <button
+                          className="group-act"
+                          title="git add -A"
+                          disabled={busyPath !== null}
+                          onClick={() => runGit("stage", undefined, undefined, group.dir)}
+                        >
+                          stage all
+                        </button>
+                      )}
+                    </div>
+                    {group.files.map((f) => (
+                      <div key={f.key} className="change-row" onClick={() => scrollToKey(f.key)}>
+                        <code className={`st st-${f.untracked ? "untracked" : (f.fileDiff && STATUS_FOR_CHANGE[f.fileDiff.type]) || "modified"}`}>
+                          {f.untracked ? "?" : f.fileDiff?.type === "new" ? "A" : f.fileDiff?.type === "deleted" ? "D" : f.fileDiff?.type.startsWith("rename") ? "R" : "M"}
+                        </code>
+                        <span className="change-path" title={f.path}>
+                          {f.path}
+                        </span>
+                        <span className="change-acts">{actionButtons(f)}</span>
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
@@ -1205,16 +1382,27 @@ function App() {
         )}
         <div className="kbd-hints">
           <span>
-            <kbd>←/→</kbd> tabs
+            <kbd>1-4</kbd>/<kbd>←/→</kbd> tabs
           </span>
           <span>
             <kbd>↑/↓</kbd> navigate
           </span>
           <span>
+            <kbd>space</kbd> refresh
+          </span>
+          {tab === "changes" && (
+            <span>
+              <kbd>v</kbd> auto-refresh
+            </span>
+          )}
+          <span>
             <kbd>;</kbd> {tab === "changes" ? "commit" : "reviewed"}
           </span>
           <span>
             <kbd>c</kbd> collapse
+          </span>
+          <span>
+            <kbd>'</kbd> new session
           </span>
           <span>
             <kbd>/</kbd> filter
@@ -1223,12 +1411,12 @@ function App() {
       </nav>
 
       <main className="diffs" ref={mainEl}>
-        {diffState === "loading" && (view.kind === "commit" || view.kind === "pr") && (
-          <div className="empty">
-            <div className="spinner" aria-label="Loading diff" />
-          </div>
+        {diffLoading && <ContentSpinner label="Loading diff…" />}
+        {view.kind === "changes" && changes === null && <ContentSpinner label="Loading changes…" />}
+        {view.kind === "manual" && manualPatches === null && !manualError && (
+          <ContentSpinner label="Loading patches…" />
         )}
-        {diffState === "error" && (view.kind === "commit" || view.kind === "pr") && (
+        {diffQuery.isError && (view.kind === "commit" || view.kind === "pr") && (
           <div className="empty error">{diffError}</div>
         )}
         {view.kind === "changes" && changes !== null && changeCount === 0 && (
@@ -1245,7 +1433,7 @@ function App() {
             </div>
           )}
         {(view.kind === "commit" || view.kind === "pr") &&
-          diffState === "idle" &&
+          diffQuery.isSuccess &&
           sections.every((s) => !s.files.length) && <div className="empty">No file changes</div>}
 
         {sections.map((section) => (
@@ -1400,8 +1588,8 @@ function App() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h3>
               Commit &amp; push
-              {stagedRepos.length ? (
-                <span className="modal-repos"> · {stagedRepos.join(", ")}</span>
+              {stagedWorktrees.length ? (
+                <span className="modal-repos"> · {stagedWorktrees.join(", ")}</span>
               ) : (
                 ""
               )}
@@ -1424,12 +1612,12 @@ function App() {
               </button>
               <button
                 className="act primary"
-                disabled={committing || !commitMsg.trim() || !stagedRepos.length}
+                disabled={committing || !commitMsg.trim() || !stagedWorktrees.length}
                 onClick={submitCommit}
               >
                 {committing
                   ? "Committing…"
-                  : stagedRepos.length
+                  : stagedWorktrees.length
                     ? "Commit & push"
                     : "Nothing staged"}
               </button>
@@ -1448,8 +1636,87 @@ function App() {
           </div>
         </div>
       )}
+
+      {claudeOpen && (
+        <div className="modal-overlay" onClick={() => !launching && setClaudeOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              New Claude session
+              {meta?.repo ? <span className="modal-repos"> · {meta.repo}</span> : ""}
+            </h3>
+            <textarea
+              autoFocus
+              className="commit-input"
+              placeholder="Prompt for a new Claude Code session…"
+              value={claudePrompt}
+              onChange={(e) => setClaudePrompt(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Escape") setClaudeOpen(false);
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
+                  e.preventDefault();
+                  submitClaude();
+                }
+              }}
+            />
+            <div className="modal-actions">
+              <button className="act" disabled={launching} onClick={() => setClaudeOpen(false)}>
+                Cancel
+              </button>
+              <button
+                className="act primary"
+                disabled={launching || !claudePrompt.trim()}
+                onClick={submitClaude}
+              >
+                {launching ? "Launching…" : "Launch"}
+              </button>
+            </div>
+            <div className="modal-hint">
+              <span>
+                Detached <code>claude</code> in tmux
+              </span>
+              <span>
+                <kbd>⌘↵</kbd> / <kbd>⌥↵</kbd> launch
+              </span>
+              <span>
+                <kbd>esc</kbd> cancel
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {launchedSession && (
+        <div className="sel-bar">
+          <span className="sel-info">
+            Launched <code>{launchedSession}</code> · attach with{" "}
+            <code>tmux attach -t {launchedSession}</code>
+          </span>
+          <button
+            className="sel-act"
+            onClick={() => navigator.clipboard.writeText(`tmux attach -t ${launchedSession}`)}
+          >
+            Copy
+          </button>
+          <button className="sel-x" title="Dismiss" onClick={() => setLaunchedSession(null)}>
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const queryClient = new QueryClient({
+  defaultOptions: {
+    // Errors surface immediately (no retry delay) like the old fetch code, and
+    // only the changes query opts back into focus refetching.
+    queries: { retry: false, refetchOnWindowFocus: false },
+  },
+});
+
+createRoot(document.getElementById("root")!).render(
+  <QueryClientProvider client={queryClient}>
+    <App />
+  </QueryClientProvider>,
+);
