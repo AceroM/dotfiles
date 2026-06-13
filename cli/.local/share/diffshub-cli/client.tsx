@@ -298,8 +298,8 @@ function App() {
   const [view, setView] = useState<View>(initial.view);
 
   // Whether the Changes view auto-refreshes (polling + window focus). Toggle
-  // with `v`; `space` forces a one-off refresh of whatever tab you're on.
-  // Defaults to off and persists across reloads via localStorage.
+  // with the switch in the Changes sidebar; `space` forces a one-off refresh of
+  // whatever tab you're on. Defaults to off and persists via localStorage.
   const [autoRefresh, setAutoRefresh] = useState(() => {
     try {
       return localStorage.getItem("autoRefresh") === "true";
@@ -974,8 +974,30 @@ function App() {
     .map((rc) => rc.segment || rc.repo || "working tree");
 
   // ---- Keyboard navigation (agents-cli style) ----
-  const keyCtx = useRef({ tab, view, visibleCommits, visiblePrs, visibleManual, selection });
-  keyCtx.current = { tab, view, visibleCommits, visiblePrs, visibleManual, selection };
+  const keyCtx = useRef({
+    tab,
+    view,
+    visibleCommits,
+    visiblePrs,
+    visibleManual,
+    selection,
+    orderedKeys,
+    sections,
+    commitOpen,
+    claudeOpen,
+  });
+  keyCtx.current = {
+    tab,
+    view,
+    visibleCommits,
+    visiblePrs,
+    visibleManual,
+    selection,
+    orderedKeys,
+    sections,
+    commitOpen,
+    claudeOpen,
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const { tab, view, visibleCommits, visiblePrs, visibleManual } = keyCtx.current;
@@ -984,6 +1006,14 @@ function App() {
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
         target.isContentEditable;
+      // Esc closes the commit / new-session dialogs from anywhere (each dialog's
+      // textarea also handles Esc while it holds focus).
+      if (e.key === "Escape" && (keyCtx.current.commitOpen || keyCtx.current.claudeOpen)) {
+        e.preventDefault();
+        setCommitOpen(false);
+        setClaudeOpen(false);
+        return;
+      }
       if (e.key === "/" && !typing) {
         e.preventDefault();
         searchEl.current?.focus();
@@ -1018,10 +1048,42 @@ function App() {
         selectTab(TAB_ORDER[Number(e.key) - 1]);
         return;
       }
-      // `v` toggles auto-refresh while on the Changes tab
-      if (e.key === "v" && tab === "changes") {
+      // Vimium-style scrolling of the diff column. We recreate j/k/d/u here so
+      // they work even where Vimium is disabled and so they target the diff pane
+      // rather than the document. (`v` is gone — it collided with Vimium's
+      // visual mode; toggle auto-refresh from the switch in the sidebar.)
+      const main = mainEl.current;
+      if (main && (e.key === "j" || e.key === "k" || e.key === "d" || e.key === "u")) {
         e.preventDefault();
-        setAutoRefresh((v) => !v);
+        const half = main.clientHeight / 2;
+        const top = e.key === "j" ? 64 : e.key === "k" ? -64 : e.key === "d" ? half : -half;
+        main.scrollBy({ top });
+        return;
+      }
+      // `h`/`l` jump to the previous/next file in the diff (otherwise the active
+      // file is driven by scroll position).
+      if (e.key === "h" || e.key === "l") {
+        e.preventDefault();
+        const keys = keyCtx.current.orderedKeys;
+        if (keys.length) {
+          const idx = activeKeyRef.current ? keys.indexOf(activeKeyRef.current) : -1;
+          const next =
+            e.key === "l" ? Math.min(idx + 1, keys.length - 1) : Math.max(idx - 1, 0);
+          fileEls.current.get(keys[next])?.scrollIntoView({ block: "start" });
+        }
+        return;
+      }
+      // `a` stages the actively-viewed file (Changes view only — it's the only
+      // place a file carries a stage action).
+      if (e.key === "a") {
+        e.preventDefault();
+        const cur = activeKeyRef.current;
+        const file = cur
+          ? keyCtx.current.sections.flatMap((s) => s.files).find((f) => f.key === cur)
+          : null;
+        if (file?.actions.includes("stage")) {
+          runGit("stage", file.path, file.repo, file.worktree);
+        }
         return;
       }
       // Space forces a refresh of the current tab: resetting the query drops its
@@ -1069,8 +1131,8 @@ function App() {
         setClaudeOpen(true);
         return;
       }
-      const down = e.key === "ArrowDown" || e.key === "j";
-      const up = e.key === "ArrowUp" || e.key === "k";
+      const down = e.key === "ArrowDown";
+      const up = e.key === "ArrowUp";
       if (!down && !up) return;
       if (tab === "commits" && visibleCommits.length) {
         e.preventDefault();
@@ -1123,7 +1185,7 @@ function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectCommit, selectPr, selectManual, selectTab, toggleReviewed, toggleCollapsed, queryClient]);
+  }, [selectCommit, selectPr, selectManual, selectTab, toggleReviewed, toggleCollapsed, runGit, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -1321,7 +1383,7 @@ function App() {
                 className={`switch${autoRefresh ? " on" : ""}`}
                 role="switch"
                 aria-checked={autoRefresh}
-                title="Toggle auto-refresh (V)"
+                title="Toggle auto-refresh"
                 onClick={() => setAutoRefresh((v) => !v)}
               >
                 <span className="switch-knob" />
@@ -1385,14 +1447,20 @@ function App() {
             <kbd>1-4</kbd>/<kbd>←/→</kbd> tabs
           </span>
           <span>
-            <kbd>↑/↓</kbd> navigate
+            <kbd>↑/↓</kbd> list
+          </span>
+          <span>
+            <kbd>j/k/d/u</kbd> scroll
+          </span>
+          <span>
+            <kbd>h/l</kbd> files
           </span>
           <span>
             <kbd>space</kbd> refresh
           </span>
           {tab === "changes" && (
             <span>
-              <kbd>v</kbd> auto-refresh
+              <kbd>a</kbd> stage
             </span>
           )}
           <span>
@@ -1603,7 +1671,10 @@ function App() {
               onKeyDown={(e) => {
                 e.stopPropagation();
                 if (e.key === "Escape") setCommitOpen(false);
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitCommit();
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
+                  e.preventDefault();
+                  submitCommit();
+                }
               }}
             />
             <div className="modal-actions">
@@ -1627,7 +1698,7 @@ function App() {
                 Runs in <code>tmux -L bg</code>
               </span>
               <span>
-                <kbd>⌘↵</kbd> commit
+                <kbd>⌘↵</kbd> / <kbd>⌥↵</kbd> commit
               </span>
               <span>
                 <kbd>esc</kbd> cancel
