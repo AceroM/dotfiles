@@ -985,6 +985,7 @@ function App() {
     sections,
     commitOpen,
     claudeOpen,
+    changes,
   });
   keyCtx.current = {
     tab,
@@ -997,6 +998,7 @@ function App() {
     sections,
     commitOpen,
     claudeOpen,
+    changes,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1084,6 +1086,19 @@ function App() {
         if (file?.actions.includes("stage")) {
           runGit("stage", file.path, file.repo, file.worktree);
         }
+        return;
+      }
+      // `A` stages everything if anything is still unstaged, otherwise (when
+      // every change is already staged) unstages everything — a toggle over the
+      // Stage all / Unstage all bulk buttons. Changes view only.
+      if (e.key === "A") {
+        e.preventDefault();
+        if (tab !== "changes") return;
+        const cs = keyCtx.current.changes ?? [];
+        const unstaged = cs.reduce((n, rc) => n + rc.unstaged.length + rc.untracked.length, 0);
+        const staged = cs.reduce((n, rc) => n + rc.staged.length, 0);
+        if (unstaged > 0) runGit("stage");
+        else if (staged > 0) runGit("unstage");
         return;
       }
       // Space forces a refresh of the current tab: resetting the query drops its
@@ -1460,7 +1475,7 @@ function App() {
           </span>
           {tab === "changes" && (
             <span>
-              <kbd>a</kbd> stage
+              <kbd>a</kbd> stage <kbd>A</kbd> all
             </span>
           )}
           <span>
