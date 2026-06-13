@@ -1,6 +1,15 @@
+# Mint a claude session id and stamp it onto a tmux session as the
+# @claude_session option. Pairing `claude --session-id $(_cl_sid)` on launch with
+# `_cl_tag <tmux-session> <sid>` afterwards lets diffshub's Tmux tab map a session
+# straight to its ~/.claude/projects/<dir>/<sid>.jsonl transcript.
+function _cl_sid() { uuidgen | tr 'A-Z' 'a-z' }
+function _cl_tag() { tmux set-option -t "$1" @claude_session "$2" 2>/dev/null }
+
 function ce() {
   local s="claude-$(uuidgen | cut -d- -f1)"
-  tmux new-session -d "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --dangerously-skip-permissions"
+  local sid=$(_cl_sid)
+  tmux new-session -d "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid --dangerously-skip-permissions"
+  _cl_tag "$s" "$sid"
   sleep 1
   tmux send-keys -t "$s:0.0" "$1" C-m
 }
@@ -8,7 +17,9 @@ function ce() {
 function pm() {
   local s="claude-pm-$(uuidgen | cut -d- -f1)"
   local prompt='Review the staged + unstaged diff and the recent git log for style. Write a Conventional Commits message (type(scope): summary, with a body if the change warrants it) that accurately describes the change — never use a placeholder like "changes". Then commit and push. Do NOT add a Co-Authored-By footer or any AI attribution.'
-  tmux new-session -ds "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
+  local sid=$(_cl_sid)
+  tmux new-session -ds "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
+  _cl_tag "$s" "$sid"
 }
 
 function j() {
@@ -35,7 +46,9 @@ function j() {
     fi
     ((attempts++))
   done
-  tmux new-session -ds "$name" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude"
+  local sid=$(_cl_sid)
+  tmux new-session -ds "$name" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid"
+  _cl_tag "$name" "$sid"
   sleep 1
   tmux send-keys -t "$name:0.0" "$1" C-m
   tmux send-keys -t "$name:0.0" C-m
@@ -70,12 +83,14 @@ function p() {
     fi
     ((attempts++))
   done
-  local claude_cmd="CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude"
+  local sid=$(_cl_sid)
+  local claude_cmd="CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid"
   local arg
   for arg in "$@"; do
     claude_cmd+=" ${(q)arg}"
   done
   tmux new-session -ds "$name" -c "$PWD" "$claude_cmd"
+  _cl_tag "$name" "$sid"
   if [[ -n "$input" ]]; then
     sleep 1
     printf '%s' "$input" | tmux load-buffer -
@@ -112,7 +127,9 @@ function _claude_new_here() {
     fi
     ((attempts++))
   done
-  tmux new-session -ds "$name" -c "$dir" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$dir' claude"
+  local sid=$(_cl_sid)
+  tmux new-session -ds "$name" -c "$dir" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$dir' claude --session-id $sid"
+  _cl_tag "$name" "$sid"
   tmux switch-client -t "$name"
 }
 

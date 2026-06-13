@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "diffshub",
+  "version": "0.1.0",
+  "description": "Assign a website to a diffshub directory, then press ' for a new Claude session or v to grab an element's HTML.",
+  "action": { "default_popup": "popup.html", "default_title": "diffshub" },
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle" }
+  ],
+  "web_accessible_resources": [{ "resources": ["dialog.js"], "matches": ["<all_urls>"] }]
+}
