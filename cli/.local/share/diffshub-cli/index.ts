@@ -73,6 +73,18 @@ async function resolveRepo(key: string, dir: string): Promise<RepoCtx | null> {
   return { key, dir, nameWithOwner, branch };
 }
 
+// A member repo, falling back to a local-only RepoCtx when its GitHub remote
+// can't be read — so Changes + the file index still work (commits/PRs need gh).
+async function resolveRepoOrLocal(key: string, dir: string): Promise<RepoCtx> {
+  const r = await resolveRepo(key, dir);
+  if (r) return r;
+  let branch = "";
+  try {
+    branch = (await $`git -C ${dir} branch --show-current`.quiet().text()).trim();
+  } catch {}
+  return { key, dir, nameWithOwner: "", branch };
+}
+
 // A directory's stored member list (JSON string[]) → clean array, or null to auto-detect.
 function parseRepos(repos: string | null): string[] | null {
   if (!repos) return null;
@@ -104,11 +116,11 @@ async function resolveMemberRepos(path: string, explicit: string[] | null): Prom
     } catch {}
   }
   if (!keys.length) keys = ["app", "web"];
-  let resolved = (
-    await Promise.all(
-      keys.filter((k) => existsSync(`${path}/${k}/.git`)).map((k) => resolveRepo(k, `${path}/${k}`)),
-    )
-  ).filter((r): r is RepoCtx => r !== null);
+  let resolved = await Promise.all(
+    keys
+      .filter((k) => existsSync(`${path}/${k}/.git`))
+      .map((k) => resolveRepoOrLocal(k, `${path}/${k}`)),
+  );
   if (!resolved.length) {
     // Fall back to every immediate child that is a git repo.
     let children: string[] = [];
@@ -118,9 +130,7 @@ async function resolveMemberRepos(path: string, explicit: string[] | null): Prom
         .map((e) => e.name)
         .sort();
     } catch {}
-    resolved = (
-      await Promise.all(children.map((k) => resolveRepo(k, `${path}/${k}`)))
-    ).filter((r): r is RepoCtx => r !== null);
+    resolved = await Promise.all(children.map((k) => resolveRepoOrLocal(k, `${path}/${k}`)));
   }
   return resolved;
 }

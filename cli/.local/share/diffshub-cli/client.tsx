@@ -66,12 +66,24 @@ interface RepoMeta {
 }
 
 interface Meta {
+  id: number; // active directory id
+  name: string; // active directory display name
+  path: string; // active directory path
   repo: string;
   cwd: string; // absolute dir new claude sessions launch in; roots @-file refs
   branch: string;
   workspace: boolean;
   editor: string;
   repos: RepoMeta[];
+  defaultDirId: number; // the launch cwd's directory id
+}
+
+// A registered directory the top-left dropdown switches between.
+interface DirEntry {
+  id: number;
+  path: string;
+  name: string;
+  repos: string[]; // member sub-dir names ([] = auto-detect)
 }
 
 // A line range highlighted in one rendered diff, driving the action bar.
@@ -278,17 +290,19 @@ function ContentSpinner({ label }: { label: string }) {
   );
 }
 
-function initialView(): { tab: Tab; view: View } {
+function initialView(): { tab: Tab; view: View; dir: number | null } {
   const params = new URLSearchParams(location.search);
+  const dirRaw = params.get("dir");
+  const dir = dirRaw && /^\d+$/.test(dirRaw) ? parseInt(dirRaw, 10) : null;
   const repo = params.get("repo") ?? undefined;
   const pr = params.get("pr");
-  if (pr) return { tab: "prs", view: { kind: "pr", number: parseInt(pr, 10), repo } };
-  if (params.get("view") === "changes") return { tab: "changes", view: { kind: "changes" } };
+  if (pr) return { tab: "prs", view: { kind: "pr", number: parseInt(pr, 10), repo }, dir };
+  if (params.get("view") === "changes") return { tab: "changes", view: { kind: "changes" }, dir };
   const manual = params.get("manual");
-  if (manual) return { tab: "manual", view: { kind: "manual", name: manual } };
+  if (manual) return { tab: "manual", view: { kind: "manual", name: manual }, dir };
   const sha = params.get("sha");
-  if (sha) return { tab: "commits", view: { kind: "commit", sha, repo } };
-  return { tab: "commits", view: { kind: "none" } };
+  if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
+  return { tab: "commits", view: { kind: "none" }, dir };
 }
 
 function App() {
@@ -296,6 +310,24 @@ function App() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>(initial.tab);
   const [view, setView] = useState<View>(initial.view);
+
+  // ---- Active directory (top-left dropdown) ----
+  // null means "the server default" (the launch cwd). Persisted to the URL only,
+  // so a reload stays put but launching `dh` elsewhere still opens that new cwd.
+  const [activeDir, setActiveDir] = useState<number | null>(initial.dir);
+  const activeDirRef = useRef(activeDir);
+  activeDirRef.current = activeDir;
+  // Append ?dir=<id> to an API url so every request targets the active directory.
+  const qd = useCallback((base: string) => {
+    const d = activeDirRef.current;
+    return d == null ? base : `${base}${base.includes("?") ? "&" : "?"}dir=${d}`;
+  }, []);
+  // Build a "/?dir=…&…" address that preserves the active directory in the URL.
+  const navUrl = useCallback((...parts: (string | false | null | undefined)[]) => {
+    const d = activeDirRef.current;
+    const all = [d != null ? `dir=${d}` : "", ...parts].filter(Boolean);
+    return all.length ? `/?${all.join("&")}` : "/";
+  }, []);
 
   // Whether the Changes view auto-refreshes (polling + window focus). Toggle
   // with the switch in the Changes sidebar; `space` forces a one-off refresh of
@@ -316,20 +348,30 @@ function App() {
   }, [autoRefresh]);
 
   // ---- Server data (TanStack Query) ----
+  // Every list/diff query keys on `activeDir` so switching directories refetches.
   const metaQuery = useQuery({
-    queryKey: ["meta"],
-    queryFn: ({ signal }) => fetchJSON<Meta>("/api/meta", signal),
+    queryKey: ["meta", activeDir],
+    queryFn: ({ signal }) => fetchJSON<Meta>(qd("/api/meta"), signal),
     staleTime: Infinity,
   });
   const meta = metaQuery.data ?? null;
   const workspace = !!meta?.workspace;
 
+  // Registered directories for the top-left dropdown + settings dialog.
+  const dirsQuery = useQuery({
+    queryKey: ["dirs"],
+    queryFn: ({ signal }) =>
+      fetchJSON<{ dirs: DirEntry[]; defaultDirId: number }>("/api/dirs", signal),
+    staleTime: Infinity,
+  });
+  const dirs = dirsQuery.data?.dirs ?? [];
+
   // Commits are paginated; useInfiniteQuery stitches the pages together and the
   // "Load more" button just asks for the next one.
   const commitsQuery = useInfiniteQuery({
-    queryKey: ["commits"],
+    queryKey: ["commits", activeDir],
     queryFn: ({ pageParam, signal }) =>
-      fetchJSON<Commit[]>(`/api/commits?page=${pageParam}`, signal),
+      fetchJSON<Commit[]>(qd(`/api/commits?page=${pageParam}`), signal),
     initialPageParam: 1,
     getNextPageParam: (lastPage, allPages) => (lastPage.length > 0 ? allPages.length + 1 : undefined),
   });
@@ -338,24 +380,24 @@ function App() {
   const loadingMore = commitsQuery.isFetchingNextPage;
 
   const prsQuery = useQuery({
-    queryKey: ["prs"],
-    queryFn: ({ signal }) => fetchJSON<PR[]>("/api/prs", signal),
+    queryKey: ["prs", activeDir],
+    queryFn: ({ signal }) => fetchJSON<PR[]>(qd("/api/prs"), signal),
     enabled: tab === "prs",
   });
   const prs = prsQuery.data ?? null;
   const prError = errMessage(prsQuery.error);
 
   const manualQuery = useQuery({
-    queryKey: ["manual"],
-    queryFn: ({ signal }) => fetchJSON<ManualPatch[]>("/api/manual", signal),
+    queryKey: ["manual", activeDir],
+    queryFn: ({ signal }) => fetchJSON<ManualPatch[]>(qd("/api/manual"), signal),
     enabled: tab === "manual" || initial.tab === "manual",
   });
   const manualPatches = manualQuery.data ?? null;
   const manualError = errMessage(manualQuery.error);
 
   const changesQuery = useQuery({
-    queryKey: ["changes"],
-    queryFn: ({ signal }) => fetchJSON<RepoChanges[]>("/api/changes", signal),
+    queryKey: ["changes", activeDir],
+    queryFn: ({ signal }) => fetchJSON<RepoChanges[]>(qd("/api/changes"), signal),
     enabled: tab === "changes",
     // Poll + refetch-on-focus only while auto-refresh is on. Structural sharing
     // keeps `data` referentially stable when nothing changed, so a poll that
@@ -374,11 +416,15 @@ function App() {
   const [committing, setCommitting] = useState(false);
 
   // New Claude session dialog (`'`) — launches an interactive claude tmux
-  // session in the dh directory, detached, seeded with the typed prompt.
+  // session in the active directory, detached, seeded with the typed prompt.
   const [claudeOpen, setClaudeOpen] = useState(false);
   const [claudePrompt, setClaudePrompt] = useState("");
   const [launching, setLaunching] = useState(false);
   const [launchedSession, setLaunchedSession] = useState<string | null>(null);
+
+  // Directory dropdown (top-left) + settings dialog (manage directories).
+  const [dirMenuOpen, setDirMenuOpen] = useState(false);
+  const [dirsOpen, setDirsOpen] = useState(false);
 
   // Auto-dismiss the "Launched" banner after a short period.
   useEffect(() => {
@@ -389,14 +435,80 @@ function App() {
 
   const [filter, setFilter] = useState("");
 
+  // ---- @-file autocomplete (New Claude session dialog) ----
+  // The directory's gitignore-respecting file list, fetched only while the dialog
+  // is open. Typing `@…` filters it into a popup that inserts `@path` references.
+  const filesQuery = useQuery({
+    queryKey: ["files", activeDir],
+    queryFn: ({ signal }) => fetchJSON<{ files: string[] }>(qd("/api/files"), signal),
+    enabled: claudeOpen,
+    staleTime: 30_000,
+  });
+  const claudeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // The active `@token` being typed: its query text + where the `@` sits + caret.
+  const [fileToken, setFileToken] = useState<{ query: string; start: number; caret: number } | null>(
+    null,
+  );
+  const [fileMenuIndex, setFileMenuIndex] = useState(0);
+  // Recompute the active @token from the textarea's value + caret position.
+  const syncFileToken = useCallback((el: HTMLTextAreaElement) => {
+    const value = el.value;
+    const caret = el.selectionStart ?? value.length;
+    let i = caret - 1;
+    let token: { query: string; start: number; caret: number } | null = null;
+    while (i >= 0) {
+      const ch = value[i];
+      if (ch === "@") {
+        const prev = i > 0 ? value[i - 1] : " ";
+        if (i === 0 || /\s/.test(prev)) token = { query: value.slice(i + 1, caret), start: i, caret };
+        break;
+      }
+      if (/\s/.test(ch)) break; // whitespace before any '@' — not in a token
+      i--;
+    }
+    setFileToken(token);
+    setFileMenuIndex(0);
+  }, []);
+  const fileSuggestions = useMemo(() => {
+    if (!fileToken) return [];
+    const all = filesQuery.data?.files ?? [];
+    const q = fileToken.query.toLowerCase();
+    const matched = q ? all.filter((f) => f.toLowerCase().includes(q)) : all;
+    // Prefer the shortest (closest) matches, then alphabetical.
+    return [...matched].sort((a, b) => a.length - b.length || (a < b ? -1 : 1)).slice(0, 20);
+  }, [fileToken, filesQuery.data]);
+  // Replace the active @token with `@<path> ` and restore the caret after it.
+  const acceptFile = useCallback(
+    (path: string) => {
+      const tok = fileToken;
+      if (!tok) return;
+      setClaudePrompt((prev) => {
+        const inserted = `@${path} `;
+        const next = prev.slice(0, tok.start) + inserted + prev.slice(tok.caret);
+        const pos = tok.start + inserted.length;
+        requestAnimationFrame(() => {
+          const el = claudeTextareaRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(pos, pos);
+          }
+        });
+        return next;
+      });
+      setFileToken(null);
+    },
+    [fileToken],
+  );
+  const fileMenuOpen = !!fileToken && fileSuggestions.length > 0;
+
   // ---- Diff for the active commit/PR view ----
   // Keyed by sha/number+repo so revisiting one is instant from cache; commit
   // diffs are immutable so they never go stale.
   const diffKey = useMemo<readonly unknown[]>(() => {
-    if (view.kind === "commit") return ["diff", "commit", view.sha, view.repo ?? null];
-    if (view.kind === "pr") return ["diff", "pr", view.number, view.repo ?? null];
-    return ["diff", "none"];
-  }, [view]);
+    if (view.kind === "commit") return ["diff", activeDir, "commit", view.sha, view.repo ?? null];
+    if (view.kind === "pr") return ["diff", activeDir, "pr", view.number, view.repo ?? null];
+    return ["diff", activeDir, "none"];
+  }, [view, activeDir]);
   const diffQuery = useQuery({
     queryKey: diffKey,
     queryFn: ({ signal }) => {
@@ -404,7 +516,7 @@ function App() {
       const rp = view.repo ? `?repo=${encodeURIComponent(view.repo)}` : "";
       const url =
         view.kind === "commit" ? `/api/diff/${view.sha}${rp}` : `/api/diff/pr/${view.number}${rp}`;
-      return fetchText(url, signal);
+      return fetchText(qd(url), signal);
     },
     enabled: view.kind === "commit" || view.kind === "pr",
     staleTime: Infinity,
@@ -424,8 +536,8 @@ function App() {
 
   // ---- Reviewed commits (persisted server-side in sqlite) ----
   const reviewedQuery = useQuery({
-    queryKey: ["reviewed"],
-    queryFn: ({ signal }) => fetchJSON<string[]>("/api/reviewed", signal),
+    queryKey: ["reviewed", activeDir],
+    queryFn: ({ signal }) => fetchJSON<string[]>(qd("/api/reviewed"), signal),
     staleTime: Infinity,
   });
   const reviewed = useMemo(() => new Set(reviewedQuery.data ?? []), [reviewedQuery.data]);
@@ -433,19 +545,17 @@ function App() {
   // cache back to its previous value if the request fails.
   const toggleReviewed = useCallback(
     (sha: string, repo?: string) => {
-      const prev = queryClient.getQueryData<string[]>(["reviewed"]) ?? [];
+      const key = ["reviewed", activeDirRef.current];
+      const prev = queryClient.getQueryData<string[]>(key) ?? [];
       const on = !prev.includes(sha);
-      queryClient.setQueryData<string[]>(
-        ["reviewed"],
-        on ? [...prev, sha] : prev.filter((s) => s !== sha),
-      );
-      fetch("/api/reviewed", {
+      queryClient.setQueryData<string[]>(key, on ? [...prev, sha] : prev.filter((s) => s !== sha));
+      fetch(qd("/api/reviewed"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sha, reviewed: on, repo }),
-      }).catch(() => queryClient.setQueryData(["reviewed"], prev));
+      }).catch(() => queryClient.setQueryData(key, prev));
     },
-    [queryClient],
+    [queryClient, qd],
   );
 
   // ---- Commits ----
@@ -469,7 +579,7 @@ function App() {
     async (action: GitAction, path?: string, repo?: string, worktree?: string) => {
       setBusyPath(path ?? worktree ?? (repo ? `*${repo}` : "*"));
       try {
-        const res = await fetch("/api/git", {
+        const res = await fetch(qd("/api/git"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action, path, repo, worktree }),
@@ -483,19 +593,19 @@ function App() {
         queryClient.invalidateQueries({ queryKey: ["changes"] });
       }
     },
-    [queryClient],
+    [queryClient, qd],
   );
 
   // Open a file (optionally at a line) in the default editor, server-side
   const openInEditor = useCallback(
     (path: string, line?: number, repo?: string, worktree?: string) => {
-      fetch("/api/open", {
+      fetch(qd("/api/open"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path, line, repo, worktree }),
       }).catch(() => {});
     },
-    [],
+    [qd],
   );
   const onOpenOpaque = useCallback(
     (path: string, repo?: string, worktree?: string) => openInEditor(path, undefined, repo, worktree),
@@ -523,7 +633,7 @@ function App() {
     const worktrees = (changes ?? []).filter((rc) => rc.staged.length).map((rc) => rc.dir);
     setCommitting(true);
     try {
-      const res = await fetch("/api/commit", {
+      const res = await fetch(qd("/api/commit"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, worktrees }),
@@ -541,15 +651,15 @@ function App() {
     } finally {
       setCommitting(false);
     }
-  }, [commitMsg, changes, queryClient]);
+  }, [commitMsg, changes, queryClient, qd]);
 
-  // Launch a new interactive claude session in the dh directory (detached).
+  // Launch a new interactive claude session in the active directory (detached).
   const submitClaude = useCallback(async () => {
     const prompt = claudePrompt.trim();
     if (!prompt) return;
     setLaunching(true);
     try {
-      const res = await fetch("/api/claude", {
+      const res = await fetch(qd("/api/claude"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
@@ -566,39 +676,170 @@ function App() {
     } finally {
       setLaunching(false);
     }
-  }, [claudePrompt]);
+  }, [claudePrompt, qd]);
 
-  const selectTab = useCallback((next: Tab) => {
-    setTab(next);
+  // `x` — stage everything, then hand the commit off to a detached claude
+  // session that writes the message itself (and pushes). Skips the `;` dialog
+  // for when you'd rather claude author an informative commit from the diff.
+  const commitWithClaude = useCallback(async () => {
+    await runGit("stage");
+    try {
+      const res = await fetch(qd("/api/claude"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: "Commit and push the staged changes with a clear, informative commit message.",
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`launch failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      const body = await res.json().catch(() => ({}) as any);
+      setLaunchedSession(typeof body.session === "string" ? body.session : null);
+    } catch (e) {
+      alert(`launch failed: ${errMessage(e)}`);
+    }
+  }, [runGit, qd]);
+
+  const selectTab = useCallback(
+    (next: Tab) => {
+      setTab(next);
+      setFilter("");
+      // The per-tab queries fetch themselves via their `enabled` flag; we only
+      // need to point the view at the right thing and update the URL.
+      if (next === "changes") {
+        setView({ kind: "changes" });
+        history.replaceState(null, "", navUrl("view=changes"));
+      }
+      if (next === "manual") {
+        setView({ kind: "manual", name: "" });
+        history.replaceState(null, "", navUrl("manual="));
+      }
+    },
+    [navUrl],
+  );
+
+  const selectCommit = useCallback(
+    (sha: string, repo?: string) => {
+      setView({ kind: "commit", sha, repo });
+      history.replaceState(null, "", navUrl(`sha=${sha}`, repo && `repo=${encodeURIComponent(repo)}`));
+    },
+    [navUrl],
+  );
+
+  const selectPr = useCallback(
+    (number: number, repo?: string) => {
+      setView({ kind: "pr", number, repo });
+      history.replaceState(
+        null,
+        "",
+        navUrl(`pr=${number}`, repo && `repo=${encodeURIComponent(repo)}`),
+      );
+    },
+    [navUrl],
+  );
+
+  const selectManual = useCallback(
+    (name: string) => {
+      setView({ kind: "manual", name });
+      history.replaceState(null, "", navUrl(`manual=${encodeURIComponent(name)}`));
+    },
+    [navUrl],
+  );
+
+  // Switch the active directory: land on its newest commit and reset the URL.
+  const selectDir = useCallback((id: number | null) => {
+    setActiveDir(id);
+    activeDirRef.current = id;
+    setTab("commits");
+    setView({ kind: "none" });
     setFilter("");
-    // The per-tab queries fetch themselves via their `enabled` flag; we only
-    // need to point the view at the right thing and update the URL.
-    if (next === "changes") {
-      setView({ kind: "changes" });
-      history.replaceState(null, "", "/?view=changes");
+    setDirMenuOpen(false);
+    history.replaceState(null, "", id != null ? `/?dir=${id}` : "/");
+  }, []);
+
+  // ---- Directory settings (add / edit / delete) ----
+  const [dirForm, setDirForm] = useState<{
+    id: number | null;
+    name: string;
+    path: string;
+    repos: string;
+  }>({ id: null, name: "", path: "", repos: "" });
+  const [dirError, setDirError] = useState("");
+  const [dirSaving, setDirSaving] = useState(false);
+
+  const openDirForm = useCallback((d?: DirEntry) => {
+    setDirError("");
+    setDirForm(
+      d
+        ? { id: d.id, name: d.name, path: d.path, repos: d.repos.join(", ") }
+        : { id: null, name: "", path: "", repos: "" },
+    );
+  }, []);
+
+  const saveDir = useCallback(async () => {
+    const path = dirForm.path.trim();
+    if (!path) return;
+    const isEdit = dirForm.id != null;
+    setDirSaving(true);
+    setDirError("");
+    try {
+      const res = await fetch(isEdit ? `/api/dirs/${dirForm.id}` : "/api/dirs", {
+        method: isEdit ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, name: dirForm.name.trim() || undefined, repos: dirForm.repos }),
+      });
+      const body = await res.json().catch(() => ({}) as any);
+      if (!res.ok) {
+        setDirError(body.error ?? res.statusText);
+        return;
+      }
+      await queryClient.invalidateQueries({ queryKey: ["dirs"] });
+      if (!isEdit && typeof body.id === "number") {
+        // Jump straight to the directory you just added.
+        selectDir(body.id);
+        setDirsOpen(false);
+      } else {
+        // Edited an existing dir — refresh everything for the active one.
+        queryClient.invalidateQueries();
+        setDirForm({ id: null, name: "", path: "", repos: "" });
+      }
+    } finally {
+      setDirSaving(false);
     }
-    if (next === "manual") {
-      setView({ kind: "manual", name: "" });
-      history.replaceState(null, "", "/?manual=");
-    }
-  }, []);
+  }, [dirForm, queryClient, selectDir]);
 
-  const selectCommit = useCallback((sha: string, repo?: string) => {
-    setView({ kind: "commit", sha, repo });
-    const rp = repo ? `&repo=${encodeURIComponent(repo)}` : "";
-    history.replaceState(null, "", `/?sha=${sha}${rp}`);
-  }, []);
+  const deleteDir = useCallback(
+    async (d: DirEntry) => {
+      if (!confirm(`Remove "${d.name}" from diffshub? (the directory itself is left untouched)`)) {
+        return;
+      }
+      setDirError("");
+      const res = await fetch(`/api/dirs/${d.id}`, { method: "DELETE" });
+      const body = await res.json().catch(() => ({}) as any);
+      if (!res.ok) {
+        setDirError(body.error ?? res.statusText);
+        return;
+      }
+      await queryClient.invalidateQueries({ queryKey: ["dirs"] });
+      if (dirForm.id === d.id) setDirForm({ id: null, name: "", path: "", repos: "" });
+      if (activeDirRef.current === d.id) selectDir(null); // fall back to the default
+    },
+    [queryClient, selectDir, dirForm.id],
+  );
 
-  const selectPr = useCallback((number: number, repo?: string) => {
-    setView({ kind: "pr", number, repo });
-    const rp = repo ? `&repo=${encodeURIComponent(repo)}` : "";
-    history.replaceState(null, "", `/?pr=${number}${rp}`);
-  }, []);
-
-  const selectManual = useCallback((name: string) => {
-    setView({ kind: "manual", name });
-    history.replaceState(null, "", `/?manual=${encodeURIComponent(name)}`);
-  }, []);
+  // Close the directory dropdown on an outside click.
+  useEffect(() => {
+    if (!dirMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest?.(".dir-dropdown")) setDirMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [dirMenuOpen]);
 
   // ---- Sections rendered in the center column ----
   const sections = useMemo<Section[]>(() => {
@@ -768,7 +1009,7 @@ function App() {
     }
     if (!payload) return;
     try {
-      const res = await fetch("/api/delete-lines", {
+      const res = await fetch(qd("/api/delete-lines"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -784,7 +1025,7 @@ function App() {
     }
     setSelection(null);
     queryClient.invalidateQueries({ queryKey: [view.kind === "manual" ? "manual" : "changes"] });
-  }, [selFile, selection, view, queryClient]);
+  }, [selFile, selection, view, queryClient, qd]);
 
   // ---- Actively viewing file: the file under the sticky header line ----
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -840,6 +1081,9 @@ function App() {
   }, [view]);
   const activeKeyRef = useRef(activeKey);
   activeKeyRef.current = activeKey;
+  // Timestamp of the last bare `g` press, so a second `g` within the window
+  // completes the `gg` (jump-to-top) sequence.
+  const lastGRef = useRef(0);
   const toggleCollapsed = useCallback(() => {
     const key = activeKeyRef.current;
     if (!key) return;
@@ -985,6 +1229,8 @@ function App() {
     sections,
     commitOpen,
     claudeOpen,
+    dirsOpen,
+    dirMenuOpen,
     changes,
   });
   keyCtx.current = {
@@ -998,6 +1244,8 @@ function App() {
     sections,
     commitOpen,
     claudeOpen,
+    dirsOpen,
+    dirMenuOpen,
     changes,
   };
   useEffect(() => {
@@ -1008,12 +1256,20 @@ function App() {
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
         target.isContentEditable;
-      // Esc closes the commit / new-session dialogs from anywhere (each dialog's
+      // Esc closes the open dialog / dropdown from anywhere (each dialog's
       // textarea also handles Esc while it holds focus).
-      if (e.key === "Escape" && (keyCtx.current.commitOpen || keyCtx.current.claudeOpen)) {
+      if (
+        e.key === "Escape" &&
+        (keyCtx.current.commitOpen ||
+          keyCtx.current.claudeOpen ||
+          keyCtx.current.dirsOpen ||
+          keyCtx.current.dirMenuOpen)
+      ) {
         e.preventDefault();
         setCommitOpen(false);
         setClaudeOpen(false);
+        setDirsOpen(false);
+        setDirMenuOpen(false);
         return;
       }
       if (e.key === "/" && !typing) {
@@ -1060,6 +1316,25 @@ function App() {
         const half = main.clientHeight / 2;
         const top = e.key === "j" ? 64 : e.key === "k" ? -64 : e.key === "d" ? half : -half;
         main.scrollBy({ top });
+        return;
+      }
+      // `G` jumps to the bottom of the diff column, `gg` to the top (a second
+      // `g` within 500ms of the first completes the sequence).
+      if (main && e.key === "G") {
+        e.preventDefault();
+        lastGRef.current = 0;
+        main.scrollTo({ top: main.scrollHeight });
+        return;
+      }
+      if (main && e.key === "g") {
+        e.preventDefault();
+        const now = Date.now();
+        if (now - lastGRef.current < 500) {
+          lastGRef.current = 0;
+          main.scrollTo({ top: 0 });
+        } else {
+          lastGRef.current = now;
+        }
         return;
       }
       // `h`/`l` jump to the previous/next file in the diff (otherwise the active
@@ -1146,6 +1421,17 @@ function App() {
         setClaudeOpen(true);
         return;
       }
+      // `x` stages everything and launches a claude session to author the commit
+      // message and push — Changes view only, and only when there's something to
+      // commit (no point spinning up a session over a clean tree).
+      if (e.key === "x") {
+        e.preventDefault();
+        const dirty = (keyCtx.current.changes ?? []).some(
+          (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
+        );
+        if (keyCtx.current.view.kind === "changes" && dirty) void commitWithClaude();
+        return;
+      }
       const down = e.key === "ArrowDown";
       const up = e.key === "ArrowUp";
       if (!down && !up) return;
@@ -1200,7 +1486,7 @@ function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectCommit, selectPr, selectManual, selectTab, toggleReviewed, toggleCollapsed, runGit, queryClient]);
+  }, [selectCommit, selectPr, selectManual, selectTab, toggleReviewed, toggleCollapsed, runGit, commitWithClaude, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -1244,19 +1530,69 @@ function App() {
     seg.groups.push(g);
   }
 
+  // The directory currently in view, and the launch cwd's id (can't be removed).
+  const defaultDirId = dirsQuery.data?.defaultDirId ?? meta?.defaultDirId ?? null;
+  const currentDirId = meta?.id ?? activeDir;
+
   return (
     <div className="layout">
       <nav className="commits">
         <header className="commits-header">
-          <h1>
-            diffshub
-            {meta && (
-              <span className="repo">
-                {meta.repo}
-                {meta.branch ? ` @ ${meta.branch}` : ""}
+          <div className="dir-dropdown">
+            <button
+              className="dir-trigger"
+              title="Switch directory"
+              onClick={() => setDirMenuOpen((o) => !o)}
+            >
+              <span className="dir-text">
+                <span className="dir-name">{meta?.name ?? "diffshub"}</span>
+                {meta && (
+                  <span className="dir-sub">
+                    {meta.repo}
+                    {meta.branch ? ` @ ${meta.branch}` : ""}
+                  </span>
+                )}
               </span>
+              <span className="dir-caret">▾</span>
+            </button>
+            {dirMenuOpen && (
+              <div className="dir-menu">
+                {dirs.map((d) => (
+                  <button
+                    key={d.id}
+                    className={`dir-item${d.id === currentDirId ? " on" : ""}`}
+                    onClick={() => selectDir(d.id)}
+                  >
+                    <span className="dir-item-name">
+                      {d.name}
+                      {d.id === defaultDirId ? " · launch" : ""}
+                    </span>
+                    <span className="dir-item-path">{d.path}</span>
+                  </button>
+                ))}
+                <div className="dir-menu-sep" />
+                <button
+                  className="dir-menu-act"
+                  onClick={() => {
+                    setDirMenuOpen(false);
+                    openDirForm();
+                    setDirsOpen(true);
+                  }}
+                >
+                  + Add directory…
+                </button>
+                <button
+                  className="dir-menu-act"
+                  onClick={() => {
+                    setDirMenuOpen(false);
+                    setDirsOpen(true);
+                  }}
+                >
+                  Manage directories…
+                </button>
+              </div>
             )}
-          </h1>
+          </div>
           <div className="tabs">
             <button className={tab === "commits" ? "on" : ""} onClick={() => selectTab("commits")}>
               Commits
@@ -1468,6 +1804,9 @@ function App() {
             <kbd>j/k/d/u</kbd> scroll
           </span>
           <span>
+            <kbd>gg/G</kbd> top/bottom
+          </span>
+          <span>
             <kbd>h/l</kbd> files
           </span>
           <span>
@@ -1475,7 +1814,7 @@ function App() {
           </span>
           {tab === "changes" && (
             <span>
-              <kbd>a</kbd> stage <kbd>A</kbd> all
+              <kbd>a</kbd> stage <kbd>A</kbd> all <kbd>x</kbd> commit w/ claude
             </span>
           )}
           <span>
@@ -1730,21 +2069,81 @@ function App() {
               New Claude session
               {meta?.repo ? <span className="modal-repos"> · {meta.repo}</span> : ""}
             </h3>
-            <textarea
-              autoFocus
-              className="commit-input"
-              placeholder="Prompt for a new Claude Code session…"
-              value={claudePrompt}
-              onChange={(e) => setClaudePrompt(e.target.value)}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === "Escape") setClaudeOpen(false);
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
-                  e.preventDefault();
-                  submitClaude();
-                }
-              }}
-            />
+            <div className="file-menu-wrap">
+              <textarea
+                autoFocus
+                ref={claudeTextareaRef}
+                className="commit-input"
+                placeholder="Prompt for a new Claude Code session…  (type @ to reference a file)"
+                value={claudePrompt}
+                onChange={(e) => {
+                  setClaudePrompt(e.target.value);
+                  syncFileToken(e.target);
+                }}
+                onClick={(e) => syncFileToken(e.currentTarget)}
+                onKeyUp={(e) => {
+                  // Track caret moves (arrows/home/end) so the @token stays current,
+                  // but let the menu's own ArrowUp/Down handling win when it's open.
+                  if (fileMenuOpen && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
+                  syncFileToken(e.currentTarget);
+                }}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  // While the @-file popup is open it owns navigation/acceptance.
+                  if (fileMenuOpen) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setFileMenuIndex((i) => (i + 1) % fileSuggestions.length);
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setFileMenuIndex((i) => (i - 1 + fileSuggestions.length) % fileSuggestions.length);
+                      return;
+                    }
+                    if (e.key === "Enter" || e.key === "Tab") {
+                      e.preventDefault();
+                      acceptFile(fileSuggestions[fileMenuIndex] ?? fileSuggestions[0]);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setFileToken(null);
+                      return;
+                    }
+                  }
+                  if (e.key === "Escape") setClaudeOpen(false);
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
+                    e.preventDefault();
+                    submitClaude();
+                  }
+                }}
+              />
+              {fileToken && (
+                <div className="file-menu">
+                  {fileSuggestions.length ? (
+                    fileSuggestions.map((f, i) => (
+                      <button
+                        key={f}
+                        className={`file-opt${i === fileMenuIndex ? " on" : ""}`}
+                        title={f}
+                        onMouseDown={(e) => {
+                          e.preventDefault(); // keep focus in the textarea
+                          acceptFile(f);
+                        }}
+                        onMouseEnter={() => setFileMenuIndex(i)}
+                      >
+                        {f}
+                      </button>
+                    ))
+                  ) : (
+                    <div className="file-menu-empty">
+                      {filesQuery.isPending ? "Loading files…" : "No matching files"}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="modal-actions">
               <button className="act" disabled={launching} onClick={() => setClaudeOpen(false)}>
                 Cancel
@@ -1787,6 +2186,106 @@ function App() {
           <button className="sel-x" title="Dismiss" onClick={() => setLaunchedSession(null)}>
             ✕
           </button>
+        </div>
+      )}
+
+      {dirsOpen && (
+        <div className="modal-overlay" onClick={() => !dirSaving && setDirsOpen(false)}>
+          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+            <h3>Directories</h3>
+            <div className="dir-rows">
+              {dirs.map((d) => (
+                <div className="dir-row" key={d.id}>
+                  <div className="dir-row-text">
+                    <div className="dir-row-name">
+                      {d.name}
+                      {d.id === defaultDirId ? " · launch" : ""}
+                    </div>
+                    <div className="dir-row-meta" title={d.path}>
+                      {d.path}
+                      {d.repos.length ? ` — ${d.repos.join(", ")}` : ""}
+                    </div>
+                  </div>
+                  <button className="act" onClick={() => openDirForm(d)}>
+                    Edit
+                  </button>
+                  {d.id !== defaultDirId && (
+                    <button className="act" onClick={() => deleteDir(d)}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              ))}
+              {dirs.length === 0 && <div className="side-note">No directories yet</div>}
+            </div>
+            <div className="dir-form">
+              <label>Name</label>
+              <input
+                value={dirForm.name}
+                placeholder="optional — defaults to the folder name"
+                onChange={(e) => setDirForm((f) => ({ ...f, name: e.target.value }))}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Escape") setDirsOpen(false);
+                }}
+              />
+              <label>Path</label>
+              <input
+                value={dirForm.path}
+                placeholder="~/work or /Users/me/project"
+                onChange={(e) => setDirForm((f) => ({ ...f, path: e.target.value }))}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Escape") setDirsOpen(false);
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    saveDir();
+                  }
+                }}
+              />
+              <label>Member repos</label>
+              <input
+                value={dirForm.repos}
+                placeholder="app, web (optional)"
+                onChange={(e) => setDirForm((f) => ({ ...f, repos: e.target.value }))}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Escape") setDirsOpen(false);
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    saveDir();
+                  }
+                }}
+              />
+              <div className="dir-form-hint">Leave empty to auto-detect git subdirectories.</div>
+            </div>
+            {dirError && <div className="modal-error">{dirError}</div>}
+            <div className="modal-actions">
+              {dirForm.id != null && (
+                <button className="act" disabled={dirSaving} onClick={() => openDirForm()}>
+                  New
+                </button>
+              )}
+              <button className="act" disabled={dirSaving} onClick={() => setDirsOpen(false)}>
+                Close
+              </button>
+              <button
+                className="act primary"
+                disabled={dirSaving || !dirForm.path.trim()}
+                onClick={saveDir}
+              >
+                {dirSaving ? "Saving…" : dirForm.id != null ? "Save" : "Add"}
+              </button>
+            </div>
+            <div className="modal-hint">
+              <span>
+                Files indexed via <code>git ls-files</code> (respects .gitignore)
+              </span>
+              <span>
+                <kbd>esc</kbd> close
+              </span>
+            </div>
+          </div>
         </div>
       )}
     </div>
