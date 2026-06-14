@@ -211,6 +211,7 @@ interface SectionFile {
   repo?: string; // which workspace repo this file belongs to
   worktree?: string; // absolute worktree dir this file lives in
   fileDiff?: FileDiffMetadata;
+  rawDiff?: string; // this file's slice of the raw unified patch, for "copy diff"
   untracked?: UntrackedEntry;
   actions: GitAction[];
 }
@@ -320,6 +321,40 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
 const errMessage = (e: unknown): string =>
   e ? String((e as { message?: unknown }).message ?? e) : "";
 
+// Split a unified git patch into one raw-text chunk per file, in document order.
+// Each chunk starts at its `diff --git` header; any preamble before the first
+// header is dropped. parsePatchFiles() emits one FileDiffMetadata per `diff
+// --git` block in the same order, so callers zip the two by index.
+function splitPatchByFile(patch: string): string[] {
+  if (!patch) return [];
+  const chunks: string[] = [];
+  let current: string[] | null = null;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      if (current) chunks.push(current.join("\n"));
+      current = [line];
+    } else if (current) {
+      current.push(line);
+    }
+  }
+  if (current) chunks.push(current.join("\n"));
+  return chunks;
+}
+
+// Parse a patch into its files, each paired with the raw diff text for just that
+// file. rawDiff is only filled when the chunk count lines up with the parsed
+// file count (always true for standard git/gh diffs); otherwise it's left empty
+// and the per-file "copy diff" button hides.
+function parseSectionFiles(
+  patch: string,
+  cacheKey?: string,
+): Array<{ file: FileDiffMetadata; rawDiff: string }> {
+  const files = parsePatchFiles(patch, cacheKey).flatMap((p) => p.files);
+  const chunks = splitPatchByFile(patch);
+  const aligned = chunks.length === files.length;
+  return files.map((file, i) => ({ file, rawDiff: aligned ? chunks[i] : "" }));
+}
+
 // One file's rendered diff. Memoized so that highlighting lines (which only
 // changes `selectedRange`/`viewing` for the active file) re-renders just that
 // file, not every diff on the page.
@@ -340,6 +375,27 @@ interface DiffRowProps {
   onSelect: (fileKey: string, range: SelectedLineRange | null) => void;
   onAct: (action: GitAction, path: string, repo?: string, worktree?: string) => void;
   onOpenOpaque: (path: string, repo?: string, worktree?: string) => void;
+}
+
+// Small clipboard button that flips its label to "copied" for a beat after a
+// successful copy. Used for the per-file path/diff actions under each diff.
+function CopyButton({ label, text, title }: { label: string; text: string; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="act"
+      title={title}
+      disabled={!text}
+      onClick={(e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(text).catch(() => {});
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      }}
+    >
+      {copied ? "copied" : label}
+    </button>
+  );
 }
 
 const DiffRow = memo(function DiffRow({
@@ -412,6 +468,12 @@ const DiffRow = memo(function DiffRow({
             <span className="hdr-acts">{acts}</span>
           </div>
         ))}
+      <div className="diff-foot">
+        <CopyButton label="copy path" title="Copy file path" text={file.path} />
+        {file.rawDiff ? (
+          <CopyButton label="copy diff" title="Copy this file's diff" text={file.rawDiff} />
+        ) : null}
+      </div>
     </div>
   );
 });
@@ -1447,6 +1509,11 @@ function App() {
   const [restartOpen, setRestartOpen] = useState(false);
   const [restartWindow, setRestartWindow] = useState("dh");
   const [restartCommand, setRestartCommand] = useState("dh");
+
+  // Kill-all confirmation dialog (`_`) — wipes every session currently listed on
+  // the Tmux tab. `killingAll` disables the buttons while the kills are in flight.
+  const [killAllOpen, setKillAllOpen] = useState(false);
+  const [killingAll, setKillingAll] = useState(false);
 
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
@@ -2539,16 +2606,17 @@ function App() {
     if (view.kind === "commit" || view.kind === "pr") {
       if (!diffText) return [];
       const cacheKey = view.kind === "commit" ? view.sha : `pr-${view.number}`;
-      const files = parsePatchFiles(diffText, cacheKey).flatMap((p) => p.files);
+      const files = parseSectionFiles(diffText, cacheKey);
       return [
         {
           label: null,
-          files: files.map((f) => ({
+          files: files.map(({ file: f, rawDiff }) => ({
             key: `main:${f.name}`,
             path: f.name,
             treePath: f.name,
             repo: view.repo,
             fileDiff: f,
+            rawDiff,
             actions: [],
           })),
         },
@@ -2559,34 +2627,36 @@ function App() {
       for (const rc of changes) {
         const idns = rc.segment || rc.repo; // unique per worktree change-source
         if (rc.staged.length) {
-          const files = parsePatchFiles(rc.stagedDiff).flatMap((p) => p.files);
+          const files = parseSectionFiles(rc.stagedDiff);
           out.push({
             label: "Staged",
             segment: rc.segment,
             repo: rc.repo,
             dir: rc.dir,
-            files: files.map((f) => ({
+            files: files.map(({ file: f, rawDiff }) => ({
               key: `staged:${idns}:${f.name}`,
               path: f.name,
               treePath: tpath(rc.segment, f.name),
               repo: rc.repo,
               worktree: rc.dir,
               fileDiff: f,
+              rawDiff,
               actions: ["unstage", "stash"],
             })),
           });
         }
-        const unstagedFiles: SectionFile[] = parsePatchFiles(rc.unstagedDiff)
-          .flatMap((p) => p.files)
-          .map((f) => ({
+        const unstagedFiles: SectionFile[] = parseSectionFiles(rc.unstagedDiff).map(
+          ({ file: f, rawDiff }) => ({
             key: `unstaged:${idns}:${f.name}`,
             path: f.name,
             treePath: tpath(rc.segment, f.name),
             repo: rc.repo,
             worktree: rc.dir,
             fileDiff: f,
+            rawDiff,
             actions: ["stage", "stash"] as GitAction[],
-          }));
+          }),
+        );
         for (const u of rc.untracked) {
           unstagedFiles.push({
             key: `untracked:${idns}:${u.path}`,
@@ -2615,18 +2685,19 @@ function App() {
       if (!patch) return [];
       // Include the content length in the cache key so editing a patch (Delete)
       // busts the render cache instead of showing the pre-edit diff.
-      const files = parsePatchFiles(
+      const files = parseSectionFiles(
         patch.contents,
         `manual-${patch.name}-${patch.contents.length}`,
-      ).flatMap((p) => p.files);
+      );
       return [
         {
           label: null,
-          files: files.map((f) => ({
+          files: files.map(({ file: f, rawDiff }) => ({
             key: `manual:${f.name}`,
             path: f.name,
             treePath: f.name,
             fileDiff: f,
+            rawDiff,
             actions: [],
           })),
         },
@@ -2901,6 +2972,37 @@ function App() {
     [dirScopedTmux, q],
   );
 
+  // Kill every session currently listed on the Tmux tab (the dir-scoped, filtered
+  // set the user is looking at — not every claude session on the box). Reuses the
+  // single-kill endpoint per session, then refreshes; the auto-select effect picks
+  // a survivor (or clears the pane). Driven by the `_` confirmation dialog.
+  const killAllSessions = useCallback(async () => {
+    const list = visibleTmux ?? [];
+    if (!list.length) {
+      setKillAllOpen(false);
+      return;
+    }
+    setKillingAll(true);
+    try {
+      await Promise.all(
+        list.map((s) =>
+          fetch("/api/tmux/kill", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session: s.name }),
+          }),
+        ),
+      );
+      for (const s of list) saveDraft(replyDraftKey(s.name), ""); // dropped tabs lose their drafts
+    } catch (e) {
+      alert(`kill failed: ${errMessage(e)}`);
+    } finally {
+      setKillingAll(false);
+      setKillAllOpen(false);
+      tmuxQuery.refetch();
+    }
+  }, [visibleTmux, tmuxQuery]);
+
   // Queued (offline) prompts scoped to the directory in view, then narrowed by the
   // sidebar filter against the prompt text — same shape as visibleTmux above.
   const visibleQueued = useMemo(() => {
@@ -2962,6 +3064,7 @@ function App() {
     orderedKeys,
     sections,
     restartOpen,
+    killAllOpen,
     commitOpen,
     claudeOpen,
     usageOpen,
@@ -2983,6 +3086,7 @@ function App() {
     orderedKeys,
     sections,
     restartOpen,
+    killAllOpen,
     commitOpen,
     claudeOpen,
     usageOpen,
@@ -3061,6 +3165,22 @@ function App() {
       if (!e.altKey && e.key >= "1" && e.key <= String(TAB_ORDER.length)) {
         e.preventDefault();
         selectTab(TAB_ORDER[Number(e.key) - 1]);
+        return;
+      }
+      // `0`/`9` jump to the first/last session on the Tmux tab (the visible,
+      // dir-scoped list), mirroring the ↑/↓ row navigation below.
+      if ((e.key === "0" || e.key === "9") && tab === "tmux" && visibleTmux?.length) {
+        e.preventDefault();
+        const target = e.key === "9" ? visibleTmux[visibleTmux.length - 1] : visibleTmux[0];
+        selectTmux(target.name);
+        document.getElementById(`row-tmux-${target.name}`)?.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      // `_` (⇧-) asks to kill every session currently listed on the Tmux tab.
+      // Destructive, so it routes through a confirmation dialog.
+      if (e.key === "_" && tab === "tmux") {
+        e.preventDefault();
+        if (visibleTmux?.length) setKillAllOpen(true);
         return;
       }
       // Vimium-style scrolling of the diff column. We recreate j/k/d/u here so
@@ -3301,7 +3421,7 @@ function App() {
     const onEscClose = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const k = keyCtx.current;
-      if (!(k.restartOpen || k.commitOpen || k.claudeOpen || k.usageOpen || k.dirsOpen || k.dirMenuOpen))
+      if (!(k.restartOpen || k.killAllOpen || k.commitOpen || k.claudeOpen || k.usageOpen || k.dirsOpen || k.dirMenuOpen))
         return;
       // In the Claude composer a live @-mention should be cancelled first; its
       // textarea's own Esc handler does that, so defer to it. A second Esc (no
@@ -3310,6 +3430,7 @@ function App() {
       e.preventDefault();
       e.stopPropagation();
       setRestartOpen(false);
+      setKillAllOpen(false);
       setCommitOpen(false);
       setClaudeOpen(false);
       setUsageOpen(false);
@@ -3950,7 +4071,7 @@ function App() {
           </span>
           {tab === "tmux" && (
             <span>
-              <kbd>x</kbd> kill <kbd>space</kbd> refresh
+              <kbd>0/9</kbd> first/last <kbd>x</kbd> kill <kbd>_</kbd> kill all <kbd>space</kbd> refresh
             </span>
           )}
           <span>
@@ -4472,6 +4593,45 @@ function App() {
               </span>
               <span>
                 <kbd>↵</kbd> restart
+              </span>
+              <span>
+                <kbd>esc</kbd> cancel
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {killAllOpen && (
+        <div className="modal-overlay" onClick={() => !killingAll && setKillAllOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Kill all sessions</h3>
+            <p className="modal-body">
+              Kill {visibleTmux?.length ?? 0} tmux{" "}
+              {(visibleTmux?.length ?? 0) === 1 ? "session" : "sessions"} currently listed
+              {meta?.repo ? (
+                <>
+                  {" "}in <code>{meta.repo}</code>
+                </>
+              ) : null}
+              ? This can't be undone.
+            </p>
+            <div className="modal-actions">
+              <button className="act" disabled={killingAll} onClick={() => setKillAllOpen(false)}>
+                Cancel
+              </button>
+              <button
+                autoFocus
+                className="act primary"
+                disabled={killingAll || !(visibleTmux?.length ?? 0)}
+                onClick={() => void killAllSessions()}
+              >
+                {killingAll ? "Killing…" : "Kill all"}
+              </button>
+            </div>
+            <div className="modal-hint">
+              <span>
+                <kbd>↵</kbd> kill all
               </span>
               <span>
                 <kbd>esc</kbd> cancel
