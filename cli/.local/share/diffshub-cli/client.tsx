@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type ClipboardEvent,
   type CSSProperties,
   type Dispatch,
@@ -49,6 +50,7 @@ import {
   Trash2,
   Sun,
   Moon,
+  Gauge,
 } from "lucide-react";
 
 type Theme = "light" | "dark";
@@ -155,6 +157,16 @@ interface TmuxSession {
   mtime: number;
 }
 
+// A prompt enqueued while the machine was offline (Tmux tab). It launches into a
+// real session automatically once connectivity returns — see the offline queue in
+// index.ts.
+interface QueuedSession {
+  id: number;
+  prompt: string;
+  createdAt: number;
+  cwd: string;
+}
+
 // One rendered line of a session's transcript.
 interface TranscriptMsg {
   role: "user" | "assistant" | "tool";
@@ -175,6 +187,10 @@ interface Transcript {
   messages: TranscriptMsg[];
   model: string;
   title: string;
+  // Live capture of a pending interactive prompt (AskUserQuestion / plan /
+  // permission) that claude hasn't written to the transcript yet — set only when
+  // the session is idle and the pane is showing a selection prompt. Null otherwise.
+  pendingPane?: string | null;
 }
 
 type View =
@@ -220,6 +236,43 @@ function timeAgo(iso: string): string {
   return `${Math.floor(days / 365)}y ago`;
 }
 
+// ~/.claude/rate-limits.json, surfaced verbatim by /api/usage. Each window is
+// null until Claude Code's statusline hook has written at least once. `resets_at`
+// and `updated_at` are unix seconds.
+interface UsageWindow {
+  used_percentage: number;
+  resets_at: number;
+}
+interface UsageData {
+  five_hour: UsageWindow | null;
+  seven_day: UsageWindow | null;
+  updated_at: number | null;
+}
+
+// Compact countdown to a future unix-seconds timestamp: "2h 14m", "8m", "<1m",
+// or "3d 4h" for the weekly window. "now" once it's elapsed (the file is stale).
+function untilReset(unixSeconds: number): string {
+  const secs = Math.floor(unixSeconds - Date.now() / 1000);
+  if (secs <= 0) return "now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return mins < 1 ? "<1m" : `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  if (hours < 24) return remMins ? `${hours}h ${remMins}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours ? `${days}d ${remHours}h` : `${days}d`;
+}
+
+// Absolute local clock for a reset — "3:00 PM" if it lands today, "Mon 3:00 PM"
+// otherwise (the weekly window can be days out).
+function resetClock(unixSeconds: number): string {
+  const d = new Date(unixSeconds * 1000);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
 const STATUS_FOR_CHANGE: Record<FileDiffMetadata["type"], GitStatusEntry["status"]> = {
   new: "added",
   deleted: "deleted",
@@ -248,6 +301,9 @@ const TMUX_POLL_MS = 2000;
 // that pause the session (AskUserQuestion / plan / permission) from going unseen
 // until the answer, without the cost of full-speed polling. See transcriptQuery.
 const TMUX_IDLE_POLL_MS = 3000;
+// Cadence for the session list while prompts sit in the offline queue, so they
+// flip to real sessions promptly once the network is back (no busy-polling).
+const TMUX_QUEUE_POLL_MS = 5000;
 
 // ---- Fetch helpers shared by every query ----
 async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -765,6 +821,26 @@ const QuestionCard = memo(function QuestionCard({
           </div>
         );
       })}
+    </div>
+  );
+});
+
+// A pending interactive prompt (AskUserQuestion / plan approval / permission)
+// that claude is blocked on but hasn't written to the transcript .jsonl yet — so
+// it can't be a structured QuestionCard. We show the raw live pane capture
+// instead (always correct, if TUI-ish) and point the user at the reply box, where
+// typing the option's number answers it exactly like pressing the key in the pane.
+const PendingPrompt = memo(function PendingPrompt({ text }: { text: string }) {
+  return (
+    <div className="pending-pane">
+      <div className="pending-pane-head">
+        <span className="pending-pane-dot" />
+        Waiting for your input
+      </div>
+      <pre className="pending-pane-body">{text}</pre>
+      <div className="pending-pane-hint">
+        Live from the pane — answer in the reply box below (e.g. type <code>1</code>).
+      </div>
     </div>
   );
 });
@@ -1300,20 +1376,36 @@ function App() {
   const tmuxQuery = useQuery({
     queryKey: ["tmux-sessions"],
     queryFn: ({ signal }) =>
-      fetchJSON<{ sessions: TmuxSession[] }>("/api/tmux/sessions", signal).then((r) => r.sessions),
+      fetchJSON<{ sessions: TmuxSession[]; queued?: QueuedSession[]; online?: boolean }>(
+        "/api/tmux/sessions",
+        signal,
+      ),
     enabled: tab === "tmux",
     refetchOnWindowFocus: false,
-    refetchInterval: (query) => (query.state.data?.some((s) => s.busy) ? TMUX_POLL_MS : false),
+    // Poll while a session is working (live busy dots) or while prompts sit queued
+    // (so they vanish + their real session pops in the moment the network returns).
+    refetchInterval: (query) =>
+      query.state.data?.sessions.some((s) => s.busy)
+        ? TMUX_POLL_MS
+        : query.state.data?.queued?.length
+          ? TMUX_QUEUE_POLL_MS
+          : false,
   });
-  const tmuxSessions = tmuxQuery.data ?? null;
+  const tmuxSessions = tmuxQuery.data?.sessions ?? null;
+  const queuedSessions = tmuxQuery.data?.queued ?? null;
+  // Whether the machine can reach the API (so launches run vs. queue). Defaults to
+  // online until the first poll; other tabs keep the last polled value.
+  const serverOnline = tmuxQuery.data?.online ?? true;
   const selectedSession = view.kind === "tmux" ? view.session : "";
   // Stream the open transcript fast while its session is busy. When idle we keep a
   // slow baseline poll rather than stopping: a session paused on an AskUserQuestion
   // / plan / permission prompt reads as not-busy (the pane title drops its braille
-  // spinner), yet its question line is already on disk — without an idle poll it
-  // wouldn't surface until the answer flips the session busy again. Structural
-  // sharing keeps an unchanged poll's data ref stable, so reading back through an
-  // idle transcript still isn't yanked to the end.
+  // spinner), and claude doesn't write that pending turn to the transcript until
+  // it's answered — so the server captures it from the live pane (pendingPane).
+  // The idle poll is what keeps that capture fresh; without it the prompt wouldn't
+  // surface until the answer flips the session busy again. Structural sharing keeps
+  // an unchanged poll's data ref stable, so reading back through an idle transcript
+  // still isn't yanked to the end.
   const selectedBusy = !!tmuxSessions?.find((s) => s.name === selectedSession)?.busy;
   const transcriptQuery = useQuery({
     queryKey: ["tmux-transcript", selectedSession],
@@ -1382,14 +1474,23 @@ function App() {
   const [claudePrompt, setClaudePrompt] = useState("");
   const [launching, setLaunching] = useState(false);
   const [launchedSession, setLaunchedSession] = useState<string | null>(null);
+  // Brief confirmation shown after an offline prompt is queued (auto-dismissed).
+  const [queuedNote, setQueuedNote] = useState(false);
   // True while a pasted image is being uploaded to /tmp/images (⌃V in the dialog).
   const [imgUploading, setImgUploading] = useState(false);
+
+  // Claude usage dialog (`⇧U`) — shows how much of the 5-hour and weekly
+  // rate-limit windows is spent and when each resets (see usageQuery below).
+  const [usageOpen, setUsageOpen] = useState(false);
 
   // Reply composer (Tmux tab) — types a reply into the selected session's pane.
   const [replyText, setReplyText] = useState("");
   const [replySending, setReplySending] = useState(false);
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Hidden <input type=file> behind the mobile "Image" button — the reliable way
+  // to attach an image where there's no keyboard for ⌃V (camera / photo library).
+  const replyImgInputRef = useRef<HTMLInputElement | null>(null);
 
   // Transcript header toggle: when on, the chat view is filtered down to just
   // the Edit/Write/MultiEdit tool calls (the inline diffs), hiding prose and
@@ -1413,6 +1514,13 @@ function App() {
     return () => window.clearTimeout(id);
   }, [launchedSession]);
 
+  // Auto-dismiss the "Queued" banner the same way.
+  useEffect(() => {
+    if (!queuedNote) return;
+    const id = window.setTimeout(() => setQueuedNote(false), 6000);
+    return () => window.clearTimeout(id);
+  }, [queuedNote]);
+
   const [filter, setFilter] = useState("");
 
   // ---- @-file autocomplete (New Claude session dialog) ----
@@ -1424,7 +1532,23 @@ function App() {
     enabled: claudeOpen,
     staleTime: 30_000,
   });
+
+  // ---- Claude usage (rate-limit windows) ----
+  // Read from ~/.claude/rate-limits.json (written by the statusline hook) only
+  // while the Usage dialog is open. The short staleTime lets a quick reopen reuse
+  // the cache while still refetching the file on its own cadence; opening always
+  // pulls the freshest snapshot the statusline has written.
+  const usageQuery = useQuery({
+    queryKey: ["usage"],
+    queryFn: ({ signal }) => fetchJSON<UsageData>("/api/usage", signal),
+    enabled: usageOpen,
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
   const claudeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Hidden <input type=file> behind the mobile "Image" button in the New Claude
+  // session dialog (same role as replyImgInputRef — see above).
+  const claudeImgInputRef = useRef<HTMLInputElement | null>(null);
   // A live mirror of `claudeOpen` for callbacks/effects that shouldn't re-subscribe
   // just to read it (e.g. the per-dir draft effect restoring focus mid-compose).
   const claudeOpenRef = useRef(claudeOpen);
@@ -1809,25 +1933,12 @@ function App() {
     [insertAtCaret],
   );
 
-  // Paste an image (⌃V): read it as base64, upload to the server which saves it
-  // under /tmp/images/<random>.<ext>, then insert that absolute path so the
-  // claude session can Read it (Read works on /tmp without a permission prompt
-  // and renders images visually). Non-image pastes fall through to normal paste.
-  const handleImagePaste = useCallback(
-    async (
-      e: ClipboardEvent<HTMLTextAreaElement>,
-      insert: (path: string) => void,
-      setUploading: (b: boolean) => void,
-    ) => {
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      const imgItem = Array.from(items).find(
-        (it) => it.kind === "file" && it.type.startsWith("image/"),
-      );
-      if (!imgItem) return; // not an image — let the normal text paste happen
-      e.preventDefault();
-      const file = imgItem.getAsFile();
-      if (!file) return;
+  // Upload one image File to the server, which saves it under
+  // /tmp/images/<random>.<ext>, then insert that absolute path so the claude
+  // session can Read it (Read works on /tmp without a permission prompt and
+  // renders images visually). Shared by ⌃V paste and the mobile file picker.
+  const uploadImageFile = useCallback(
+    async (file: File, insert: (path: string) => void, setUploading: (b: boolean) => void) => {
       setUploading(true);
       try {
         const dataUrl: string = await new Promise((resolve, reject) => {
@@ -1843,17 +1954,53 @@ function App() {
         });
         const body = await res.json().catch(() => ({}) as any);
         if (!res.ok) {
-          alert(`image paste failed: ${body.error ?? res.statusText}`);
+          alert(`image upload failed: ${body.error ?? res.statusText}`);
           return;
         }
         if (typeof body.path === "string") insert(`${body.path} `);
       } catch (err) {
-        alert(`image paste failed: ${String((err as any)?.message ?? err)}`);
+        alert(`image upload failed: ${String((err as any)?.message ?? err)}`);
       } finally {
         setUploading(false);
       }
     },
     [],
+  );
+  // Paste an image (⌃V): pull the image off the clipboard and upload it.
+  // Non-image pastes fall through to normal text paste.
+  const handleImagePaste = useCallback(
+    async (
+      e: ClipboardEvent<HTMLTextAreaElement>,
+      insert: (path: string) => void,
+      setUploading: (b: boolean) => void,
+    ) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imgItem = Array.from(items).find(
+        (it) => it.kind === "file" && it.type.startsWith("image/"),
+      );
+      if (!imgItem) return; // not an image — let the normal text paste happen
+      e.preventDefault();
+      const file = imgItem.getAsFile();
+      if (!file) return;
+      await uploadImageFile(file, insert, setUploading);
+    },
+    [uploadImageFile],
+  );
+  // Mobile path: an image chosen from the file picker (photo library / camera).
+  const handleImageFile = useCallback(
+    async (
+      e: ChangeEvent<HTMLInputElement>,
+      insert: (path: string) => void,
+      setUploading: (b: boolean) => void,
+    ) => {
+      const input = e.currentTarget;
+      const file = input.files?.[0];
+      input.value = ""; // let the same file be re-picked next time
+      if (!file) return;
+      await uploadImageFile(file, insert, setUploading);
+    },
+    [uploadImageFile],
   );
   const handleClaudePaste = useCallback(
     (e: ClipboardEvent<HTMLTextAreaElement>) =>
@@ -1889,10 +2036,16 @@ function App() {
       // prompt already clears the draft key via the save effect).
       claudeCaretRef.current = null;
       if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), null);
-      setLaunchedSession(typeof body.session === "string" ? body.session : null);
-      // The new tmux session needs a beat to register before it shows up in the
-      // list, so nudge a refresh now and again shortly after rather than waiting
-      // for the next poll — otherwise the just-launched session never pops in.
+      if (body.queued) {
+        // Offline: the prompt was enqueued, not launched. It shows in the Tmux
+        // sidebar as a queued row and fires automatically once we're back online.
+        setQueuedNote(true);
+      } else {
+        setLaunchedSession(typeof body.session === "string" ? body.session : null);
+      }
+      // The new tmux session (or queued row) needs a beat to register before it
+      // shows up in the list, so nudge a refresh now and again shortly after rather
+      // than waiting for the next poll — otherwise it never pops in.
       queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
       setTimeout(() => queryClient.refetchQueries({ queryKey: ["tmux-sessions"] }), 900);
     } finally {
@@ -1985,11 +2138,13 @@ function App() {
         return;
       }
       const body = await res.json().catch(() => ({}) as any);
-      setLaunchedSession(typeof body.session === "string" ? body.session : null);
+      if (body.queued) setQueuedNote(true);
+      else setLaunchedSession(typeof body.session === "string" ? body.session : null);
+      queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
     } catch (e) {
       alert(`launch failed: ${errMessage(e)}`);
     }
-  }, [runGit, qd]);
+  }, [runGit, qd, queryClient]);
 
   // Refetch the current tab's data — the same thing `space` does, exposed to the
   // mobile Actions menu (where there's no keyboard). Resetting the list query
@@ -2086,6 +2241,29 @@ function App() {
       tmuxQuery.refetch();
     },
     [tmuxSessions, selectTmux, tmuxQuery],
+  );
+
+  // Drop a queued (offline) prompt before it launches, then refresh the list.
+  const cancelQueued = useCallback(
+    async (id: number) => {
+      try {
+        const res = await fetch("/api/queue/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}) as any);
+          alert(`cancel failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+      } catch (e) {
+        alert(`cancel failed: ${errMessage(e)}`);
+        return;
+      }
+      tmuxQuery.refetch();
+    },
+    [tmuxQuery],
   );
 
   // On the Tmux tab, auto-select the first session once the list loads (or when
@@ -2640,6 +2818,18 @@ function App() {
         : dirScopedTmux,
     [dirScopedTmux, q],
   );
+
+  // Queued (offline) prompts scoped to the directory in view, then narrowed by the
+  // sidebar filter against the prompt text — same shape as visibleTmux above.
+  const visibleQueued = useMemo(() => {
+    if (!queuedSessions) return null;
+    const root = meta?.path;
+    let list = root
+      ? queuedSessions.filter((x) => x.cwd === root || x.cwd.startsWith(`${root}/`))
+      : queuedSessions;
+    if (q) list = list.filter((x) => x.prompt.toLowerCase().includes(q));
+    return list;
+  }, [queuedSessions, meta?.path, q]);
   // File count per patch for the sidebar (parsePatchFiles is cached by key).
   const manualFileCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -2691,6 +2881,7 @@ function App() {
     sections,
     commitOpen,
     claudeOpen,
+    usageOpen,
     dirsOpen,
     dirMenuOpen,
     changes,
@@ -2709,6 +2900,7 @@ function App() {
     sections,
     commitOpen,
     claudeOpen,
+    usageOpen,
     dirsOpen,
     dirMenuOpen,
     changes,
@@ -2729,12 +2921,14 @@ function App() {
         e.key === "Escape" &&
         (keyCtx.current.commitOpen ||
           keyCtx.current.claudeOpen ||
+          keyCtx.current.usageOpen ||
           keyCtx.current.dirsOpen ||
           keyCtx.current.dirMenuOpen)
       ) {
         e.preventDefault();
         setCommitOpen(false);
         setClaudeOpen(false);
+        setUsageOpen(false);
         setDirsOpen(false);
         setDirMenuOpen(false);
         return;
@@ -2917,6 +3111,14 @@ function App() {
       if (e.key === "R") {
         e.preventDefault();
         void refreshServer();
+        return;
+      }
+      // `U` (Shift+U — lowercase `u` is half-page scroll up) opens the Claude
+      // usage dialog: how much of the 5-hour and weekly windows is spent and when
+      // each resets.
+      if (e.key === "U") {
+        e.preventDefault();
+        setUsageOpen(true);
         return;
       }
       if (e.key === "'") {
@@ -3125,6 +3327,7 @@ function App() {
   }
   // The Tmux tab's "Kill session" lives as a dedicated trash button beside this
   // menu (see the topbar), so it's intentionally not duplicated here.
+  actionItems.push({ label: "Claude usage", icon: <Gauge />, onClick: () => setUsageOpen(true) });
   actionItems.push({ label: "Refresh", icon: <RefreshCw />, onClick: refreshTab });
   actionItems.push({ label: "Restart server", icon: <RotateCw />, onClick: () => void refreshServer() });
   actionItems.push({
@@ -3558,6 +3761,32 @@ function App() {
             {tmuxQuery.isError && (
               <div className="side-note error">{errMessage(tmuxQuery.error)}</div>
             )}
+            {!serverOnline && (
+              <div className="offline-note">
+                <span className="offline-dot" />
+                Offline — new sessions are queued and launch when you reconnect.
+              </div>
+            )}
+            {visibleQueued?.map((qs) => (
+              <div key={`q-${qs.id}`} className="commit queued" title={qs.prompt}>
+                <div className="sess-top">
+                  <span className="sess-queued" />
+                  <span className="sess-name">Queued session</span>
+                  <span className="queued-badge">Queued</span>
+                </div>
+                <div className="sess-task">{qs.prompt}</div>
+                <button
+                  className="kill-btn"
+                  title="Remove from queue"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void cancelQueued(qs.id);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
             {visibleTmux?.map((s) => (
               <div
                 key={s.name}
@@ -3583,13 +3812,15 @@ function App() {
                 </button>
               </div>
             ))}
-            {visibleTmux !== null && visibleTmux.length === 0 && (
-              <div className="side-note">
-                {tmuxSessions && tmuxSessions.length > 0
-                  ? "No claude sessions in this directory"
-                  : "No claude tmux sessions"}
-              </div>
-            )}
+            {visibleTmux !== null &&
+              visibleTmux.length === 0 &&
+              (!visibleQueued || visibleQueued.length === 0) && (
+                <div className="side-note">
+                  {tmuxSessions && tmuxSessions.length > 0
+                    ? "No claude sessions in this directory"
+                    : "No claude tmux sessions"}
+                </div>
+              )}
           </div>
         )}
 
@@ -3650,6 +3881,9 @@ function App() {
             <kbd>⇧R</kbd> restart server
           </span>
           <span>
+            <kbd>⇧U</kbd> usage
+          </span>
+          <span>
             <kbd>/</kbd> filter
           </span>
         </div>
@@ -3674,6 +3908,7 @@ function App() {
                   <span className="t-sub">
                     {transcriptData.cwd}
                     {transcriptData.model ? ` · ${transcriptData.model}` : ""}
+                    {transcriptData.session ? ` · ${transcriptData.session}` : ""}
                   </span>
                   <button
                     type="button"
@@ -3704,6 +3939,9 @@ function App() {
                       onAnswerQuestion={i === turns.length - 1 ? answerQuestion : undefined}
                     />
                   ))
+                )}
+                {transcriptData.pendingPane && !selectedBusy && (
+                  <PendingPrompt text={transcriptData.pendingPane} />
                 )}
                 {selectedBusy && (
                   <div className="turn assistant">
@@ -3743,6 +3981,24 @@ function App() {
                   }}
                 />
                 <div className="reply-bar">
+                  {!isDesktop && (
+                    <>
+                      <input
+                        ref={replyImgInputRef}
+                        type="file"
+                        accept="image/*"
+                        hidden
+                        onChange={(e) => handleImageFile(e, insertIntoReply, setReplyImgUploading)}
+                      />
+                      <button
+                        className="act img-pick"
+                        disabled={replyImgUploading}
+                        onClick={() => replyImgInputRef.current?.click()}
+                      >
+                        🖼 Image
+                      </button>
+                    </>
+                  )}
                   <span className="reply-hint">
                     {replyImgUploading ? (
                       "Uploading image…"
@@ -4156,7 +4412,32 @@ function App() {
                   document.body,
                 )}
             </div>
+            {!serverOnline && (
+              <div className="modal-offline">
+                <span className="offline-dot" />
+                You're offline — this prompt will be queued and launch automatically
+                once you're back online.
+              </div>
+            )}
             <div className="modal-actions">
+              {!isDesktop && (
+                <>
+                  <input
+                    ref={claudeImgInputRef}
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={(e) => handleImageFile(e, insertIntoPrompt, setImgUploading)}
+                  />
+                  <button
+                    className="act img-pick"
+                    disabled={imgUploading}
+                    onClick={() => claudeImgInputRef.current?.click()}
+                  >
+                    {imgUploading ? "Uploading…" : "🖼 Image"}
+                  </button>
+                </>
+              )}
               <button className="act" disabled={launching} onClick={() => setClaudeOpen(false)}>
                 Cancel
               </button>
@@ -4165,8 +4446,99 @@ function App() {
                 disabled={launching || !claudePrompt.trim()}
                 onClick={submitClaude}
               >
-                {launching ? "Launching…" : "Launch"}
+                {launching
+                  ? serverOnline
+                    ? "Launching…"
+                    : "Queuing…"
+                  : serverOnline
+                    ? "Launch"
+                    : "Queue"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {usageOpen && (
+        <div className="modal-overlay" onClick={() => setUsageOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Claude usage</h3>
+            {usageQuery.isLoading && !usageQuery.data ? (
+              <div className="usage-note">Loading…</div>
+            ) : usageQuery.isError ? (
+              <div className="usage-note error">{errMessage(usageQuery.error)}</div>
+            ) : !usageQuery.data?.five_hour && !usageQuery.data?.seven_day ? (
+              <div className="usage-note">
+                No usage data yet — it appears once Claude Code's statusline has
+                rendered at least once.
+              </div>
+            ) : (
+              <div className="usage-grid">
+                {(
+                  [
+                    ["Session", "5-hour window", usageQuery.data?.five_hour ?? null],
+                    ["Weekly", "7-day window", usageQuery.data?.seven_day ?? null],
+                  ] as const
+                ).map(([label, sub, win]) => (
+                  <div className="usage-row" key={label}>
+                    <div className="usage-head">
+                      <span className="usage-label">
+                        {label} <span className="usage-sub">{sub}</span>
+                      </span>
+                      <span className="usage-pct">
+                        {win ? `${Math.round(win.used_percentage)}%` : "—"}
+                      </span>
+                    </div>
+                    {win ? (
+                      <>
+                        <div className="usage-bar">
+                          <div
+                            className={`usage-fill${
+                              win.used_percentage >= 90
+                                ? " hot"
+                                : win.used_percentage >= 70
+                                  ? " warm"
+                                  : ""
+                            }`}
+                            style={{
+                              width: `${Math.min(100, Math.max(2, win.used_percentage))}%`,
+                            }}
+                          />
+                        </div>
+                        <div className="usage-reset">
+                          Resets in <strong>{untilReset(win.resets_at)}</strong>
+                          <span className="usage-clock"> · {resetClock(win.resets_at)}</span>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="usage-reset muted">No data for this window</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="modal-actions">
+              <button
+                className="act"
+                onClick={() => void usageQuery.refetch()}
+                disabled={usageQuery.isFetching}
+              >
+                {usageQuery.isFetching ? "Refreshing…" : "Refresh"}
+              </button>
+              <button className="act primary" onClick={() => setUsageOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="modal-hint">
+              {usageQuery.data?.updated_at ? (
+                <span>
+                  Updated{" "}
+                  {timeAgo(new Date(usageQuery.data.updated_at * 1000).toISOString())}
+                </span>
+              ) : null}
+              <span>
+                <kbd>esc</kbd> close
+              </span>
             </div>
           </div>
         </div>
@@ -4185,6 +4557,17 @@ function App() {
             Copy
           </button>
           <button className="sel-x" title="Dismiss" onClick={() => setLaunchedSession(null)}>
+            ✕
+          </button>
+        </div>
+      )}
+
+      {queuedNote && (
+        <div className="sel-bar">
+          <span className="sel-info">
+            Queued — Claude will start it automatically once you're back online.
+          </span>
+          <button className="sel-x" title="Dismiss" onClick={() => setQueuedNote(false)}>
             ✕
           </button>
         </div>
