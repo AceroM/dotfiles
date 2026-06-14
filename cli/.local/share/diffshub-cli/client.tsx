@@ -29,7 +29,6 @@ import {
   FileDiff as FileDiffIcon,
   FileStack,
   SquareTerminal,
-  Sparkles,
 } from "lucide-react";
 
 interface Commit {
@@ -114,7 +113,9 @@ interface DiffSelection {
 
 type Tab = "commits" | "prs" | "changes" | "manual" | "tmux";
 
-const TAB_ORDER: Tab[] = ["commits", "prs", "changes", "manual", "tmux"];
+// Order drives the 1–5 / ←→ shortcuts and the tab strip. The first entry is the
+// landing tab for the default route (see initialView).
+const TAB_ORDER: Tab[] = ["tmux", "changes", "commits", "prs", "manual"];
 
 interface ManualPatch {
   name: string;
@@ -346,6 +347,30 @@ function ContentSpinner({ label }: { label: string }) {
   );
 }
 
+// Placeholder for the diff column while a commit/PR/changes diff is still being
+// computed server-side (git runs in the background). Mimics a few file cards with
+// shimmering line bars so switching to a diff feels instant — the layout is there
+// immediately and only the text streams in. Row counts/widths vary per index so it
+// reads as code, not a solid block.
+function SkeletonDiff({ files = 3 }: { files?: number }) {
+  return (
+    <div className="skel-diff" aria-busy="true" aria-label="Loading diff">
+      {Array.from({ length: files }, (_, i) => (
+        <div className="skel-file" key={i}>
+          <div className="skel-file-head">
+            <div className="skel-bar" style={{ width: `${28 + ((i * 17) % 38)}%` }} />
+          </div>
+          {Array.from({ length: 5 + ((i * 4) % 5) }, (_, j) => (
+            <div className="skel-code-line" key={j}>
+              <div className="skel-bar code" style={{ width: `${30 + ((j * 23) % 58)}%` }} />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ---- Lightweight markdown rendering for assistant messages ----
 // Not a full CommonMark parser — just enough (code blocks, headings, lists,
 // quotes, **bold**/*italic*/`code`/[links]) to make claude's markdown read like
@@ -521,9 +546,6 @@ const TranscriptTurn = memo(function TranscriptTurn({
   }
   return (
     <div className="turn assistant">
-      <div className="avatar">
-        <Sparkles size={15} />
-      </div>
       <div className="content">
         {msgs.map((m, i) => {
           if (m.kind === "tool_use")
@@ -579,7 +601,70 @@ function initialView(): { tab: Tab; view: View; dir: number | null } {
   if (manual) return { tab: "manual", view: { kind: "manual", name: manual }, dir };
   const sha = params.get("sha");
   if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
-  return { tab: "commits", view: { kind: "none" }, dir };
+  // Default route lands on the first tab (Tmux sessions); see TAB_ORDER.
+  return { tab: "tmux", view: { kind: "tmux", session: "" }, dir };
+}
+
+// ---- Draft persistence (localStorage) ----
+// The New Claude session prompt and each Tmux tab's half-typed reply survive
+// reloads and closing/reopening the dialog. The Claude prompt is keyed by the
+// active directory id so a temp prompt typed in one dir never bleeds into
+// another; reply drafts are keyed by session name (globally unique) so every
+// tab keeps its own draft, and killing a session drops its key.
+const claudeDraftKey = (dirId: number) => `claudeDraft:${dirId}`;
+const replyDraftKey = (session: string) => `replyDraft:${session}`;
+function loadDraft(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+function saveDraft(key: string, value: string) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key); // empty draft → no stale key left behind
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
+
+// ---- Last-tab memory (sessionStorage) ----
+// Switching directories restores the tab you were last on instead of forcing
+// one, so browsing across dirs keeps you in the same tab. Defaults to the Tmux
+// tab the first time. Session-scoped so it resets when the tab/window closes.
+const LAST_TAB_KEY = "lastTab";
+function loadLastTab(): Tab {
+  try {
+    const t = sessionStorage.getItem(LAST_TAB_KEY);
+    if (t && (TAB_ORDER as string[]).includes(t)) return t as Tab;
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+  return "tmux";
+}
+function saveLastTab(t: Tab) {
+  try {
+    sessionStorage.setItem(LAST_TAB_KEY, t);
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
+
+// The view + URL param a tab lands on by default (used when a directory switch
+// restores a remembered tab). Commits/PRs have no default sub-view — they show
+// their list and wait for a selection — so they reset to an empty pane.
+function tabDefaults(t: Tab): { view: View; param: string } {
+  switch (t) {
+    case "changes":
+      return { view: { kind: "changes" }, param: "view=changes" };
+    case "manual":
+      return { view: { kind: "manual", name: "" }, param: "manual=" };
+    case "tmux":
+      return { view: { kind: "tmux", session: "" }, param: "tmux=" };
+    default:
+      return { view: { kind: "none" }, param: "" };
+  }
 }
 
 function App() {
@@ -623,6 +708,11 @@ function App() {
       // ignore storage failures (private mode, quota, etc.)
     }
   }, [autoRefresh]);
+
+  // Remember the tab you're on so the next directory switch restores it.
+  useEffect(() => {
+    saveLastTab(tab);
+  }, [tab]);
 
   // ---- Server data (TanStack Query) ----
   // Every list/diff query keys on `activeDir` so switching directories refetches.
@@ -713,6 +803,24 @@ function App() {
   const selectedSessionRef = useRef(selectedSession);
   selectedSessionRef.current = selectedSession;
 
+  // Sessions are global (every claude tmux session on the box), but the Tmux tab
+  // should only show the ones running under the directory you're browsing. Scope
+  // by cwd against the active directory's root (`meta.path`): a session belongs
+  // here if its cwd is that root or sits beneath it (covers workspace sub-repos).
+  const dirScopedTmux = useMemo(() => {
+    if (!tmuxSessions) return null;
+    const root = meta?.path;
+    if (!root) return tmuxSessions;
+    return tmuxSessions.filter((s) => s.cwd === root || s.cwd.startsWith(`${root}/`));
+  }, [tmuxSessions, meta?.path]);
+
+  // The Tmux tab badge counts only sessions where claude is actively working,
+  // not the total — idle sessions don't earn a number.
+  const runningTmux = useMemo(
+    () => dirScopedTmux?.filter((s) => s.busy).length ?? 0,
+    [dirScopedTmux],
+  );
+
   const [busyPath, setBusyPath] = useState<string | null>(null);
 
   // Commit & push dialog (Changes view, `;`)
@@ -723,6 +831,7 @@ function App() {
   // New Claude session dialog (`'`) — launches an interactive claude tmux
   // session in the active directory, detached, seeded with the typed prompt.
   const [claudeOpen, setClaudeOpen] = useState(false);
+  // Loaded per-directory by the effect below once `meta` (the active dir) is known.
   const [claudePrompt, setClaudePrompt] = useState("");
   const [launching, setLaunching] = useState(false);
   const [launchedSession, setLaunchedSession] = useState<string | null>(null);
@@ -735,9 +844,15 @@ function App() {
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Directory dropdown (top-left) + settings dialog (manage directories).
+  // Directory dropdown (top-left) + settings dialog (manage directories). The
+  // dropdown is a combobox: `dirFilter` narrows the list as you type and
+  // `dirActive` is the keyboard-highlighted row (Enter selects it). The `D`
+  // shortcut opens it and focuses `dirSearchEl`.
   const [dirMenuOpen, setDirMenuOpen] = useState(false);
   const [dirsOpen, setDirsOpen] = useState(false);
+  const [dirFilter, setDirFilter] = useState("");
+  const [dirActive, setDirActive] = useState(0);
+  const dirSearchEl = useRef<HTMLInputElement | null>(null);
 
   // Auto-dismiss the "Launched" banner after a short period.
   useEffect(() => {
@@ -758,6 +873,46 @@ function App() {
     staleTime: 30_000,
   });
   const claudeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Where the caret/selection sat when the dialog last closed, so reopening it
+  // (e.g. after `esc`) restores the cursor instead of jumping to the start/end.
+  const claudeCaretRef = useRef<{ start: number; end: number } | null>(null);
+  const captureClaudeCaret = useCallback((el: HTMLTextAreaElement) => {
+    claudeCaretRef.current = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 };
+  }, []);
+  // The Claude draft is kept per active directory (meta.id, which resolves the
+  // "server default" case too). `claudeDraftDirRef` records which dir the
+  // in-memory prompt belongs to, so switching directories loads that dir's own
+  // draft and the save effect always writes back to the right key. The
+  // `current === id` guard means a meta refetch for the same dir won't clobber
+  // what the user is currently typing.
+  const claudeDraftDirRef = useRef<number | null>(null);
+  useEffect(() => {
+    const id = meta?.id;
+    if (id == null || claudeDraftDirRef.current === id) return;
+    claudeDraftDirRef.current = id;
+    setClaudePrompt(loadDraft(claudeDraftKey(id)));
+  }, [meta?.id]);
+  // Persist the draft under its directory's key; launching clears the prompt,
+  // which also clears the stored key. Wait until we know the active dir so we
+  // never write the draft under the wrong (or a stale) key.
+  useEffect(() => {
+    const id = claudeDraftDirRef.current;
+    if (id == null) return;
+    saveDraft(claudeDraftKey(id), claudePrompt);
+  }, [claudePrompt]);
+  // On (re)open, drop the caret back where it was; autoFocus has already focused
+  // the textarea, so default a fresh prompt's caret to the end of the text.
+  useEffect(() => {
+    if (!claudeOpen) return;
+    const caret = claudeCaretRef.current;
+    requestAnimationFrame(() => {
+      const el = claudeTextareaRef.current;
+      if (!el) return;
+      el.focus();
+      const pos = caret ?? { start: el.value.length, end: el.value.length };
+      el.setSelectionRange(pos.start, pos.end);
+    });
+  }, [claudeOpen]);
   // The active `@token` being typed: its query text + where the `@` sits + caret.
   const [fileToken, setFileToken] = useState<{ query: string; start: number; caret: number } | null>(
     null,
@@ -884,13 +1039,16 @@ function App() {
   );
 
   // ---- Commits ----
-  // Land on the newest commit once the first page arrives — unless the URL
-  // already pinned a specific commit/PR/changes/manual view.
+  // Land on the newest commit whenever the commits tab has nothing selected —
+  // on first load (URL didn't pin a specific view) and on every (re)entry to the
+  // tab, since switching tabs resets the view to "none". A view that's already a
+  // commit (e.g. URL-pinned or hand-picked) is left untouched.
   useEffect(() => {
+    if (tab !== "commits") return;
     const first = commits[0];
     if (!first) return;
     setView((v) => (v.kind === "none" ? { kind: "commit", sha: first.sha, repo: first.repo } : v));
-  }, [commits]);
+  }, [tab, commits]);
 
   // ---- Manual patches (./diffs/*.patch in the cwd) ----
   // Auto-select the first patch when the Manual tab is open with none chosen.
@@ -985,6 +1143,7 @@ function App() {
       ref: MutableRefObject<HTMLTextAreaElement | null>,
       setValue: Dispatch<SetStateAction<string>>,
       insert: string,
+      onValue?: (next: string) => void,
     ) => {
       const el = ref.current;
       setValue((prev) => {
@@ -999,17 +1158,23 @@ function App() {
             e2.setSelectionRange(pos, pos);
           }
         });
+        onValue?.(next);
         return next;
       });
     },
     [],
   );
+  // The prompt persists via its own effect on `claudePrompt`; the reply has no
+  // such effect, so persist its draft here too (keeps a pasted image ref).
   const insertIntoPrompt = useCallback(
     (insert: string) => insertAtCaret(claudeTextareaRef, setClaudePrompt, insert),
     [insertAtCaret],
   );
   const insertIntoReply = useCallback(
-    (insert: string) => insertAtCaret(replyTextareaRef, setReplyText, insert),
+    (insert: string) =>
+      insertAtCaret(replyTextareaRef, setReplyText, insert, (next) => {
+        if (selectedSessionRef.current) saveDraft(replyDraftKey(selectedSessionRef.current), next);
+      }),
     [insertAtCaret],
   );
 
@@ -1115,6 +1280,7 @@ function App() {
         return;
       }
       setReplyText("");
+      saveDraft(replyDraftKey(session), ""); // sent → drop this tab's saved draft
       // Give claude a beat to accept the keys before reading the transcript back.
       setTimeout(() => {
         queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
@@ -1154,20 +1320,14 @@ function App() {
     (next: Tab) => {
       setTab(next);
       setFilter("");
-      // The per-tab queries fetch themselves via their `enabled` flag; we only
-      // need to point the view at the right thing and update the URL.
-      if (next === "changes") {
-        setView({ kind: "changes" });
-        history.replaceState(null, "", navUrl("view=changes"));
-      }
-      if (next === "manual") {
-        setView({ kind: "manual", name: "" });
-        history.replaceState(null, "", navUrl("manual="));
-      }
-      if (next === "tmux") {
-        setView({ kind: "tmux", session: "" });
-        history.replaceState(null, "", navUrl("tmux="));
-      }
+      // Always reset the view to the tab's default so the center/right columns
+      // never keep showing the previous tab's content (e.g. a commit diff bleeding
+      // into the PRs tab). Commits/PRs reset to an empty "none" view and wait for a
+      // selection — commits then auto-lands on the newest one (see effect below).
+      // The per-tab queries fetch themselves via their `enabled` flag.
+      const { view: nextView, param } = tabDefaults(next);
+      setView(nextView);
+      history.replaceState(null, "", navUrl(param));
     },
     [navUrl],
   );
@@ -1202,6 +1362,7 @@ function App() {
         alert(`kill failed: ${errMessage(e)}`);
         return;
       }
+      saveDraft(replyDraftKey(name), ""); // removing the tab drops its saved draft
       if (selectedSessionRef.current === name) selectTmux(next);
       tmuxQuery.refetch();
     },
@@ -1209,17 +1370,19 @@ function App() {
   );
 
   // On the Tmux tab, auto-select the first session once the list loads (or when
-  // the selected session disappears, e.g. after a kill) so the transcript pane
-  // always shows something to read.
+  // the selected session disappears, e.g. after a kill or a directory switch) so
+  // the transcript pane always shows something from the directory in view. Works
+  // off the directory-scoped list so we never land on a session from another dir.
   useEffect(() => {
-    if (tab !== "tmux" || !tmuxSessions) return;
-    const exists = selectedSession && tmuxSessions.some((s) => s.name === selectedSession);
-    if (!exists && tmuxSessions.length) selectTmux(tmuxSessions[0].name);
-  }, [tab, tmuxSessions, selectedSession, selectTmux]);
+    if (tab !== "tmux" || !dirScopedTmux) return;
+    const exists = selectedSession && dirScopedTmux.some((s) => s.name === selectedSession);
+    if (!exists) selectTmux(dirScopedTmux.length ? dirScopedTmux[0].name : "");
+  }, [tab, dirScopedTmux, selectedSession, selectTmux]);
 
-  // Drop any half-typed reply when the selected session changes.
+  // Load the selected session's saved reply draft (each tab keeps its own
+  // half-typed reply in localStorage), or clear when nothing is selected.
   useEffect(() => {
-    setReplyText("");
+    setReplyText(selectedSession ? loadDraft(replyDraftKey(selectedSession)) : "");
   }, [selectedSession]);
 
   const selectCommit = useCallback(
@@ -1250,16 +1413,22 @@ function App() {
     [navUrl],
   );
 
-  // Switch the active directory: land on its newest commit and reset the URL.
-  const selectDir = useCallback((id: number | null) => {
-    setActiveDir(id);
-    activeDirRef.current = id;
-    setTab("commits");
-    setView({ kind: "none" });
-    setFilter("");
-    setDirMenuOpen(false);
-    history.replaceState(null, "", id != null ? `/?dir=${id}` : "/");
-  }, []);
+  // Switch the active directory: restore the tab you were last on (defaults to
+  // Tmux) rather than forcing one, and reset the URL to match.
+  const selectDir = useCallback(
+    (id: number | null) => {
+      setActiveDir(id);
+      activeDirRef.current = id;
+      const nextTab = loadLastTab();
+      const { view: nextView, param } = tabDefaults(nextTab);
+      setTab(nextTab);
+      setView(nextView);
+      setFilter("");
+      setDirMenuOpen(false);
+      history.replaceState(null, "", navUrl(param));
+    },
+    [navUrl],
+  );
 
   // ---- Directory settings (add / edit / delete) ----
   const [dirForm, setDirForm] = useState<{
@@ -1341,6 +1510,33 @@ function App() {
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [dirMenuOpen]);
+
+  // When the dropdown opens, focus its filter box and reset the highlight; when
+  // it closes, drop the filter so it reopens clean next time.
+  useEffect(() => {
+    if (dirMenuOpen) {
+      setDirActive(0);
+      requestAnimationFrame(() => dirSearchEl.current?.focus());
+    } else {
+      setDirFilter("");
+    }
+  }, [dirMenuOpen]);
+
+  // Keep the keyboard-highlighted directory scrolled into view as you arrow
+  // through a long, filtered list.
+  useEffect(() => {
+    if (dirMenuOpen) document.getElementById(`diropt-${dirActive}`)?.scrollIntoView({ block: "nearest" });
+  }, [dirActive, dirMenuOpen]);
+
+  // Directories shown in the dropdown, narrowed by the combobox filter (matched
+  // against both the display name and the path).
+  const visibleDirs = useMemo(() => {
+    const f = dirFilter.trim().toLowerCase();
+    if (!f) return dirs;
+    return dirs.filter(
+      (d) => d.name.toLowerCase().includes(f) || d.path.toLowerCase().includes(f),
+    );
+  }, [dirs, dirFilter]);
 
   // ---- Sections rendered in the center column ----
   const sections = useMemo<Section[]>(() => {
@@ -1598,6 +1794,19 @@ function App() {
     setTimeout(() => fileEls.current.get(key)?.scrollIntoView({ block: "nearest" }), 50);
   }, []);
 
+  // ---- Per-worktree collapse (Changes sidebar) ----
+  // Click a worktree header to fold/unfold its staged/unstaged groups. Keyed by
+  // the worktree segment, so the state survives auto-refresh refetches.
+  const [collapsedWorktrees, setCollapsedWorktrees] = useState<Set<string>>(new Set());
+  const toggleWorktree = useCallback((segment: string) => {
+    setCollapsedWorktrees((prev) => {
+      const next = new Set(prev);
+      if (next.has(segment)) next.delete(segment);
+      else next.add(segment);
+      return next;
+    });
+  }, []);
+
   // ---- File tree (right sidebar) ----
   const onTreeSelect = useRef<(paths: readonly string[]) => void>(() => {});
   onTreeSelect.current = (paths) => {
@@ -1683,15 +1892,15 @@ function App() {
   );
   const visibleTmux = useMemo(
     () =>
-      q && tmuxSessions
-        ? tmuxSessions.filter(
+      q && dirScopedTmux
+        ? dirScopedTmux.filter(
             (s) =>
               s.name.toLowerCase().includes(q) ||
               s.cwd.toLowerCase().includes(q) ||
               s.task.toLowerCase().includes(q),
           )
-        : tmuxSessions,
-    [tmuxSessions, q],
+        : dirScopedTmux,
+    [dirScopedTmux, q],
   );
   // File count per patch for the sidebar (parsePatchFiles is cached by key).
   const manualFileCounts = useMemo(() => {
@@ -1747,6 +1956,7 @@ function App() {
     dirsOpen,
     dirMenuOpen,
     changes,
+    dirs,
   });
   keyCtx.current = {
     tab,
@@ -1764,6 +1974,7 @@ function App() {
     dirsOpen,
     dirMenuOpen,
     changes,
+    dirs,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1810,6 +2021,14 @@ function App() {
       if (e.composedPath().some((n) => n instanceof HTMLElement && n.classList?.contains("tree"))) {
         return;
       }
+      // `D` opens the directory dropdown and focuses its filter box, so you can
+      // jump between directories without reaching for the mouse (the open effect
+      // handles focusing the input).
+      if (e.key === "D") {
+        e.preventDefault();
+        setDirMenuOpen(true);
+        return;
+      }
       // ←/→ switch between tabs globally
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
@@ -1818,8 +2037,8 @@ function App() {
         selectTab(TAB_ORDER[(idx + delta) % TAB_ORDER.length]);
         return;
       }
-      // 1–5 jump straight to a tab
-      if (e.key >= "1" && e.key <= String(TAB_ORDER.length)) {
+      // 1–5 jump straight to a tab (plain, not ⌥ — that switches directories).
+      if (!e.altKey && e.key >= "1" && e.key <= String(TAB_ORDER.length)) {
         e.preventDefault();
         selectTab(TAB_ORDER[Number(e.key) - 1]);
         return;
@@ -1942,7 +2161,10 @@ function App() {
         // If lines are highlighted, clear the prompt and replace it with their
         // @-file reference so the new session lands with just that context.
         const ref = claudeRefRef.current;
-        if (ref) setClaudePrompt(`${ref} `);
+        if (ref) {
+          setClaudePrompt(`${ref} `);
+          claudeCaretRef.current = null; // land the caret after the inserted ref
+        }
         setClaudeOpen(true);
         return;
       }
@@ -2027,9 +2249,30 @@ function App() {
           ?.scrollIntoView({ block: "nearest" });
       }
     };
+    // ⌥1–⌥9 jump straight to the Nth registered directory (top-left dropdown),
+    // 1-indexed. Registered in the *capture* phase on its own listener so it
+    // fires before the event reaches any element — including modal textareas
+    // that call e.stopPropagation() in their bubble-phase onKeyDown. This makes
+    // directory switching supersede everything else: even mid-typing in a
+    // commit box or filter field, ⌥+digit wins. Match on e.code, not e.key,
+    // since ⌥+digit yields a special glyph for e.key on macOS but e.code stays
+    // "Digit1"…"Digit9".
+    const onDirHotkey = (e: KeyboardEvent) => {
+      if (!e.altKey || !/^Digit[1-9]$/.test(e.code)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) active.blur();
+      const d = keyCtx.current.dirs[Number(e.code.slice(5)) - 1];
+      if (d) selectDir(d.id);
+    };
+    document.addEventListener("keydown", onDirHotkey, true);
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, killSession, toggleReviewed, toggleCollapsed, runGit, commitWithClaude, queryClient]);
+    return () => {
+      document.removeEventListener("keydown", onDirHotkey, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, toggleReviewed, toggleCollapsed, runGit, commitWithClaude, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -2084,7 +2327,7 @@ function App() {
           <div className="dir-dropdown">
             <button
               className="dir-trigger"
-              title="Switch directory"
+              title="Switch directory (D)"
               onClick={() => setDirMenuOpen((o) => !o)}
             >
               <span className="dir-text">
@@ -2100,19 +2343,59 @@ function App() {
             </button>
             {dirMenuOpen && (
               <div className="dir-menu">
-                {dirs.map((d) => (
-                  <button
-                    key={d.id}
-                    className={`dir-item${d.id === currentDirId ? " on" : ""}`}
-                    onClick={() => selectDir(d.id)}
-                  >
-                    <span className="dir-item-name">
-                      {d.name}
-                      {d.id === defaultDirId ? " · launch" : ""}
-                    </span>
-                    <span className="dir-item-path">{d.path}</span>
-                  </button>
-                ))}
+                <input
+                  ref={dirSearchEl}
+                  className="dir-search"
+                  type="text"
+                  placeholder="Filter directories…"
+                  value={dirFilter}
+                  onChange={(e) => {
+                    setDirFilter(e.target.value);
+                    setDirActive(0);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setDirActive((i) => Math.min(i + 1, visibleDirs.length - 1));
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setDirActive((i) => Math.max(i - 1, 0));
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      const d = visibleDirs[dirActive] ?? visibleDirs[0];
+                      if (d) selectDir(d.id);
+                    }
+                  }}
+                />
+                <div className="dir-list">
+                  {visibleDirs.map((d, i) => {
+                    // Shortcut index off the full list so ⌥N stays right when filtered.
+                    const kbIndex = dirs.indexOf(d);
+                    return (
+                      <button
+                        key={d.id}
+                        id={`diropt-${i}`}
+                        className={`dir-item${d.id === currentDirId ? " on" : ""}${
+                          i === dirActive ? " active" : ""
+                        }`}
+                        onMouseEnter={() => setDirActive(i)}
+                        onClick={() => selectDir(d.id)}
+                      >
+                        <span className="dir-item-text">
+                          <span className="dir-item-name">
+                            {d.name}
+                            {d.id === defaultDirId ? " · launch" : ""}
+                          </span>
+                          <span className="dir-item-path">{d.path}</span>
+                        </span>
+                        {kbIndex >= 0 && kbIndex < 9 && (
+                          <span className="dir-item-key">⌥{kbIndex + 1}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {visibleDirs.length === 0 && <div className="dir-empty">No matches</div>}
+                </div>
                 <div className="dir-menu-sep" />
                 <button
                   className="dir-menu-act"
@@ -2138,6 +2421,23 @@ function App() {
           </div>
           <div className="tabs">
             <button
+              className={tab === "tmux" ? "on" : ""}
+              data-tip="Tmux sessions"
+              aria-label="Tmux sessions"
+              onClick={() => selectTab("tmux")}
+            >
+              <SquareTerminal />
+              {runningTmux > 0 && <span className="tab-badge">{runningTmux}</span>}
+            </button>
+            <button
+              className={tab === "changes" ? "on" : ""}
+              data-tip="Changes"
+              aria-label="Changes"
+              onClick={() => selectTab("changes")}
+            >
+              <FileDiffIcon />
+            </button>
+            <button
               className={tab === "commits" ? "on" : ""}
               data-tip="Commits"
               aria-label="Commits"
@@ -2154,34 +2454,12 @@ function App() {
               <GitPullRequest />
             </button>
             <button
-              className={tab === "changes" ? "on" : ""}
-              data-tip="Changes"
-              aria-label="Changes"
-              onClick={() => selectTab("changes")}
-            >
-              <FileDiffIcon />
-            </button>
-            <button
               className={tab === "manual" ? "on" : ""}
               data-tip="Manual patches"
               aria-label="Manual patches"
               onClick={() => selectTab("manual")}
             >
               <FileStack />
-              {manualPatches && manualPatches.length > 0 && (
-                <span className="tab-badge">{manualPatches.length}</span>
-              )}
-            </button>
-            <button
-              className={tab === "tmux" ? "on" : ""}
-              data-tip="Tmux sessions"
-              aria-label="Tmux sessions"
-              onClick={() => selectTab("tmux")}
-            >
-              <SquareTerminal />
-              {tmuxSessions && tmuxSessions.length > 0 && (
-                <span className="tab-badge">{tmuxSessions.length}</span>
-              )}
             </button>
           </div>
           {tab !== "changes" && (
@@ -2335,41 +2613,59 @@ function App() {
             {changes !== null && changeCount === 0 && (
               <div className="side-note">Working tree clean ✨</div>
             )}
-            {worktreeSegments.map((seg) => (
-              <div key={seg.segment || "_"}>
-                {seg.segment && <div className="wt-label">{seg.segment}</div>}
-                {seg.groups.map((group) => (
-                  <div key={group.label}>
-                    <div className="group-label">
-                      <span>
-                        {group.label} ({group.files.length})
-                      </span>
-                      {group.label === "Unstaged" && (
-                        <button
-                          className="group-act"
-                          title="git add -A"
-                          disabled={busyPath !== null}
-                          onClick={() => runGit("stage", undefined, undefined, group.dir)}
-                        >
-                          stage all
-                        </button>
-                      )}
-                    </div>
-                    {group.files.map((f) => (
-                      <div key={f.key} className="change-row" onClick={() => scrollToKey(f.key)}>
-                        <code className={`st st-${f.untracked ? "untracked" : (f.fileDiff && STATUS_FOR_CHANGE[f.fileDiff.type]) || "modified"}`}>
-                          {f.untracked ? "?" : f.fileDiff?.type === "new" ? "A" : f.fileDiff?.type === "deleted" ? "D" : f.fileDiff?.type.startsWith("rename") ? "R" : "M"}
-                        </code>
-                        <span className="change-path" title={f.path}>
-                          {f.path}
-                        </span>
-                        <span className="change-acts">{actionButtons(f)}</span>
+            {worktreeSegments.map((seg) => {
+              // Only worktrees with a segment header collapse; a single working
+              // tree (segment "") has no header and always shows its groups.
+              const collapsed = !!seg.segment && collapsedWorktrees.has(seg.segment);
+              const wtFiles = seg.groups.reduce((n, g) => n + g.files.length, 0);
+              return (
+                <div key={seg.segment || "_"}>
+                  {seg.segment && (
+                    <button
+                      className={`wt-label${collapsed ? " collapsed" : ""}`}
+                      title={collapsed ? "Expand worktree" : "Collapse worktree"}
+                      aria-expanded={!collapsed}
+                      onClick={() => toggleWorktree(seg.segment)}
+                    >
+                      <span className="wt-name">{seg.segment}</span>
+                      <span className="wt-count">{wtFiles}</span>
+                      <span className="wt-caret">▾</span>
+                    </button>
+                  )}
+                  {!collapsed &&
+                    seg.groups.map((group) => (
+                      <div key={group.label}>
+                        <div className="group-label">
+                          <span>
+                            {group.label} ({group.files.length})
+                          </span>
+                          {group.label === "Unstaged" && (
+                            <button
+                              className="group-act"
+                              title="git add -A"
+                              disabled={busyPath !== null}
+                              onClick={() => runGit("stage", undefined, undefined, group.dir)}
+                            >
+                              stage all
+                            </button>
+                          )}
+                        </div>
+                        {group.files.map((f) => (
+                          <div key={f.key} className="change-row" onClick={() => scrollToKey(f.key)}>
+                            <code className={`st st-${f.untracked ? "untracked" : (f.fileDiff && STATUS_FOR_CHANGE[f.fileDiff.type]) || "modified"}`}>
+                              {f.untracked ? "?" : f.fileDiff?.type === "new" ? "A" : f.fileDiff?.type === "deleted" ? "D" : f.fileDiff?.type.startsWith("rename") ? "R" : "M"}
+                            </code>
+                            <span className="change-path" title={f.path}>
+                              {f.path}
+                            </span>
+                            <span className="change-acts">{actionButtons(f)}</span>
+                          </div>
+                        ))}
                       </div>
                     ))}
-                  </div>
-                ))}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -2404,8 +2700,12 @@ function App() {
                 </button>
               </div>
             ))}
-            {tmuxSessions !== null && tmuxSessions.length === 0 && (
-              <div className="side-note">No claude tmux sessions</div>
+            {visibleTmux !== null && visibleTmux.length === 0 && (
+              <div className="side-note">
+                {tmuxSessions && tmuxSessions.length > 0
+                  ? "No claude sessions in this directory"
+                  : "No claude tmux sessions"}
+              </div>
             )}
           </div>
         )}
@@ -2413,6 +2713,9 @@ function App() {
         <div className="kbd-hints">
           <span>
             <kbd>1-5</kbd>/<kbd>←/→</kbd> tabs
+          </span>
+          <span>
+            <kbd>⌥1-9</kbd> dir
           </span>
           <span>
             <kbd>↑/↓</kbd> list
@@ -2484,9 +2787,6 @@ function App() {
                 )}
                 {selectedBusy && (
                   <div className="turn assistant">
-                    <div className="avatar">
-                      <Sparkles size={15} />
-                    </div>
                     <div className="content">
                       <div className="typing">
                         <span />
@@ -2505,7 +2805,10 @@ function App() {
                   className="reply-input"
                   placeholder={`Reply to ${selectedSession}…  (⌃V to paste an image, ↵ to send, ⇧↵ for newline)`}
                   value={replyText}
-                  onChange={(e) => setReplyText(e.target.value)}
+                  onChange={(e) => {
+                    setReplyText(e.target.value);
+                    saveDraft(replyDraftKey(selectedSession), e.target.value);
+                  }}
                   onPaste={handleReplyPaste}
                   onKeyDown={(e) => {
                     e.stopPropagation();
@@ -2550,11 +2853,26 @@ function App() {
             )}
           </div>
         )}
-        {diffLoading && <ContentSpinner label="Loading diff…" />}
-        {view.kind === "changes" && changes === null && <ContentSpinner label="Loading changes…" />}
-        {view.kind === "manual" && manualPatches === null && !manualError && (
-          <ContentSpinner label="Loading patches…" />
+        {/* Diff-column skeleton: shown while git computes a commit/PR/changes/manual
+            diff in the background, and on the commits tab during the brief moment
+            before it auto-lands on the newest commit. The layout lands instantly so
+            switching tabs feels SPA-snappy and only the diff text streams in. */}
+        {(diffLoading ||
+          (view.kind === "changes" && changes === null) ||
+          (view.kind === "manual" && manualPatches === null && !manualError) ||
+          (view.kind === "none" &&
+            tab === "commits" &&
+            (commitsQuery.isPending || commits.length > 0))) && <SkeletonDiff />}
+        {/* Nothing selected: keep the column scoped to the current tab rather than
+            leaking the previous tab's diff. PRs wait for a pick; an empty commits
+            repo says so. */}
+        {view.kind === "none" && tab === "prs" && (
+          <div className="empty">Select a PR on the left to view its diff</div>
         )}
+        {view.kind === "none" &&
+          tab === "commits" &&
+          !commitsQuery.isPending &&
+          commits.length === 0 && <div className="empty">No commits yet</div>}
         {diffQuery.isError && (view.kind === "commit" || view.kind === "pr") && (
           <div className="empty error">{diffError}</div>
         )}
@@ -2621,7 +2939,7 @@ function App() {
         </div>
       )}
 
-      {tab !== "tmux" && (
+      {tab !== "tmux" && view.kind !== "none" && (
       <aside className="tree">
         <div className="meta-panel">
           {view.kind === "commit" && (
@@ -2798,10 +3116,16 @@ function App() {
                 onChange={(e) => {
                   setClaudePrompt(e.target.value);
                   syncFileToken(e.target);
+                  captureClaudeCaret(e.target);
                 }}
                 onPaste={handleClaudePaste}
-                onClick={(e) => syncFileToken(e.currentTarget)}
+                onClick={(e) => {
+                  syncFileToken(e.currentTarget);
+                  captureClaudeCaret(e.currentTarget);
+                }}
+                onSelect={(e) => captureClaudeCaret(e.currentTarget)}
                 onKeyUp={(e) => {
+                  captureClaudeCaret(e.currentTarget);
                   // Track caret moves (arrows/home/end) so the @token stays current,
                   // but let the menu's own ArrowUp/Down handling win when it's open.
                   if (fileMenuOpen && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;

@@ -1124,11 +1124,6 @@ const page = `<!DOCTYPE html>
     border-radius: 18px; padding: 10px 15px; text-align: left;
     white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.55;
   }
-  .turn.assistant .avatar {
-    width: 26px; height: 26px; flex-shrink: 0; margin-top: 1px;
-    display: flex; align-items: center; justify-content: center;
-    border-radius: 50%; color: #ffffff; background: linear-gradient(135deg, #8771dd, #6e56cf);
-  }
   .turn.assistant .content {
     flex: 1; min-width: 0; padding-top: 2px;
     display: flex; flex-direction: column; gap: 10px;
@@ -1263,6 +1258,16 @@ const page = `<!DOCTYPE html>
   .skel-bar.title { height: 9px; margin-bottom: 8px; }
   .skel-bar.meta { height: 7px; width: 45%; }
   @keyframes shimmer { 0% { background-position-x: 100%; } 100% { background-position-x: -100%; } }
+
+  /* Diff-column skeleton (center pane) — a few file cards with shimmering code
+     lines, so a diff that's still being computed server-side renders its shape
+     instantly instead of a blank/spinner gap. */
+  .skel-diff { padding: 4px 2px; }
+  .skel-file { margin-bottom: 18px; border: 1px solid #ececef; border-radius: 8px; overflow: hidden; }
+  .skel-file-head { padding: 10px 12px; background: #f7f7f8; border-bottom: 1px solid #ececef; }
+  .skel-file-head .skel-bar { height: 9px; }
+  .skel-code-line { padding: 5px 12px; }
+  .skel-code-line .skel-bar.code { height: 8px; }
   .commit-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #71717a; }
   .commit-meta img { width: 14px; height: 14px; border-radius: 50%; }
   .commit-meta code { color: #71717a; }
@@ -1316,11 +1321,21 @@ const page = `<!DOCTYPE html>
   .switch-state { min-width: 18px; font-variant-numeric: tabular-nums; }
 
   .wt-label {
-    display: flex; align-items: center; gap: 6px;
+    display: flex; align-items: center; gap: 6px; width: 100%;
     padding: 12px 14px 2px; font-size: 11px; font-weight: 700;
     color: #6e56cf; letter-spacing: .02em;
+    background: none; border: none; cursor: pointer;
+    font-family: inherit; text-align: left;
   }
+  .wt-label:hover { color: #5b46b8; }
   .wt-label::before { content: "⎇"; opacity: .75; font-size: 12px; }
+  .wt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wt-count {
+    margin-left: auto; flex-shrink: 0; font-size: 10px; font-weight: 600;
+    color: #8b7fd0; background: #efe9fb; border-radius: 999px; padding: 0 6px;
+  }
+  .wt-caret { flex-shrink: 0; font-size: 9px; color: #a99fe0; transition: transform .12s; }
+  .wt-label.collapsed .wt-caret { transform: rotate(-90deg); }
   .wt-label + .group-label { padding-top: 4px; }
   .group-label {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -1471,16 +1486,33 @@ const page = `<!DOCTYPE html>
   .dir-menu {
     position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30;
     background: #ffffff; border: 1px solid #e4e4e7; border-radius: 8px;
-    box-shadow: 0 10px 34px rgba(0, 0, 0, .16); padding: 4px; max-height: 60vh; overflow-y: auto;
+    box-shadow: 0 10px 34px rgba(0, 0, 0, .16); padding: 4px;
+    display: flex; flex-direction: column; max-height: 60vh;
   }
+  /* Combobox filter, pinned above the scrolling directory list. */
+  .dir-search {
+    width: 100%; box-sizing: border-box; margin: 0 0 6px; padding: 6px 9px;
+    border: 1px solid #d4d4d8; border-radius: 6px; font: inherit; color: #18181b; outline: none;
+  }
+  .dir-search:focus { border-color: #6e56cf; }
+  .dir-list { overflow-y: auto; min-height: 0; }
+  .dir-empty { padding: 8px 9px; color: #a1a1aa; font-size: 12px; }
   .dir-item {
-    display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left; cursor: pointer;
+    display: flex; flex-direction: row; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer;
     padding: 6px 9px; background: none; border: none; border-radius: 6px;
   }
   .dir-item:hover { background: #f0f0f1; }
   .dir-item.on { background: #efe9fb; }
+  /* Keyboard-highlighted row in the combobox (ring so it reads even on .on). */
+  .dir-item.active { background: #f0f0f1; box-shadow: inset 0 0 0 1px #c4b8ef; }
+  .dir-item .dir-item-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
   .dir-item .dir-item-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dir-item .dir-item-path { font-size: 11px; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir-item .dir-item-key {
+    flex-shrink: 0; font-size: 10px; color: #a1a1aa; font-variant-numeric: tabular-nums;
+    background: #f0f0f1; border-radius: 4px; padding: 1px 5px;
+  }
+  .dir-item.on .dir-item-key, .dir-item.active .dir-item-key { background: #e4ddf7; color: #6e56cf; }
   .dir-menu-sep { height: 1px; background: #e4e4e7; margin: 4px 2px; }
   .dir-menu-act {
     display: block; width: 100%; text-align: left; cursor: pointer;
