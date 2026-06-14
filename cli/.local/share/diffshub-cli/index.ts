@@ -2536,16 +2536,25 @@ const server = Bun.serve({
       return json({ ok: true });
     }
 
-    // Restart the diffshub server itself. The server runs as `dh` (a foreground
-    // `bun`) inside the `dh` window of the `bg` tmux socket; a manual refresh is
-    // Ctrl-C in that pane then re-typing `dh`. We can't do that inline — sending
-    // C-c kills *this* process mid-request, before it could relaunch anything. So,
-    // like /api/commit, we hand the work to a detached `tmux -L bg` session that
-    // outlives our death: it pauses (so this response flushes first), sends C-c to
-    // drop back to the shell, waits for the port to free, then types `dh` + Enter.
+    // Restart a server running in a tmux window. By default this is diffshub
+    // itself — a foreground `bun` in the `dh` window of the `bg` tmux socket,
+    // relaunched by typing `dh` — but the Restart dialog (`⇧R`) can point both
+    // the target window and the relaunch command anywhere. A manual refresh is
+    // Ctrl-C in that pane then re-typing the command. We can't do that inline —
+    // sending C-c kills *this* process mid-request, before it could relaunch
+    // anything. So, like /api/commit, we hand the work to a detached `tmux -L bg`
+    // session that outlives our death: it pauses (so this response flushes
+    // first), sends C-c to drop back to the shell, waits for the port to free,
+    // then types the command + Enter.
     if (req.method === "POST" && url.pathname === "/api/restart-server") {
       try {
-        // Find the pane whose window is named `dh` on the bg socket.
+        const body = (await req.json().catch(() => ({}))) as {
+          window?: string;
+          command?: string;
+        };
+        const windowName = (body.window ?? "").trim() || "dh";
+        const command = (body.command ?? "").trim() || "dh";
+        // Find the pane whose window matches `windowName` on the bg socket.
         const SEP = "\x1f";
         const target = (
           await $`tmux -L bg list-panes -a -F ${`#{window_name}${SEP}#{session_name}:#{window_index}.#{pane_index}`}`.quiet().text()
@@ -2553,12 +2562,12 @@ const server = Bun.serve({
           .trim()
           .split("\n")
           .map((l) => l.split(SEP))
-          .find(([name]) => name === "dh")?.[1];
-        if (!target) return json({ error: "No `dh` window on the bg tmux socket" }, 404);
+          .find(([name]) => name === windowName)?.[1];
+        if (!target) return json({ error: `No \`${windowName}\` window on the bg tmux socket` }, 404);
         const session = `diffshub-restart-${Date.now()}`;
         const script =
           `sleep 0.4; tmux -L bg send-keys -t ${shq(target)} C-c; ` +
-          `sleep 1; tmux -L bg send-keys -t ${shq(target)} dh Enter`;
+          `sleep 1; tmux -L bg send-keys -t ${shq(target)} ${shq(command)} Enter`;
         await $`tmux -L bg new-session -d -s ${session} ${script}`.quiet();
       } catch (e) {
         return json({ error: errText(e) }, 500);

@@ -1,7 +1,7 @@
 // Always-on content script (no React — kept tiny). On a site mapped to a diffshub
 // directory it lazy-loads bar.js and mounts the persistent bottom-center composer;
 // when the mapping is removed it tears it down. Everything else — the composer,
-// @-file autocomplete, visual-select, and the ' / v shortcuts — lives in bar.tsx.
+// @-file autocomplete, visual-select, and the ; / v shortcuts — lives in bar.tsx.
 
 import { getConfig } from "./api";
 

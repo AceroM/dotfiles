@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "diffshub",
   "version": "0.1.0",
-  "description": "Assign a website to a diffshub directory, then use the bottom-center composer (' to focus, v to point at an element) to launch Claude sessions.",
+  "description": "Assign a website to a diffshub directory, then use the bottom-center composer (; to focus, v to point at an element) to launch Claude sessions.",
   "action": { "default_popup": "popup.html", "default_title": "diffshub" },
   "permissions": ["storage", "tabs"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
