@@ -214,6 +214,30 @@ const listFilesStmt = db.query<{ path: string }, [number]>(
   "SELECT path FROM files WHERE dir_id = ? ORDER BY path",
 );
 
+// Prompts enqueued while the machine was offline (claude can't reach the Anthropic
+// API, so launching a session would do nothing). Each row is drained — launched as
+// a real claude session — automatically once connectivity returns. See checkOnline
+// / drainQueue.
+db.run(`CREATE TABLE IF NOT EXISTS queued_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dir_id INTEGER NOT NULL,
+  prompt TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+)`);
+interface QueuedRow {
+  id: number;
+  dir_id: number;
+  prompt: string;
+  created_at: number;
+}
+const insertQueuedStmt = db.query<{ id: number }, [number, string, number]>(
+  "INSERT INTO queued_sessions (dir_id, prompt, created_at) VALUES (?, ?, ?) RETURNING id",
+);
+const listQueuedStmt = db.query<QueuedRow, []>(
+  "SELECT * FROM queued_sessions ORDER BY created_at, id",
+);
+const deleteQueuedStmt = db.query("DELETE FROM queued_sessions WHERE id = ?");
+
 // ---- Resolved-workspace cache (gh calls are slow) ----
 const wsCache = new Map<number, Promise<Workspace>>();
 function getWorkspace(id: number): Promise<Workspace> {
@@ -439,6 +463,47 @@ async function pasteAndSubmit(name: string, text: string): Promise<void> {
   await $`rm -f ${bufFile}`.quiet();
 }
 
+// A session that's idle (no braille spinner in its pane title) may actually be
+// *blocked on an interactive prompt* — an AskUserQuestion, an ExitPlanMode plan
+// approval, or a tool-permission request. claude does NOT write that turn to the
+// transcript .jsonl until it's answered, so the prompt is invisible to
+// parseTranscript (the file just freezes mid-conversation). It lives only in the
+// live TUI pane. So when a session is idle we capture the visible pane and, if it
+// looks like a selection prompt, return it verbatim — the client surfaces it as a
+// "waiting for input" block and the user answers from the reply box (the same
+// digit/text they'd type in the terminal). Returns null for an ordinary idle pane
+// (empty input box, no pending prompt).
+//
+// Signal: every one of these prompts renders a highlighted numbered choice
+// ("❯ 1. …"); a plain input box never does. A select/navigate/proceed footer is
+// accepted as a secondary signal in case the cursor glyph ever differs.
+const PROMPT_CURSOR = /❯\s*\d+\.\s/u;
+const PROMPT_FOOTER = /(?:to select|↑\/↓|to navigate|Do you want to proceed|Would you like to proceed)/iu;
+// A full-width horizontal rule — claude brackets the prompt box with these.
+const FULL_RULE = /^\s*─{20,}\s*$/u;
+async function capturePendingPrompt(name: string): Promise<string | null> {
+  let pane: string;
+  try {
+    // Capture scrollback above the visible area too: a prompt taller than a short
+    // pane scrolls its own question off-screen, so the visible lines alone miss it
+    // (a 18-row tmux pane shows only the footer of a tall AskUserQuestion).
+    pane = await $`tmux -L default capture-pane -p -S -120 -t ${`${name}:0.0`}`.quiet().text();
+  } catch {
+    return null;
+  }
+  if (!PROMPT_CURSOR.test(pane) && !PROMPT_FOOTER.test(pane)) return null;
+  let lines = pane.replace(/\s+$/u, "").split("\n");
+  // The prompt box is delimited by full-width rules; keep from the rule that opens
+  // it (the second-to-last rule, just before the question) onward, so we show the
+  // question + options + footer without the conversation scrolled in above it.
+  const rules = lines.flatMap((l, i) => (FULL_RULE.test(l) ? [i] : []));
+  if (rules.length >= 2) lines = lines.slice(rules[rules.length - 2] + 1);
+  while (lines.length && !lines[0].trim()) lines.shift();
+  const MAX = 80; // backstop for an unusual prompt with no detectable rules
+  const text = (lines.length > MAX ? lines.slice(-MAX) : lines).join("\n").trimEnd();
+  return text || null;
+}
+
 // Launch an interactive claude session detached in the directory (mirrors `p`),
 // returning the session name so the caller can `tmux attach -t <name>`.
 // We mint the claude session id ourselves (`--session-id`) and stamp it onto the
@@ -462,6 +527,67 @@ async function newClaudeSession(dir: string, prompt: string): Promise<string> {
   await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
   return name;
 }
+
+// ---- Offline queue ----
+// claude needs to reach the Anthropic API to do anything, so when the machine is
+// offline we enqueue new-session prompts instead of launching dead sessions, then
+// drain the queue automatically once connectivity returns. Connectivity is probed
+// with a cheap HEAD to the API host: any HTTP response (even a 4xx) proves we got
+// through; only a network error / timeout means we're offline. The result is cached
+// briefly so the hot paths (a launch decision, a sidebar poll) don't reprobe the
+// network every call.
+const ONLINE_PROBE_URL = "https://api.anthropic.com/";
+let onlineState = { online: true, checkedAt: 0 };
+async function checkOnline(force = false): Promise<boolean> {
+  if (!force && Date.now() - onlineState.checkedAt < 10_000) return onlineState.online;
+  let online = false;
+  try {
+    await fetch(ONLINE_PROBE_URL, { method: "HEAD", signal: AbortSignal.timeout(3500) });
+    online = true;
+  } catch {
+    online = false;
+  }
+  onlineState = { online, checkedAt: Date.now() };
+  return online;
+}
+
+// Each queued prompt, resolved to the directory it was created in, so the client
+// can scope queued rows to the active directory just like live sessions.
+function listQueuedSessions() {
+  return listQueuedStmt.all().map((row) => ({
+    id: row.id,
+    prompt: row.prompt,
+    createdAt: row.created_at,
+    cwd: getDirStmt.get(row.dir_id)?.path ?? "",
+  }));
+}
+
+// Launch every queued prompt, oldest first, dropping each row as its session
+// starts. Stops at the first failure (e.g. a tmux hiccup) and leaves the rest for
+// the next tick. A no-op while offline or when nothing is queued.
+async function drainQueue(): Promise<void> {
+  if (!onlineState.online) return;
+  for (const row of listQueuedStmt.all()) {
+    const dir = getDirStmt.get(row.dir_id);
+    if (!dir) {
+      deleteQueuedStmt.run(row.id); // directory was removed — drop the orphan
+      continue;
+    }
+    try {
+      await newClaudeSession(dir.path, row.prompt);
+      deleteQueuedStmt.run(row.id);
+    } catch {
+      break;
+    }
+  }
+}
+
+// Keep the cached online status warm and flush the queue shortly after the network
+// returns, without waiting for the next user action.
+setInterval(() => {
+  void checkOnline(true).then(() => drainQueue());
+}, 12_000);
+void checkOnline(true).then(() => drainQueue());
 
 // ---- Tmux tab: claude sessions <-> ~/.claude transcripts ----
 // claude stores each session's transcript at
@@ -1354,6 +1480,39 @@ const page = `<!DOCTYPE html>
   .commit:hover .kill-btn { opacity: 1; }
   .kill-btn:hover { background: var(--red-bg); border-color: var(--red-border); color: var(--red); }
 
+  /* ---- Tmux tab: queued (offline) sessions ---- */
+  /* A prompt enqueued while offline — it launches once the box is back online.
+     An amber pulsing dot + a QUEUED chip set it apart from a live session, and the
+     row isn't clickable (there's no transcript yet). */
+  .commit.queued { border-left-color: var(--amber); cursor: default; }
+  .commit.queued:hover { background: var(--bg-hover); }
+  .sess-queued {
+    flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--amber); margin-right: 7px;
+    animation: pendingPulse 1.6s ease-in-out infinite;
+  }
+  .queued-badge {
+    margin-left: auto; flex-shrink: 0; font-size: 9px; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase; line-height: 14px;
+    color: var(--amber); border: 1px solid var(--amber); border-radius: 999px; padding: 0 6px;
+  }
+  /* Offline banner — shown atop the session list and inside the New session dialog. */
+  .offline-note {
+    display: flex; align-items: center; gap: 7px;
+    margin: 8px 14px 2px; padding: 7px 10px;
+    font-size: 11px; color: var(--amber);
+    background: var(--bg-soft); border: 1px solid var(--amber); border-radius: 7px;
+  }
+  .offline-dot {
+    flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--amber);
+    animation: pendingPulse 1.6s ease-in-out infinite;
+  }
+  .modal-offline {
+    display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 8px 11px;
+    font-size: 12px; color: var(--amber);
+    background: var(--bg-soft); border: 1px solid var(--amber); border-radius: 8px;
+  }
+
   /* ---- Tmux tab: transcript (ChatGPT-style chat) ---- */
   .transcript { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
   .transcript-head {
@@ -1506,6 +1665,36 @@ const page = `<!DOCTYPE html>
   .q-choice-desc { font-size: 12px; color: var(--text-desc); white-space: pre-wrap; word-break: break-word; }
   .q-choice-spin { flex: none; align-self: center; color: var(--accent); font-size: 12px; }
   .q-multi { margin-top: 8px; font-size: 11.5px; color: var(--text-hint); }
+
+  /* Live pane capture of a pending prompt (AskUserQuestion / plan / permission)
+     that claude hasn't written to the transcript yet — see capturePendingPrompt. */
+  .pending-pane {
+    align-self: stretch; max-width: 100%;
+    border: 1px solid var(--amber); border-radius: 10px; overflow: hidden;
+    background: var(--bg-soft);
+  }
+  .pending-pane-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; font-size: 12.5px; font-weight: 650; color: var(--amber);
+    border-bottom: 1px solid var(--border);
+  }
+  .pending-pane-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--amber);
+    animation: pendingPulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pendingPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  .pending-pane-body {
+    margin: 0; padding: 10px 14px; max-height: 24em; overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.5;
+    color: var(--text-md); white-space: pre;
+  }
+  .pending-pane-hint {
+    padding: 7px 14px; font-size: 11.5px; color: var(--text-hint);
+    border-top: 1px solid var(--border);
+  }
+  .pending-pane-hint code {
+    padding: 1px 5px; border-radius: 4px; background: var(--bg-muted); color: var(--text-2);
+  }
 
   /* "Claude is working" typing indicator */
   .typing { display: inline-flex; gap: 4px; padding: 6px 2px; }
@@ -1834,12 +2023,37 @@ const page = `<!DOCTYPE html>
      so manual drag-resize is off; it scrolls internally once it hits max-height. */
   .commit-input.auto { resize: none; }
   .commit-input:focus { border-color: var(--accent); }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  /* Mobile "Image" picker button: a comfortable tap target, pinned bottom-left
+     in the modal footer (the rest of the row stays right-aligned). */
+  .img-pick { padding: 6px 12px; font-size: 13px; border-radius: 7px; }
+  .modal-actions .img-pick { margin-right: auto; }
   .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .modal-actions .primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   .modal-hint { margin-top: 10px; font-size: 11px; color: var(--text-faint); display: flex; gap: 8px; flex-wrap: wrap; }
   .modal-hint kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; }
   .modal-hint code { color: var(--text-muted); }
+
+  /* Claude usage dialog (⇧U) — one row per rate-limit window: label, percent,
+     a fill bar, and the reset countdown. */
+  .usage-note { padding: 8px 2px 4px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+  .usage-note.error { color: var(--red); white-space: pre-wrap; }
+  .usage-grid { display: flex; flex-direction: column; gap: 16px; padding: 4px 0 2px; }
+  .usage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+  .usage-label { font-size: 13px; font-weight: 600; }
+  .usage-sub { font-weight: 400; font-size: 11px; color: var(--text-faint); }
+  .usage-pct { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .usage-bar { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; }
+  .usage-fill {
+    height: 100%; border-radius: 999px; background: var(--accent);
+    min-width: 2%; transition: width .2s;
+  }
+  .usage-fill.warm { background: #e0a800; }
+  .usage-fill.hot { background: var(--red); }
+  .usage-reset { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
+  .usage-reset.muted { color: var(--text-faint); }
+  .usage-reset strong { color: var(--text); font-weight: 600; }
+  .usage-clock { color: var(--text-faint); }
 
   /* Floating action bar shown when diff lines are highlighted */
   .sel-bar {
@@ -2352,6 +2566,24 @@ const server = Bun.serve({
       return json({ ok: true });
     }
 
+    // Claude usage windows. The statusline hook (~/.claude/statusline-ratelimit.sh)
+    // writes the latest five-hour and seven-day rate-limit state to
+    // ~/.claude/rate-limits.json on every render; we just surface that file so the
+    // Usage dialog (`⇧U`) can show how much of each window is spent and when it
+    // resets. No file yet (statusline never ran) → null windows, so the dialog can
+    // say "no data yet" instead of erroring.
+    if (req.method === "GET" && url.pathname === "/api/usage") {
+      try {
+        const f = Bun.file(`${process.env.HOME}/.claude/rate-limits.json`);
+        if (!(await f.exists())) {
+          return json({ five_hour: null, seven_day: null, updated_at: null });
+        }
+        return json(await f.json());
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
     // Save a pasted image (base64 data URL or bare base64) to /tmp/images/<random>
     // and return its absolute path, so the New Claude session prompt can reference
     // it. claude's Read tool reads absolute paths (incl. /tmp) with no permission
@@ -2414,6 +2646,12 @@ const server = Bun.serve({
       if (typeof body.prompt !== "string" || !body.prompt.trim()) {
         return json({ error: "Empty prompt" }, 400);
       }
+      // Offline → enqueue instead of launching a session that couldn't reach the
+      // API. drainQueue() launches it automatically once we're back online.
+      if (!(await checkOnline(true))) {
+        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now())!.id;
+        return json({ ok: true, queued: true, id });
+      }
       try {
         const session = await newClaudeSession(ws.path, body.prompt);
         return json({ ok: true, session });
@@ -2426,10 +2664,28 @@ const server = Bun.serve({
     // List claude tmux sessions (global, not dir-scoped) with transcript status.
     if (req.method === "GET" && url.pathname === "/api/tmux/sessions") {
       try {
-        return json({ sessions: await listClaudeSessions() });
+        return json({
+          sessions: await listClaudeSessions(),
+          queued: listQueuedSessions(),
+          online: onlineState.online,
+        });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
+    }
+
+    // Drop a queued (offline) prompt before it launches.
+    if (req.method === "POST" && url.pathname === "/api/queue/cancel") {
+      let body: { id?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const id = Number(body.id);
+      if (!Number.isInteger(id) || id < 1) return json({ error: "Invalid id" }, 400);
+      deleteQueuedStmt.run(id);
+      return json({ ok: true });
     }
 
     // Read one session's transcript (the latest `limit` messages).
@@ -2444,13 +2700,18 @@ const server = Bun.serve({
         ).trim();
         const [cwd, sid, cmd, paneTitle] = info.split(SEP);
         const task = cleanTitle(paneTitle ?? "", name, cmd ?? "");
+        // An idle pane (no braille spinner) may be blocked on an interactive
+        // prompt that isn't in the transcript yet — capture it from the live pane
+        // so the question doesn't go unseen until it's answered.
+        const busy = /^[⠀-⣿]/u.test(paneTitle ?? "");
+        const pendingPane = busy ? null : await capturePendingPrompt(name);
         const path = await resolveTranscript(cwd ?? "", sid ?? "", task);
         if (!path || !existsSync(path)) {
-          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "" });
+          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "", pendingPane });
         }
         const text = await Bun.file(path).text();
         const { messages, model, title } = parseTranscript(text, limit);
-        return json({ session: name, cwd, sessionId: sid, path, messages, model, title });
+        return json({ session: name, cwd, sessionId: sid, path, messages, model, title, pendingPane });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
