@@ -1947,6 +1947,7 @@ const page = `<!DOCTYPE html>
   .diffs.tmux { padding: 0 20px; }
   .section-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
+  .diff-foot { display: flex; gap: 6px; margin-top: 6px; }
   .file-diff.viewing::before {
     content: ""; position: absolute; left: -10px; top: 0; bottom: 0;
     width: 3px; border-radius: 2px; background: var(--accent);
@@ -2020,6 +2021,8 @@ const page = `<!DOCTYPE html>
     padding: 16px; box-shadow: 0 12px 44px rgba(0, 0, 0, .18);
   }
   .modal h3 { margin: 0 0 10px; font-size: 14px; }
+  .modal-body { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-muted); }
+  .modal-body code { color: var(--text); }
   .commit-input {
     width: 100%; min-height: 92px; max-height: 60vh; resize: vertical; overflow-y: auto;
     background: var(--bg); color: inherit; font: inherit; line-height: 1.5;
