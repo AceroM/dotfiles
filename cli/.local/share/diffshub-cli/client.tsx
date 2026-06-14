@@ -40,6 +40,7 @@ import {
   EllipsisVertical,
   Sparkles,
   RefreshCw,
+  RotateCw,
   Plus,
   Minus,
   Archive,
@@ -901,6 +902,11 @@ const TranscriptTurn = memo(function TranscriptTurn({
   );
 });
 
+// An Edit/Write/MultiEdit tool call — carries diff hunks we render inline.
+function isEditMsg(m: TranscriptMsg): boolean {
+  return m.kind === "tool_use" && !!m.edits && m.edits.length > 0;
+}
+
 interface Turn {
   role: "user" | "assistant";
   msgs: TranscriptMsg[];
@@ -1377,6 +1383,11 @@ function App() {
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // Transcript header toggle: when on, the chat view is filtered down to just
+  // the Edit/Write/MultiEdit tool calls (the inline diffs), hiding prose and
+  // other tool noise.
+  const [editsOnly, setEditsOnly] = useState(false);
+
   // Directory dropdown (top-left) + settings dialog (manage directories). The
   // dropdown is a combobox: `dirFilter` narrows the list as you type and
   // `dirActive` is the keyboard-highlighted row (Enter selects it). The `D`
@@ -1614,7 +1625,11 @@ function App() {
   // selectedBusy), so streamed-in messages auto-scroll to the end; structural
   // sharing means an unchanged poll keeps the same data ref and won't re-scroll.
   const transcriptData = transcriptQuery.data;
-  const turns = useMemo(() => groupTurns(transcriptData?.messages ?? []), [transcriptData]);
+  const turns = useMemo(() => {
+    const msgs = transcriptData?.messages ?? [];
+    const filtered = editsOnly ? msgs.filter(isEditMsg) : msgs;
+    return groupTurns(filtered);
+  }, [transcriptData, editsOnly]);
   useEffect(() => {
     if (tab !== "tmux" || !transcriptData) return;
     const el = mainEl.current;
@@ -1991,6 +2006,26 @@ function App() {
       queryClient.resetQueries({ queryKey: diffKeyRef.current });
     }
   }, [tab, view, selectedSession, queryClient]);
+
+  // Restart the diffshub server itself (the `dh` window on the bg tmux socket:
+  // Ctrl-C, then re-run `dh`). The server bounces this to a detached tmux session,
+  // so it answers ok *before* it dies — but the response can still race the death,
+  // so a dropped request is treated as the restart working, not an error. The
+  // server is down for ~1–2s; nudge a full refetch once it should be back (the
+  // auto-refresh interval also reconnects on its own).
+  const refreshServer = useCallback(async () => {
+    try {
+      const res = await fetch("/api/restart-server", { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`restart failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+    } catch {
+      // The server may die before the response lands — that *is* the restart.
+    }
+    setTimeout(() => queryClient.invalidateQueries(), 2500);
+  }, [queryClient]);
 
   const selectTab = useCallback(
     (next: Tab) => {
@@ -2870,6 +2905,12 @@ function App() {
         toggleTheme();
         return;
       }
+      // `R` (Shift+R, so it's deliberate) restarts the diffshub server.
+      if (e.key === "R") {
+        e.preventDefault();
+        void refreshServer();
+        return;
+      }
       if (e.key === "'") {
         e.preventDefault();
         // If lines are highlighted, clear the prompt and replace it with their
@@ -2991,7 +3032,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, queryClient]);
+  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -3074,14 +3115,10 @@ function App() {
       onClick: () => toggleReviewed(view.sha, view.repo),
     });
   }
-  if (tab === "tmux" && selectedSession) {
-    actionItems.push({
-      label: "Kill session",
-      icon: <Trash2 />,
-      onClick: () => void killSession(selectedSession),
-    });
-  }
+  // The Tmux tab's "Kill session" lives as a dedicated trash button beside this
+  // menu (see the topbar), so it's intentionally not duplicated here.
   actionItems.push({ label: "Refresh", icon: <RefreshCw />, onClick: refreshTab });
+  actionItems.push({ label: "Restart server", icon: <RotateCw />, onClick: () => void refreshServer() });
   actionItems.push({
     label: theme === "dark" ? "Light mode" : "Dark mode",
     icon: theme === "dark" ? <Sun /> : <Moon />,
@@ -3107,6 +3144,16 @@ function App() {
           <Menu size={18} />
         </button>
         <span className="topbar-title">{meta?.name ?? "diffshub"}</span>
+        {tab === "tmux" && selectedSession && (
+          <button
+            className="topbar-btn topbar-kill"
+            title={`Kill ${selectedSession}`}
+            aria-label={`Kill session ${selectedSession}`}
+            onClick={() => void killSession(selectedSession)}
+          >
+            <Trash2 size={18} />
+          </button>
+        )}
         <div className="topbar-actions">
           <button
             className="topbar-btn"
@@ -3592,6 +3639,9 @@ function App() {
             <kbd>t</kbd> theme
           </span>
           <span>
+            <kbd>⇧R</kbd> restart server
+          </span>
+          <span>
             <kbd>/</kbd> filter
           </span>
         </div>
@@ -3617,6 +3667,15 @@ function App() {
                     {transcriptData.cwd}
                     {transcriptData.model ? ` · ${transcriptData.model}` : ""}
                   </span>
+                  <button
+                    type="button"
+                    className={`edits-toggle${editsOnly ? " on" : ""}`}
+                    aria-pressed={editsOnly}
+                    title={editsOnly ? "Show all messages" : "Show only edits"}
+                    onClick={() => setEditsOnly((v) => !v)}
+                  >
+                    Edits only
+                  </button>
                 </div>
                 {transcriptData.messages.length === 0 ? (
                   <div className="transcript-empty">
@@ -3624,6 +3683,8 @@ function App() {
                       ? "No conversation yet — press space to refresh"
                       : "No transcript found for this session"}
                   </div>
+                ) : editsOnly && turns.length === 0 ? (
+                  <div className="transcript-empty">No edits in this conversation yet</div>
                 ) : (
                   turns.map((t, i) => (
                     <TranscriptTurn
