@@ -6,8 +6,10 @@ import {
   useRef,
   useState,
   type ClipboardEvent,
+  type CSSProperties,
   type Dispatch,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type SetStateAction,
 } from "react";
@@ -29,6 +31,10 @@ import {
   FileDiff as FileDiffIcon,
   FileStack,
   SquareTerminal,
+  Menu,
+  PanelRight,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 
 interface Commit {
@@ -524,14 +530,64 @@ const Markdown = memo(function Markdown({ text }: { text: string }) {
   return <div className="md">{blocks}</div>;
 });
 
+const PLAN_CHOICES = [
+  { n: 1, label: "Yes, and auto-accept edits" },
+  { n: 2, label: "Yes, and manually approve edits" },
+  { n: 3, label: "No, keep planning" },
+] as const;
+
+const PlanCard = memo(function PlanCard({
+  plan,
+  onAnswer,
+}: {
+  plan: string;
+  onAnswer?: (choice: number) => Promise<void> | void;
+}) {
+  const [sending, setSending] = useState<number | null>(null);
+  const answer = async (n: number) => {
+    if (!onAnswer || sending !== null) return;
+    setSending(n);
+    try {
+      await onAnswer(n);
+    } finally {
+      setSending(null);
+    }
+  };
+  return (
+    <div className="plan-card">
+      <div className="plan-card-head">Plan</div>
+      <div className="plan-card-body">
+        <Markdown text={plan} />
+      </div>
+      <div className="plan-card-foot">
+        <div className="plan-q">Would you like to proceed?</div>
+        {PLAN_CHOICES.map((c) => (
+          <button
+            key={c.n}
+            className="plan-choice"
+            disabled={!onAnswer || sending !== null}
+            onClick={() => answer(c.n)}
+          >
+            <span className="plan-choice-n">{c.n}</span>
+            <span className="plan-choice-label">{c.label}</span>
+            {sending === c.n ? <span className="plan-choice-spin">sending…</span> : null}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+});
+
 // One conversation turn: a user turn is a right-aligned bubble; an assistant turn
 // is a left avatar + content stack (markdown text, tool calls, tool results).
 const TranscriptTurn = memo(function TranscriptTurn({
   role,
   msgs,
+  onAnswerPlan,
 }: {
   role: "user" | "assistant";
   msgs: TranscriptMsg[];
+  onAnswerPlan?: (choice: number) => Promise<void> | void;
 }) {
   if (role === "user") {
     return (
@@ -548,6 +604,8 @@ const TranscriptTurn = memo(function TranscriptTurn({
     <div className="turn assistant">
       <div className="content">
         {msgs.map((m, i) => {
+          if (m.kind === "tool_use" && m.tool === "ExitPlanMode")
+            return <PlanCard key={i} plan={m.text} onAnswer={onAnswerPlan} />;
           if (m.kind === "tool_use")
             return (
               <div key={i} className="tool-use">
@@ -612,6 +670,7 @@ function initialView(): { tab: Tab; view: View; dir: number | null } {
 // another; reply drafts are keyed by session name (globally unique) so every
 // tab keeps its own draft, and killing a session drops its key.
 const claudeDraftKey = (dirId: number) => `claudeDraft:${dirId}`;
+const claudeCaretKey = (dirId: number) => `claudeCaret:${dirId}`;
 const replyDraftKey = (session: string) => `replyDraft:${session}`;
 function loadDraft(key: string): string {
   try {
@@ -628,6 +687,54 @@ function saveDraft(key: string, value: string) {
     // ignore storage failures (private mode, quota, etc.)
   }
 }
+// The composer caret rides along with its per-directory draft: where the cursor
+// sat when you last closed the dialog (or switched directories) survives reloads
+// and dir hops, so reopening with `'` — or jumping back to a directory — lands
+// you exactly where you left off instead of at the start/end of the text.
+function loadCaret(key: string): { start: number; end: number } | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const [s, e] = raw.split(",").map(Number);
+    if (Number.isFinite(s) && Number.isFinite(e)) return { start: s, end: e };
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+  return null;
+}
+function saveCaret(key: string, caret: { start: number; end: number } | null) {
+  try {
+    if (caret) localStorage.setItem(key, `${caret.start},${caret.end}`);
+    else localStorage.removeItem(key);
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
+
+// ---- Numeric prefs (localStorage) ----
+// Small helpers for the resizable-sidebar widths; fall back to the default when
+// the key is missing or corrupt.
+function loadNum(key: string, fallback: number): number {
+  try {
+    const raw = localStorage.getItem(key);
+    const n = raw == null ? NaN : Number(raw);
+    return Number.isFinite(n) ? n : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function saveNum(key: string, value: number) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
+// Resizable-sidebar bounds (px). Desktop only; mobile drawers use a fixed width.
+const LEFT_MIN = 240;
+const LEFT_MAX = 460;
+const RIGHT_MIN = 240;
+const RIGHT_MAX = 560;
 
 // ---- Last-tab memory (sessionStorage) ----
 // Switching directories restores the tab you were last on instead of forcing
@@ -708,6 +815,94 @@ function App() {
       // ignore storage failures (private mode, quota, etc.)
     }
   }, [autoRefresh]);
+
+  // ---- Sidebar sizing + responsive layout ----
+  // Both sidebars are drag-resizable on desktop (widths persisted); the right one
+  // can be minimized to a floating chevron; and below 1024px the columns become
+  // off-canvas drawers opened from a top bar (burger = left, panel = right).
+  const [leftWidth, setLeftWidth] = useState(() => loadNum("sidebarLeftWidth", 300));
+  const [rightWidth, setRightWidth] = useState(() => loadNum("sidebarRightWidth", 280));
+  const leftWidthRef = useRef(leftWidth);
+  leftWidthRef.current = leftWidth;
+  const rightWidthRef = useRef(rightWidth);
+  rightWidthRef.current = rightWidth;
+  const [rightMinimized, setRightMinimized] = useState(() => {
+    try {
+      return localStorage.getItem("rightSidebarMinimized") === "true";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("rightSidebarMinimized", String(rightMinimized));
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [rightMinimized]);
+  // Which off-canvas drawer is open on mobile (transient — never persisted).
+  const [drawerOpen, setDrawerOpen] = useState<null | "left" | "right">(null);
+  const [isDesktop, setIsDesktop] = useState(() => {
+    try {
+      return window.matchMedia("(min-width: 1025px)").matches;
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1025px)");
+    const onChange = () => {
+      setIsDesktop(mq.matches);
+      if (mq.matches) setDrawerOpen(null); // back to desktop → no stale drawer
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  // On mobile, any navigation (tab or selection — both change `view`) closes the
+  // drawer so the chosen diff/session is visible.
+  useEffect(() => {
+    if (!isDesktop) setDrawerOpen(null);
+  }, [tab, view, isDesktop]);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
+  // Live-drag a sidebar divider: write the CSS var straight to the DOM on each
+  // move for a smooth drag, then commit the clamped width to state + storage on
+  // release. Reads the start width from a ref so the handler can stay stable.
+  const startResize = useCallback(
+    (side: "left" | "right") => (e: ReactPointerEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = side === "left" ? leftWidthRef.current : rightWidthRef.current;
+      const min = side === "left" ? LEFT_MIN : RIGHT_MIN;
+      const max = side === "left" ? LEFT_MAX : RIGHT_MAX;
+      const cssVar = side === "left" ? "--left-w" : "--right-w";
+      let latest = startW;
+      const onMove = (ev: PointerEvent) => {
+        const dx = ev.clientX - startX;
+        // The left handle grows with rightward drag; the right handle is mirrored.
+        const raw = side === "left" ? startW + dx : startW - dx;
+        latest = Math.max(min, Math.min(max, raw));
+        layoutRef.current?.style.setProperty(cssVar, `${latest}px`);
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        if (side === "left") {
+          setLeftWidth(latest);
+          saveNum("sidebarLeftWidth", latest);
+        } else {
+          setRightWidth(latest);
+          saveNum("sidebarRightWidth", latest);
+        }
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [],
+  );
 
   // Remember the tab you're on so the next directory switch restores it.
   useEffect(() => {
@@ -873,11 +1068,28 @@ function App() {
     staleTime: 30_000,
   });
   const claudeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // A live mirror of `claudeOpen` for callbacks/effects that shouldn't re-subscribe
+  // just to read it (e.g. the per-dir draft effect restoring focus mid-compose).
+  const claudeOpenRef = useRef(claudeOpen);
+  claudeOpenRef.current = claudeOpen;
+  // Grow the composer to fit its content (then scroll past the CSS max-height)
+  // so a long prompt never hides behind a fixed-height box.
+  const autosizeClaude = useCallback(() => {
+    const el = claudeTextareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, []);
   // Where the caret/selection sat when the dialog last closed, so reopening it
   // (e.g. after `esc`) restores the cursor instead of jumping to the start/end.
+  // Persisted per directory (see claudeCaretKey) so it survives reloads and dir
+  // hops too, matching the per-directory draft.
   const claudeCaretRef = useRef<{ start: number; end: number } | null>(null);
   const captureClaudeCaret = useCallback((el: HTMLTextAreaElement) => {
-    claudeCaretRef.current = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 };
+    const caret = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 };
+    claudeCaretRef.current = caret;
+    const id = claudeDraftDirRef.current;
+    if (id != null) saveCaret(claudeCaretKey(id), caret);
   }, []);
   // The Claude draft is kept per active directory (meta.id, which resolves the
   // "server default" case too). `claudeDraftDirRef` records which dir the
@@ -891,7 +1103,21 @@ function App() {
     if (id == null || claudeDraftDirRef.current === id) return;
     claudeDraftDirRef.current = id;
     setClaudePrompt(loadDraft(claudeDraftKey(id)));
-  }, [meta?.id]);
+    claudeCaretRef.current = loadCaret(claudeCaretKey(id));
+    // Switching directories with the composer open (⌥1-9) swaps in that dir's
+    // own draft without stealing focus, so you can juggle a prompt per directory.
+    // Re-focus and drop the caret into the freshly-loaded draft on the next frame.
+    if (claudeOpenRef.current) {
+      requestAnimationFrame(() => {
+        const el = claudeTextareaRef.current;
+        if (!el) return;
+        el.focus();
+        const pos = claudeCaretRef.current ?? { start: el.value.length, end: el.value.length };
+        el.setSelectionRange(pos.start, pos.end);
+        autosizeClaude();
+      });
+    }
+  }, [meta?.id, autosizeClaude]);
   // Persist the draft under its directory's key; launching clears the prompt,
   // which also clears the stored key. Wait until we know the active dir so we
   // never write the draft under the wrong (or a stale) key.
@@ -911,8 +1137,9 @@ function App() {
       el.focus();
       const pos = caret ?? { start: el.value.length, end: el.value.length };
       el.setSelectionRange(pos.start, pos.end);
+      autosizeClaude();
     });
-  }, [claudeOpen]);
+  }, [claudeOpen, autosizeClaude]);
   // The active `@token` being typed: its query text + where the `@` sits + caret.
   const [fileToken, setFileToken] = useState<{ query: string; start: number; caret: number } | null>(
     null,
@@ -959,13 +1186,15 @@ function App() {
           if (el) {
             el.focus();
             el.setSelectionRange(pos, pos);
+            captureClaudeCaret(el);
+            autosizeClaude();
           }
         });
         return next;
       });
       setFileToken(null);
     },
-    [fileToken],
+    [fileToken, captureClaudeCaret, autosizeClaude],
   );
   const fileMenuOpen = !!fileToken && fileSuggestions.length > 0;
 
@@ -1254,11 +1483,20 @@ function App() {
       const body = await res.json().catch(() => ({}) as any);
       setClaudeOpen(false);
       setClaudePrompt("");
+      // Launched: the draft is consumed, so drop its saved caret too (the empty
+      // prompt already clears the draft key via the save effect).
+      claudeCaretRef.current = null;
+      if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), null);
       setLaunchedSession(typeof body.session === "string" ? body.session : null);
+      // The new tmux session needs a beat to register before it shows up in the
+      // list, so nudge a refresh now and again shortly after rather than waiting
+      // for the next poll — otherwise the just-launched session never pops in.
+      queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+      setTimeout(() => queryClient.refetchQueries({ queryKey: ["tmux-sessions"] }), 900);
     } finally {
       setLaunching(false);
     }
-  }, [claudePrompt, qd]);
+  }, [claudePrompt, qd, queryClient]);
 
   // Send a reply into the selected session's claude pane (server pastes the text
   // + Enter), then refresh the transcript + session list once so the new turn and
@@ -1290,6 +1528,31 @@ function App() {
       setReplySending(false);
     }
   }, [replyText, queryClient]);
+
+  // Answer a live plan card by sending its choice's digit into the pane — the
+  // ExitPlanMode prompt is keyed 1/2/3 just like the TUI — then refresh so the
+  // resulting turn (and busy dot) show up. Only the last turn's card calls this.
+  const answerPlan = useCallback(
+    async (choice: number) => {
+      const session = selectedSessionRef.current;
+      if (!session) return;
+      const res = await fetch("/api/tmux/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session, text: String(choice) }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`answer failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      setTimeout(() => {
+        queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
+        queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+      }, 500);
+    },
+    [queryClient],
+  );
 
   // `x` — stage everything, then hand the commit off to a detached claude
   // session that writes the message itself (and pushes). Skips the `;` dialog
@@ -1724,6 +1987,14 @@ function App() {
     queryClient.invalidateQueries({ queryKey: [view.kind === "manual" ? "manual" : "changes"] });
   }, [selFile, selection, view, queryClient, qd]);
 
+  // Refs so the global keydown handler (registered once) can fire the latest
+  // delete on Backspace while lines are highlighted, mirroring the sel-bar's
+  // Delete button (which is gated on canDelete).
+  const deleteSelectionRef = useRef(deleteSelection);
+  deleteSelectionRef.current = deleteSelection;
+  const canDeleteRef = useRef(canDelete);
+  canDeleteRef.current = canDelete;
+
   // ---- Actively viewing file: the file under the sticky header line ----
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const orderedKeys = useMemo(() => sections.flatMap((s) => s.files.map((f) => f.key)), [sections]);
@@ -2017,6 +2288,13 @@ function App() {
         setSelection(null);
         return;
       }
+      // Backspace deletes the highlighted lines — same as the sel-bar's Delete
+      // button, so it only fires where deletion is allowed (canDelete).
+      if (e.key === "Backspace" && keyCtx.current.selection) {
+        e.preventDefault();
+        if (canDeleteRef.current) void deleteSelectionRef.current();
+        return;
+      }
       // Leave keys alone while focus is inside the file tree (it has its own nav)
       if (e.composedPath().some((n) => n instanceof HTMLElement && n.classList?.contains("tree"))) {
         return;
@@ -2261,8 +2539,13 @@ function App() {
       if (!e.altKey || !/^Digit[1-9]$/.test(e.code)) return;
       e.preventDefault();
       e.stopPropagation();
-      const active = document.activeElement;
-      if (active instanceof HTMLElement) active.blur();
+      // Keep focus in the Claude composer when switching dirs mid-prompt so you can
+      // juggle a draft per directory; otherwise blur the active field (filter box,
+      // commit message, etc.) so the switch reads cleanly.
+      if (!keyCtx.current.claudeOpen) {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement) active.blur();
+      }
       const d = keyCtx.current.dirs[Number(e.code.slice(5)) - 1];
       if (d) selectDir(d.id);
     };
@@ -2320,8 +2603,44 @@ function App() {
   const defaultDirId = dirsQuery.data?.defaultDirId ?? meta?.defaultDirId ?? null;
   const currentDirId = meta?.id ?? activeDir;
 
+  // The right "details" sidebar only exists for a commit/PR/changes/manual view —
+  // not the Tmux tab or an empty pane. It drives the desktop column, the mobile
+  // right-drawer opener, and the minimize chevron. On desktop it hides when
+  // minimized; on mobile it's always mounted (as a drawer) so its opener works.
+  const hasRightSidebar = tab !== "tmux" && view.kind !== "none";
+  const showRight = hasRightSidebar && (isDesktop ? !rightMinimized : true);
+
   return (
-    <div className="layout">
+    <div
+      className="layout"
+      ref={layoutRef}
+      style={
+        { "--left-w": `${leftWidth}px`, "--right-w": `${rightWidth}px` } as CSSProperties
+      }
+      data-drawer={drawerOpen ?? ""}
+    >
+      <header className="topbar">
+        <button
+          className="topbar-btn burger"
+          title="Menu"
+          aria-label="Open menu"
+          onClick={() => setDrawerOpen((d) => (d === "left" ? null : "left"))}
+        >
+          <Menu size={18} />
+        </button>
+        <span className="topbar-title">{meta?.name ?? "diffshub"}</span>
+        {hasRightSidebar && (
+          <button
+            className="topbar-btn topbar-right"
+            title="Show details"
+            aria-label="Open details panel"
+            onClick={() => setDrawerOpen((d) => (d === "right" ? null : "right"))}
+          >
+            <PanelRight size={18} />
+          </button>
+        )}
+      </header>
+      <div className="body">
       <nav className="commits">
         <header className="commits-header">
           <div className="dir-dropdown">
@@ -2757,6 +3076,8 @@ function App() {
         </div>
       </nav>
 
+      <div className="resizer rz-left" onPointerDown={startResize("left")} />
+
       <main className={`diffs${tab === "tmux" ? " tmux" : ""}`} ref={mainEl}>
         {tab === "tmux" && (
           <div className="transcript">
@@ -2783,7 +3104,14 @@ function App() {
                       : "No transcript found for this session"}
                   </div>
                 ) : (
-                  turns.map((t, i) => <TranscriptTurn key={i} role={t.role} msgs={t.msgs} />)
+                  turns.map((t, i) => (
+                    <TranscriptTurn
+                      key={i}
+                      role={t.role}
+                      msgs={t.msgs}
+                      onAnswerPlan={i === turns.length - 1 ? answerPlan : undefined}
+                    />
+                  ))
                 )}
                 {selectedBusy && (
                   <div className="turn assistant">
@@ -2939,8 +3267,18 @@ function App() {
         </div>
       )}
 
-      {tab !== "tmux" && view.kind !== "none" && (
-      <aside className="tree">
+      {showRight && (
+        <>
+        <div className="resizer rz-right" onPointerDown={startResize("right")} />
+        <aside className="tree">
+        <button
+          className="tree-min"
+          title="Hide panel"
+          aria-label="Hide details panel"
+          onClick={() => setRightMinimized(true)}
+        >
+          <ChevronRight size={16} />
+        </button>
         <div className="meta-panel">
           {view.kind === "commit" && (
             <>
@@ -3040,6 +3378,24 @@ function App() {
           />
         </div>
       </aside>
+        </>
+      )}
+      </div>
+
+      {/* Mobile: dim + tap-to-close behind an open drawer. */}
+      {drawerOpen && <div className="scrim" onClick={() => setDrawerOpen(null)} />}
+
+      {/* Desktop: when the right sidebar is minimized, a floating chevron tab at
+          the right edge brings it back. */}
+      {isDesktop && hasRightSidebar && rightMinimized && (
+        <button
+          className="tree-reveal"
+          title="Show panel"
+          aria-label="Show details panel"
+          onClick={() => setRightMinimized(false)}
+        >
+          <ChevronLeft size={16} />
+        </button>
       )}
 
       {commitOpen && (
@@ -3110,13 +3466,14 @@ function App() {
               <textarea
                 autoFocus
                 ref={claudeTextareaRef}
-                className="commit-input"
+                className="commit-input auto"
                 placeholder="Prompt for a new Claude Code session…  (type @ to reference a file, ⌃V to paste an image)"
                 value={claudePrompt}
                 onChange={(e) => {
                   setClaudePrompt(e.target.value);
                   syncFileToken(e.target);
                   captureClaudeCaret(e.target);
+                  autosizeClaude();
                 }}
                 onPaste={handleClaudePaste}
                 onClick={(e) => {
