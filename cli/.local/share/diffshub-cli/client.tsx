@@ -1532,13 +1532,26 @@ function App() {
 
   const [filter, setFilter] = useState("");
 
-  // ---- @-file autocomplete (New Claude session dialog) ----
-  // The directory's gitignore-respecting file list, fetched only while the dialog
-  // is open. Typing `@…` filters it into a popup that inserts `@path` references.
+  // ---- @-file autocomplete (New Claude session dialog + reply composer) ----
+  // The active `@token` being typed: its query text + where the `@` sits + caret,
+  // plus which composer (`owner`) it belongs to. Both composers share this state —
+  // only the focused one can own a live token at a time — and `owner` decides which
+  // textarea accept/placement act on and which popup renders.
+  const [fileToken, setFileToken] = useState<{
+    query: string;
+    start: number;
+    caret: number;
+    owner: "claude" | "reply";
+  } | null>(null);
+  const [fileMenuIndex, setFileMenuIndex] = useState(0);
+  // The directory's gitignore-respecting file list. Fetched while the New Claude
+  // dialog is open (so the first `@` there is instant) and lazily whenever a
+  // mention token goes live in either composer. Typing `@…` filters it into a
+  // popup that inserts `@path` references.
   const filesQuery = useQuery({
     queryKey: ["files", activeDir],
     queryFn: ({ signal }) => fetchJSON<{ files: string[] }>(qd("/api/files"), signal),
-    enabled: claudeOpen,
+    enabled: claudeOpen || !!fileToken,
     staleTime: 30_000,
   });
 
@@ -1585,6 +1598,43 @@ function App() {
     const id = claudeDraftDirRef.current;
     if (id != null) saveCaret(claudeCaretKey(id), caret);
   }, []);
+  // A @-mention target bundles everything the shared autocomplete needs to drive a
+  // particular composer: its textarea ref, value setter, caret-capture/autosize
+  // hooks, and an optional post-insert callback (the reply box persists its draft).
+  // The active `fileToken.owner` selects which of these the logic operates on.
+  type MentionTarget = {
+    id: "claude" | "reply";
+    ref: MutableRefObject<HTMLTextAreaElement | null>;
+    setText: Dispatch<SetStateAction<string>>;
+    captureCaret: (el: HTMLTextAreaElement) => void;
+    autosize: () => void;
+    onAccept?: (next: string) => void;
+  };
+  const claudeMentionTarget = useMemo<MentionTarget>(
+    () => ({
+      id: "claude",
+      ref: claudeTextareaRef,
+      setText: setClaudePrompt,
+      captureCaret: captureClaudeCaret,
+      autosize: autosizeClaude,
+    }),
+    [captureClaudeCaret, autosizeClaude],
+  );
+  const replyMentionTarget = useMemo<MentionTarget>(
+    () => ({
+      id: "reply",
+      ref: replyTextareaRef,
+      setText: setReplyText,
+      // The reply box has no persisted caret and is CSS-resizable, so both are no-ops.
+      captureCaret: () => {},
+      autosize: () => {},
+      // No onChange fires for a programmatic insert, so persist the draft here too.
+      onAccept: (next: string) => {
+        if (selectedSessionRef.current) saveDraft(replyDraftKey(selectedSessionRef.current), next);
+      },
+    }),
+    [],
+  );
   // The Claude draft is kept per active directory (meta.id, which resolves the
   // "server default" case too). `claudeDraftDirRef` records which dir the
   // in-memory prompt belongs to, so switching directories loads that dir's own
@@ -1634,22 +1684,20 @@ function App() {
       autosizeClaude();
     });
   }, [claudeOpen, autosizeClaude]);
-  // The active `@token` being typed: its query text + where the `@` sits + caret.
-  const [fileToken, setFileToken] = useState<{ query: string; start: number; caret: number } | null>(
-    null,
-  );
-  const [fileMenuIndex, setFileMenuIndex] = useState(0);
-  // Recompute the active @token from the textarea's value + caret position.
-  const syncFileToken = useCallback((el: HTMLTextAreaElement) => {
+  // Recompute the active @token from a textarea's value + caret position, tagging
+  // it with which composer (`target.id`) it belongs to.
+  const syncFileToken = useCallback((el: HTMLTextAreaElement, target: MentionTarget) => {
     const value = el.value;
     const caret = el.selectionStart ?? value.length;
     let i = caret - 1;
-    let token: { query: string; start: number; caret: number } | null = null;
+    let token: { query: string; start: number; caret: number; owner: "claude" | "reply" } | null =
+      null;
     while (i >= 0) {
       const ch = value[i];
       if (ch === "@") {
         const prev = i > 0 ? value[i - 1] : " ";
-        if (i === 0 || /\s/.test(prev)) token = { query: value.slice(i + 1, caret), start: i, caret };
+        if (i === 0 || /\s/.test(prev))
+          token = { query: value.slice(i + 1, caret), start: i, caret, owner: target.id };
         break;
       }
       if (/\s/.test(ch)) break; // whitespace before any '@' — not in a token
@@ -1666,29 +1714,32 @@ function App() {
     // Prefer the shortest (closest) matches, then alphabetical.
     return [...matched].sort((a, b) => a.length - b.length || (a < b ? -1 : 1)).slice(0, 20);
   }, [fileToken, filesQuery.data]);
-  // Replace the active @token with `@<path> ` and restore the caret after it.
+  // Replace the active @token with `@<path> ` in its owning composer and restore
+  // the caret after it.
   const acceptFile = useCallback(
     (path: string) => {
       const tok = fileToken;
       if (!tok) return;
-      setClaudePrompt((prev) => {
+      const target = tok.owner === "reply" ? replyMentionTarget : claudeMentionTarget;
+      target.setText((prev) => {
         const inserted = `@${path} `;
         const next = prev.slice(0, tok.start) + inserted + prev.slice(tok.caret);
         const pos = tok.start + inserted.length;
+        target.onAccept?.(next);
         requestAnimationFrame(() => {
-          const el = claudeTextareaRef.current;
+          const el = target.ref.current;
           if (el) {
             el.focus();
             el.setSelectionRange(pos, pos);
-            captureClaudeCaret(el);
-            autosizeClaude();
+            target.captureCaret(el);
+            target.autosize();
           }
         });
         return next;
       });
       setFileToken(null);
     },
-    [fileToken, captureClaudeCaret, autosizeClaude],
+    [fileToken, claudeMentionTarget, replyMentionTarget],
   );
   const fileMenuOpen = !!fileToken && fileSuggestions.length > 0;
   // The @-file popover is portaled to <body> (see the dialog JSX) so the modal's
@@ -1703,8 +1754,9 @@ function App() {
       setFileMenuStyle(null);
       return;
     }
+    const target = fileToken.owner === "reply" ? replyMentionTarget : claudeMentionTarget;
     const place = () => {
-      const el = claudeTextareaRef.current;
+      const el = target.ref.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
       const gap = 4;
@@ -1726,7 +1778,7 @@ function App() {
       window.removeEventListener("scroll", place, true);
       window.removeEventListener("resize", place);
     };
-  }, [fileToken, claudePrompt, fileSuggestions.length]);
+  }, [fileToken, claudePrompt, replyText, fileSuggestions.length, claudeMentionTarget, replyMentionTarget]);
 
   // ---- Diff for the active commit/PR view ----
   // Keyed by sha/number+repo so revisiting one is instant from cache; commit
@@ -2082,6 +2134,7 @@ function App() {
         return;
       }
       setReplyText("");
+      setFileToken(null); // drop any open @-mention popup along with the sent text
       saveDraft(replyDraftKey(session), ""); // sent → drop this tab's saved draft
       // Give claude a beat to accept the keys before reading the transcript back.
       setTimeout(() => {
@@ -4010,28 +4063,93 @@ function App() {
             )}
             {selectedSession && (
               <div className="reply-box">
-                <textarea
-                  ref={replyTextareaRef}
-                  className="reply-input"
-                  placeholder={`Reply to ${selectedSession}…  (⌃V to paste an image, ↵ to send, ⇧↵ for newline)`}
-                  value={replyText}
-                  onChange={(e) => {
-                    setReplyText(e.target.value);
-                    saveDraft(replyDraftKey(selectedSession), e.target.value);
-                  }}
-                  onPaste={handleReplyPaste}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === "Escape") {
-                      e.currentTarget.blur();
-                      return;
-                    }
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      submitReply();
-                    }
-                  }}
-                />
+                <div className="file-menu-wrap">
+                  <textarea
+                    ref={replyTextareaRef}
+                    className="reply-input"
+                    placeholder={`Reply to ${selectedSession}…  (type @ to reference a file, ⌃V to paste an image, ↵ to send, ⇧↵ for newline)`}
+                    value={replyText}
+                    onChange={(e) => {
+                      setReplyText(e.target.value);
+                      saveDraft(replyDraftKey(selectedSession), e.target.value);
+                      syncFileToken(e.target, replyMentionTarget);
+                    }}
+                    onPaste={handleReplyPaste}
+                    onClick={(e) => syncFileToken(e.currentTarget, replyMentionTarget)}
+                    onKeyUp={(e) => {
+                      // Let the menu's own ArrowUp/Down win while it's open; otherwise
+                      // keep the @token current as the caret moves (arrows/home/end).
+                      if (fileMenuOpen && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
+                      syncFileToken(e.currentTarget, replyMentionTarget);
+                    }}
+                    // Leaving the box (clicking into the transcript) dismisses the popup;
+                    // a menu click can't trigger this because its onMouseDown preventDefault
+                    // keeps focus here.
+                    onBlur={() => {
+                      if (fileToken?.owner === "reply") setFileToken(null);
+                    }}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      // While the @-file popup is open it owns navigation/acceptance.
+                      if (fileMenuOpen) {
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          setFileMenuIndex((i) => (i + 1) % fileSuggestions.length);
+                          return;
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          setFileMenuIndex((i) => (i - 1 + fileSuggestions.length) % fileSuggestions.length);
+                          return;
+                        }
+                        if (e.key === "Enter" || e.key === "Tab") {
+                          e.preventDefault();
+                          acceptFile(fileSuggestions[fileMenuIndex] ?? fileSuggestions[0]);
+                          return;
+                        }
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        // A live @-token cancels first (keeping the literal "@…" text);
+                        // a second Esc (no token) blurs the composer.
+                        if (fileToken) setFileToken(null);
+                        else e.currentTarget.blur();
+                        return;
+                      }
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        submitReply();
+                      }
+                    }}
+                  />
+                  {fileToken?.owner === "reply" &&
+                    fileMenuStyle &&
+                    createPortal(
+                      <div className="file-menu" style={fileMenuStyle}>
+                        {fileSuggestions.length ? (
+                          fileSuggestions.map((f, i) => (
+                            <button
+                              key={f}
+                              className={`file-opt${i === fileMenuIndex ? " on" : ""}`}
+                              title={f}
+                              onMouseDown={(e) => {
+                                e.preventDefault(); // keep focus in the textarea
+                                acceptFile(f);
+                              }}
+                              onMouseEnter={() => setFileMenuIndex(i)}
+                            >
+                              {f}
+                            </button>
+                          ))
+                        ) : (
+                          <div className="file-menu-empty">
+                            {filesQuery.isPending ? "Loading files…" : "No matching files"}
+                          </div>
+                        )}
+                      </div>,
+                      document.body,
+                    )}
+                </div>
                 <div className="reply-bar">
                   {!isDesktop && (
                     <>
@@ -4434,13 +4552,13 @@ function App() {
                 value={claudePrompt}
                 onChange={(e) => {
                   setClaudePrompt(e.target.value);
-                  syncFileToken(e.target);
+                  syncFileToken(e.target, claudeMentionTarget);
                   captureClaudeCaret(e.target);
                   autosizeClaude();
                 }}
                 onPaste={handleClaudePaste}
                 onClick={(e) => {
-                  syncFileToken(e.currentTarget);
+                  syncFileToken(e.currentTarget, claudeMentionTarget);
                   captureClaudeCaret(e.currentTarget);
                 }}
                 onSelect={(e) => captureClaudeCaret(e.currentTarget)}
@@ -4449,7 +4567,7 @@ function App() {
                   // Track caret moves (arrows/home/end) so the @token stays current,
                   // but let the menu's own ArrowUp/Down handling win when it's open.
                   if (fileMenuOpen && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
-                  syncFileToken(e.currentTarget);
+                  syncFileToken(e.currentTarget, claudeMentionTarget);
                 }}
                 onKeyDown={(e) => {
                   e.stopPropagation();
@@ -4489,7 +4607,7 @@ function App() {
                   }
                 }}
               />
-              {fileToken &&
+              {fileToken?.owner === "claude" &&
                 fileMenuStyle &&
                 createPortal(
                   <div className="file-menu" style={fileMenuStyle}>

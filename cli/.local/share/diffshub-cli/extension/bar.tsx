@@ -10,7 +10,7 @@
 // page-highlight overlay used during visual-select lives in the light DOM (it has
 // to wrap real page elements), guarded so it never selects our own UI.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { getConfig, DEFAULT_SERVER } from "./api";
@@ -62,10 +62,14 @@ function Bar() {
 
   // ---- composer ----
   const [expanded, setExpanded] = useState(false);
-  const [selecting, setSelecting] = useState(false);
+  // null = not picking. "inject" (v) drops the picked ref into the composer;
+  // "editor" (V) opens its source file in the local $EDITOR instead.
+  const [selectMode, setSelectMode] = useState<null | "inject" | "editor">(null);
+  const selecting = selectMode !== null;
   const [prompt, setPrompt] = useState("");
   const [launching, setLaunching] = useState(false);
   const [launched, setLaunched] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const [fileToken, setFileToken] = useState<{ query: string; start: number; caret: number } | null>(
@@ -194,6 +198,101 @@ function Bar() {
     });
   }, []);
 
+  // Open a picked element's source file in the local $EDITOR (capital `V`). Needs a
+  // dev `data-loc` (path:line:col) to map back to a file; production pages have no
+  // source map, so we say so rather than guess. Hits the server's /api/open, which
+  // spawns $VISUAL/$EDITOR (default zed) — same path as the diffshub "open" button.
+  const openInEditor = useCallback(
+    async (el: HTMLElement) => {
+      const srcEl = el.closest("[data-loc]");
+      const m = srcEl?.getAttribute("data-loc")?.match(/^(.*):(\d+):(\d+)$/);
+      if (!m) {
+        alert("No source location for this element (production page has no source map).");
+        return;
+      }
+      const srv = server ?? (await pickServer());
+      try {
+        const res = await fetch(`${srv}/api/open?dir=${dirId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: m[1], line: Number(m[2]) }),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          alert(`open in editor failed: ${body.error ?? res.statusText}`);
+        }
+      } catch (err) {
+        alert(`open in editor failed: ${String((err as { message?: string })?.message ?? err)}`);
+      }
+    },
+    [server, pickServer, dirId],
+  );
+
+  // Insert text at the textarea's caret (replacing any selection), then restore
+  // the caret after it. Used to drop an uploaded image's /tmp path into the prompt.
+  const insertAtCaret = useCallback((text: string) => {
+    const el = taRef.current;
+    setPrompt((prev) => {
+      const start = el?.selectionStart ?? prev.length;
+      const end = el?.selectionEnd ?? prev.length;
+      const next = prev.slice(0, start) + text + prev.slice(end);
+      const pos = start + text.length;
+      requestAnimationFrame(() => {
+        const e2 = taRef.current;
+        if (e2) {
+          e2.focus();
+          e2.setSelectionRange(pos, pos);
+        }
+      });
+      return next;
+    });
+  }, []);
+
+  // ---- image paste (⌃V): upload to the server's /tmp/images and drop the path in ----
+  // Mirrors the New Claude session composer: the server saves the image under
+  // /tmp/images/<random>.<ext> and we insert that absolute path, which claude's Read
+  // tool can open (no permission prompt on /tmp) and render. No preview here.
+  // Non-image pastes fall through to the textarea's normal text paste.
+  const handlePaste = useCallback(
+    async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imgItem = Array.from(items).find(
+        (it) => it.kind === "file" && it.type.startsWith("image/"),
+      );
+      if (!imgItem) return; // not an image — let the normal text paste happen
+      e.preventDefault();
+      const file = imgItem.getAsFile();
+      if (!file) return;
+      const srv = server ?? (await pickServer());
+      setUploading(true);
+      try {
+        const dataUrl: string = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(r.error);
+          r.readAsDataURL(file);
+        });
+        const res = await fetch(`${srv}/api/upload-image`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: dataUrl }),
+        });
+        const body = (await res.json().catch(() => ({}))) as { path?: string; error?: string };
+        if (!res.ok) {
+          alert(`image upload failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+        if (typeof body.path === "string") insertAtCaret(`${body.path} `);
+      } catch (err) {
+        alert(`image upload failed: ${String((err as { message?: string })?.message ?? err)}`);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [server, pickServer, insertAtCaret],
+  );
+
   // ---- submit ----
   const submit = useCallback(async () => {
     const p = prompt.trim();
@@ -222,10 +321,15 @@ function Bar() {
     }
   }, [prompt, dirId, server, pickServer, contextTemplate]);
 
-  // ---- visual select (cursor button / `v`) ----
+  // ---- visual select (cursor button / `v` inject · `V` open in $EDITOR) ----
   useEffect(() => {
-    if (!selecting) return;
+    if (selectMode === null) return;
+    const editorMode = selectMode === "editor";
     const overlay = ensureOverlay();
+    // Tint the highlight by mode: purple drops the ref into the composer,
+    // amber opens the picked element's source in $EDITOR.
+    overlay.style.background = editorMode ? "rgba(245, 158, 11, 0.20)" : "rgba(110, 86, 207, 0.18)";
+    overlay.style.borderColor = editorMode ? "#f59e0b" : "#6e56cf";
     overlay.style.display = "block";
     const inHost = (e: Event) => e.composedPath().some((n) => n === hostEl);
 
@@ -244,14 +348,16 @@ function Bar() {
       e.stopPropagation();
       e.stopImmediatePropagation();
       const el = e.target as HTMLElement | null;
-      setSelecting(false);
-      if (el) injectRef(computeRef(el));
+      setSelectMode(null);
+      if (!el) return;
+      if (editorMode) void openInEditor(el);
+      else injectRef(computeRef(el));
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        setSelecting(false);
+        setSelectMode(null);
       }
     };
     document.addEventListener("mousemove", onMove, true);
@@ -263,10 +369,11 @@ function Bar() {
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("keydown", onKey, true);
     };
-  }, [selecting, injectRef]);
+  }, [selectMode, injectRef, openInEditor]);
 
-  // ---- page shortcuts: ; (or ') opens & focuses, v starts select (ignored while
-  // typing); Escape collapses it back to the pill (handled on the textarea). ----
+  // ---- page shortcuts: ; (or ') opens & focuses, v starts select, V starts select
+  // that opens the picked element in $EDITOR (all ignored while typing); Escape
+  // collapses it back to the pill (handled on the textarea). ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (dirId == null || selecting) return;
@@ -277,7 +384,10 @@ function Bar() {
         open();
       } else if (e.key === "v") {
         e.preventDefault();
-        setSelecting(true);
+        setSelectMode("inject");
+      } else if (e.key === "V") {
+        e.preventDefault();
+        setSelectMode("editor");
       }
     };
     document.addEventListener("keydown", onKey, true);
@@ -308,12 +418,13 @@ function Bar() {
           ref={taRef}
           className="ta"
           rows={3}
-          placeholder="Ask for a change…  (@ a file · v to point at an element)"
+          placeholder="Ask for a change…  (@ a file · ⌃V image · v point at an element · V open it in your editor)"
           value={prompt}
           onChange={(e) => {
             setPrompt(e.target.value);
             syncFileToken(e.target);
           }}
+          onPaste={(e) => void handlePaste(e)}
           onClick={(e) => syncFileToken(e.currentTarget)}
           onKeyUp={(e) => {
             if (fileMenuOpen && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
@@ -381,24 +492,34 @@ function Bar() {
       <div className="toolbar">
         <button
           className={`tool${selecting ? " on" : ""}`}
-          title="Point at an element to fix  ( v )"
-          onClick={() => setSelecting((s) => !s)}
+          title="Point at an element  ( v insert ref · V open in editor )"
+          onClick={() => setSelectMode((m) => (m ? null : "inject"))}
         >
           <CursorIcon />
         </button>
         <span className="status">
           {selecting ? (
-            "Click an element · Esc to cancel"
+            selectMode === "editor" ? (
+              "Click an element to open in your editor · Esc to cancel"
+            ) : (
+              "Click an element · Esc to cancel"
+            )
+          ) : uploading ? (
+            "Uploading image…"
           ) : (
             <>
-              <kbd>v</kbd> select · <kbd>⌘↵</kbd> send
+              <kbd>v</kbd> select · <kbd>V</kbd> edit · <kbd>⌃V</kbd> image · <kbd>⌘↵</kbd> send
             </>
           )}
         </span>
         <button className="collapse" title="Collapse" onClick={() => setExpanded(false)}>
           ▾
         </button>
-        <button className="send" disabled={launching || !prompt.trim()} onClick={() => void submit()}>
+        <button
+          className="send"
+          disabled={launching || uploading || !prompt.trim()}
+          onClick={() => void submit()}
+        >
           {launching ? "…" : "Send"}
         </button>
       </div>
