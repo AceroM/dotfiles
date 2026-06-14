@@ -345,7 +345,9 @@ function Bar() {
               if (fileToken) setFileToken(null);
               else setExpanded(false);
             }
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            // Enter sends; Shift+Enter inserts a newline. (Cmd/Ctrl+Enter also
+            // sends, for muscle memory.) The file-menu Enter above wins first.
+            if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               void submit();
             }

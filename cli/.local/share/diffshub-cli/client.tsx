@@ -3976,7 +3976,7 @@ function App() {
                   <div className="transcript-empty">
                     {transcriptData.path
                       ? "No conversation yet — press space to refresh"
-                      : "No transcript found for this session"}
+                      : "Starting session…"}
                   </div>
                 ) : editsOnly && turns.length === 0 ? (
                   <div className="transcript-empty">No edits in this conversation yet</div>
