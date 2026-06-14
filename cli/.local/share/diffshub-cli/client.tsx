@@ -10,6 +10,7 @@ import {
   type ClipboardEvent,
   type CSSProperties,
   type Dispatch,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -1439,6 +1440,14 @@ function App() {
   const [busyPath, setBusyPath] = useState<string | null>(null);
 
   // Commit & push dialog (Changes view, `;`)
+  // Restart-server dialog (`⇧R`) — which tmux window to bounce and what command
+  // to relaunch it with. Both default to `dh` (diffshub itself) but can point at
+  // any window/command pair. Kept in state so the last-used values stick for the
+  // session rather than resetting to `dh` on every open.
+  const [restartOpen, setRestartOpen] = useState(false);
+  const [restartWindow, setRestartWindow] = useState("dh");
+  const [restartCommand, setRestartCommand] = useState("dh");
+
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const [committing, setCommitting] = useState(false);
@@ -2178,19 +2187,37 @@ function App() {
   // so a dropped request is treated as the restart working, not an error. The
   // server is down for ~1–2s; nudge a full refetch once it should be back (the
   // auto-refresh interval also reconnects on its own).
-  const refreshServer = useCallback(async () => {
-    try {
-      const res = await fetch("/api/restart-server", { method: "POST" });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}) as any);
-        alert(`restart failed: ${body.error ?? res.statusText}`);
-        return;
+  const refreshServer = useCallback(
+    async (opts?: { window?: string; command?: string }) => {
+      try {
+        const res = await fetch("/api/restart-server", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ window: opts?.window ?? "dh", command: opts?.command ?? "dh" }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}) as any);
+          alert(`restart failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+      } catch {
+        // The server may die before the response lands — that *is* the restart.
       }
-    } catch {
-      // The server may die before the response lands — that *is* the restart.
-    }
-    setTimeout(() => queryClient.invalidateQueries(), 2500);
-  }, [queryClient]);
+      setTimeout(() => queryClient.invalidateQueries(), 2500);
+    },
+    [queryClient],
+  );
+
+  // Submit the Restart dialog: bounce the named window with the given command.
+  // Both fields are required (a blank either side falls back to `dh` server-side,
+  // but we don't want a stray Enter on an empty field to do anything surprising).
+  const submitRestart = useCallback(() => {
+    const window = restartWindow.trim();
+    const command = restartCommand.trim();
+    if (!window || !command) return;
+    setRestartOpen(false);
+    void refreshServer({ window, command });
+  }, [restartWindow, restartCommand, refreshServer]);
 
   const selectTab = useCallback(
     (next: Tab) => {
@@ -2881,11 +2908,13 @@ function App() {
     selection,
     orderedKeys,
     sections,
+    restartOpen,
     commitOpen,
     claudeOpen,
     usageOpen,
     dirsOpen,
     dirMenuOpen,
+    fileToken,
     changes,
     dirs,
   });
@@ -2900,16 +2929,22 @@ function App() {
     selection,
     orderedKeys,
     sections,
+    restartOpen,
     commitOpen,
     claudeOpen,
     usageOpen,
     dirsOpen,
     dirMenuOpen,
+    fileToken,
     changes,
     dirs,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Every shortcut below is a bare keypress — none use ⌘/Ctrl. So when a meta
+      // or ctrl modifier is held, the event belongs to the browser/OS (⌘N new
+      // window, ⌘T, ⌘L, ⌘A, ⌘D…); bail so we never shadow the native shortcut.
+      if (e.metaKey || e.ctrlKey) return;
       const { tab, view, visibleCommits, visiblePrs, visibleManual, visibleTmux, selectedTmux } =
         keyCtx.current;
       const target = (e.composedPath()[0] ?? e.target) as HTMLElement;
@@ -2917,24 +2952,9 @@ function App() {
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
         target.isContentEditable;
-      // Esc closes the open dialog / dropdown from anywhere (each dialog's
-      // textarea also handles Esc while it holds focus).
-      if (
-        e.key === "Escape" &&
-        (keyCtx.current.commitOpen ||
-          keyCtx.current.claudeOpen ||
-          keyCtx.current.usageOpen ||
-          keyCtx.current.dirsOpen ||
-          keyCtx.current.dirMenuOpen)
-      ) {
-        e.preventDefault();
-        setCommitOpen(false);
-        setClaudeOpen(false);
-        setUsageOpen(false);
-        setDirsOpen(false);
-        setDirMenuOpen(false);
-        return;
-      }
+      // Esc-to-close for every dialog/dropdown lives in the capture-phase
+      // onEscClose handler (registered below) so it fires before modal inputs
+      // can swallow Esc via e.stopPropagation() — one source of truth.
       if (e.key === "/" && !typing) {
         e.preventDefault();
         // In an open Tmux chat, `/` jumps to the reply composer (where you spend
@@ -3109,10 +3129,12 @@ function App() {
         toggleTheme();
         return;
       }
-      // `R` (Shift+R, so it's deliberate) restarts the diffshub server.
+      // `R` (Shift+R, so it's deliberate) opens the Restart dialog: which tmux
+      // window to bounce and what command to relaunch it with (both default `dh`,
+      // i.e. the diffshub server itself).
       if (e.key === "R") {
         e.preventDefault();
-        void refreshServer();
+        setRestartOpen(true);
         return;
       }
       // `U` (Shift+U — lowercase `u` is half-page scroll up) opens the Claude
@@ -3218,6 +3240,29 @@ function App() {
           ?.scrollIntoView({ block: "nearest" });
       }
     };
+    // Esc closes whichever dialog/dropdown is open. Registered in the *capture*
+    // phase (like ⌥-digit below) so it fires before the event reaches any modal
+    // input that calls e.stopPropagation() in its bubble-phase onKeyDown — those
+    // would otherwise eat Esc and leave the dialog open. This is the single
+    // source of truth, so every dialog closes on the first Esc, instantly.
+    const onEscClose = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const k = keyCtx.current;
+      if (!(k.restartOpen || k.commitOpen || k.claudeOpen || k.usageOpen || k.dirsOpen || k.dirMenuOpen))
+        return;
+      // In the Claude composer a live @-mention should be cancelled first; its
+      // textarea's own Esc handler does that, so defer to it. A second Esc (no
+      // token) falls through to here and closes the dialog.
+      if (k.claudeOpen && k.fileToken) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setRestartOpen(false);
+      setCommitOpen(false);
+      setClaudeOpen(false);
+      setUsageOpen(false);
+      setDirsOpen(false);
+      setDirMenuOpen(false);
+    };
     // ⌥1–⌥9 jump straight to the Nth registered directory (top-left dropdown),
     // 1-indexed. Registered in the *capture* phase on its own listener so it
     // fires before the event reaches any element — including modal textareas
@@ -3240,9 +3285,11 @@ function App() {
       const d = keyCtx.current.dirs[Number(e.code.slice(5)) - 1];
       if (d) selectDir(d.id);
     };
+    document.addEventListener("keydown", onEscClose, true);
     document.addEventListener("keydown", onDirHotkey, true);
     document.addEventListener("keydown", onKey);
     return () => {
+      document.removeEventListener("keydown", onEscClose, true);
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
@@ -3334,7 +3381,7 @@ function App() {
   // menu (see the topbar), so it's intentionally not duplicated here.
   actionItems.push({ label: "Claude usage", icon: <Gauge />, onClick: () => setUsageOpen(true) });
   actionItems.push({ label: "Refresh", icon: <RefreshCw />, onClick: refreshTab });
-  actionItems.push({ label: "Restart server", icon: <RotateCw />, onClick: () => void refreshServer() });
+  actionItems.push({ label: "Restart server…", icon: <RotateCw />, onClick: () => setRestartOpen(true) });
   actionItems.push({
     label: theme === "dark" ? "Light mode" : "Dark mode",
     icon: theme === "dark" ? <Sun /> : <Moon />,
@@ -4253,6 +4300,69 @@ function App() {
         </button>
       )}
 
+      {restartOpen && (
+        <div className="modal-overlay" onClick={() => setRestartOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Restart server</h3>
+            <div className="dir-form">
+              <label>Window</label>
+              <input
+                autoFocus
+                value={restartWindow}
+                placeholder="dh"
+                onChange={(e) => setRestartWindow(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Escape") setRestartOpen(false);
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitRestart();
+                  }
+                }}
+              />
+              <label>Command</label>
+              <input
+                value={restartCommand}
+                placeholder="dh"
+                onChange={(e) => setRestartCommand(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Escape") setRestartOpen(false);
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitRestart();
+                  }
+                }}
+              />
+            </div>
+            <div className="modal-actions">
+              <button className="act" onClick={() => setRestartOpen(false)}>
+                Cancel
+              </button>
+              <button
+                className="act primary"
+                disabled={!restartWindow.trim() || !restartCommand.trim()}
+                onClick={submitRestart}
+              >
+                Restart
+              </button>
+            </div>
+            <div className="modal-hint">
+              <span>
+                Ctrl-C the <code>{restartWindow.trim() || "dh"}</code> window, then run{" "}
+                <code>{restartCommand.trim() || "dh"}</code> in <code>tmux -L bg</code>
+              </span>
+              <span>
+                <kbd>↵</kbd> restart
+              </span>
+              <span>
+                <kbd>esc</kbd> cancel
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {commitOpen && (
         <div className="modal-overlay" onClick={() => !committing && setCommitOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -4280,7 +4390,6 @@ function App() {
               onKeyUp={(e) => captureCommitCaret(e.currentTarget)}
               onKeyDown={(e) => {
                 e.stopPropagation();
-                if (e.key === "Escape") setCommitOpen(false);
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
                   e.preventDefault();
                   submitCommit();
@@ -4615,7 +4724,6 @@ function App() {
                 onChange={(e) => setDirForm((f) => ({ ...f, name: e.target.value }))}
                 onKeyDown={(e) => {
                   e.stopPropagation();
-                  if (e.key === "Escape") setDirsOpen(false);
                 }}
               />
               <label>Path</label>
@@ -4625,7 +4733,6 @@ function App() {
                 onChange={(e) => setDirForm((f) => ({ ...f, path: e.target.value }))}
                 onKeyDown={(e) => {
                   e.stopPropagation();
-                  if (e.key === "Escape") setDirsOpen(false);
                   if (e.key === "Enter") {
                     e.preventDefault();
                     saveDir();
@@ -4639,7 +4746,6 @@ function App() {
                 onChange={(e) => setDirForm((f) => ({ ...f, repos: e.target.value }))}
                 onKeyDown={(e) => {
                   e.stopPropagation();
-                  if (e.key === "Escape") setDirsOpen(false);
                   if (e.key === "Enter") {
                     e.preventDefault();
                     saveDir();

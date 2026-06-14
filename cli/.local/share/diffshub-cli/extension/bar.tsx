@@ -265,13 +265,14 @@ function Bar() {
     };
   }, [selecting, injectRef]);
 
-  // ---- page shortcuts: ' opens & focuses, v starts select (ignored while typing) ----
+  // ---- page shortcuts: ; (or ') opens & focuses, v starts select (ignored while
+  // typing); Escape collapses it back to the pill (handled on the textarea). ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (dirId == null || selecting) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (isTyping(e)) return;
-      if (e.key === "'") {
+      if (e.key === ";" || e.key === "'") {
         e.preventDefault();
         open();
       } else if (e.key === "v") {
@@ -287,7 +288,7 @@ function Bar() {
 
   if (!expanded) {
     return (
-      <button className="pill" title="Ask diffshub  ( ' )" onClick={open}>
+      <button className="pill" title="Ask diffshub  ( ; )" onClick={open}>
         <SparkIcon />
         <span>Ask diffshub</span>
       </button>
