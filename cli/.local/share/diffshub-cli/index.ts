@@ -695,6 +695,12 @@ async function resolveTranscript(
     if (byId) return byId;
     const expected = `${claudeProjectsRoot}/${mungeDir(cwd)}/${sid}.jsonl`;
     if (existsSync(expected)) return expected;
+    // Tagged session whose transcript claude hasn't written yet (just launched):
+    // its file is exactly <sid>.jsonl, so don't fall through to the title-match /
+    // newest-transcript heuristics below — those are for untagged legacy sessions
+    // and would briefly surface an unrelated chat (e.g. the previous one) until
+    // claude writes the file.
+    return null;
   }
   let cands = cache?.get(cwd);
   if (!cands) {
