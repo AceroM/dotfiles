@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -14,6 +15,7 @@ import {
   type SetStateAction,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import {
   QueryClient,
   QueryClientProvider,
@@ -21,7 +23,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { parsePatchFiles, type FileDiffMetadata, type SelectedLineRange } from "@pierre/diffs";
+import { getSharedHighlighter, parsePatchFiles, type FileDiffMetadata, type SelectedLineRange } from "@pierre/diffs";
 import { FileDiff, MultiFileDiff } from "@pierre/diffs/react";
 import type { GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
@@ -35,7 +37,20 @@ import {
   PanelRight,
   ChevronLeft,
   ChevronRight,
+  EllipsisVertical,
+  Sparkles,
+  RefreshCw,
+  Plus,
+  Minus,
+  Archive,
+  Bot,
+  Check,
+  Trash2,
+  Sun,
+  Moon,
 } from "lucide-react";
+
+type Theme = "light" | "dark";
 
 interface Commit {
   sha: string;
@@ -146,6 +161,9 @@ interface TranscriptMsg {
   text: string;
   tool?: string;
   ts?: string;
+  path?: string; // file path for Edit/Write/MultiEdit/Read
+  edits?: { old: string; new: string }[]; // hunks for Edit/Write/MultiEdit diff rendering
+  lang?: string; // language id for a Read tool result's code block
 }
 
 interface Transcript {
@@ -250,6 +268,13 @@ interface DiffRowProps {
   collapsed: boolean;
   selectedRange: SelectedLineRange | null;
   busy: boolean;
+  // "split" side-by-side on desktop; "unified" single-column on mobile/tablet
+  // where there isn't room for two columns. Part of the props so the memo busts
+  // when the viewport crosses the breakpoint.
+  diffStyle: "split" | "unified";
+  // Light/dark — drives the diff library's own palette + syntax theme. A prop so
+  // the memo busts (and the diff re-renders) the moment the theme is toggled.
+  themeType: Theme;
   registerEl: (key: string, el: HTMLDivElement | null) => void;
   onSelect: (fileKey: string, range: SelectedLineRange | null) => void;
   onAct: (action: GitAction, path: string, repo?: string, worktree?: string) => void;
@@ -262,6 +287,8 @@ const DiffRow = memo(function DiffRow({
   collapsed,
   selectedRange,
   busy,
+  diffStyle,
+  themeType,
   registerEl,
   onSelect,
   onAct,
@@ -295,7 +322,7 @@ const DiffRow = memo(function DiffRow({
         <FileDiff
           fileDiff={file.fileDiff}
           selectedLines={selectedRange}
-          options={{ ...DIFF_OPTIONS, ...selectionOptions }}
+          options={{ ...DIFF_OPTIONS, themeType, diffStyle, ...selectionOptions }}
           disableWorkerPool
           renderHeaderMetadata={
             file.actions.length ? () => <span className="hdr-acts">{acts}</span> : undefined
@@ -308,7 +335,7 @@ const DiffRow = memo(function DiffRow({
             oldFile={{ name: file.path, contents: "" }}
             newFile={{ name: file.path, contents: file.untracked.contents }}
             selectedLines={selectedRange}
-            options={{ ...DIFF_OPTIONS, ...selectionOptions }}
+            options={{ ...DIFF_OPTIONS, themeType, diffStyle, ...selectionOptions }}
             disableWorkerPool
             renderHeaderMetadata={() => <span className="hdr-acts">{acts}</span>}
           />
@@ -405,9 +432,58 @@ function parseInline(text: string): ReactNode[] {
   return nodes;
 }
 
+// Syntax highlighting for fenced code blocks. Reuses the very same shiki
+// highlighter the diff viewer already bundles via @pierre/diffs (a singleton
+// that loads each language on demand), so chat code and diffs tokenize
+// identically and we ship no extra highlighter. We mirror the diff viewer's two
+// pierre themes and emit BOTH as CSS vars (shiki dual-theme output), so chat
+// code recolors with the app's light/dark toggle through pure CSS — no
+// re-highlight on theme change. See the `.md-code .shiki` rules in index.ts.
+const CODE_THEMES = { light: "pierre-light", dark: "pierre-dark" } as const;
+
+// Common fence labels shiki doesn't recognize under that exact name.
+const LANG_ALIASES: Record<string, string> = {
+  sh: "bash", shell: "bash", zsh: "bash", console: "bash",
+  js: "javascript", cjs: "javascript", mjs: "javascript",
+  ts: "typescript", py: "python", rb: "ruby", yml: "yaml", md: "markdown",
+  "c++": "cpp", "c#": "csharp", cs: "csharp", rs: "rust", kt: "kotlin", htm: "html",
+};
+
+// Tokenize `code` to themed HTML, loading the language on demand. Falls back to a
+// plain (still themed) render for unknown languages or any load failure; returns
+// "" on total failure so the caller keeps its plain <pre>.
+async function highlightToHtml(code: string, lang: string): Promise<string> {
+  const id = LANG_ALIASES[lang] ?? lang;
+  const themes = [CODE_THEMES.light, CODE_THEMES.dark];
+  try {
+    const hl = await getSharedHighlighter({ themes, langs: id ? [id] : [] });
+    const resolved = hl.getLoadedLanguages().includes(id) ? id : "text";
+    return hl.codeToHtml(code, { lang: resolved, themes: CODE_THEMES, defaultColor: false });
+  } catch {
+    try {
+      const hl = await getSharedHighlighter({ themes, langs: [] });
+      return hl.codeToHtml(code, { lang: "text", themes: CODE_THEMES, defaultColor: false });
+    } catch {
+      return "";
+    }
+  }
+}
+
 // A fenced code block with a language label + copy button (ChatGPT-style).
 const CodeBlock = memo(function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [copied, setCopied] = useState(false);
+  // Highlighting is async (shiki); render a plain <pre> until it resolves so
+  // there's never a flash of broken layout. Re-runs as `code` streams in.
+  const [html, setHtml] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    highlightToHtml(code, lang).then((h) => {
+      if (live && h) setHtml(h);
+    });
+    return () => {
+      live = false;
+    };
+  }, [code, lang]);
   return (
     <div className="md-code">
       <div className="md-code-head">
@@ -423,9 +499,13 @@ const CodeBlock = memo(function CodeBlock({ lang, code }: { lang: string; code: 
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre>
-        <code>{code}</code>
-      </pre>
+      {html ? (
+        <div className="md-code-body" dangerouslySetInnerHTML={{ __html: html }} />
+      ) : (
+        <pre>
+          <code>{code}</code>
+        </pre>
+      )}
     </div>
   );
 });
@@ -578,16 +658,197 @@ const PlanCard = memo(function PlanCard({
   );
 });
 
+interface AskQuestion {
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: { label: string; description?: string }[];
+}
+
+// Parse AskUserQuestion's JSON input into renderable questions. Wrapped so a
+// malformed/blank payload degrades to null and the caller falls back to a plain
+// tool line instead of throwing or showing an empty card.
+function parseQuestions(text: string): AskQuestion[] | null {
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const qs = data?.questions;
+  if (!Array.isArray(qs)) return null;
+  const parsed = qs
+    .filter((q: any) => q && typeof q.question === "string" && Array.isArray(q.options))
+    .map((q: any) => ({
+      question: q.question as string,
+      header: typeof q.header === "string" ? q.header : undefined,
+      multiSelect: !!q.multiSelect,
+      options: (q.options as any[])
+        .filter((o) => o && typeof o.label === "string")
+        .map((o) => ({
+          label: o.label as string,
+          description: typeof o.description === "string" ? o.description : undefined,
+        })),
+    }))
+    .filter((q) => q.options.length > 0);
+  return parsed.length ? parsed : null;
+}
+
+// AskUserQuestion card — mirrors the in-TUI multiple-choice prompt. Like the plan
+// card, only the live (last-turn) prompt is answerable: clicking an option sends
+// its 1-based number into the pane (the key you'd press in the TUI), advancing to
+// the next question. Multi-select questions render read-only — a single keypress
+// can't express them — with a hint to answer from the reply box.
+const QuestionCard = memo(function QuestionCard({
+  text,
+  onAnswer,
+}: {
+  text: string;
+  // (questionIndex, optionIndex) — questionIndex lets a future caller map clicks
+  // back to a specific question; today the pane just receives the option number.
+  onAnswer?: (questionIndex: number, optionIndex: number) => Promise<void> | void;
+}) {
+  const questions = useMemo(() => parseQuestions(text), [text]);
+  // The option mid-send, keyed `${qi}:${oi}`, so only the clicked button spins.
+  const [sending, setSending] = useState<string | null>(null);
+  if (!questions) {
+    // Unparseable payload — fall back to a plain tool line, not an empty card.
+    return (
+      <div className="tool-use">
+        <span className="tool-name">AskUserQuestion</span>
+      </div>
+    );
+  }
+  const answer = async (qi: number, oi: number) => {
+    if (!onAnswer || sending !== null) return;
+    setSending(`${qi}:${oi}`);
+    try {
+      await onAnswer(qi, oi);
+    } finally {
+      setSending(null);
+    }
+  };
+  return (
+    <div className="q-card">
+      <div className="q-card-head">{questions.length > 1 ? `${questions.length} questions` : "Question"}</div>
+      {questions.map((q, qi) => {
+        const clickable = !!onAnswer && !q.multiSelect;
+        return (
+          <div key={qi} className="q-block">
+            {q.header ? <div className="q-tag">{q.header}</div> : null}
+            <div className="q-text">{q.question}</div>
+            <div className="q-opts">
+              {q.options.map((o, oi) => (
+                <button
+                  key={oi}
+                  className={`q-choice${clickable ? "" : " readonly"}`}
+                  disabled={!clickable || sending !== null}
+                  onClick={clickable ? () => answer(qi, oi) : undefined}
+                  title={clickable ? "Send this answer" : undefined}
+                >
+                  <span className="q-choice-n">{oi + 1}</span>
+                  <span className="q-choice-body">
+                    <span className="q-choice-label">{o.label}</span>
+                    {o.description ? <span className="q-choice-desc">{o.description}</span> : null}
+                  </span>
+                  {sending === `${qi}:${oi}` ? <span className="q-choice-spin">sending…</span> : null}
+                </button>
+              ))}
+            </div>
+            {q.multiSelect && onAnswer ? (
+              <div className="q-multi">Multi-select — type your picks in the reply box below.</div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+// An Edit/Write/MultiEdit tool call rendered as inline diff hunks via the same
+// diffs library the Changes tab uses. old_string/new_string are snippets (not
+// whole files), so each shows as a standalone unified hunk with synthetic line
+// numbers — compact and readable inline in the chat.
+const EditDiff = memo(function EditDiff({
+  tool,
+  path,
+  edits,
+  theme,
+}: {
+  tool: string;
+  path: string;
+  edits: { old: string; new: string }[];
+  theme: Theme;
+}) {
+  const name = path ? path.split("/").pop() || path : tool;
+  const options = {
+    ...DIFF_OPTIONS,
+    themeType: theme,
+    diffStyle: "unified" as const,
+    enableLineSelection: false,
+  };
+  return (
+    <div className="chat-diff">
+      <div className="tool-use">
+        <span className="tool-name">{tool}</span>
+        {path ? <span className="tool-arg">{path}</span> : null}
+      </div>
+      {edits.map((e, j) => (
+        <MultiFileDiff
+          key={j}
+          oldFile={{ name, contents: e.old }}
+          newFile={{ name, contents: e.new }}
+          options={options}
+          disableWorkerPool
+        />
+      ))}
+    </div>
+  );
+});
+
+// A Read tool result as a collapsed, syntax-highlighted code block. Reuses the
+// chat CodeBlock so it inherits the shared highlighter; collapsed by default so
+// a long file doesn't flood the transcript.
+const ReadBlock = memo(function ReadBlock({
+  path,
+  lang,
+  code,
+}: {
+  path: string;
+  lang: string;
+  code: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const name = path ? path.split("/").pop() || path : "file";
+  const lines = code ? code.split("\n").length : 0;
+  return (
+    <div className="read-block">
+      <button className="read-block-head" onClick={() => setOpen((o) => !o)}>
+        <span className="tool-name">Read</span>
+        <span className="tool-arg">{name}</span>
+        <span className="read-block-meta">
+          {lines} {lines === 1 ? "line" : "lines"} · {open ? "hide" : "show"}
+        </span>
+      </button>
+      {open ? <CodeBlock lang={lang} code={code} /> : null}
+    </div>
+  );
+});
+
 // One conversation turn: a user turn is a right-aligned bubble; an assistant turn
 // is a left avatar + content stack (markdown text, tool calls, tool results).
 const TranscriptTurn = memo(function TranscriptTurn({
   role,
   msgs,
+  theme,
   onAnswerPlan,
+  onAnswerQuestion,
 }: {
   role: "user" | "assistant";
   msgs: TranscriptMsg[];
+  theme: Theme;
   onAnswerPlan?: (choice: number) => Promise<void> | void;
+  onAnswerQuestion?: (questionIndex: number, optionIndex: number) => Promise<void> | void;
 }) {
   if (role === "user") {
     return (
@@ -606,6 +867,18 @@ const TranscriptTurn = memo(function TranscriptTurn({
         {msgs.map((m, i) => {
           if (m.kind === "tool_use" && m.tool === "ExitPlanMode")
             return <PlanCard key={i} plan={m.text} onAnswer={onAnswerPlan} />;
+          if (m.kind === "tool_use" && m.tool === "AskUserQuestion")
+            return <QuestionCard key={i} text={m.text} onAnswer={onAnswerQuestion} />;
+          if (m.kind === "tool_use" && m.edits && m.edits.length)
+            return (
+              <EditDiff
+                key={i}
+                tool={m.tool || "Edit"}
+                path={m.path || ""}
+                edits={m.edits}
+                theme={theme}
+              />
+            );
           if (m.kind === "tool_use")
             return (
               <div key={i} className="tool-use">
@@ -613,6 +886,8 @@ const TranscriptTurn = memo(function TranscriptTurn({
                 {m.text ? <span className="tool-arg">{m.text}</span> : null}
               </div>
             );
+          if (m.kind === "tool_result" && m.tool === "Read")
+            return <ReadBlock key={i} path={m.path || ""} lang={m.lang || "text"} code={m.text} />;
           if (m.kind === "tool_result")
             return (
               <div key={i} className="tool-result">
@@ -736,6 +1011,15 @@ const LEFT_MAX = 460;
 const RIGHT_MIN = 240;
 const RIGHT_MAX = 560;
 
+// Grow a textarea to fit its content (capped + scrolled by its CSS max-height)
+// so a long message never hides behind a fixed-height box. Shared by the New
+// Claude session and Commit & push composers.
+function autosize(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
+
 // ---- Last-tab memory (sessionStorage) ----
 // Switching directories restores the tab you were last on instead of forcing
 // one, so browsing across dirs keeps you in the same tab. Defaults to the Tmux
@@ -779,6 +1063,33 @@ function App() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>(initial.tab);
   const [view, setView] = useState<View>(initial.view);
+
+  // ---- Light / dark theme ----
+  // Toggle with the `t` shortcut or the theme action; no system mode. Defaults to
+  // light. Persisted to localStorage; the `dark` class on <html> flips the
+  // CSS-variable palette (see the page <style>) and is fed to the diff library's
+  // themeType so the rendered diffs recolor too.
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      return localStorage.getItem("theme") === "dark" ? "dark" : "light";
+    } catch {
+      return "light";
+    }
+  });
+  // Apply before paint so a reload into dark mode doesn't flash light first.
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("theme", theme);
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [theme]);
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => (t === "dark" ? "light" : "dark"));
+  }, []);
 
   // ---- Active directory (top-left dropdown) ----
   // null means "the server default" (the launch cwd). Persisted to the URL only,
@@ -842,6 +1153,9 @@ function App() {
   }, [rightMinimized]);
   // Which off-canvas drawer is open on mobile (transient — never persisted).
   const [drawerOpen, setDrawerOpen] = useState<null | "left" | "right">(null);
+  // Mobile-only "Actions" menu in the top bar (the tab-relevant things you'd
+  // otherwise trigger by keyboard on desktop). Transient — never persisted.
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [isDesktop, setIsDesktop] = useState(() => {
     try {
       return window.matchMedia("(min-width: 1025px)").matches;
@@ -1022,6 +1336,30 @@ function App() {
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const [committing, setCommitting] = useState(false);
+  // Same cursor-preservation + auto-grow as the New Claude session composer: the
+  // message and caret survive closing/reopening the dialog so an edited multi-line
+  // message isn't lost when you pop out to read the diff. In-memory only (the
+  // message itself isn't persisted), so there's nothing to restore across reloads.
+  const commitTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const commitCaretRef = useRef<{ start: number; end: number } | null>(null);
+  const captureCommitCaret = useCallback((el: HTMLTextAreaElement) => {
+    commitCaretRef.current = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 };
+  }, []);
+  const autosizeCommit = useCallback(() => autosize(commitTextareaRef.current), []);
+  // On (re)open, drop the caret back where it was and size to the message; a fresh
+  // (empty) message defaults the caret to the end like autoFocus would.
+  useEffect(() => {
+    if (!commitOpen) return;
+    const caret = commitCaretRef.current;
+    requestAnimationFrame(() => {
+      const el = commitTextareaRef.current;
+      if (!el) return;
+      el.focus();
+      const pos = caret ?? { start: el.value.length, end: el.value.length };
+      el.setSelectionRange(pos.start, pos.end);
+      autosizeCommit();
+    });
+  }, [commitOpen, autosizeCommit]);
 
   // New Claude session dialog (`'`) — launches an interactive claude tmux
   // session in the active directory, detached, seeded with the typed prompt.
@@ -1074,12 +1412,16 @@ function App() {
   claudeOpenRef.current = claudeOpen;
   // Grow the composer to fit its content (then scroll past the CSS max-height)
   // so a long prompt never hides behind a fixed-height box.
-  const autosizeClaude = useCallback(() => {
-    const el = claudeTextareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, []);
+  const autosizeClaude = useCallback(() => autosize(claudeTextareaRef.current), []);
+  // Re-fit on every value change (typing, draft load, dir switch). useLayoutEffect
+  // runs after React commits the new value but before paint, so scrollHeight is
+  // measured against the text actually in the box — no rAF race, no stale height.
+  // This is what makes a directory's grown height survive hopping away and back:
+  // the swapped-in draft re-fits deterministically instead of relying on a frame
+  // callback that may run before the new value lands in the DOM.
+  useLayoutEffect(() => {
+    if (claudeOpen) autosizeClaude();
+  }, [claudePrompt, claudeOpen, autosizeClaude]);
   // Where the caret/selection sat when the dialog last closed, so reopening it
   // (e.g. after `esc`) restores the cursor instead of jumping to the start/end.
   // Persisted per directory (see claudeCaretKey) so it survives reloads and dir
@@ -1197,6 +1539,42 @@ function App() {
     [fileToken, captureClaudeCaret, autosizeClaude],
   );
   const fileMenuOpen = !!fileToken && fileSuggestions.length > 0;
+  // The @-file popover is portaled to <body> (see the dialog JSX) so the modal's
+  // `overflow-y: auto` can't clip it — the old in-modal absolute popover got cut
+  // off whenever the composer grew. We pin it to the textarea with fixed coords,
+  // flip it above when there's more room up top, and cap its height to the space
+  // available so it never spills past the viewport. Recomputed as the box grows
+  // or shrinks (claudePrompt), as the list fills in, and on scroll/resize.
+  const [fileMenuStyle, setFileMenuStyle] = useState<CSSProperties | null>(null);
+  useLayoutEffect(() => {
+    if (!fileToken) {
+      setFileMenuStyle(null);
+      return;
+    }
+    const place = () => {
+      const el = claudeTextareaRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const gap = 4;
+      const below = window.innerHeight - r.bottom - gap;
+      const above = r.top - gap;
+      const placeAbove = below < 180 && above > below;
+      setFileMenuStyle({
+        position: "fixed",
+        left: r.left,
+        width: r.width,
+        maxHeight: Math.max(120, Math.min(280, placeAbove ? above : below)),
+        ...(placeAbove ? { bottom: window.innerHeight - r.top + gap } : { top: r.bottom + gap }),
+      });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [fileToken, claudePrompt, fileSuggestions.length]);
 
   // ---- Diff for the active commit/PR view ----
   // Keyed by sha/number+repo so revisiting one is instant from cache; commit
@@ -1357,6 +1735,7 @@ function App() {
       }
       setCommitOpen(false);
       setCommitMsg("");
+      commitCaretRef.current = null; // committed: drop the saved caret
       // The commit/push runs async in tmux; nudge a refetch so the cleared
       // working tree shows up (interval polling will also catch it).
       setTimeout(() => queryClient.invalidateQueries({ queryKey: ["changes"] }), 600);
@@ -1529,17 +1908,18 @@ function App() {
     }
   }, [replyText, queryClient]);
 
-  // Answer a live plan card by sending its choice's digit into the pane — the
-  // ExitPlanMode prompt is keyed 1/2/3 just like the TUI — then refresh so the
-  // resulting turn (and busy dot) show up. Only the last turn's card calls this.
-  const answerPlan = useCallback(
-    async (choice: number) => {
+  // Type a single answer keystroke into the selected session's pane, then refresh
+  // so the resulting turn (and busy dot) show up. Shared by the plan and question
+  // cards — both answer a live TUI prompt by sending the option's digit, exactly
+  // the key you'd press in the terminal.
+  const sendToSession = useCallback(
+    async (text: string) => {
       const session = selectedSessionRef.current;
       if (!session) return;
       const res = await fetch("/api/tmux/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session, text: String(choice) }),
+        body: JSON.stringify({ session, text }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}) as any);
@@ -1552,6 +1932,15 @@ function App() {
       }, 500);
     },
     [queryClient],
+  );
+  // Answer a live plan card — the ExitPlanMode prompt is keyed 1/2/3 like the TUI.
+  // Only the last turn's card is wired to call this.
+  const answerPlan = useCallback((choice: number) => sendToSession(String(choice)), [sendToSession]);
+  // Answer a live AskUserQuestion option by sending its 1-based number into the
+  // pane; the TUI selects that option and advances to the next question.
+  const answerQuestion = useCallback(
+    (_questionIndex: number, optionIndex: number) => sendToSession(String(optionIndex + 1)),
+    [sendToSession],
   );
 
   // `x` — stage everything, then hand the commit off to a detached claude
@@ -1578,6 +1967,30 @@ function App() {
       alert(`launch failed: ${errMessage(e)}`);
     }
   }, [runGit, qd]);
+
+  // Refetch the current tab's data — the same thing `space` does, exposed to the
+  // mobile Actions menu (where there's no keyboard). Resetting the list query
+  // flashes its skeleton; the Tmux tab just refetches the list + open transcript.
+  const refreshTab = useCallback(() => {
+    if (tab === "tmux") {
+      queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+      if (selectedSession)
+        queryClient.refetchQueries({ queryKey: ["tmux-transcript", selectedSession] });
+      return;
+    }
+    const listKey: string[] =
+      tab === "commits"
+        ? ["commits"]
+        : tab === "prs"
+          ? ["prs"]
+          : tab === "changes"
+            ? ["changes"]
+            : ["manual"];
+    queryClient.resetQueries({ queryKey: listKey });
+    if (view.kind === "commit" || view.kind === "pr") {
+      queryClient.resetQueries({ queryKey: diffKeyRef.current });
+    }
+  }, [tab, view, selectedSession, queryClient]);
 
   const selectTab = useCallback(
     (next: Tab) => {
@@ -1773,6 +2186,17 @@ function App() {
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [dirMenuOpen]);
+
+  // Close the mobile Actions menu on an outside click.
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest?.(".topbar-actions")) setActionsOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [actionsOpen]);
 
   // When the dropdown opens, focus its filter box and reset the highlight; when
   // it closes, drop the filter so it reopens clean next time.
@@ -2274,7 +2698,13 @@ function App() {
       }
       if (e.key === "/" && !typing) {
         e.preventDefault();
-        searchEl.current?.focus();
+        // In an open Tmux chat, `/` jumps to the reply composer (where you spend
+        // your time); elsewhere it focuses the sidebar filter.
+        if (tab === "tmux" && selectedTmux && replyTextareaRef.current) {
+          replyTextareaRef.current.focus();
+        } else {
+          searchEl.current?.focus();
+        }
         return;
       }
       if (e.key === "Escape" && typing) {
@@ -2434,6 +2864,12 @@ function App() {
         toggleCollapsed();
         return;
       }
+      // `t` toggles light/dark.
+      if (e.key === "t") {
+        e.preventDefault();
+        toggleTheme();
+        return;
+      }
       if (e.key === "'") {
         e.preventDefault();
         // If lines are highlighted, clear the prompt and replace it with their
@@ -2555,7 +2991,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, toggleReviewed, toggleCollapsed, runGit, commitWithClaude, queryClient]);
+  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -2610,6 +3046,48 @@ function App() {
   const hasRightSidebar = tab !== "tmux" && view.kind !== "none";
   const showRight = hasRightSidebar && (isDesktop ? !rightMinimized : true);
 
+  // Mobile "Actions" menu (top bar) — the tab-relevant things you'd otherwise
+  // reach by keyboard on desktop. "New Claude session" works on every tab; the
+  // rest depend on the active tab/view. Refresh is always offered, last.
+  const actionItems: {
+    label: string;
+    icon: ReactNode;
+    onClick: () => void;
+    disabled?: boolean;
+  }[] = [{ label: "New Claude session", icon: <Sparkles />, onClick: () => setClaudeOpen(true) }];
+  if (tab === "changes" && view.kind === "changes") {
+    const dirty = (changes ?? []).some(
+      (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
+    );
+    actionItems.push(
+      { label: "Stage all", icon: <Plus />, onClick: () => runGit("stage"), disabled: busyPath !== null },
+      { label: "Unstage all", icon: <Minus />, onClick: () => runGit("unstage"), disabled: busyPath !== null },
+      { label: "Stash all", icon: <Archive />, onClick: () => runGit("stash"), disabled: busyPath !== null },
+      { label: "Commit with Claude", icon: <Bot />, onClick: () => void commitWithClaude(), disabled: !dirty },
+      { label: "Commit & push…", icon: <GitCommitHorizontal />, onClick: () => setCommitOpen(true) },
+    );
+  }
+  if (tab === "commits" && view.kind === "commit") {
+    actionItems.push({
+      label: reviewed.has(view.sha) ? "Mark unreviewed" : "Mark reviewed",
+      icon: <Check />,
+      onClick: () => toggleReviewed(view.sha, view.repo),
+    });
+  }
+  if (tab === "tmux" && selectedSession) {
+    actionItems.push({
+      label: "Kill session",
+      icon: <Trash2 />,
+      onClick: () => void killSession(selectedSession),
+    });
+  }
+  actionItems.push({ label: "Refresh", icon: <RefreshCw />, onClick: refreshTab });
+  actionItems.push({
+    label: theme === "dark" ? "Light mode" : "Dark mode",
+    icon: theme === "dark" ? <Sun /> : <Moon />,
+    onClick: toggleTheme,
+  });
+
   return (
     <div
       className="layout"
@@ -2629,6 +3107,37 @@ function App() {
           <Menu size={18} />
         </button>
         <span className="topbar-title">{meta?.name ?? "diffshub"}</span>
+        <div className="topbar-actions">
+          <button
+            className="topbar-btn"
+            title="Actions"
+            aria-label="Tab actions"
+            aria-haspopup="menu"
+            aria-expanded={actionsOpen}
+            onClick={() => setActionsOpen((o) => !o)}
+          >
+            <EllipsisVertical size={18} />
+          </button>
+          {actionsOpen && (
+            <div className="topbar-actions-menu" role="menu">
+              {actionItems.map((it) => (
+                <button
+                  key={it.label}
+                  className="topbar-action"
+                  role="menuitem"
+                  disabled={it.disabled}
+                  onClick={() => {
+                    setActionsOpen(false);
+                    it.onClick();
+                  }}
+                >
+                  {it.icon}
+                  <span>{it.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         {hasRightSidebar && (
           <button
             className="topbar-btn topbar-right"
@@ -3030,6 +3539,15 @@ function App() {
         )}
 
         <div className="kbd-hints">
+          <button
+            className="theme-toggle"
+            onClick={toggleTheme}
+            title="Toggle light/dark (t)"
+            aria-label="Toggle light/dark"
+          >
+            {theme === "dark" ? <Sun size={13} /> : <Moon size={13} />}
+            <span>{theme === "dark" ? "Light" : "Dark"}</span>
+          </button>
           <span>
             <kbd>1-5</kbd>/<kbd>←/→</kbd> tabs
           </span>
@@ -3071,6 +3589,9 @@ function App() {
             <kbd>'</kbd> new session
           </span>
           <span>
+            <kbd>t</kbd> theme
+          </span>
+          <span>
             <kbd>/</kbd> filter
           </span>
         </div>
@@ -3109,7 +3630,9 @@ function App() {
                       key={i}
                       role={t.role}
                       msgs={t.msgs}
+                      theme={theme}
                       onAnswerPlan={i === turns.length - 1 ? answerPlan : undefined}
+                      onAnswerQuestion={i === turns.length - 1 ? answerQuestion : undefined}
                     />
                   ))
                 )}
@@ -3232,6 +3755,8 @@ function App() {
                 collapsed={collapsedKeys.has(f.key)}
                 selectedRange={selection?.fileKey === f.key ? selection.range : null}
                 busy={busyPath !== null}
+                diffStyle={isDesktop ? "split" : "unified"}
+                themeType={theme}
                 registerEl={registerEl}
                 onSelect={onDiffSelect}
                 onAct={runGit}
@@ -3411,10 +3936,18 @@ function App() {
             </h3>
             <textarea
               autoFocus
-              className="commit-input"
+              ref={commitTextareaRef}
+              className="commit-input auto"
               placeholder="Commit message…"
               value={commitMsg}
-              onChange={(e) => setCommitMsg(e.target.value)}
+              onChange={(e) => {
+                setCommitMsg(e.target.value);
+                captureCommitCaret(e.target);
+                autosizeCommit();
+              }}
+              onClick={(e) => captureCommitCaret(e.currentTarget)}
+              onSelect={(e) => captureCommitCaret(e.currentTarget)}
+              onKeyUp={(e) => captureCommitCaret(e.currentTarget)}
               onKeyDown={(e) => {
                 e.stopPropagation();
                 if (e.key === "Escape") setCommitOpen(false);
@@ -3507,43 +4040,52 @@ function App() {
                       acceptFile(fileSuggestions[fileMenuIndex] ?? fileSuggestions[0]);
                       return;
                     }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setFileToken(null);
-                      return;
-                    }
                   }
-                  if (e.key === "Escape") setClaudeOpen(false);
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    // A live @-token — even with no matches yet, or while the file
+                    // list is still loading — means you wanted the literal "@…"
+                    // text, so cancel just the mention and keep typing. A second
+                    // Esc (no token) closes the dialog.
+                    if (fileToken) setFileToken(null);
+                    else setClaudeOpen(false);
+                    return;
+                  }
+                  // Enter submits; Shift+Enter falls through to the textarea for a
+                  // newline. (⌘/⌃/⌥+Enter also submit, for old muscle memory.)
+                  if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     submitClaude();
                   }
                 }}
               />
-              {fileToken && (
-                <div className="file-menu">
-                  {fileSuggestions.length ? (
-                    fileSuggestions.map((f, i) => (
-                      <button
-                        key={f}
-                        className={`file-opt${i === fileMenuIndex ? " on" : ""}`}
-                        title={f}
-                        onMouseDown={(e) => {
-                          e.preventDefault(); // keep focus in the textarea
-                          acceptFile(f);
-                        }}
-                        onMouseEnter={() => setFileMenuIndex(i)}
-                      >
-                        {f}
-                      </button>
-                    ))
-                  ) : (
-                    <div className="file-menu-empty">
-                      {filesQuery.isPending ? "Loading files…" : "No matching files"}
-                    </div>
-                  )}
-                </div>
-              )}
+              {fileToken &&
+                fileMenuStyle &&
+                createPortal(
+                  <div className="file-menu" style={fileMenuStyle}>
+                    {fileSuggestions.length ? (
+                      fileSuggestions.map((f, i) => (
+                        <button
+                          key={f}
+                          className={`file-opt${i === fileMenuIndex ? " on" : ""}`}
+                          title={f}
+                          onMouseDown={(e) => {
+                            e.preventDefault(); // keep focus in the textarea
+                            acceptFile(f);
+                          }}
+                          onMouseEnter={() => setFileMenuIndex(i)}
+                        >
+                          {f}
+                        </button>
+                      ))
+                    ) : (
+                      <div className="file-menu-empty">
+                        {filesQuery.isPending ? "Loading files…" : "No matching files"}
+                      </div>
+                    )}
+                  </div>,
+                  document.body,
+                )}
             </div>
             <div className="modal-actions">
               <button className="act" disabled={launching} onClick={() => setClaudeOpen(false)}>
@@ -3556,26 +4098,6 @@ function App() {
               >
                 {launching ? "Launching…" : "Launch"}
               </button>
-            </div>
-            <div className="modal-hint">
-              <span>
-                {imgUploading ? (
-                  "Uploading image…"
-                ) : (
-                  <>
-                    Detached <code>claude</code> in tmux
-                  </>
-                )}
-              </span>
-              <span>
-                <kbd>⌃V</kbd> paste image
-              </span>
-              <span>
-                <kbd>⌘↵</kbd> / <kbd>⌥↵</kbd> launch
-              </span>
-              <span>
-                <kbd>esc</kbd> cancel
-              </span>
             </div>
           </div>
         </div>
