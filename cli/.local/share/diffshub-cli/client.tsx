@@ -52,6 +52,7 @@ import {
   Sun,
   Moon,
   Gauge,
+  ExternalLink,
 } from "lucide-react";
 
 type Theme = "light" | "dark";
@@ -1562,6 +1563,7 @@ function App() {
   // Reply composer (Tmux tab) — types a reply into the selected session's pane.
   const [replyText, setReplyText] = useState("");
   const [replySending, setReplySending] = useState(false);
+  const [replyStopping, setReplyStopping] = useState(false);
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   // Hidden <input type=file> behind the mobile "Image" button — the reliable way
@@ -2212,6 +2214,33 @@ function App() {
       setReplySending(false);
     }
   }, [replyText, queryClient]);
+
+  // Stop claude mid-turn in the selected session: send Escape into its pane (the
+  // same key you'd press in the terminal to interrupt). Then refresh so the now-idle
+  // state shows up.
+  const stopSession = useCallback(async () => {
+    const session = selectedSessionRef.current;
+    if (!session) return;
+    setReplyStopping(true);
+    try {
+      const res = await fetch("/api/tmux/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        alert(`stop failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      setTimeout(() => {
+        queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
+        queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+      }, 500);
+    } finally {
+      setReplyStopping(false);
+    }
+  }, [queryClient]);
 
   // Type a single answer keystroke into the selected session's pane, then refresh
   // so the resulting turn (and busy dot) show up. Shared by the plan and question
@@ -4309,6 +4338,14 @@ function App() {
                   </span>
                   <span className="spacer" />
                   <button
+                    className="act stop"
+                    disabled={replyStopping || !selectedBusy}
+                    onClick={stopSession}
+                    title="Interrupt claude (sends Escape)"
+                  >
+                    {replyStopping ? "Stopping…" : "Stop"}
+                  </button>
+                  <button
                     className="act primary"
                     disabled={replySending || !replyText.trim()}
                     onClick={submitReply}
@@ -4446,6 +4483,33 @@ function App() {
                   {view.sha.slice(0, 12)}
                 </button>
               </div>
+              {(() => {
+                const nwo =
+                  meta?.repos.find((r) => r.key === (activeCommit?.repo ?? view.repo))
+                    ?.nameWithOwner || meta?.repos[0]?.nameWithOwner;
+                return nwo ? (
+                  <div className="meta-line gh-links">
+                    <a
+                      className="gh-link"
+                      href={`https://github.com/${nwo}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`Open ${nwo} on GitHub`}
+                    >
+                      <ExternalLink size={13} /> {nwo}
+                    </a>
+                    <a
+                      className="gh-link"
+                      href={`https://github.com/${nwo}/commit/${view.sha}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open this commit on GitHub"
+                    >
+                      <GitCommitHorizontal size={13} /> Commit
+                    </a>
+                  </div>
+                ) : null;
+              })()}
             </>
           )}
           {view.kind === "pr" && (

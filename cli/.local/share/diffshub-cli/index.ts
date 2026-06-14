@@ -1768,6 +1768,8 @@ const page = `<!DOCTYPE html>
   .reply-bar .act { padding: 5px 16px; font-size: 12px; border-radius: 7px; }
   .reply-bar .act.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .reply-bar .act.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .reply-bar .act.stop { background: #b91c1c; border-color: #b91c1c; color: #fff; }
+  .reply-bar .act.stop:hover:not(:disabled) { background: #dc2626; border-color: #dc2626; }
   .reply-hint { font-size: 11px; color: var(--text-faint); display: flex; gap: 10px; flex-wrap: wrap; }
   .reply-hint kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; }
 
@@ -1998,6 +2000,14 @@ const page = `<!DOCTYPE html>
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
   .meta-panel .sha-btn:hover { border-color: var(--accent); color: var(--text); }
+  .meta-panel .gh-links { flex-wrap: wrap; gap: 8px; }
+  .meta-panel .gh-link {
+    display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+    color: var(--text-2); text-decoration: none; font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .meta-panel .gh-link svg { flex: none; }
+  .meta-panel .gh-link:hover { color: var(--accent); text-decoration: underline; }
   .tree-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px 6px;
     --trees-bg-override: var(--bg-sidebar);
     --trees-bg-muted-override: var(--bg-hover);
@@ -2770,6 +2780,27 @@ const server = Bun.serve({
       }
       try {
         await pasteAndSubmit(body.session, body.text);
+        return json({ ok: true });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Interrupt a session's claude pane: send Escape, exactly the key you'd press
+    // in the terminal to stop claude mid-turn. (Sent as a key name, not pasted
+    // text, so it can't go through pasteAndSubmit.)
+    if (req.method === "POST" && url.pathname === "/api/tmux/stop") {
+      let body: { session?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.session !== "string" || !body.session) {
+        return json({ error: "Missing session" }, 400);
+      }
+      try {
+        await $`tmux -L default send-keys -t ${`${body.session}:0.0`} Escape`.quiet();
         return json({ ok: true });
       } catch (e) {
         return json({ error: errText(e) }, 500);
