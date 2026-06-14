@@ -1164,6 +1164,7 @@ const page = `<!DOCTYPE html>
     --accent-bg-hover: #f3f0fc;
     --accent-chip: #ece7fa;
     --accent-card: #fbfaff;
+    --accent-choice-bg: #ffffff;
     --accent-head: #f1edfb;
     --accent-foot: #f7f5fe;
     --accent-key-bg: #e4ddf7;
@@ -1220,6 +1221,7 @@ const page = `<!DOCTYPE html>
     --accent-bg-hover: #332c54;
     --accent-chip: #37305a;
     --accent-card: #1e1b2b;
+    --accent-choice-bg: #262236;
     --accent-head: #262138;
     --accent-foot: #211d31;
     --accent-key-bg: #3a3360;
@@ -1450,7 +1452,7 @@ const page = `<!DOCTYPE html>
   .plan-choice {
     display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
     padding: 8px 11px; border: 1px solid var(--accent-border-4); border-radius: 7px;
-    background: #fff; color: var(--text-on-accent-bg); font-size: 13px; font-family: inherit; cursor: pointer;
+    background: var(--accent-choice-bg); color: var(--text-on-accent-bg); font-size: 13px; font-family: inherit; cursor: pointer;
   }
   .plan-choice:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg-hover); }
   .plan-choice:disabled { cursor: default; opacity: .5; }
@@ -1488,7 +1490,7 @@ const page = `<!DOCTYPE html>
   .q-choice {
     display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left;
     padding: 9px 11px; border: 1px solid var(--accent-border-4); border-radius: 7px;
-    background: #fff; color: var(--text-on-accent-bg); font-size: 13px; font-family: inherit; cursor: pointer;
+    background: var(--accent-choice-bg); color: var(--text-on-accent-bg); font-size: 13px; font-family: inherit; cursor: pointer;
   }
   .q-choice:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg-hover); }
   .q-choice:disabled { cursor: default; }
