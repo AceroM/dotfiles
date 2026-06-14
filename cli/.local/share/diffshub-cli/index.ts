@@ -1261,6 +1261,9 @@ const page = `<!DOCTYPE html>
     background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--text-strong);
   }
   .topbar-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  /* Dedicated kill button (Tmux tab) — sits beside the actions dropdown. */
+  .topbar-kill { color: var(--red); border-color: var(--red-border); }
+  .topbar-kill:hover { background: var(--red-bg); border-color: var(--red); color: var(--red); }
   .topbar-title { flex: 1; min-width: 0; font-weight: 600; font-size: 14px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Mobile "Actions" dropdown — sits beside the details toggle in the top bar. */
@@ -1363,6 +1366,17 @@ const page = `<!DOCTYPE html>
   }
   .transcript-head h2 { font-size: 14px; margin: 0; }
   .transcript-head .t-sub { font-size: 11px; color: var(--text-muted); }
+  /* Top-right toggle: filter the chat down to just the edit diffs. */
+  .edits-toggle {
+    margin-left: auto; align-self: center; cursor: pointer;
+    font-size: 11px; line-height: 1; white-space: nowrap;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--bg-muted); color: var(--text-muted);
+  }
+  .edits-toggle:hover { color: var(--text); border-color: var(--text-muted); }
+  .edits-toggle.on {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
   /* Chat turns */
   .turn { display: flex; gap: 11px; align-items: flex-start; }
   .turn.user { flex-direction: column; align-items: flex-end; gap: 6px; }
@@ -2300,6 +2314,36 @@ const server = Bun.serve({
         );
         const script = `${steps.join("; ")}; rm -f ${shq(msgFile)}`;
         await $`tmux -L bg new-session -d -c ${ws.path} -s ${session} ${script}`.cwd(ws.path).quiet();
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json({ ok: true });
+    }
+
+    // Restart the diffshub server itself. The server runs as `dh` (a foreground
+    // `bun`) inside the `dh` window of the `bg` tmux socket; a manual refresh is
+    // Ctrl-C in that pane then re-typing `dh`. We can't do that inline — sending
+    // C-c kills *this* process mid-request, before it could relaunch anything. So,
+    // like /api/commit, we hand the work to a detached `tmux -L bg` session that
+    // outlives our death: it pauses (so this response flushes first), sends C-c to
+    // drop back to the shell, waits for the port to free, then types `dh` + Enter.
+    if (req.method === "POST" && url.pathname === "/api/restart-server") {
+      try {
+        // Find the pane whose window is named `dh` on the bg socket.
+        const SEP = "\x1f";
+        const target = (
+          await $`tmux -L bg list-panes -a -F ${`#{window_name}${SEP}#{session_name}:#{window_index}.#{pane_index}`}`.quiet().text()
+        )
+          .trim()
+          .split("\n")
+          .map((l) => l.split(SEP))
+          .find(([name]) => name === "dh")?.[1];
+        if (!target) return json({ error: "No `dh` window on the bg tmux socket" }, 404);
+        const session = `diffshub-restart-${Date.now()}`;
+        const script =
+          `sleep 0.4; tmux -L bg send-keys -t ${shq(target)} C-c; ` +
+          `sleep 1; tmux -L bg send-keys -t ${shq(target)} dh Enter`;
+        await $`tmux -L bg new-session -d -s ${session} ${script}`.quiet();
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
