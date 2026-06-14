@@ -4390,7 +4390,9 @@ function App() {
               onKeyUp={(e) => captureCommitCaret(e.currentTarget)}
               onKeyDown={(e) => {
                 e.stopPropagation();
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
+                // Enter submits; Shift+Enter falls through for a newline.
+                // (⌘/⌃/⌥+Enter also submit, for old muscle memory.)
+                if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   submitCommit();
                 }
@@ -4411,17 +4413,6 @@ function App() {
                     ? "Commit & push"
                     : "Nothing staged"}
               </button>
-            </div>
-            <div className="modal-hint">
-              <span>
-                Runs in <code>tmux -L bg</code>
-              </span>
-              <span>
-                <kbd>⌘↵</kbd> / <kbd>⌥↵</kbd> commit
-              </span>
-              <span>
-                <kbd>esc</kbd> cancel
-              </span>
             </div>
           </div>
         </div>
