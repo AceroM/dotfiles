@@ -646,6 +646,10 @@ function summarizeToolInput(name: string, input: any): string {
   if (name === "Grep") return [pick("pattern"), pick("path") && `in ${pick("path")}`].filter(Boolean).join(" ");
   if (name === "Glob") return pick("pattern");
   if (name === "Task") return pick("description") || pick("subagent_type");
+  // The whole plan is carried through verbatim — the client renders it as a
+  // dedicated plan card (full markdown + approve/keep-planning choices) rather
+  // than a one-line tool summary, so it must not be collapsed here.
+  if (name === "ExitPlanMode") return pick("plan");
   if (name === "TodoWrite") return Array.isArray(input.todos) ? `${input.todos.length} todos` : "";
   const s = JSON.stringify(input);
   return s.length > 200 ? s.slice(0, 200) + "…" : s;
@@ -709,7 +713,9 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
               role: "assistant",
               kind: "tool_use",
               tool: b.name,
-              text: trunc(summarizeToolInput(b.name, b.input), 1000),
+              // A plan needs much more room than a one-line tool summary so the
+              // client's plan card can show the whole thing.
+              text: trunc(summarizeToolInput(b.name, b.input), b.name === "ExitPlanMode" ? 16000 : 1000),
               ts,
             });
         }
@@ -1035,7 +1041,25 @@ const page = `<!DOCTYPE html>
   }
   code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   button { font: inherit; color: inherit; }
-  .layout { display: flex; height: 100%; overflow: hidden; }
+  /* Outer shell stacks an (off-desktop) top bar above the 3-column body. */
+  .layout { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .body { flex: 1; display: flex; min-height: 0; position: relative; }
+
+  /* Mobile/tablet top bar — burger (left drawer), title, panel button (right
+     drawer). Hidden on desktop; turned on in the max-width:1024px block below. */
+  .topbar { display: none; }
+  .topbar-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; flex-shrink: 0; cursor: pointer;
+    background: none; border: 1px solid #e4e4e7; border-radius: 8px; color: #3f3f46;
+  }
+  .topbar-btn:hover { background: #f0f0f1; border-color: #d4d4d8; }
+  .topbar-title { flex: 1; min-width: 0; font-weight: 600; font-size: 14px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Drag handle between columns (desktop only — hidden in the mobile block). */
+  .resizer { flex: 0 0 5px; cursor: col-resize; background: transparent; z-index: 6; }
+  .resizer:hover, .resizer:active { background: #d9d2f4; }
 
   .commits {
     width: 300px; min-width: 300px;
@@ -1148,6 +1172,40 @@ const page = `<!DOCTYPE html>
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
     color: #71717a; white-space: pre-wrap; word-break: break-word;
   }
+
+  /* ExitPlanMode plan card — the full plan plus claude's approve/keep-planning
+     choices, mirroring the in-TUI plan prompt. No max-height: the whole plan is
+     meant to be read inline, never trapped in a tiny scroll box. */
+  .plan-card {
+    align-self: stretch; max-width: 100%;
+    border: 1px solid #d9d2f4; border-radius: 10px; overflow: hidden; background: #fbfaff;
+  }
+  .plan-card-head {
+    padding: 8px 14px; font-size: 12.5px; font-weight: 650; color: #6e56cf;
+    background: #f1edfb; border-bottom: 1px solid #e6e0f7;
+  }
+  .plan-card-head::before { content: "◳ "; opacity: .8; }
+  .plan-card-body { padding: 13px 16px; }
+  .plan-card-body .md { font-size: 13.5px; }
+  .plan-card-foot {
+    padding: 11px 13px 13px; border-top: 1px solid #ece8f8; background: #f7f5fe;
+    display: flex; flex-direction: column; gap: 7px;
+  }
+  .plan-q { font-size: 12.5px; font-weight: 600; color: #45405c; margin-bottom: 1px; }
+  .plan-choice {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    padding: 8px 11px; border: 1px solid #ddd6f3; border-radius: 7px;
+    background: #fff; color: #2a2540; font-size: 13px; font-family: inherit; cursor: pointer;
+  }
+  .plan-choice:hover:not(:disabled) { border-color: #6e56cf; background: #f3f0fc; }
+  .plan-choice:disabled { cursor: default; opacity: .5; }
+  .plan-choice-n {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 5px; background: #ece7fa;
+    color: #6e56cf; font-size: 11px; font-weight: 700;
+  }
+  .plan-choice-label { flex: 1; min-width: 0; }
+  .plan-choice-spin { color: #6e56cf; font-size: 12px; }
 
   /* "Claude is working" typing indicator */
   .typing { display: inline-flex; gap: 4px; padding: 6px 2px; }
@@ -1399,7 +1457,27 @@ const page = `<!DOCTYPE html>
     border-left: 1px solid #e4e4e7;
     background: #f7f7f8;
     display: flex; flex-direction: column;
+    position: relative;
   }
+  /* Desktop: collapse the right sidebar to a floating chevron (see .tree-reveal). */
+  .tree-min {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0; cursor: pointer;
+    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 6px; color: #71717a;
+  }
+  .tree-min:hover { color: #18181b; border-color: #d4d4d8; background: #f0f0f1; }
+  /* Floating tab that brings the minimized right sidebar back. */
+  .tree-reveal {
+    position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 40;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 52px; padding: 0; cursor: pointer; color: #6e56cf;
+    background: #ffffff; border: 1px solid #e4e4e7; border-right: none;
+    border-radius: 8px 0 0 8px; box-shadow: -4px 0 14px rgba(0, 0, 0, .08);
+  }
+  .tree-reveal:hover { background: #f3f0fc; color: #5b46b8; }
+  /* leave room for the meta-panel title so the minimize button never overlaps it */
+  .tree .meta-panel { padding-right: 38px; }
   .meta-panel { padding: 14px; border-bottom: 1px solid #e4e4e7; }
   .meta-panel h2 { font-size: 13px; margin: 0 0 6px; line-height: 1.4; word-break: break-word; }
   .meta-panel .meta-line { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #71717a; margin-top: 4px; }
@@ -1428,15 +1506,19 @@ const page = `<!DOCTYPE html>
   }
   .modal {
     width: 460px; max-width: calc(100vw - 40px);
+    max-height: 90vh; overflow-y: auto;
     background: #ffffff; border: 1px solid #e4e4e7; border-radius: 10px;
     padding: 16px; box-shadow: 0 12px 44px rgba(0, 0, 0, .18);
   }
   .modal h3 { margin: 0 0 10px; font-size: 14px; }
   .commit-input {
-    width: 100%; min-height: 92px; resize: vertical;
+    width: 100%; min-height: 92px; max-height: 60vh; resize: vertical; overflow-y: auto;
     background: #ffffff; color: inherit; font: inherit; line-height: 1.5;
     border: 1px solid #d4d4d8; border-radius: 6px; padding: 8px 10px; outline: none;
   }
+  /* The New Claude session composer grows to fit its content via JS (autosizeClaude),
+     so manual drag-resize is off; it scrolls internally once it hits max-height. */
+  .commit-input.auto { resize: none; }
   .commit-input:focus { border-color: #6e56cf; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .modal-actions .primary { background: #6e56cf; border-color: #6e56cf; color: #fff; }
@@ -1556,6 +1638,38 @@ const page = `<!DOCTYPE html>
   }
   .file-opt:hover, .file-opt.on { background: #efe9fb; }
   .file-menu-empty { padding: 8px 9px; color: #a1a1aa; font-size: 12px; }
+
+  /* ---- Desktop (≥1025px): resizable sidebar widths from JS-driven CSS vars,
+     clamped client-side to the min/max in client.tsx. ---- */
+  @media (min-width: 1025px) {
+    .commits { width: var(--left-w, 300px); min-width: var(--left-w, 300px); }
+    .tree { width: var(--right-w, 280px); min-width: var(--right-w, 280px); }
+  }
+
+  /* ---- Mobile/tablet (≤1024px): the top bar appears and both sidebars become
+     off-canvas drawers slid in by the burger / panel buttons. ---- */
+  @media (max-width: 1024px) {
+    .topbar {
+      display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+      padding: 8px 12px; border-bottom: 1px solid #e4e4e7; background: #f7f7f8;
+    }
+    .resizer { display: none; }
+    .tree-min { display: none; }
+
+    /* Drawers: fixed, off-canvas, slide in on transform. They sit below the top
+       bar (top: 51px) and above the scrim. */
+    .commits, .tree {
+      position: fixed; top: 51px; bottom: 0; z-index: 45;
+      width: min(86vw, 380px); min-width: 0;
+      transition: transform .22s ease;
+    }
+    .commits { left: 0; transform: translateX(-100%); }
+    .tree { right: 0; left: auto; transform: translateX(100%); }
+    .layout[data-drawer="left"] .commits { transform: translateX(0); box-shadow: 6px 0 28px rgba(0,0,0,.18); }
+    .layout[data-drawer="right"] .tree { transform: translateX(0); box-shadow: -6px 0 28px rgba(0,0,0,.18); }
+
+    .scrim { position: fixed; top: 51px; inset: 51px 0 0; z-index: 44; background: rgba(0,0,0,.35); }
+  }
 </style>
 </head>
 <body>
