@@ -2122,14 +2122,16 @@ function App() {
   // `x` — stage everything, then hand the commit off to a detached claude
   // session that writes the message itself (and pushes). Skips the `;` dialog
   // for when you'd rather claude author an informative commit from the diff.
-  const commitWithClaude = useCallback(async () => {
+  const commitWithClaude = useCallback(async (deploy = false) => {
     await runGit("stage");
     try {
       const res = await fetch(qd("/api/claude"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: "Commit and push the staged changes with a clear, informative commit message.",
+          prompt: deploy
+            ? "Commit and push the staged changes with a clear, informative commit message, then deploy the changes."
+            : "Commit and push the staged changes with a clear, informative commit message.",
         }),
       });
       if (!res.ok) {
@@ -3136,16 +3138,18 @@ function App() {
       // `x` kills the selected session on the Tmux tab; otherwise it stages
       // everything and launches a claude session to author the commit message and
       // push (Changes view only, and only when there's something to commit).
-      if (e.key === "x") {
+      // `X` (Shift+X) does the same commit+push, then also tells Claude to deploy.
+      if (e.key === "x" || e.key === "X") {
         e.preventDefault();
         if (tab === "tmux") {
-          if (selectedTmux) void killSession(selectedTmux);
+          if (e.key === "x" && selectedTmux) void killSession(selectedTmux);
           return;
         }
         const dirty = (keyCtx.current.changes ?? []).some(
           (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
         );
-        if (keyCtx.current.view.kind === "changes" && dirty) void commitWithClaude();
+        if (keyCtx.current.view.kind === "changes" && dirty)
+          void commitWithClaude(e.key === "X");
         return;
       }
       const down = e.key === "ArrowDown";
@@ -3315,6 +3319,7 @@ function App() {
       { label: "Unstage all", icon: <Minus />, onClick: () => runGit("unstage"), disabled: busyPath !== null },
       { label: "Stash all", icon: <Archive />, onClick: () => runGit("stash"), disabled: busyPath !== null },
       { label: "Commit with Claude", icon: <Bot />, onClick: () => void commitWithClaude(), disabled: !dirty },
+      { label: "Commit & deploy with Claude", icon: <Bot />, onClick: () => void commitWithClaude(true), disabled: !dirty },
       { label: "Commit & push…", icon: <GitCommitHorizontal />, onClick: () => setCommitOpen(true) },
     );
   }
@@ -3862,7 +3867,7 @@ function App() {
           </span>
           {tab === "changes" && (
             <span>
-              <kbd>a</kbd> stage <kbd>A</kbd> all <kbd>x</kbd> commit w/ claude
+              <kbd>a</kbd> stage <kbd>A</kbd> all <kbd>x</kbd> commit w/ claude <kbd>⇧X</kbd> + deploy
             </span>
           )}
           <span>
