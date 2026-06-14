@@ -12,6 +12,9 @@ interface MountOpts {
   dirId: number;
   initialPrompt: string;
   caretAtEnd: boolean;
+  pageUrl: string;
+  // Per-origin preamble prepended to the prompt ({url} → pageUrl); "" = none.
+  context: string;
 }
 
 const HOST_ID = "diffshub-ext-host";
@@ -53,7 +56,7 @@ export function mount(opts: MountOpts) {
   );
 }
 
-function Dialog({ serverUrl, dirId, initialPrompt, caretAtEnd, onClose }: MountOpts & { onClose: () => void }) {
+function Dialog({ serverUrl, dirId, initialPrompt, caretAtEnd, pageUrl, context, onClose }: MountOpts & { onClose: () => void }) {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [launching, setLaunching] = useState(false);
   const [launched, setLaunched] = useState<string | null>(null);
@@ -141,10 +144,11 @@ function Dialog({ serverUrl, dirId, initialPrompt, caretAtEnd, onClose }: MountO
     if (!p) return;
     setLaunching(true);
     try {
+      const preamble = context.trim() ? `${context.replace(/\{url\}/g, pageUrl).trim()}\n\n` : "";
       const res = await fetch(`${serverUrl}/api/claude?dir=${dirId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: p }),
+        body: JSON.stringify({ prompt: preamble + p }),
       });
       const body = (await res.json().catch(() => ({}))) as { session?: string; error?: string };
       if (!res.ok) {
@@ -156,7 +160,7 @@ function Dialog({ serverUrl, dirId, initialPrompt, caretAtEnd, onClose }: MountO
     } finally {
       setLaunching(false);
     }
-  }, [prompt, serverUrl, dirId, onClose]);
+  }, [prompt, serverUrl, dirId, pageUrl, context, onClose]);
 
   return (
     <div
@@ -210,15 +214,14 @@ function Dialog({ serverUrl, dirId, initialPrompt, caretAtEnd, onClose }: MountO
                       acceptFile(fileSuggestions[fileMenuIndex] ?? fileSuggestions[0]);
                       return;
                     }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setFileToken(null);
-                      return;
-                    }
                   }
                   if (e.key === "Escape") {
                     e.preventDefault();
-                    onClose();
+                    // A live @-token (even with no matches yet) means you wanted
+                    // the literal "@…" text — cancel just the mention. A second
+                    // Esc, with no token, closes the dialog.
+                    if (fileToken) setFileToken(null);
+                    else onClose();
                   }
                   if (e.key === "Enter" && (e.metaKey || e.ctrlKey || e.altKey)) {
                     e.preventDefault();

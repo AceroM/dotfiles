@@ -315,11 +315,15 @@ getWorkspace(defaultDirId)
   .catch(() => {});
 
 // Permissive CORS so the Chrome extension's content scripts can call the API
-// from any origin (the server is localhost-only and personal).
+// from any origin (the server is localhost-only and personal). The
+// Allow-Private-Network header keeps Chrome's Private Network Access check from
+// blocking the call when the page is an https origin (e.g. a tailscale URL)
+// reaching back to this http://localhost server.
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Private-Network": "true",
 };
 
 function json(obj: unknown, status = 200): Response {
@@ -414,6 +418,14 @@ async function pickClaudeSessionName(): Promise<string> {
   return name;
 }
 
+// How long to wait between pasting text and sending Enter when replying into an
+// already-running session (/api/tmux/send). Claude's TUI debounces bracketed
+// paste: an Enter that lands in the same beat as the paste is swallowed into the
+// pasted content as a literal newline instead of submitting. Letting the TUI
+// settle first makes the Enter reliably submit. (New sessions sidestep this
+// entirely — see newClaudeSession, which passes the prompt as a CLI arg.)
+const PASTE_SETTLE_MS = 400;
+
 // Paste text into a running pane via a tmux buffer (robust for multi-line input
 // and special characters, unlike literal send-keys) and submit it with Enter.
 async function pasteAndSubmit(name: string, text: string): Promise<void> {
@@ -422,17 +434,9 @@ async function pasteAndSubmit(name: string, text: string): Promise<void> {
   const buf = `diffshub-${name}`;
   await $`tmux -L default load-buffer -b ${buf} ${bufFile}`.quiet();
   await $`tmux -L default paste-buffer -d -b ${buf} -t ${`${name}:0.0`}`.quiet();
+  await Bun.sleep(PASTE_SETTLE_MS);
   await $`tmux -L default send-keys -t ${`${name}:0.0`} Enter`.quiet();
   await $`rm -f ${bufFile}`.quiet();
-}
-
-// Paste the prompt into a freshly-started claude session and submit it. Runs
-// fire-and-forget after a short delay so claude's TUI is ready to receive it.
-async function sendClaudePrompt(name: string, prompt: string): Promise<void> {
-  try {
-    await Bun.sleep(1000);
-    await pasteAndSubmit(name, prompt);
-  } catch {}
 }
 
 // Launch an interactive claude session detached in the directory (mirrors `p`),
@@ -440,13 +444,22 @@ async function sendClaudePrompt(name: string, prompt: string): Promise<void> {
 // We mint the claude session id ourselves (`--session-id`) and stamp it onto the
 // tmux session as the `@claude_session` user option, so the Tmux tab can map this
 // session straight to its ~/.claude transcript (see resolveTranscript).
+//
+// The first prompt is passed as claude's positional CLI argument, NOT pasted into
+// the pane after startup. The old approach (waitForReady + paste-buffer + delayed
+// Enter) raced claude's bracketed-paste debounce: an Enter landing in the same
+// beat as the paste was swallowed as a literal newline, leaving the prompt sitting
+// unsent in the input box — exactly the "it just made a new line" failure. A
+// positional arg has zero timing: claude reads it on boot and submits it itself.
+// Images still work because the upload route embeds /tmp/images/<id> paths as text
+// in the prompt, and claude's Read tool resolves those paths.
 async function newClaudeSession(dir: string, prompt: string): Promise<string> {
   const name = await pickClaudeSessionName();
   const sid = crypto.randomUUID();
-  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}`;
+  const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
+  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${promptArg}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
   await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
-  if (prompt.trim()) void sendClaudePrompt(name, prompt);
   return name;
 }
 
@@ -634,6 +647,49 @@ interface TranscriptMsg {
   text: string;
   tool?: string; // tool name for tool_use
   ts?: string; // ISO timestamp
+  path?: string; // file path for Edit/Write/MultiEdit/Read
+  edits?: { old: string; new: string }[]; // hunks for Edit/Write/MultiEdit diff rendering
+  lang?: string; // language id for a Read tool result's code block
+}
+
+// Map a file path to a language id the diffs highlighter understands. Falls back
+// to "text" (no highlighting) for anything unknown.
+function langFromPath(path: string): string {
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  const map: Record<string, string> = {
+    ts: "ts", tsx: "tsx", js: "js", jsx: "jsx", mjs: "js", cjs: "js",
+    json: "json", jsonc: "json", md: "markdown", mdx: "markdown",
+    css: "css", scss: "scss", less: "less", html: "html", xml: "xml",
+    py: "python", rb: "ruby", go: "go", rs: "rust", java: "java", kt: "kotlin",
+    c: "c", h: "c", cpp: "cpp", cc: "cpp", hpp: "cpp", cs: "csharp",
+    php: "php", swift: "swift", lua: "lua", sql: "sql", graphql: "graphql",
+    sh: "shell", bash: "shell", zsh: "shell", fish: "shell",
+    yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", dockerfile: "docker",
+  };
+  return map[ext] ?? "text";
+}
+
+// Strip claude's cat -n prefixes ("   12\t<code>") off a Read tool result so the
+// raw file content can render in a syntax-highlighted code block. Leaves output
+// that isn't line-numbered (other tools) untouched.
+function stripLineNumbers(text: string): string {
+  const lines = text.split("\n");
+  if (!lines.some((l) => /^\s*\d+\t/.test(l))) return text;
+  return lines.map((l) => l.replace(/^\s*\d+\t/, "")).join("\n");
+}
+
+// Pull the before/after hunks out of an Edit/Write/MultiEdit tool call so the
+// client can render them with the diffs library. Each hunk is capped so a giant
+// edit doesn't bloat the transcript payload.
+function extractEdits(name: string, input: any): { old: string; new: string }[] | undefined {
+  if (input == null || typeof input !== "object") return undefined;
+  const cap = (s: unknown) =>
+    typeof s === "string" ? (s.length > 4000 ? s.slice(0, 4000) + "\n… (truncated)" : s) : "";
+  if (name === "Edit") return [{ old: cap(input.old_string), new: cap(input.new_string) }];
+  if (name === "Write") return [{ old: "", new: cap(input.content) }];
+  if (name === "MultiEdit" && Array.isArray(input.edits))
+    return input.edits.map((e: any) => ({ old: cap(e?.old_string), new: cap(e?.new_string) }));
+  return undefined;
 }
 
 // One-line-ish summary of a tool call's input for the transcript.
@@ -641,7 +697,7 @@ function summarizeToolInput(name: string, input: any): string {
   if (input == null || typeof input !== "object") return "";
   const pick = (k: string) => (typeof input[k] === "string" ? input[k] : "");
   if (name === "Bash") return pick("command");
-  if (name === "Read" || name === "Edit" || name === "Write" || name === "NotebookEdit")
+  if (name === "Read" || name === "Edit" || name === "Write" || name === "MultiEdit" || name === "NotebookEdit")
     return pick("file_path") || pick("notebook_path");
   if (name === "Grep") return [pick("pattern"), pick("path") && `in ${pick("path")}`].filter(Boolean).join(" ");
   if (name === "Glob") return pick("pattern");
@@ -650,6 +706,10 @@ function summarizeToolInput(name: string, input: any): string {
   // dedicated plan card (full markdown + approve/keep-planning choices) rather
   // than a one-line tool summary, so it must not be collapsed here.
   if (name === "ExitPlanMode") return pick("plan");
+  // AskUserQuestion carries its questions + options as structured JSON; the
+  // client parses it into a dedicated question card with selectable answers, so
+  // pass the whole input through verbatim instead of collapsing the options away.
+  if (name === "AskUserQuestion") return JSON.stringify(input);
   if (name === "TodoWrite") return Array.isArray(input.todos) ? `${input.todos.length} todos` : "";
   const s = JSON.stringify(input);
   return s.length > 200 ? s.slice(0, 200) + "…" : s;
@@ -672,6 +732,10 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
   const msgs: TranscriptMsg[] = [];
   let model = "";
   let title = "";
+  // Remember each tool_use by id so its matching tool_result (which arrives in a
+  // later user message) can be enriched — e.g. a Read result rendered as a code
+  // block in the file's language.
+  const toolById = new Map<string, { name: string; path: string }>();
   const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -699,7 +763,23 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
             msgs.push({ role: "user", kind: "text", text: trunc(b.text, 8000), ts });
           else if (b?.type === "tool_result") {
             const t = blockText(b.content) || (typeof b.content === "string" ? b.content : "");
-            msgs.push({ role: "tool", kind: "tool_result", text: trunc(t || "(tool result)", 2000), ts });
+            const src = b.tool_use_id ? toolById.get(b.tool_use_id) : undefined;
+            if (src?.name === "Read") {
+              // Render Read output as a syntax-highlighted code block: strip the
+              // line-number gutter and carry the file's language. Bigger cap than
+              // a generic tool result since the client collapses it by default.
+              msgs.push({
+                role: "tool",
+                kind: "tool_result",
+                tool: "Read",
+                path: src.path || undefined,
+                lang: langFromPath(src.path || ""),
+                text: trunc(stripLineNumbers(t) || "(empty file)", 8000),
+                ts,
+              });
+            } else {
+              msgs.push({ role: "tool", kind: "tool_result", text: trunc(t || "(tool result)", 2000), ts });
+            }
           }
         }
       }
@@ -708,16 +788,32 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
         for (const b of content) {
           if (b?.type === "text" && b.text?.trim())
             msgs.push({ role: "assistant", kind: "text", text: trunc(b.text, 8000), ts });
-          else if (b?.type === "tool_use")
+          else if (b?.type === "tool_use") {
+            const path =
+              typeof b.input?.file_path === "string"
+                ? b.input.file_path
+                : typeof b.input?.notebook_path === "string"
+                  ? b.input.notebook_path
+                  : "";
+            if (typeof b.id === "string") toolById.set(b.id, { name: b.name, path });
             msgs.push({
               role: "assistant",
               kind: "tool_use",
               tool: b.name,
-              // A plan needs much more room than a one-line tool summary so the
-              // client's plan card can show the whole thing.
-              text: trunc(summarizeToolInput(b.name, b.input), b.name === "ExitPlanMode" ? 16000 : 1000),
+              // A plan (and an AskUserQuestion's full option list) needs much
+              // more room than a one-line tool summary so the client's plan /
+              // question card can show the whole thing.
+              text: trunc(
+                summarizeToolInput(b.name, b.input),
+                b.name === "ExitPlanMode" || b.name === "AskUserQuestion" ? 16000 : 1000,
+              ),
+              // Edit/Write/MultiEdit carry their before/after hunks so the client
+              // can render them with the diffs library instead of a one-liner.
+              path: path || undefined,
+              edits: extractEdits(b.name, b.input),
               ts,
             });
+          }
         }
       } else if (typeof content === "string" && content.trim()) {
         msgs.push({ role: "assistant", kind: "text", text: trunc(content, 8000), ts });
@@ -1031,13 +1127,124 @@ const page = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>diffshub</title>
 <style>
-  :root { color-scheme: light; }
+  :root {
+    color-scheme: light;
+    --bg: #ffffff;
+    --bg-raised: #fcfcfd;
+    --bg-soft: #fafafa;
+    --bg-sidebar: #f7f7f8;
+    --bg-muted: #f4f4f5;
+    --bg-hover: #f0f0f1;
+    --bg-tabs: #efeff1;
+    --skel-hi: #f1f1f3;
+    --border-soft: #ececef;
+    --skel-lo: #e8e8eb;
+    --border-code: #e7e7ea;
+    --border: #e4e4e7;
+    --border-strong: #d4d4d8;
+    --text: #18181b;
+    --text-md: #1f2328;
+    --text-strong: #3f3f46;
+    --text-2: #52525b;
+    --text-muted: #71717a;
+    --text-faint: #a1a1aa;
+    --text-hint: #8a8499;
+    --text-desc: #6b6680;
+    --text-on-accent-bg: #2a2540;
+    --text-q: #45405c;
+    --accent: #6e56cf;
+    --accent-hover: #7d68d6;
+    --accent-strong: #5b46b8;
+    --accent-strong-2: #5a45b0;
+    --accent-dim: #8b7fd0;
+    --accent-faint: #a99fe0;
+    --accent-dot: #b8a9ec;
+    --accent-ring: #c4b8ef;
+    --accent-bg: #efe9fb;
+    --accent-bg-hover: #f3f0fc;
+    --accent-chip: #ece7fa;
+    --accent-card: #fbfaff;
+    --accent-head: #f1edfb;
+    --accent-foot: #f7f5fe;
+    --accent-key-bg: #e4ddf7;
+    --accent-border: #d9d2f4;
+    --accent-border-2: #e6e0f7;
+    --accent-border-3: #ece8f8;
+    --accent-border-4: #ddd6f3;
+    --accent-badge-border: #ddd0fb;
+    --red: #dc2626;
+    --red-strong: #b91c1c;
+    --red-bg: #fee2e2;
+    --red-border: #fca5a5;
+    --green: #16a34a;
+    --green-bg: #dcfce7;
+    --green-border: #86efac;
+    --amber: #d97706;
+    --blue: #2563eb;
+    --switch-knob: #ffffff;
+  }
+  html.dark {
+    color-scheme: dark;
+    --bg: #1c1c1f;
+    --bg-raised: #222227;
+    --bg-soft: #202024;
+    --bg-sidebar: #161618;
+    --bg-muted: #26262b;
+    --bg-hover: #2a2a30;
+    --bg-tabs: #202025;
+    --skel-hi: #303037;
+    --border-soft: #2a2a2f;
+    --skel-lo: #242429;
+    --border-code: #33333a;
+    --border: #2e2e34;
+    --border-strong: #3a3a41;
+    --text: #e9e9ec;
+    --text-md: #e3e3e7;
+    --text-strong: #c6c6cd;
+    --text-2: #a9a9b3;
+    --text-muted: #8e8e98;
+    --text-faint: #6d6d77;
+    --text-hint: #7c7689;
+    --text-desc: #9b94ac;
+    --text-on-accent-bg: #e1ddf2;
+    --text-q: #d0cae6;
+    --accent: #8b7fe0;
+    --accent-hover: #9d8fe8;
+    --accent-strong: #a99fe6;
+    --accent-strong-2: #b3aaea;
+    --accent-dim: #9f94dd;
+    --accent-faint: #7d72b8;
+    --accent-dot: #8b7fe0;
+    --accent-ring: #5a4f86;
+    --accent-bg: #2a2447;
+    --accent-bg-hover: #332c54;
+    --accent-chip: #37305a;
+    --accent-card: #1e1b2b;
+    --accent-head: #262138;
+    --accent-foot: #211d31;
+    --accent-key-bg: #3a3360;
+    --accent-border: #3f3866;
+    --accent-border-2: #352e54;
+    --accent-border-3: #2e2845;
+    --accent-border-4: #403963;
+    --accent-badge-border: #3a3160;
+    --red: #f06a6a;
+    --red-strong: #d84a4a;
+    --red-bg: #3a1f1f;
+    --red-border: #7d3b3b;
+    --green: #42b86a;
+    --green-bg: #16331f;
+    --green-border: #2f6e44;
+    --amber: #e3982f;
+    --blue: #5b8def;
+    --switch-knob: #e4e4e7;
+  }
   * { box-sizing: border-box; }
   html, body, #root { height: 100%; margin: 0; }
   body {
     font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: #ffffff;
-    color: #18181b;
+    background: var(--bg);
+    color: var(--text);
   }
   code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   button { font: inherit; color: inherit; }
@@ -1051,45 +1258,61 @@ const page = `<!DOCTYPE html>
   .topbar-btn {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px; flex-shrink: 0; cursor: pointer;
-    background: none; border: 1px solid #e4e4e7; border-radius: 8px; color: #3f3f46;
+    background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--text-strong);
   }
-  .topbar-btn:hover { background: #f0f0f1; border-color: #d4d4d8; }
+  .topbar-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
   .topbar-title { flex: 1; min-width: 0; font-weight: 600; font-size: 14px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Mobile "Actions" dropdown — sits beside the details toggle in the top bar. */
+  .topbar-actions { position: relative; flex-shrink: 0; }
+  .topbar-actions-menu {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 46;
+    min-width: 212px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 12px 34px rgba(0, 0, 0, .18); padding: 5px;
+    display: flex; flex-direction: column;
+  }
+  .topbar-action {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    cursor: pointer; padding: 9px 10px; background: none; border: none;
+    border-radius: 7px; color: var(--text-strong); font-size: 13px;
+  }
+  .topbar-action:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+  .topbar-action:disabled { opacity: .45; cursor: default; }
+  .topbar-action svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--accent); }
 
   /* Drag handle between columns (desktop only — hidden in the mobile block). */
   .resizer { flex: 0 0 5px; cursor: col-resize; background: transparent; z-index: 6; }
-  .resizer:hover, .resizer:active { background: #d9d2f4; }
+  .resizer:hover, .resizer:active { background: var(--accent-border); }
 
   .commits {
     width: 300px; min-width: 300px;
     display: flex; flex-direction: column;
-    border-right: 1px solid #e4e4e7;
-    background: #f7f7f8;
+    border-right: 1px solid var(--border);
+    background: var(--bg-sidebar);
   }
-  .commits-header { padding: 14px 14px 10px; border-bottom: 1px solid #e4e4e7; }
+  .commits-header { padding: 14px 14px 10px; border-bottom: 1px solid var(--border); }
   .commits-header h1 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: baseline; gap: 8px; }
-  .commits-header .repo { font-size: 11px; font-weight: 400; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .commits-header .repo { font-size: 11px; font-weight: 400; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .commits-header input {
     width: 100%; padding: 6px 10px; font-size: 13px;
-    background: #ffffff; color: inherit;
-    border: 1px solid #d4d4d8; border-radius: 6px; outline: none;
+    background: var(--bg); color: inherit;
+    border: 1px solid var(--border-strong); border-radius: 6px; outline: none;
   }
-  .commits-header input:focus { border-color: #6e56cf; }
+  .commits-header input:focus { border-color: var(--accent); }
 
-  .tabs { display: flex; gap: 2px; margin-bottom: 10px; background: #efeff1; border: 1px solid #e4e4e7; border-radius: 7px; padding: 2px; }
+  .tabs { display: flex; gap: 2px; margin-bottom: 10px; background: var(--bg-tabs); border: 1px solid var(--border); border-radius: 7px; padding: 2px; }
   .tabs button {
     flex: 1; height: 30px; cursor: pointer; position: relative;
     display: flex; align-items: center; justify-content: center;
-    background: none; border: none; border-radius: 5px; color: #71717a;
+    background: none; border: none; border-radius: 5px; color: var(--text-muted);
   }
-  .tabs button:hover { color: #18181b; }
-  .tabs button.on { background: #ffffff; color: #6e56cf; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on { background: var(--bg); color: var(--accent); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
   .tabs button svg { width: 16px; height: 16px; display: block; }
   /* count badge (e.g. number of manual patches / tmux sessions) */
   .tabs button .tab-badge {
     position: absolute; top: 1px; right: 4px; min-width: 13px; height: 13px;
-    padding: 0 3px; border-radius: 7px; background: #6e56cf; color: #fff;
+    padding: 0 3px; border-radius: 7px; background: var(--accent); color: #fff;
     font-size: 9px; line-height: 13px; font-weight: 600; text-align: center;
   }
   /* hover tooltip driven by data-tip */
@@ -1109,42 +1332,42 @@ const page = `<!DOCTYPE html>
   /* ---- Tmux tab: session list rows ---- */
   .sess-busy {
     flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%;
-    background: #d4d4d8; margin-right: 7px;
+    background: var(--border-strong); margin-right: 7px;
   }
-  .sess-busy.on { background: #6e56cf; box-shadow: 0 0 0 0 rgba(110,86,207,.5); animation: sessPulse 1.4s ease-in-out infinite; }
+  .sess-busy.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(110,86,207,.5); animation: sessPulse 1.4s ease-in-out infinite; }
   @keyframes sessPulse { 0% { box-shadow: 0 0 0 0 rgba(110,86,207,.5); } 70% { box-shadow: 0 0 0 5px rgba(110,86,207,0); } 100% { box-shadow: 0 0 0 0 rgba(110,86,207,0); } }
   .commit .sess-top { display: flex; align-items: center; }
   .sess-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .commit .sess-task { color: #71717a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; margin-top: 2px; padding-right: 22px; }
-  .commit .sess-cwd { color: #a1a1aa; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; }
+  .commit .sess-task { color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; margin-top: 2px; padding-right: 22px; }
+  .commit .sess-cwd { color: var(--text-faint); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; }
   .kill-btn {
     position: absolute; top: 9px; right: 10px; width: 18px; height: 18px;
     display: flex; align-items: center; justify-content: center; padding: 0;
-    background: none; border: 1px solid #d4d4d8; border-radius: 50%;
-    color: #a1a1aa; font-size: 11px; cursor: pointer; opacity: 0;
+    background: none; border: 1px solid var(--border-strong); border-radius: 50%;
+    color: var(--text-faint); font-size: 11px; cursor: pointer; opacity: 0;
   }
   .commit:hover .kill-btn { opacity: 1; }
-  .kill-btn:hover { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
+  .kill-btn:hover { background: var(--red-bg); border-color: var(--red-border); color: var(--red); }
 
   /* ---- Tmux tab: transcript (ChatGPT-style chat) ---- */
   .transcript { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
   .transcript-head {
-    position: sticky; top: 0; z-index: 5; background: #ffffff;
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
     margin: 0 0 2px; padding: 10px 0;
-    border-bottom: 1px solid #e4e4e7; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
   }
   /* Opaque shield filling any strip above the stuck header (e.g. the scroll
      container's top padding) so scrolled messages never peek above the title. */
   .transcript-head::before {
-    content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 20px; background: #ffffff;
+    content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 20px; background: var(--bg);
   }
   .transcript-head h2 { font-size: 14px; margin: 0; }
-  .transcript-head .t-sub { font-size: 11px; color: #71717a; }
+  .transcript-head .t-sub { font-size: 11px; color: var(--text-muted); }
   /* Chat turns */
   .turn { display: flex; gap: 11px; align-items: flex-start; }
   .turn.user { flex-direction: column; align-items: flex-end; gap: 6px; }
   .turn.user .bubble {
-    max-width: 80%; background: #f4f4f5; color: #18181b;
+    max-width: 80%; background: var(--bg-muted); color: var(--text);
     border-radius: 18px; padding: 10px 15px; text-align: left;
     white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.55;
   }
@@ -1158,64 +1381,125 @@ const page = `<!DOCTYPE html>
     align-self: flex-start; max-width: 100%;
     display: inline-flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
-    color: #52525b; background: #f4f4f5; border: 1px solid #e4e4e7; border-radius: 6px; padding: 4px 9px;
+    color: var(--text-2); background: var(--bg-muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px;
   }
-  .tool-use .tool-name { color: #6e56cf; font-weight: 600; }
+  .tool-use .tool-name { color: var(--accent); font-weight: 600; }
   .tool-use .tool-name::before { content: "⚒ "; opacity: .8; }
-  .tool-use .tool-arg { color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tool-use .tool-arg { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .tool-result {
     align-self: flex-start; max-width: 100%;
-    background: #fafafa; border: 1px solid #e4e4e7; border-radius: 6px;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px;
   }
   .tool-result pre {
     margin: 0; padding: 7px 10px; max-height: 9em; overflow: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
-    color: #71717a; white-space: pre-wrap; word-break: break-word;
+    color: var(--text-muted); white-space: pre-wrap; word-break: break-word;
   }
+
+  /* Edit/Write/MultiEdit shown as inline diff hunks (diffs library), and Read
+     output as a collapsible highlighted code block — same renderers as the
+     Changes tab and chat code blocks. */
+  .chat-diff { align-self: stretch; max-width: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .chat-diff .tool-use { margin-bottom: 1px; }
+  .read-block { align-self: stretch; max-width: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .read-block-head {
+    align-self: flex-start; display: inline-flex; align-items: baseline; gap: 7px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    color: var(--text-2); background: var(--bg-muted); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 9px; cursor: pointer;
+  }
+  .read-block-head:hover { border-color: var(--accent-border); }
+  .read-block-head .tool-name { color: var(--accent); font-weight: 600; }
+  .read-block-head .tool-name::before { content: "📄 "; opacity: .8; }
+  .read-block-head .tool-arg { color: var(--text-muted); }
+  .read-block-head .read-block-meta { color: var(--text-muted); opacity: .75; }
 
   /* ExitPlanMode plan card — the full plan plus claude's approve/keep-planning
      choices, mirroring the in-TUI plan prompt. No max-height: the whole plan is
      meant to be read inline, never trapped in a tiny scroll box. */
   .plan-card {
     align-self: stretch; max-width: 100%;
-    border: 1px solid #d9d2f4; border-radius: 10px; overflow: hidden; background: #fbfaff;
+    border: 1px solid var(--accent-border); border-radius: 10px; overflow: hidden; background: var(--accent-card);
   }
   .plan-card-head {
-    padding: 8px 14px; font-size: 12.5px; font-weight: 650; color: #6e56cf;
-    background: #f1edfb; border-bottom: 1px solid #e6e0f7;
+    padding: 8px 14px; font-size: 12.5px; font-weight: 650; color: var(--accent);
+    background: var(--accent-head); border-bottom: 1px solid var(--accent-border-2);
   }
   .plan-card-head::before { content: "◳ "; opacity: .8; }
   .plan-card-body { padding: 13px 16px; }
   .plan-card-body .md { font-size: 13.5px; }
   .plan-card-foot {
-    padding: 11px 13px 13px; border-top: 1px solid #ece8f8; background: #f7f5fe;
+    padding: 11px 13px 13px; border-top: 1px solid var(--accent-border-3); background: var(--accent-foot);
     display: flex; flex-direction: column; gap: 7px;
   }
-  .plan-q { font-size: 12.5px; font-weight: 600; color: #45405c; margin-bottom: 1px; }
+  .plan-q { font-size: 12.5px; font-weight: 600; color: var(--text-q); margin-bottom: 1px; }
   .plan-choice {
     display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-    padding: 8px 11px; border: 1px solid #ddd6f3; border-radius: 7px;
-    background: #fff; color: #2a2540; font-size: 13px; font-family: inherit; cursor: pointer;
+    padding: 8px 11px; border: 1px solid var(--accent-border-4); border-radius: 7px;
+    background: #fff; color: var(--text-on-accent-bg); font-size: 13px; font-family: inherit; cursor: pointer;
   }
-  .plan-choice:hover:not(:disabled) { border-color: #6e56cf; background: #f3f0fc; }
+  .plan-choice:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg-hover); }
   .plan-choice:disabled { cursor: default; opacity: .5; }
   .plan-choice-n {
     flex: none; display: inline-flex; align-items: center; justify-content: center;
-    width: 18px; height: 18px; border-radius: 5px; background: #ece7fa;
-    color: #6e56cf; font-size: 11px; font-weight: 700;
+    width: 18px; height: 18px; border-radius: 5px; background: var(--accent-chip);
+    color: var(--accent); font-size: 11px; font-weight: 700;
   }
   .plan-choice-label { flex: 1; min-width: 0; }
-  .plan-choice-spin { color: #6e56cf; font-size: 12px; }
+  .plan-choice-spin { color: var(--accent); font-size: 12px; }
+
+  /* AskUserQuestion card — the in-TUI multiple-choice prompt rebuilt for the web:
+     each question with its options (label + description) as selectable answers.
+     Only the live (last-turn) prompt is answerable; clicking an option sends its
+     number into the pane, the same key you'd press in the TUI. Multi-select
+     questions render read-only (a single keypress can't express them) with a hint
+     to answer from the reply box. */
+  .q-card {
+    align-self: stretch; max-width: 100%;
+    border: 1px solid var(--accent-border); border-radius: 10px; overflow: hidden; background: var(--accent-card);
+  }
+  .q-card-head {
+    padding: 8px 14px; font-size: 12.5px; font-weight: 650; color: var(--accent);
+    background: var(--accent-head); border-bottom: 1px solid var(--accent-border-2);
+  }
+  .q-card-head::before { content: "? "; opacity: .8; font-weight: 800; }
+  .q-block { padding: 13px 16px; }
+  .q-block + .q-block { border-top: 1px solid var(--accent-border-3); }
+  .q-tag {
+    display: inline-block; margin-bottom: 7px; padding: 2px 8px; border-radius: 999px;
+    background: var(--accent-chip); color: var(--accent); font-size: 11px; font-weight: 700;
+  }
+  .q-text { font-size: 13.5px; font-weight: 600; color: var(--text-on-accent-bg); margin-bottom: 10px; }
+  .q-opts { display: flex; flex-direction: column; gap: 7px; }
+  .q-choice {
+    display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left;
+    padding: 9px 11px; border: 1px solid var(--accent-border-4); border-radius: 7px;
+    background: #fff; color: var(--text-on-accent-bg); font-size: 13px; font-family: inherit; cursor: pointer;
+  }
+  .q-choice:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg-hover); }
+  .q-choice:disabled { cursor: default; }
+  .q-choice.readonly { opacity: 1; } /* historical/multi-select: shown, just not clickable */
+  .q-choice.readonly:disabled { opacity: .9; }
+  .q-choice-n {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; margin-top: 1px; border-radius: 5px; background: var(--accent-chip);
+    color: var(--accent); font-size: 11px; font-weight: 700;
+  }
+  .q-choice-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .q-choice-label { font-weight: 600; }
+  .q-choice-desc { font-size: 12px; color: var(--text-desc); white-space: pre-wrap; word-break: break-word; }
+  .q-choice-spin { flex: none; align-self: center; color: var(--accent); font-size: 12px; }
+  .q-multi { margin-top: 8px; font-size: 11.5px; color: var(--text-hint); }
 
   /* "Claude is working" typing indicator */
   .typing { display: inline-flex; gap: 4px; padding: 6px 2px; }
-  .typing span { width: 6px; height: 6px; border-radius: 50%; background: #b8a9ec; animation: typing 1.2s infinite ease-in-out; }
+  .typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-dot); animation: typing 1.2s infinite ease-in-out; }
   .typing span:nth-child(2) { animation-delay: .15s; }
   .typing span:nth-child(3) { animation-delay: .3s; }
   @keyframes typing { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
 
   /* Markdown rendering of assistant messages */
-  .md { font-size: 14px; line-height: 1.62; color: #1f2328; word-break: break-word; }
+  .md { font-size: 14px; line-height: 1.62; color: var(--text-md); word-break: break-word; }
   .md > :first-child { margin-top: 0; }
   .md > :last-child { margin-bottom: 0; }
   .md p { margin: 0 0 10px; white-space: pre-wrap; }
@@ -1225,50 +1509,56 @@ const page = `<!DOCTYPE html>
   .md .md-h.h3, .md .md-h.h4, .md .md-h.h5, .md .md-h.h6 { font-size: 14px; }
   .md ul, .md ol { margin: 0 0 10px; padding-left: 22px; }
   .md li { margin: 3px 0; }
-  .md a { color: #6e56cf; text-decoration: underline; }
-  .md a:hover { color: #5a45b0; }
+  .md a { color: var(--accent); text-decoration: underline; }
+  .md a:hover { color: var(--accent-strong-2); }
   .md strong { font-weight: 650; }
   .md em { font-style: italic; }
-  .md blockquote.md-quote { margin: 0 0 10px; padding: 2px 0 2px 13px; border-left: 3px solid #e4e4e7; color: #52525b; }
-  .md hr.md-hr { border: none; border-top: 1px solid #e4e4e7; margin: 16px 0; }
+  .md blockquote.md-quote { margin: 0 0 10px; padding: 2px 0 2px 13px; border-left: 3px solid var(--border); color: var(--text-2); }
+  .md hr.md-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
   .md-code-inline {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em;
-    background: #f0f0f1; border: 1px solid #e7e7ea; border-radius: 5px; padding: .5px 5px;
+    background: var(--bg-hover); border: 1px solid var(--border-code); border-radius: 5px; padding: .5px 5px;
   }
   /* Fenced code blocks */
-  .md-code { margin: 0 0 10px; border: 1px solid #e4e4e7; border-radius: 8px; overflow: hidden; background: #fcfcfd; }
+  .md-code { margin: 0 0 10px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-raised); }
   .md-code-head {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 4px 8px 4px 11px; background: #f4f4f5; border-bottom: 1px solid #e4e4e7;
-    font-size: 11px; color: #71717a;
+    padding: 4px 8px 4px 11px; background: var(--bg-muted); border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted);
   }
   .md-code-head .lang { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: lowercase; }
-  .md-code-head .copy { background: none; border: none; cursor: pointer; color: #71717a; font-size: 11px; padding: 2px 7px; border-radius: 5px; }
-  .md-code-head .copy:hover { background: #e4e4e7; color: #18181b; }
+  .md-code-head .copy { background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 11px; padding: 2px 7px; border-radius: 5px; }
+  .md-code-head .copy:hover { background: var(--border); color: var(--text); }
   .md-code pre { margin: 0; padding: 11px 12px; overflow-x: auto; }
-  .md-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.55; color: #1f2328; white-space: pre; }
-  .transcript-empty { color: #71717a; padding: 40px 0; text-align: center; }
+  .md-code code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.55; color: var(--text-md); white-space: pre; }
+  /* Shiki-highlighted blocks reuse the diff viewer's pierre themes. Tokens carry
+     both light + dark colors as CSS vars (defaultColor:false); pick by .dark and
+     let the .md-code card background show through. */
+  .md-code .shiki { background: transparent !important; }
+  .md-code .shiki, .md-code .shiki span { color: var(--shiki-light); }
+  html.dark .md-code .shiki, html.dark .md-code .shiki span { color: var(--shiki-dark); }
+  .transcript-empty { color: var(--text-muted); padding: 40px 0; text-align: center; }
 
   /* Reply composer pinned to the bottom of the transcript column. Mirrors the
      New Claude session textarea: multi-line, ⌃V image paste, ↵ to send. */
   .reply-box {
     position: sticky; bottom: 0; z-index: 4;
     margin-top: 6px; padding: 10px 0 14px;
-    background: #ffffff; border-top: 1px solid #e4e4e7;
+    background: var(--bg); border-top: 1px solid var(--border);
   }
   .reply-input {
     width: 100%; min-height: 46px; max-height: 220px; resize: vertical;
-    background: #ffffff; color: inherit; font: inherit; line-height: 1.5;
-    border: 1px solid #d4d4d8; border-radius: 8px; padding: 8px 10px; outline: none;
+    background: var(--bg); color: inherit; font: inherit; line-height: 1.5;
+    border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; outline: none;
   }
-  .reply-input:focus { border-color: #6e56cf; }
+  .reply-input:focus { border-color: var(--accent); }
   .reply-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .reply-bar .spacer { flex: 1; }
   .reply-bar .act { padding: 5px 16px; font-size: 12px; border-radius: 7px; }
-  .reply-bar .act.primary { background: #6e56cf; border-color: #6e56cf; color: #fff; }
-  .reply-bar .act.primary:hover:not(:disabled) { background: #7d68d6; border-color: #7d68d6; }
-  .reply-hint { font-size: 11px; color: #a1a1aa; display: flex; gap: 10px; flex-wrap: wrap; }
-  .reply-hint kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; }
+  .reply-bar .act.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .reply-bar .act.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .reply-hint { font-size: 11px; color: var(--text-faint); display: flex; gap: 10px; flex-wrap: wrap; }
+  .reply-hint kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; }
 
   .commit-list { flex: 1; overflow-y: auto; padding: 6px 0; }
   .commit {
@@ -1276,8 +1566,8 @@ const page = `<!DOCTYPE html>
     padding: 8px 14px; border: none; border-left: 3px solid transparent;
     background: none; position: relative;
   }
-  .commit:hover { background: #f0f0f1; }
-  .commit.active { background: #efe9fb; border-left-color: #6e56cf; }
+  .commit:hover { background: var(--bg-hover); }
+  .commit.active { background: var(--accent-bg); border-left-color: var(--accent); }
   .commit-msg {
     display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-weight: 500; margin-bottom: 3px; padding-right: 22px;
@@ -1285,15 +1575,15 @@ const page = `<!DOCTYPE html>
   .rev-btn {
     position: absolute; top: 7px; right: 10px; width: 18px; height: 18px;
     display: flex; align-items: center; justify-content: center; padding: 0;
-    background: none; border: 1px solid #d4d4d8; border-radius: 50%;
-    color: #a1a1aa; font-size: 10px; cursor: pointer; opacity: 0;
+    background: none; border: 1px solid var(--border-strong); border-radius: 50%;
+    color: var(--text-faint); font-size: 10px; cursor: pointer; opacity: 0;
   }
   .commit:hover .rev-btn { opacity: 1; }
-  .commit.reviewed .rev-btn { opacity: 1; background: #dcfce7; border-color: #86efac; color: #16a34a; }
-  .commit.reviewed .commit-msg { color: #a1a1aa; font-weight: 400; }
+  .commit.reviewed .rev-btn { opacity: 1; background: var(--green-bg); border-color: var(--green-border); color: var(--green); }
+  .commit.reviewed .commit-msg { color: var(--text-faint); font-weight: 400; }
   .spinner {
     width: 34px; height: 34px; margin: 0 auto; border-radius: 50%;
-    border: 4px solid #e4e4e7; border-top-color: #6e56cf;
+    border: 4px solid var(--border); border-top-color: var(--accent);
     animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -1301,7 +1591,7 @@ const page = `<!DOCTYPE html>
      visible area rather than tucking it up near the top. */
   .loading-wrap {
     display: flex; align-items: center; justify-content: center;
-    min-height: 75vh; color: #71717a;
+    min-height: 75vh; color: var(--text-muted);
   }
 
   /* Sidebar skeleton placeholders, shown while a tab's list is loading */
@@ -1309,7 +1599,7 @@ const page = `<!DOCTYPE html>
   .skel-row { padding: 8px 14px; }
   .skel-bar {
     border-radius: 4px;
-    background-image: linear-gradient(90deg, #e8e8eb, #f1f1f3, #e8e8eb);
+    background-image: linear-gradient(90deg, var(--skel-lo), var(--skel-hi), var(--skel-lo));
     background-size: 200% 100%;
     animation: shimmer 1.4s ease-in-out infinite;
   }
@@ -1321,59 +1611,67 @@ const page = `<!DOCTYPE html>
      lines, so a diff that's still being computed server-side renders its shape
      instantly instead of a blank/spinner gap. */
   .skel-diff { padding: 4px 2px; }
-  .skel-file { margin-bottom: 18px; border: 1px solid #ececef; border-radius: 8px; overflow: hidden; }
-  .skel-file-head { padding: 10px 12px; background: #f7f7f8; border-bottom: 1px solid #ececef; }
+  .skel-file { margin-bottom: 18px; border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden; }
+  .skel-file-head { padding: 10px 12px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border-soft); }
   .skel-file-head .skel-bar { height: 9px; }
   .skel-code-line { padding: 5px 12px; }
   .skel-code-line .skel-bar.code { height: 8px; }
-  .commit-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #71717a; }
+  .commit-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
   .commit-meta img { width: 14px; height: 14px; border-radius: 50%; }
-  .commit-meta code { color: #71717a; }
+  .commit-meta code { color: var(--text-muted); }
   .commit-ago { margin-left: auto; white-space: nowrap; }
   .repo-badge {
     font-size: 10px; line-height: 1.5; padding: 0 5px; border-radius: 4px;
-    background: #efe9fb; color: #6e56cf; border: 1px solid #ddd0fb;
+    background: var(--accent-bg); color: var(--accent); border: 1px solid var(--accent-badge-border);
     white-space: nowrap; flex-shrink: 0;
   }
-  .modal-repos { color: #6e56cf; font-weight: 600; }
-  .pr-stats .add { color: #16a34a; }
-  .pr-stats .del { color: #dc2626; }
+  .modal-repos { color: var(--accent); font-weight: 600; }
+  .pr-stats .add { color: var(--green); }
+  .pr-stats .del { color: var(--red); }
   .load-more {
     display: block; width: calc(100% - 28px); margin: 8px 14px; padding: 6px;
-    background: #f4f4f5; color: #71717a; border: 1px solid #e4e4e7;
+    background: var(--bg-muted); color: var(--text-muted); border: 1px solid var(--border);
     border-radius: 6px; cursor: pointer; font-size: 12px;
   }
-  .load-more:hover { color: #18181b; }
-  .side-note { color: #71717a; padding: 16px 14px; }
-  .side-note.error { color: #dc2626; white-space: pre-wrap; }
+  .load-more:hover { color: var(--text); }
+  .side-note { color: var(--text-muted); padding: 16px 14px; }
+  .side-note.error { color: var(--red); white-space: pre-wrap; }
 
   .kbd-hints {
-    padding: 8px 14px; border-top: 1px solid #e4e4e7;
-    font-size: 11px; color: #a1a1aa; display: flex; gap: 10px; flex-wrap: wrap;
+    padding: 8px 14px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-faint); display: flex; gap: 10px; flex-wrap: wrap;
   }
-  .kbd-hints kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; font-size: 10px; }
+  .kbd-hints kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; font-size: 10px; }
+  /* Light/dark toggle pill in the sidebar footer (also the t key / Actions menu). */
+  .theme-toggle {
+    display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+    padding: 2px 8px; font-size: 11px; color: var(--text-2);
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 6px;
+  }
+  .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+  .theme-toggle svg { width: 13px; height: 13px; }
 
   .bulk-actions { display: flex; gap: 6px; padding: 8px 14px; }
   .bulk-actions button {
     flex: 1; padding: 5px 0; font-size: 11px; cursor: pointer;
-    background: #ffffff; border: 1px solid #d4d4d8; border-radius: 6px; color: #52525b;
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text-2);
   }
-  .bulk-actions button:hover:not(:disabled) { color: #18181b; border-color: #6e56cf; }
+  .bulk-actions button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
   .bulk-actions button:disabled { opacity: .5; cursor: default; }
 
   .auto-refresh-bar {
     display: flex; align-items: center; gap: 8px;
-    padding: 10px 14px 2px; font-size: 11px; color: #71717a;
+    padding: 10px 14px 2px; font-size: 11px; color: var(--text-muted);
   }
   .switch {
     position: relative; width: 30px; height: 17px; flex-shrink: 0; padding: 0;
-    background: #d4d4d8; border: none; border-radius: 999px; cursor: pointer;
+    background: var(--border-strong); border: none; border-radius: 999px; cursor: pointer;
     transition: background .15s;
   }
-  .switch.on { background: #6e56cf; }
+  .switch.on { background: var(--accent); }
   .switch-knob {
     position: absolute; top: 2px; left: 2px; width: 13px; height: 13px;
-    background: #ffffff; border-radius: 50%; transition: transform .15s;
+    background: var(--switch-knob); border-radius: 50%; transition: transform .15s;
   }
   .switch.on .switch-knob { transform: translateX(13px); }
   .switch-state { min-width: 18px; font-variant-numeric: tabular-nums; }
@@ -1381,31 +1679,31 @@ const page = `<!DOCTYPE html>
   .wt-label {
     display: flex; align-items: center; gap: 6px; width: 100%;
     padding: 12px 14px 2px; font-size: 11px; font-weight: 700;
-    color: #6e56cf; letter-spacing: .02em;
+    color: var(--accent); letter-spacing: .02em;
     background: none; border: none; cursor: pointer;
     font-family: inherit; text-align: left;
   }
-  .wt-label:hover { color: #5b46b8; }
+  .wt-label:hover { color: var(--accent-strong); }
   .wt-label::before { content: "⎇"; opacity: .75; font-size: 12px; }
   .wt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wt-count {
     margin-left: auto; flex-shrink: 0; font-size: 10px; font-weight: 600;
-    color: #8b7fd0; background: #efe9fb; border-radius: 999px; padding: 0 6px;
+    color: var(--accent-dim); background: var(--accent-bg); border-radius: 999px; padding: 0 6px;
   }
-  .wt-caret { flex-shrink: 0; font-size: 9px; color: #a99fe0; transition: transform .12s; }
+  .wt-caret { flex-shrink: 0; font-size: 9px; color: var(--accent-faint); transition: transform .12s; }
   .wt-label.collapsed .wt-caret { transform: rotate(-90deg); }
   .wt-label + .group-label { padding-top: 4px; }
   .group-label {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 14px 4px; font-size: 11px; font-weight: 600;
-    color: #71717a; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em;
   }
   .group-act {
     padding: 2px 8px; font-size: 10px; cursor: pointer;
     text-transform: none; letter-spacing: 0; flex-shrink: 0;
-    background: #ffffff; border: 1px solid #d4d4d8; border-radius: 5px; color: #52525b;
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 5px; color: var(--text-2);
   }
-  .group-act:hover:not(:disabled) { color: #18181b; border-color: #6e56cf; }
+  .group-act:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
   .group-act:disabled { opacity: .5; cursor: default; }
   .change-row {
     display: flex; align-items: center; gap: 8px;
@@ -1414,21 +1712,21 @@ const page = `<!DOCTYPE html>
        them on :hover never reflows the row (no layout shift). */
     min-height: 30px;
   }
-  .change-row:hover { background: #f0f0f1; }
+  .change-row:hover { background: var(--bg-hover); }
   .change-row .st { width: 12px; text-align: center; font-size: 11px; flex-shrink: 0; }
-  .st-added, .st-untracked { color: #16a34a; }
-  .st-modified { color: #d97706; }
-  .st-deleted { color: #dc2626; }
-  .st-renamed { color: #2563eb; }
+  .st-added, .st-untracked { color: var(--green); }
+  .st-modified { color: var(--amber); }
+  .st-deleted { color: var(--red); }
+  .st-renamed { color: var(--blue); }
   .change-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
   .change-acts { display: none; gap: 4px; flex-shrink: 0; }
   .change-row:hover .change-acts { display: flex; }
 
   .act {
     padding: 1px 7px; font-size: 11px; cursor: pointer;
-    background: #f4f4f5; border: 1px solid #d4d4d8; border-radius: 5px; color: #52525b;
+    background: var(--bg-muted); border: 1px solid var(--border-strong); border-radius: 5px; color: var(--text-2);
   }
-  .act:hover:not(:disabled) { color: #18181b; border-color: #6e56cf; }
+  .act:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
   .act:disabled { opacity: .5; cursor: default; }
   .hdr-acts { display: inline-flex; gap: 5px; margin-left: 10px; }
 
@@ -1436,26 +1734,26 @@ const page = `<!DOCTYPE html>
   /* Tmux tab: drop the top/bottom padding so the sticky title and the reply
      composer sit flush against the column edges. */
   .diffs.tmux { padding: 0 20px; }
-  .section-label { font-size: 12px; color: #71717a; text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
+  .section-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
   .file-diff.viewing::before {
     content: ""; position: absolute; left: -10px; top: 0; bottom: 0;
-    width: 3px; border-radius: 2px; background: #6e56cf;
+    width: 3px; border-radius: 2px; background: var(--accent);
   }
-  .empty { color: #71717a; padding: 40px 0; text-align: center; }
-  .empty.error { color: #dc2626; white-space: pre-wrap; text-align: left; }
+  .empty { color: var(--text-muted); padding: 40px 0; text-align: center; }
+  .empty.error { color: var(--red); white-space: pre-wrap; text-align: left; }
   .opaque-file {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 14px; border: 1px solid #e4e4e7; border-radius: 8px;
-    color: #71717a; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+    padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text-muted); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
   }
   .opaque-open { cursor: pointer; }
-  .opaque-open:hover { color: #18181b; text-decoration: underline; }
+  .opaque-open:hover { color: var(--text); text-decoration: underline; }
 
   .tree {
     width: 280px; min-width: 280px;
-    border-left: 1px solid #e4e4e7;
-    background: #f7f7f8;
+    border-left: 1px solid var(--border);
+    background: var(--bg-sidebar);
     display: flex; flex-direction: column;
     position: relative;
   }
@@ -1464,38 +1762,38 @@ const page = `<!DOCTYPE html>
     position: absolute; top: 8px; right: 8px; z-index: 2;
     display: inline-flex; align-items: center; justify-content: center;
     width: 24px; height: 24px; padding: 0; cursor: pointer;
-    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 6px; color: #71717a;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted);
   }
-  .tree-min:hover { color: #18181b; border-color: #d4d4d8; background: #f0f0f1; }
+  .tree-min:hover { color: var(--text); border-color: var(--border-strong); background: var(--bg-hover); }
   /* Floating tab that brings the minimized right sidebar back. */
   .tree-reveal {
     position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 40;
     display: inline-flex; align-items: center; justify-content: center;
-    width: 22px; height: 52px; padding: 0; cursor: pointer; color: #6e56cf;
-    background: #ffffff; border: 1px solid #e4e4e7; border-right: none;
+    width: 22px; height: 52px; padding: 0; cursor: pointer; color: var(--accent);
+    background: var(--bg); border: 1px solid var(--border); border-right: none;
     border-radius: 8px 0 0 8px; box-shadow: -4px 0 14px rgba(0, 0, 0, .08);
   }
-  .tree-reveal:hover { background: #f3f0fc; color: #5b46b8; }
+  .tree-reveal:hover { background: var(--accent-bg-hover); color: var(--accent-strong); }
   /* leave room for the meta-panel title so the minimize button never overlaps it */
   .tree .meta-panel { padding-right: 38px; }
-  .meta-panel { padding: 14px; border-bottom: 1px solid #e4e4e7; }
+  .meta-panel { padding: 14px; border-bottom: 1px solid var(--border); }
   .meta-panel h2 { font-size: 13px; margin: 0 0 6px; line-height: 1.4; word-break: break-word; }
-  .meta-panel .meta-line { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #71717a; margin-top: 4px; }
+  .meta-panel .meta-line { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); margin-top: 4px; }
   .meta-panel .meta-line img { width: 14px; height: 14px; border-radius: 50%; }
   .meta-panel .sha-btn {
-    background: #ffffff; border: 1px solid #d4d4d8; border-radius: 5px;
-    padding: 1px 7px; font-size: 11px; cursor: pointer; color: #52525b;
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 5px;
+    padding: 1px 7px; font-size: 11px; cursor: pointer; color: var(--text-2);
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
-  .meta-panel .sha-btn:hover { border-color: #6e56cf; color: #18181b; }
+  .meta-panel .sha-btn:hover { border-color: var(--accent); color: var(--text); }
   .tree-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px 6px;
-    --trees-bg-override: #f7f7f8;
-    --trees-bg-muted-override: #f0f0f1;
-    --trees-fg-override: #18181b;
-    --trees-fg-muted-override: #71717a;
-    --trees-border-color-override: #e4e4e7;
-    --trees-selected-bg-override: #efe9fb;
-    --trees-accent-override: #6e56cf;
+    --trees-bg-override: var(--bg-sidebar);
+    --trees-bg-muted-override: var(--bg-hover);
+    --trees-fg-override: var(--text);
+    --trees-fg-muted-override: var(--text-muted);
+    --trees-border-color-override: var(--border);
+    --trees-selected-bg-override: var(--accent-bg);
+    --trees-accent-override: var(--accent);
   }
   .tree-body > * { flex: 1; min-height: 0; }
 
@@ -1507,25 +1805,25 @@ const page = `<!DOCTYPE html>
   .modal {
     width: 460px; max-width: calc(100vw - 40px);
     max-height: 90vh; overflow-y: auto;
-    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 10px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
     padding: 16px; box-shadow: 0 12px 44px rgba(0, 0, 0, .18);
   }
   .modal h3 { margin: 0 0 10px; font-size: 14px; }
   .commit-input {
     width: 100%; min-height: 92px; max-height: 60vh; resize: vertical; overflow-y: auto;
-    background: #ffffff; color: inherit; font: inherit; line-height: 1.5;
-    border: 1px solid #d4d4d8; border-radius: 6px; padding: 8px 10px; outline: none;
+    background: var(--bg); color: inherit; font: inherit; line-height: 1.5;
+    border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px 10px; outline: none;
   }
   /* The New Claude session composer grows to fit its content via JS (autosizeClaude),
      so manual drag-resize is off; it scrolls internally once it hits max-height. */
   .commit-input.auto { resize: none; }
-  .commit-input:focus { border-color: #6e56cf; }
+  .commit-input:focus { border-color: var(--accent); }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-  .modal-actions .primary { background: #6e56cf; border-color: #6e56cf; color: #fff; }
-  .modal-actions .primary:hover:not(:disabled) { background: #7d68d6; border-color: #7d68d6; }
-  .modal-hint { margin-top: 10px; font-size: 11px; color: #a1a1aa; display: flex; gap: 8px; flex-wrap: wrap; }
-  .modal-hint kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; }
-  .modal-hint code { color: #71717a; }
+  .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .modal-actions .primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .modal-hint { margin-top: 10px; font-size: 11px; color: var(--text-faint); display: flex; gap: 8px; flex-wrap: wrap; }
+  .modal-hint kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; }
+  .modal-hint code { color: var(--text-muted); }
 
   /* Floating action bar shown when diff lines are highlighted */
   .sel-bar {
@@ -1558,77 +1856,79 @@ const page = `<!DOCTYPE html>
   .dir-trigger {
     display: flex; align-items: center; gap: 6px; width: 100%;
     padding: 7px 10px; cursor: pointer; text-align: left;
-    background: #ffffff; border: 1px solid #d4d4d8; border-radius: 7px; color: #18181b;
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 7px; color: var(--text);
   }
-  .dir-trigger:hover { border-color: #6e56cf; }
+  .dir-trigger:hover { border-color: var(--accent); }
   .dir-trigger .dir-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dir-trigger .dir-sub { font-size: 11px; font-weight: 400; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir-trigger .dir-sub { font-size: 11px; font-weight: 400; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dir-trigger .dir-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-  .dir-trigger .dir-caret { margin-left: auto; color: #a1a1aa; font-size: 10px; flex-shrink: 0; }
+  .dir-trigger .dir-caret { margin-left: auto; color: var(--text-faint); font-size: 10px; flex-shrink: 0; }
   .dir-menu {
     position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30;
-    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 10px 34px rgba(0, 0, 0, .16); padding: 4px;
     display: flex; flex-direction: column; max-height: 60vh;
   }
   /* Combobox filter, pinned above the scrolling directory list. */
   .dir-search {
     width: 100%; box-sizing: border-box; margin: 0 0 6px; padding: 6px 9px;
-    border: 1px solid #d4d4d8; border-radius: 6px; font: inherit; color: #18181b; outline: none;
+    border: 1px solid var(--border-strong); border-radius: 6px; font: inherit; color: var(--text); outline: none;
   }
-  .dir-search:focus { border-color: #6e56cf; }
+  .dir-search:focus { border-color: var(--accent); }
   .dir-list { overflow-y: auto; min-height: 0; }
-  .dir-empty { padding: 8px 9px; color: #a1a1aa; font-size: 12px; }
+  .dir-empty { padding: 8px 9px; color: var(--text-faint); font-size: 12px; }
   .dir-item {
     display: flex; flex-direction: row; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer;
     padding: 6px 9px; background: none; border: none; border-radius: 6px;
   }
-  .dir-item:hover { background: #f0f0f1; }
-  .dir-item.on { background: #efe9fb; }
+  .dir-item:hover { background: var(--bg-hover); }
+  .dir-item.on { background: var(--accent-bg); }
   /* Keyboard-highlighted row in the combobox (ring so it reads even on .on). */
-  .dir-item.active { background: #f0f0f1; box-shadow: inset 0 0 0 1px #c4b8ef; }
+  .dir-item.active { background: var(--bg-hover); box-shadow: inset 0 0 0 1px var(--accent-ring); }
   .dir-item .dir-item-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
   .dir-item .dir-item-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dir-item .dir-item-path { font-size: 11px; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir-item .dir-item-path { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dir-item .dir-item-key {
-    flex-shrink: 0; font-size: 10px; color: #a1a1aa; font-variant-numeric: tabular-nums;
-    background: #f0f0f1; border-radius: 4px; padding: 1px 5px;
+    flex-shrink: 0; font-size: 10px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+    background: var(--bg-hover); border-radius: 4px; padding: 1px 5px;
   }
-  .dir-item.on .dir-item-key, .dir-item.active .dir-item-key { background: #e4ddf7; color: #6e56cf; }
-  .dir-menu-sep { height: 1px; background: #e4e4e7; margin: 4px 2px; }
+  .dir-item.on .dir-item-key, .dir-item.active .dir-item-key { background: var(--accent-key-bg); color: var(--accent); }
+  .dir-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
   .dir-menu-act {
     display: block; width: 100%; text-align: left; cursor: pointer;
-    padding: 6px 9px; background: none; border: none; border-radius: 6px; color: #52525b;
+    padding: 6px 9px; background: none; border: none; border-radius: 6px; color: var(--text-2);
   }
-  .dir-menu-act:hover { background: #f0f0f1; color: #18181b; }
+  .dir-menu-act:hover { background: var(--bg-hover); color: var(--text); }
 
   /* Settings dialog (manage directories) */
   .modal.wide { width: 560px; }
   .dir-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; max-height: 46vh; overflow-y: auto; }
   .dir-row {
     display: flex; align-items: center; gap: 8px;
-    padding: 8px 10px; border: 1px solid #e4e4e7; border-radius: 8px;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
   }
   .dir-row .dir-row-text { flex: 1; min-width: 0; }
   .dir-row .dir-row-name { font-weight: 600; }
-  .dir-row .dir-row-meta { font-size: 11px; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir-row .dir-row-meta { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dir-form { display: grid; grid-template-columns: 90px 1fr; gap: 8px 10px; align-items: center; }
-  .dir-form label { font-size: 12px; color: #71717a; }
+  .dir-form label { font-size: 12px; color: var(--text-muted); }
   .dir-form input {
     width: 100%; padding: 6px 9px; font: inherit; font-size: 13px;
-    background: #ffffff; color: inherit; border: 1px solid #d4d4d8; border-radius: 6px; outline: none;
+    background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 6px; outline: none;
   }
-  .dir-form input:focus { border-color: #6e56cf; }
-  .dir-form .dir-form-hint { grid-column: 2; font-size: 11px; color: #a1a1aa; margin-top: -2px; }
-  .modal-error { margin-top: 10px; color: #dc2626; font-size: 12px; white-space: pre-wrap; }
+  .dir-form input:focus { border-color: var(--accent); }
+  .dir-form .dir-form-hint { grid-column: 2; font-size: 11px; color: var(--text-faint); margin-top: -2px; }
+  .modal-error { margin-top: 10px; color: var(--red); font-size: 12px; white-space: pre-wrap; }
 
-  /* @-file autocomplete popup in the New Claude session dialog */
+  /* @-file autocomplete popup in the New Claude session dialog. Portaled to
+     <body> with fixed coords (left/top|bottom/width/max-height set inline from
+     the textarea's rect) so the modal's overflow never clips it. */
   .file-menu-wrap { position: relative; }
   .file-menu {
-    position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 60;
-    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 8px;
+    position: fixed; z-index: 60;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 10px 34px rgba(0, 0, 0, .18); padding: 4px;
-    max-height: 240px; overflow-y: auto;
+    overflow-y: auto;
   }
   .file-opt {
     display: block; width: 100%; text-align: left; cursor: pointer;
@@ -1636,8 +1936,8 @@ const page = `<!DOCTYPE html>
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
   }
-  .file-opt:hover, .file-opt.on { background: #efe9fb; }
-  .file-menu-empty { padding: 8px 9px; color: #a1a1aa; font-size: 12px; }
+  .file-opt:hover, .file-opt.on { background: var(--accent-bg); }
+  .file-menu-empty { padding: 8px 9px; color: var(--text-faint); font-size: 12px; }
 
   /* ---- Desktop (≥1025px): resizable sidebar widths from JS-driven CSS vars,
      clamped client-side to the min/max in client.tsx. ---- */
@@ -1651,7 +1951,7 @@ const page = `<!DOCTYPE html>
   @media (max-width: 1024px) {
     .topbar {
       display: flex; align-items: center; gap: 10px; flex-shrink: 0;
-      padding: 8px 12px; border-bottom: 1px solid #e4e4e7; background: #f7f7f8;
+      padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar);
     }
     .resizer { display: none; }
     .tree-min { display: none; }

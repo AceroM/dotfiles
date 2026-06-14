@@ -23,6 +23,16 @@ declare global {
 
 export const DEFAULT_SERVER = "http://localhost:3433";
 
+// Seed preamble for a production origin — tells the launched session it's looking
+// at the live deploy (not local dev) and can stream logs with `wrangler tail`.
+// {url} is substituted with the page URL when the prompt is sent.
+export const DEFAULT_PROD_CONTEXT = `<context>
+This request comes from the PRODUCTION deploy (Cloudflare Workers), not local dev.
+Live page: {url}
+- Stream live logs with \`wrangler tail\` (run from the app dir).
+- The source is this repo; edit here, then ship via the normal deploy.
+</context>`;
+
 export interface DirEntry {
   id: number;
   path: string;
@@ -32,15 +42,27 @@ export interface DirEntry {
 
 export interface Config {
   serverUrl: string;
+  // Reachable when Chrome isn't on the diffshub host (e.g. a tailscale HTTPS URL);
+  // the content script probes serverUrl first and falls back to this.
+  fallbackServerUrl?: string;
   // origin (scheme://host[:port]) → directory id
   mappings: Record<string, number>;
+  // origin → context preamble prepended to prompts ({url} → the page URL)
+  contexts?: Record<string, string>;
 }
 
 export async function getConfig(): Promise<Config> {
-  const s = await chrome.storage.local.get(["serverUrl", "mappings"]);
+  const s = await chrome.storage.local.get([
+    "serverUrl",
+    "fallbackServerUrl",
+    "mappings",
+    "contexts",
+  ]);
   return {
     serverUrl: (s.serverUrl as string) || DEFAULT_SERVER,
+    fallbackServerUrl: (s.fallbackServerUrl as string) || "",
     mappings: (s.mappings as Record<string, number>) || {},
+    contexts: (s.contexts as Record<string, string>) || {},
   };
 }
 
@@ -53,4 +75,16 @@ export async function setMapping(origin: string, dirId: number | null): Promise<
 
 export async function setServerUrl(serverUrl: string): Promise<void> {
   await chrome.storage.local.set({ serverUrl: serverUrl.replace(/\/+$/, "") });
+}
+
+export async function setFallbackServerUrl(url: string): Promise<void> {
+  await chrome.storage.local.set({ fallbackServerUrl: url.replace(/\/+$/, "") });
+}
+
+export async function setContext(origin: string, template: string): Promise<void> {
+  const { contexts } = await getConfig();
+  const map = contexts ?? {};
+  if (template.trim()) map[origin] = template;
+  else delete map[origin];
+  await chrome.storage.local.set({ contexts: map });
 }
