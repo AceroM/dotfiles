@@ -71,6 +71,10 @@ function Bar() {
   const [launched, setLaunched] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
 
+  // Current SPA route (pathname). Shown in the toolbar and folded into the prompt
+  // as context on submit (the `{route}` token, alongside `{url}`).
+  const route = useRoute();
+
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const [fileToken, setFileToken] = useState<{ query: string; start: number; caret: number } | null>(
     null,
@@ -301,7 +305,10 @@ function Bar() {
     setLaunching(true);
     try {
       const preamble = contextTemplate.trim()
-        ? `${contextTemplate.replace(/\{url\}/g, location.href).trim()}\n\n`
+        ? `${contextTemplate
+            .replace(/\{url\}/g, location.href)
+            .replace(/\{route\}/g, location.pathname)
+            .trim()}\n\n`
         : "";
       const res = await fetch(`${srv}/api/claude?dir=${dirId}`, {
         method: "POST",
@@ -507,9 +514,9 @@ function Bar() {
           ) : uploading ? (
             "Uploading image…"
           ) : (
-            <>
-              <kbd>v</kbd> select · <kbd>V</kbd> edit · <kbd>⌃V</kbd> image · <kbd>⌘↵</kbd> send
-            </>
+            <code className="route" title={`This page (${route}) is sent with your prompt as context`}>
+              {route}
+            </code>
           )}
         </span>
         <button className="collapse" title="Collapse" onClick={() => setExpanded(false)}>
@@ -525,6 +532,35 @@ function Bar() {
       </div>
     </div>
   );
+}
+
+// The current route (location.pathname), kept live across SPA navigations. The
+// host page may push history without a full load, so we patch pushState/replaceState
+// (restored on unmount) and also listen for popstate/hashchange.
+function useRoute(): string {
+  const [route, setRoute] = useState(location.pathname);
+  useEffect(() => {
+    const update = () => setRoute(location.pathname);
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    history.pushState = function (...args) {
+      origPush.apply(this, args as Parameters<typeof origPush>);
+      update();
+    };
+    history.replaceState = function (...args) {
+      origReplace.apply(this, args as Parameters<typeof origReplace>);
+      update();
+    };
+    window.addEventListener("popstate", update);
+    window.addEventListener("hashchange", update);
+    return () => {
+      history.pushState = origPush;
+      history.replaceState = origReplace;
+      window.removeEventListener("popstate", update);
+      window.removeEventListener("hashchange", update);
+    };
+  }, []);
+  return route;
 }
 
 // "src/components/Buy.tsx:42:6" → "@src/components/Buy.tsx#42" (a Claude @-file
@@ -686,7 +722,11 @@ const CSS = `
   display: flex; align-items: center; gap: 6px;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
-.status kbd { background: #e4e4e7; border-radius: 3px; padding: 1px 4px; font-size: 10px; }
+.status .route {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; color: #71717a;
+  background: #f4f4f5; border: 1px solid #e4e4e7; border-radius: 4px; padding: 1px 6px;
+}
 .collapse {
   flex-shrink: 0; width: 28px; height: 28px; cursor: pointer; padding: 0;
   background: none; border: 1px solid transparent; border-radius: 8px; color: #a1a1aa;
