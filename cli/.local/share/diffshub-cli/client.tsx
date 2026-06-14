@@ -241,10 +241,13 @@ const DIFF_OPTIONS = {
   enableLineSelection: true,
 } as const;
 
-// How often the Tmux tab re-reads the session list / open transcript, but only
-// while a claude session is actively working (see the queries below). At idle we
-// stop polling entirely.
+// How often the Tmux tab re-reads the session list / open transcript while a
+// claude session is actively working (see the queries below).
 const TMUX_POLL_MS = 2000;
+// Slower baseline for the open transcript when its session is idle — keeps prompts
+// that pause the session (AskUserQuestion / plan / permission) from going unseen
+// until the answer, without the cost of full-speed polling. See transcriptQuery.
+const TMUX_IDLE_POLL_MS = 3000;
 
 // ---- Fetch helpers shared by every query ----
 async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -1304,8 +1307,13 @@ function App() {
   });
   const tmuxSessions = tmuxQuery.data ?? null;
   const selectedSession = view.kind === "tmux" ? view.session : "";
-  // Stream the open transcript only while its session is busy; once claude goes
-  // idle we stop polling so you can scroll back without being yanked to the end.
+  // Stream the open transcript fast while its session is busy. When idle we keep a
+  // slow baseline poll rather than stopping: a session paused on an AskUserQuestion
+  // / plan / permission prompt reads as not-busy (the pane title drops its braille
+  // spinner), yet its question line is already on disk — without an idle poll it
+  // wouldn't surface until the answer flips the session busy again. Structural
+  // sharing keeps an unchanged poll's data ref stable, so reading back through an
+  // idle transcript still isn't yanked to the end.
   const selectedBusy = !!tmuxSessions?.find((s) => s.name === selectedSession)?.busy;
   const transcriptQuery = useQuery({
     queryKey: ["tmux-transcript", selectedSession],
@@ -1313,7 +1321,7 @@ function App() {
       fetchJSON<Transcript>(`/api/tmux/transcript?session=${encodeURIComponent(selectedSession)}`, signal),
     enabled: tab === "tmux" && !!selectedSession,
     refetchOnWindowFocus: false,
-    refetchInterval: selectedBusy ? TMUX_POLL_MS : false,
+    refetchInterval: selectedBusy ? TMUX_POLL_MS : TMUX_IDLE_POLL_MS,
   });
   const selectedSessionRef = useRef(selectedSession);
   selectedSessionRef.current = selectedSession;

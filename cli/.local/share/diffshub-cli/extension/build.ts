@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // Bundle the diffshub Chrome extension into ./dist (load that as an unpacked
 // extension). content.ts must be a classic script → iife; popup.tsx and
-// dialog.tsx are ES modules (popup via <script type=module>, dialog via a
-// dynamic import() of a web-accessible resource).
+// bar.tsx are ES modules (popup via <script type=module>, bar via a dynamic
+// import() of a web-accessible resource).
 
 import { copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -33,15 +33,15 @@ check(
   await Bun.build({ entrypoints: [join(here, "content.ts")], format: "iife", ...common }),
   "content",
 );
-// Popup + lazy dialog — ES modules.
+// Popup + lazy composer — ES modules.
 check(
   await Bun.build({
-    entrypoints: [join(here, "popup.tsx"), join(here, "dialog.tsx")],
+    entrypoints: [join(here, "popup.tsx"), join(here, "bar.tsx")],
     format: "esm",
     splitting: false,
     ...common,
   }),
-  "popup+dialog",
+  "popup+bar",
 );
 
 copyFileSync(join(here, "manifest.json"), join(dist, "manifest.json"));

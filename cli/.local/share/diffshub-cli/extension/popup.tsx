@@ -195,7 +195,7 @@ function Popup() {
       />
 
       <div className="hint">
-        On a mapped site: <kbd>'</kbd> new Claude session · <kbd>v</kbd> visual-select an element
+        On a mapped site a composer pins to the bottom — <kbd>'</kbd> focus · <kbd>v</kbd> point at an element
       </div>
     </>
   );
