@@ -30,6 +30,7 @@ import { FileDiff, MultiFileDiff } from "@pierre/diffs/react";
 import type { GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import {
+  House,
   GitCommitHorizontal,
   GitPullRequest,
   FileDiff as FileDiffIcon,
@@ -144,11 +145,11 @@ interface DiffSelection {
   range: SelectedLineRange;
 }
 
-type Tab = "commits" | "prs" | "changes" | "manual" | "tmux";
+type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux";
 
-// Order drives the 1–5 / ←→ shortcuts and the tab strip. The first entry is the
-// landing tab for the default route (see initialView).
-const TAB_ORDER: Tab[] = ["tmux", "changes", "commits", "prs", "manual"];
+// Order drives the 1–6 / ←→ shortcuts and the tab strip. The first entry is the
+// landing tab for the default route (see initialView) — Home, the session monitor.
+const TAB_ORDER: Tab[] = ["home", "tmux", "changes", "commits", "prs", "manual"];
 
 interface ManualPatch {
   name: string;
@@ -203,9 +204,31 @@ interface Transcript {
   // permission) that claude hasn't written to the transcript yet — set only when
   // the session is idle and the pane is showing a selection prompt. Null otherwise.
   pendingPane?: string | null;
+  // The same pending prompt parsed into renderable controls (see parsePendingPrompt
+  // on the server); null when the pane couldn't be parsed and only pendingPane (the
+  // raw text) is usable. Mirrors the server's PendingPrompt type.
+  pendingPrompt?: PendingPrompt | null;
+}
+
+// Mirror of the server's PendingPrompt (index.ts) — kept in sync by hand since the
+// client is bundled separately from the server module.
+interface PendingOption {
+  index: number; // 1-based, the digit you'd press in the pane
+  label: string;
+  desc?: string;
+  checked: boolean; // [x] vs [ ] — multi-select only
+  cursor: boolean; // the ❯-highlighted row
+  freeText: boolean; // claude's appended "Type something" option
+}
+interface PendingPrompt {
+  kind: "multi" | "single" | "confirm";
+  question: string;
+  options: PendingOption[];
+  multiQuestion: boolean;
 }
 
 type View =
+  | { kind: "home" }
   | { kind: "commit"; sha: string; repo?: string }
   | { kind: "pr"; number: number; repo?: string }
   | { kind: "changes" }
@@ -964,22 +987,191 @@ const QuestionCard = memo(function QuestionCard({
   );
 });
 
-// A pending interactive prompt (AskUserQuestion / plan approval / permission)
-// that claude is blocked on but hasn't written to the transcript .jsonl yet — so
-// it can't be a structured QuestionCard. We show the raw live pane capture
-// instead (always correct, if TUI-ish) and point the user at the reply box, where
-// typing the option's number answers it exactly like pressing the key in the pane.
-const PendingPrompt = memo(function PendingPrompt({ text }: { text: string }) {
+// A pending interactive prompt (AskUserQuestion / plan approval / permission) that
+// claude is blocked on but hasn't written to the transcript .jsonl yet. The server
+// parses the live pane into renderable controls (prompt), so instead of making you
+// read ASCII and hand-type a digit we show real buttons / checkboxes:
+//   • single-select → numbered buttons (click sends the digit, like pressing it)
+//   • multi-select  → checkboxes + Submit (server toggles + verifies + Enters)
+//   • confirm       → a single "Confirm & submit" for claude's final-submit gate
+// The raw pane stays one click away ("show raw pane") and is the fallback when the
+// pane can't be parsed (prompt == null) — the original type-in-the-reply-box flow.
+const PendingPrompt = memo(function PendingPrompt({
+  text,
+  prompt,
+  onAnswerSingle,
+  onAnswerMulti,
+  onConfirm,
+}: {
+  text: string;
+  prompt?: PendingPrompt | null;
+  onAnswerSingle?: (digit: number) => Promise<void> | void;
+  onAnswerMulti?: (selected: number[]) => Promise<void> | void;
+  onConfirm?: () => Promise<void> | void;
+}) {
+  // Multi-select working set, seeded once from the pane's current [x] state. The
+  // call site keys this component by question, so it remounts (re-seeds) per
+  // question and preserves in-progress toggles across background polls.
+  const [checked, setChecked] = useState<Set<number>>(
+    () =>
+      new Set(
+        (prompt?.kind === "multi" ? prompt.options : [])
+          .filter((o) => o.checked && !o.freeText)
+          .map((o) => o.index),
+      ),
+  );
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const head = (
+    <div className="pending-pane-head">
+      <span className="pending-pane-dot" />
+      Waiting for your input
+    </div>
+  );
+
+  // Unparseable pane → original raw-pane + reply-box behavior.
+  if (!prompt) {
+    return (
+      <div className="pending-pane">
+        {head}
+        <pre className="pending-pane-body">{text}</pre>
+        <div className="pending-pane-hint">
+          Live from the pane — answer in the reply box below (e.g. type <code>1</code>).
+        </div>
+      </div>
+    );
+  }
+
+  const real = prompt.options.filter((o) => !o.freeText);
+  const hasFreeText = prompt.options.some((o) => o.freeText);
+  const rawDetails = (
+    <details className="pending-raw">
+      <summary>show raw pane</summary>
+      <pre className="pending-pane-body">{text}</pre>
+    </details>
+  );
+  const freeHint = hasFreeText ? (
+    <div className="pending-pane-hint">…or type your own answer in the reply box below.</div>
+  ) : null;
+
+  if (prompt.kind === "confirm") {
+    const confirm = async () => {
+      if (!onConfirm || busy) return;
+      setBusy(true);
+      try {
+        await onConfirm();
+      } finally {
+        setBusy(false);
+      }
+    };
+    return (
+      <div className="pending-pane">
+        {head}
+        <div className="pending-body">
+          <div className="q-text">{prompt.question || "Ready to submit your answers?"}</div>
+          <button className="pending-submit" disabled={!onConfirm || busy} onClick={confirm}>
+            {busy ? "submitting…" : "Confirm & submit"}
+          </button>
+        </div>
+        {rawDetails}
+      </div>
+    );
+  }
+
+  if (prompt.kind === "single") {
+    const pick = async (i: number) => {
+      if (!onAnswerSingle || busy) return;
+      setBusy(true);
+      try {
+        await onAnswerSingle(i);
+      } finally {
+        setBusy(false);
+      }
+    };
+    return (
+      <div className="pending-pane">
+        {head}
+        <div className="pending-body">
+          {prompt.question ? <div className="q-text">{prompt.question}</div> : null}
+          <div className="q-opts">
+            {real.map((o) => (
+              <button
+                key={o.index}
+                className="q-choice"
+                disabled={!onAnswerSingle || busy}
+                onClick={() => pick(o.index)}
+                title="Send this answer"
+              >
+                <span className="q-choice-n">{o.index}</span>
+                <span className="q-choice-body">
+                  <span className="q-choice-label">{o.label}</span>
+                  {o.desc ? <span className="q-choice-desc">{o.desc}</span> : null}
+                </span>
+              </button>
+            ))}
+          </div>
+          {freeHint}
+        </div>
+        {rawDetails}
+      </div>
+    );
+  }
+
+  // multi-select
+  const toggle = (i: number) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+  const submit = async () => {
+    if (!onAnswerMulti || busy) return;
+    setErr(null);
+    setBusy(true);
+    try {
+      await onAnswerMulti([...checked]);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="pending-pane">
-      <div className="pending-pane-head">
-        <span className="pending-pane-dot" />
-        Waiting for your input
+      {head}
+      <div className="pending-body">
+        {prompt.question ? <div className="q-text">{prompt.question}</div> : null}
+        <div className="q-checks">
+          {real.map((o) => {
+            const on = checked.has(o.index);
+            return (
+              <button
+                key={o.index}
+                type="button"
+                className={`q-check${on ? " on" : ""}`}
+                role="checkbox"
+                aria-checked={on}
+                disabled={busy}
+                onClick={() => toggle(o.index)}
+              >
+                <span className="q-check-box">{on ? "✓" : ""}</span>
+                <span className="q-choice-body">
+                  <span className="q-choice-label">{o.label}</span>
+                  {o.desc ? <span className="q-choice-desc">{o.desc}</span> : null}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {freeHint}
+        {err ? <div className="pending-err">Couldn’t auto-fill ({err}) — use the reply box below.</div> : null}
+        <button className="pending-submit" disabled={!onAnswerMulti || busy} onClick={submit}>
+          {busy ? "submitting…" : `Submit${checked.size ? ` ${checked.size}` : ""}`}
+        </button>
       </div>
-      <pre className="pending-pane-body">{text}</pre>
-      <div className="pending-pane-hint">
-        Live from the pane — answer in the reply box below (e.g. type <code>1</code>).
-      </div>
+      {rawDetails}
     </div>
   );
 });
@@ -1197,8 +1389,8 @@ function initialView(): { tab: Tab; view: View; dir: number | null } {
   if (manual) return { tab: "manual", view: { kind: "manual", name: manual }, dir };
   const sha = params.get("sha");
   if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
-  // Default route lands on the first tab (Tmux sessions); see TAB_ORDER.
-  return { tab: "tmux", view: { kind: "tmux", session: "" }, dir };
+  // Default route lands on the first tab (Home — the session monitor); see TAB_ORDER.
+  return { tab: "home", view: { kind: "home" }, dir };
 }
 
 // ---- Draft persistence (localStorage) ----
@@ -1310,6 +1502,8 @@ function saveLastTab(t: Tab) {
 // their list and wait for a selection — so they reset to an empty pane.
 function tabDefaults(t: Tab): { view: View; param: string } {
   switch (t) {
+    case "home":
+      return { view: { kind: "home" }, param: "" };
     case "changes":
       return { view: { kind: "changes" }, param: "view=changes" };
     case "manual":
@@ -1456,6 +1650,150 @@ function PushToggle() {
           </div>
           {msg && <div className="push-msg">{msg}</div>}
         </>
+      )}
+    </div>
+  );
+}
+
+// One session tile on the Home dashboard. The `state` class drives the status
+// dot's colour/pulse (see the .home-card CSS); clicking opens the transcript.
+function HomeCard({
+  session,
+  state,
+  onOpen,
+}: {
+  session: TmuxSession;
+  state: string;
+  onOpen: (name: string) => void;
+}) {
+  return (
+    <button
+      id={`row-tmux-${session.name}`}
+      className={`home-card ${state}`}
+      onClick={() => onOpen(session.name)}
+    >
+      <div className="home-card-top">
+        <span className="home-dot" />
+        <span className="home-card-name">{session.name}</span>
+      </div>
+      {session.task && <div className="home-card-task">{session.task}</div>}
+      <div className="home-card-cwd">{session.cwd.replace(/^.*\//, "") || session.cwd}</div>
+    </button>
+  );
+}
+
+// The Home tab: the active directory's claude tmux chats grouped by state. "In
+// progress" and "Needs action" always show (even empty — they're the states you
+// watch for); the rest appear only when populated. Pure presentation over the
+// already-fetched, dir-scoped + filtered session lists.
+function HomeView({
+  groups,
+  queued,
+  loading,
+  error,
+  onOpen,
+}: {
+  groups: {
+    inProgress: TmuxSession[];
+    needsAction: TmuxSession[];
+    done: TmuxSession[];
+    idle: TmuxSession[];
+  };
+  queued: QueuedSession[];
+  loading: boolean;
+  error: string | null;
+  onOpen: (name: string) => void;
+}) {
+  if (loading) return <ContentSpinner label="Loading sessions…" />;
+  if (error) return <div className="empty error">{error}</div>;
+  const { inProgress, needsAction, done, idle } = groups;
+  const total =
+    inProgress.length + needsAction.length + done.length + idle.length + queued.length;
+  return (
+    <div className="home">
+      <section className="home-group">
+        <div className="home-group-head in-progress">
+          <span className="home-group-title">In progress</span>
+          <span className="home-group-count">{inProgress.length}</span>
+        </div>
+        {inProgress.length ? (
+          <div className="home-cards">
+            {inProgress.map((s) => (
+              <HomeCard key={s.name} session={s} state="busy" onOpen={onOpen} />
+            ))}
+          </div>
+        ) : (
+          <div className="home-empty">Nothing running right now.</div>
+        )}
+      </section>
+
+      <section className="home-group">
+        <div className="home-group-head needs-action">
+          <span className="home-group-title">Needs action</span>
+          <span className="home-group-count">{needsAction.length}</span>
+        </div>
+        {needsAction.length ? (
+          <div className="home-cards">
+            {needsAction.map((s) => (
+              <HomeCard key={s.name} session={s} state="waiting" onOpen={onOpen} />
+            ))}
+          </div>
+        ) : (
+          <div className="home-empty">All clear — nothing waiting on you.</div>
+        )}
+      </section>
+
+      {queued.length > 0 && (
+        <section className="home-group">
+          <div className="home-group-head needs-action">
+            <span className="home-group-title">Queued</span>
+            <span className="home-group-count">{queued.length}</span>
+          </div>
+          <div className="home-cards">
+            {queued.map((q) => (
+              <div key={q.id} className="home-card queued">
+                <div className="home-card-top">
+                  <span className="home-dot" />
+                  <span className="home-card-name">Queued prompt</span>
+                </div>
+                <div className="home-card-task">{q.prompt}</div>
+                <div className="home-card-cwd">{q.cwd.replace(/^.*\//, "") || q.cwd}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {done.length > 0 && (
+        <section className="home-group">
+          <div className="home-group-head done">
+            <span className="home-group-title">Done</span>
+            <span className="home-group-count">{done.length}</span>
+          </div>
+          <div className="home-cards">
+            {done.map((s) => (
+              <HomeCard key={s.name} session={s} state="unread" onOpen={onOpen} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {idle.length > 0 && (
+        <section className="home-group">
+          <div className="home-group-head idle">
+            <span className="home-group-title">Idle</span>
+            <span className="home-group-count">{idle.length}</span>
+          </div>
+          <div className="home-cards">
+            {idle.map((s) => (
+              <HomeCard key={s.name} session={s} state="idle" onOpen={onOpen} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {total === 0 && (
+        <div className="home-empty-all">No claude sessions in this directory.</div>
       )}
     </div>
   );
@@ -1729,7 +2067,7 @@ function App() {
         "/api/tmux/sessions",
         signal,
       ),
-    enabled: tab === "tmux",
+    enabled: tab === "tmux" || tab === "home",
     refetchOnWindowFocus: false,
     // Poll while a session is working (live busy dots), while one sits waiting for
     // input (so its "Waiting" badge appears the moment a run pauses on a prompt and
@@ -1853,6 +2191,12 @@ function App() {
   // not the total — idle sessions don't earn a number.
   const runningTmux = useMemo(
     () => dirScopedTmux?.filter((s) => s.busy).length ?? 0,
+    [dirScopedTmux],
+  );
+  // The Home tab badge counts sessions blocked on input — the actionable number.
+  // Independent of the search filter, so it always reflects the directory's truth.
+  const needsActionCount = useMemo(
+    () => dirScopedTmux?.filter((s) => s.waiting && !s.busy).length ?? 0,
     [dirScopedTmux],
   );
 
@@ -2697,6 +3041,52 @@ function App() {
     [sendToSession],
   );
 
+  // Answer a live multi-select AskUserQuestion from the pending-prompt checkboxes.
+  // The server toggles the pane to match `selected`, verifies, then submits — so we
+  // throw on failure to surface the message inline (the card falls back to the reply
+  // box). On success, refresh once so the next question / busy dot shows up.
+  const answerPendingMulti = useCallback(
+    async (selected: number[]) => {
+      const session = selectedSessionRef.current;
+      if (!session) return;
+      const res = await fetch("/api/tmux/answer-multi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session, selected }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}) as any);
+        throw new Error(body.error ?? res.statusText);
+      }
+      setTimeout(() => {
+        queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
+        queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+      }, 500);
+    },
+    [queryClient],
+  );
+
+  // Send a bare Enter into the pane — used by the pending-prompt confirm card to
+  // clear claude's "Ready to submit your answers?" gate.
+  const confirmPending = useCallback(async () => {
+    const session = selectedSessionRef.current;
+    if (!session) return;
+    const res = await fetch("/api/tmux/key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session, key: "Enter" }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}) as any);
+      alert(`submit failed: ${body.error ?? res.statusText}`);
+      return;
+    }
+    setTimeout(() => {
+      queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
+      queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+    }, 500);
+  }, [queryClient]);
+
   // `x` — stage everything, then hand the commit off to a detached claude
   // session that writes the message itself (and pushes). Skips the `;` dialog
   // for when you'd rather claude author an informative commit from the diff.
@@ -3487,6 +3877,29 @@ function App() {
     }
   }, [visibleTmux, isUnread, selectTmux]);
 
+  // ---- Home (session monitor) groups ----
+  // Partition the visible, dir-scoped + filtered sessions by state for the Home
+  // dashboard. isUnread already excludes busy + waiting, so every session lands in
+  // exactly one of these buckets; queued (offline) prompts come from scopedQueued.
+  const homeGroups = useMemo(() => {
+    const list = visibleTmux ?? [];
+    return {
+      inProgress: list.filter((s) => s.busy),
+      needsAction: list.filter((s) => s.waiting && !s.busy),
+      done: list.filter((s) => isUnread(s)),
+      idle: list.filter((s) => !s.busy && !s.waiting && !isUnread(s)),
+    };
+  }, [visibleTmux, isUnread]);
+  // Open a session from the Home dashboard: flip to the Tmux tab and select it
+  // (selectTmux sets the view + URL; setTab swaps the main area to the transcript).
+  const openSession = useCallback(
+    (name: string) => {
+      setTab("tmux");
+      selectTmux(name);
+    },
+    [selectTmux],
+  );
+
   // Kill every session currently listed on the Tmux tab (the dir-scoped, filtered
   // set the user is looking at — not every claude session on the box). Reuses the
   // single-kill endpoint per session, then refreshes; the auto-select effect picks
@@ -4145,7 +4558,7 @@ function App() {
             </button>
           </>
         )}
-        {(tab === "tmux" || tab === "commits") && (
+        {(tab === "home" || tab === "tmux" || tab === "commits") && (
           <button
             className="topbar-btn topbar-new"
             title="New Claude session"
@@ -4307,6 +4720,17 @@ function App() {
           </div>
           <div className="tabs">
             <button
+              className={tab === "home" ? "on" : ""}
+              data-tip="Home"
+              aria-label="Home"
+              onClick={() => selectTab("home")}
+            >
+              <House />
+              {needsActionCount > 0 && (
+                <span className="tab-badge waiting">{needsActionCount}</span>
+              )}
+            </button>
+            <button
               className={tab === "tmux" ? "on" : ""}
               data-tip="Tmux sessions"
               aria-label="Tmux sessions"
@@ -4358,7 +4782,7 @@ function App() {
                   ? "Filter commits…"
                   : tab === "prs"
                     ? "Filter PRs…"
-                    : tab === "tmux"
+                    : tab === "tmux" || tab === "home"
                       ? "Filter sessions…"
                       : "Filter patches…"
               }
@@ -4700,7 +5124,19 @@ function App() {
 
       <div className="resizer rz-left" onPointerDown={startResize("left")} />
 
-      <main className={`diffs${tab === "tmux" ? " tmux" : ""}`} ref={mainEl}>
+      <main
+        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : ""}`}
+        ref={mainEl}
+      >
+        {tab === "home" && (
+          <HomeView
+            groups={homeGroups}
+            queued={visibleQueued ?? []}
+            loading={tmuxQuery.isPending && !tmuxSessions}
+            error={tmuxQuery.isError ? errMessage(tmuxQuery.error) : null}
+            onOpen={openSession}
+          />
+        )}
         {tab === "tmux" && (
           <div className="transcript">
             {!selectedSession && <div className="transcript-empty">Select a session on the left</div>}
@@ -4751,7 +5187,22 @@ function App() {
                   ))
                 )}
                 {transcriptData.pendingPane && !selectedBusy && (
-                  <PendingPrompt text={transcriptData.pendingPane} />
+                  <PendingPrompt
+                    // Remount (re-seed checkboxes) when the question changes, but keep
+                    // in-progress toggles stable across background polls of the same one.
+                    key={
+                      transcriptData.pendingPrompt
+                        ? `${transcriptData.pendingPrompt.kind}:${transcriptData.pendingPrompt.question}:${transcriptData.pendingPrompt.options
+                            .map((o) => o.label)
+                            .join("|")}`
+                        : "raw"
+                    }
+                    text={transcriptData.pendingPane}
+                    prompt={transcriptData.pendingPrompt}
+                    onAnswerSingle={(d) => sendToSession(String(d))}
+                    onAnswerMulti={answerPendingMulti}
+                    onConfirm={confirmPending}
+                  />
                 )}
                 {selectedBusy && (
                   <div className="turn assistant">

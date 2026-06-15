@@ -528,6 +528,151 @@ async function capturePendingPrompt(name: string): Promise<string | null> {
   return text || null;
 }
 
+// ---- Structured pending-prompt parsing ----
+// capturePendingPrompt returns the raw TUI text of a selection prompt claude is
+// blocked on. For the web UI we want real controls (checkboxes / buttons) instead
+// of asking the user to read ASCII and hand-type a digit, so we parse that text
+// into options. The layout claude renders (verified against the 2.1.x TUI):
+//
+//   ❯ 1. [ ] Label            ← multi-select option (checkbox); ❯ marks the cursor
+//        description…          ← dim, indented, may wrap across lines
+//     4. [ ] Type something    ← claude appends a free-text option as the last one
+//          Submit
+//
+// Single-select / plan-approval / permission prompts render the same numbered list
+// WITHOUT the [ ]/[x] checkboxes (a digit picks + submits). A final-submit screen
+// shows "Ready to submit your answers?" with no options. We classify accordingly.
+//
+// Digit i maps straight to option i in claude's key handler, so the client never
+// needs cursor tracking — it sends the digit(s) and (for multi) an Enter to submit.
+export type PendingOption = {
+  index: number; // 1-based, exactly the digit you'd press in the pane
+  label: string;
+  desc?: string;
+  checked: boolean; // [x] vs [ ] — meaningful for multi-select only
+  cursor: boolean; // the ❯-highlighted row
+  freeText: boolean; // claude's appended "Type something" option (answer via reply box)
+};
+export type PendingPrompt = {
+  kind: "multi" | "single" | "confirm";
+  question: string; // prompt text shown above the options
+  options: PendingOption[];
+  multiQuestion: boolean; // one question of a multi-question AskUserQuestion (tab strip)
+};
+
+// A numbered option row: optional ❯ cursor, the index, an optional [ ]/[x] box, label.
+const OPT_RE = /^(\s*)(❯|>)?\s*(\d+)\.\s+(\[([ xX✓·])\]\s+)?(.*\S)\s*$/u;
+const FREE_TEXT_RE = /^(?:type something|type your own|something else|none of the above)\b/iu;
+// A multi-question AskUserQuestion renders a tab strip ("← ⊟ Scope ☐ State ✓ Submit →").
+const TAB_BAR_RE = /[←→]|[⊟☐☑✓▢]\s+\S+\s+[⊟☐☑✓▢]/u;
+const CONFIRM_RE = /ready to submit your answers|submit your answers\?/iu;
+
+function parsePendingPrompt(pane: string | null): PendingPrompt | null {
+  if (!pane) return null;
+  // Strip any box-drawing side borders so the option regex anchors cleanly.
+  const lines = pane.split("\n").map((l) => l.replace(/^\s*[│┃]\s?/u, "").replace(/\s*[│┃]\s*$/u, ""));
+  const multiQuestion = lines.some((l) => TAB_BAR_RE.test(l));
+
+  type Row = { opt: PendingOption; hasBox: boolean; descLines: string[] };
+  const rows: Row[] = [];
+  const preamble: string[] = [];
+  let expecting = 1;
+  let last: Row | null = null;
+
+  for (const line of lines) {
+    const m = OPT_RE.exec(line);
+    // Accept only sequential indices (1,2,3,…) so a number inside a description
+    // ("the existing isUnread state") can't masquerade as a new option.
+    if (m && Number(m[3]) === expecting) {
+      const label = m[6].trim();
+      last = {
+        opt: {
+          index: expecting,
+          label,
+          checked: m[5] != null && /[xX✓·]/u.test(m[5]),
+          cursor: !!m[2],
+          freeText: FREE_TEXT_RE.test(label),
+        },
+        hasBox: m[4] != null,
+        descLines: [],
+      };
+      rows.push(last);
+      expecting++;
+      continue;
+    }
+    const t = line.trim();
+    if (last) {
+      // Continuation: a dim description line or the bare "Submit" affordance.
+      if (t && !/^submit$/iu.test(t)) last.descLines.push(t);
+    } else if (t) {
+      preamble.push(t);
+    }
+  }
+
+  const question = preamble.filter((l) => !TAB_BAR_RE.test(l)).join(" ").trim();
+  if (rows.length === 0) {
+    return lines.some((l) => CONFIRM_RE.test(l))
+      ? { kind: "confirm", question, options: [], multiQuestion }
+      : null;
+  }
+  const anyBox = rows.some((r) => r.hasBox);
+  const options = rows.map((r) => {
+    const desc = r.descLines.join(" ").trim();
+    return desc ? { ...r.opt, desc } : r.opt;
+  });
+  return { kind: anyBox ? "multi" : "single", question, options, multiQuestion };
+}
+
+// How long to let the TUI register individual keystrokes (option toggles, Enter)
+// sent one at a time — shorter than a paste settle since these aren't bracketed.
+const KEY_SETTLE_MS = 60;
+// Longer pause before re-capturing the pane to read back the result of keystrokes —
+// the TUI repaint lags the input, so a too-short wait reads the pre-toggle frame.
+const VERIFY_SETTLE_MS = 200;
+
+// Send a sequence of tmux key names (e.g. "1", "3", "Enter") into a pane, pausing
+// between each so claude's input handler processes them as distinct keypresses.
+async function sendKeySeq(name: string, keys: string[]): Promise<void> {
+  for (const key of keys) {
+    await $`tmux -L default send-keys -t ${`${name}:0.0`} ${key}`.quiet();
+    await Bun.sleep(KEY_SETTLE_MS);
+  }
+}
+
+// Answer a live multi-select AskUserQuestion by reproducing the selection the user
+// built in the web UI. `selected` is the set of 1-based option indices that should
+// end up checked. We capture the pane, toggle only the options whose state differs
+// (digit i toggles option i), re-capture to CONFIRM the checkbox pattern matches
+// before committing — so a wrong protocol assumption can never submit a bad answer
+// — then press Enter (and a second Enter if claude shows its "Ready to submit?"
+// confirm). Returns {ok:false} without submitting if verification fails.
+async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok: boolean; error?: string }> {
+  const parsed = parsePendingPrompt(await capturePendingPrompt(name));
+  if (!parsed || parsed.kind !== "multi") return { ok: false, error: "no multi-select prompt is waiting" };
+  const want = new Set(selected);
+  const real = parsed.options.filter((o) => !o.freeText);
+  const toggles = real.filter((o) => want.has(o.index) !== o.checked).map((o) => String(o.index));
+  if (toggles.length) await sendKeySeq(name, toggles);
+
+  // Verify: re-read the pane and check every real option matches the desired state.
+  // Wait a render frame or two first — keystrokes are processed immediately but the
+  // TUI repaint (the [x] we're about to read back) lags the input.
+  await Bun.sleep(VERIFY_SETTLE_MS);
+  const after = parsePendingPrompt(await capturePendingPrompt(name));
+  if (!after || after.kind !== "multi") return { ok: false, error: "prompt changed while answering" };
+  const ok = after.options
+    .filter((o) => !o.freeText)
+    .every((o) => o.checked === want.has(o.index));
+  if (!ok) return { ok: false, error: "could not confirm the selection in the pane" };
+
+  await sendKeySeq(name, ["Enter"]);
+  // A multi-question prompt may show a final "Ready to submit your answers?" gate.
+  await Bun.sleep(VERIFY_SETTLE_MS);
+  const gate = await capturePendingPrompt(name);
+  if (gate && CONFIRM_RE.test(gate)) await sendKeySeq(name, ["Enter"]);
+  return { ok: true };
+}
+
 // Launch an interactive claude session detached in the directory (mirrors `p`),
 // returning the session name so the caller can `tmux attach -t <name>`.
 // We mint the claude session id ourselves (`--session-id`) and stamp it onto the
@@ -1548,6 +1693,8 @@ const page = `<!DOCTYPE html>
     padding: 0 3px; border-radius: 7px; background: var(--accent); color: #fff;
     font-size: 9px; line-height: 13px; font-weight: 600; text-align: center;
   }
+  /* Home tab badge counts sessions needing input — amber, like the waiting state. */
+  .tabs button .tab-badge.waiting { background: var(--amber); }
   /* hover tooltip driven by data-tip */
   .tabs button[data-tip]::after {
     content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%;
@@ -1833,6 +1980,45 @@ const page = `<!DOCTYPE html>
     padding: 1px 5px; border-radius: 4px; background: var(--bg-muted); color: var(--text-2);
   }
 
+  /* Structured pending-prompt controls (see PendingPrompt) — real buttons/checkboxes
+     drawn over the live pane so you tap instead of hand-typing a digit. Reuses the
+     q-card accent treatment for the option rows. */
+  .pending-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .pending-body .q-text { margin: 0; }
+  .q-checks { display: flex; flex-direction: column; gap: 7px; }
+  .q-check {
+    display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left;
+    padding: 9px 11px; border: 1px solid var(--accent-border-4); border-radius: 7px;
+    background: var(--accent-choice-bg); color: var(--text-on-accent-bg);
+    font-size: 13px; font-family: inherit; cursor: pointer;
+  }
+  .q-check:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg-hover); }
+  .q-check:disabled { cursor: default; opacity: .6; }
+  .q-check.on { border-color: var(--accent); background: var(--accent-bg-hover); }
+  .q-check-box {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; margin-top: 1px; border-radius: 5px;
+    border: 1.5px solid var(--accent-border); background: var(--accent-card);
+    color: #fff; font-size: 12px; font-weight: 800; line-height: 1;
+  }
+  .q-check.on .q-check-box { background: var(--accent); border-color: var(--accent); }
+  .pending-submit {
+    align-self: flex-start; padding: 8px 16px; border: 1px solid var(--accent); border-radius: 7px;
+    background: var(--accent); color: #fff; font-size: 13px; font-weight: 650; font-family: inherit; cursor: pointer;
+  }
+  .pending-submit:hover:not(:disabled) { filter: brightness(1.08); }
+  .pending-submit:disabled { opacity: .55; cursor: default; }
+  .pending-err { font-size: 12px; color: var(--amber); }
+  .pending-raw { border-top: 1px solid var(--border); }
+  .pending-raw > summary {
+    padding: 7px 14px; font-size: 11.5px; color: var(--text-hint);
+    cursor: pointer; user-select: none; list-style: none;
+  }
+  .pending-raw > summary::-webkit-details-marker { display: none; }
+  .pending-raw > summary:hover { color: var(--text-2); }
+  .pending-raw[open] > summary { border-bottom: 1px solid var(--border); }
+  .pending-raw .pending-pane-body { border-top: none; }
+
   /* "Claude is working" typing indicator */
   .typing { display: inline-flex; gap: 4px; padding: 6px 2px; }
   .typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-dot); animation: typing 1.2s infinite ease-in-out; }
@@ -2091,6 +2277,39 @@ const page = `<!DOCTYPE html>
   /* Tmux tab: drop the top/bottom padding so the sticky title and the reply
      composer sit flush against the column edges. */
   .diffs.tmux { padding: 0 20px; }
+
+  /* ---- Home tab: session monitor dashboard ---- */
+  /* The landing view groups the directory's claude chats by state. Cards reuse the
+     sidebar's status-dot language (purple = working, amber = waiting/queued). "In
+     progress" and "Needs action" always show; the rest appear when populated. */
+  .diffs.home-main { padding: 18px 20px 60vh; }
+  .home { display: flex; flex-direction: column; gap: 22px; max-width: 1100px; }
+  .home-group { display: flex; flex-direction: column; gap: 10px; }
+  .home-group-head { display: flex; align-items: center; gap: 8px; }
+  .home-group-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
+  .home-group-head.in-progress .home-group-title { color: var(--accent); }
+  .home-group-head.needs-action .home-group-title { color: var(--amber); }
+  .home-group-count { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-muted); background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: 999px; padding: 1px 7px; }
+  .home-empty { font-size: 13px; color: var(--text-muted); padding: 2px 2px 4px; }
+  .home-empty-all { font-size: 14px; color: var(--text-muted); text-align: center; padding: 48px 0; }
+  .home-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .home-card { display: flex; flex-direction: column; gap: 5px; text-align: left; width: 100%; padding: 11px 13px; border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 8px; background: var(--bg-raised); color: var(--text); cursor: pointer; font: inherit; transition: background .12s, border-color .12s; }
+  .home-card:hover { background: var(--bg-hover); }
+  .home-card.busy, .home-card.unread { border-left-color: var(--accent); }
+  .home-card.waiting, .home-card.queued { border-left-color: var(--amber); }
+  .home-card.queued { cursor: default; }
+  .home-card-top { display: flex; align-items: center; gap: 7px; }
+  .home-card-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-card.unread .home-card-name { font-weight: 700; }
+  .home-card-task { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-card.queued .home-card-task { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .home-card-cwd { font-size: 11px; color: var(--text-muted); opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Status dot — mirrors .sess-busy in the sidebar. */
+  .home-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+  .home-card.busy .home-dot { background: var(--accent); animation: sessPulse 1.4s ease-in-out infinite; }
+  .home-card.waiting .home-dot, .home-card.queued .home-dot { background: var(--amber); animation: pendingPulse 1.6s ease-in-out infinite; }
+  .home-card.unread .home-dot { background: var(--accent); }
+  @media (max-width: 640px) { .home-cards { grid-template-columns: 1fr; } }
   .section-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
   .diff-foot { display: flex; gap: 6px; margin-top: 6px; }
@@ -3227,13 +3446,16 @@ const server = Bun.serve({
         // so the question doesn't go unseen until it's answered.
         const busy = /^[⠀-⣿]/u.test(paneTitle ?? "");
         const pendingPane = busy ? null : await capturePendingPrompt(name);
+        // Parse the raw pane into renderable controls; pendingPane stays as the
+        // always-correct fallback the client can drop back to ("show raw pane").
+        const pendingPrompt = parsePendingPrompt(pendingPane);
         const path = await resolveTranscript(cwd ?? "", sid ?? "", task);
         if (!path || !existsSync(path)) {
-          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "", pendingPane });
+          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "", pendingPane, pendingPrompt });
         }
         const text = await Bun.file(path).text();
         const { messages, model, title } = parseTranscript(text, limit);
-        return json({ session: name, cwd, sessionId: sid, path, messages, model, title, pendingPane });
+        return json({ session: name, cwd, sessionId: sid, path, messages, model, title, pendingPane, pendingPrompt });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -3336,6 +3558,56 @@ const server = Bun.serve({
       }
       try {
         await $`tmux -L default send-keys -t ${`${body.session}:0.0`} Escape`.quiet();
+        return json({ ok: true });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Answer a live multi-select AskUserQuestion from the web checkboxes: toggle the
+    // pane's options to match `selected` (1-based indices to end up checked), verify,
+    // then submit. The heavy lifting + safety checks live in answerMultiSelect.
+    if (req.method === "POST" && url.pathname === "/api/tmux/answer-multi") {
+      let body: { session?: unknown; selected?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.session !== "string" || !body.session) {
+        return json({ error: "Missing session" }, 400);
+      }
+      const selected = Array.isArray(body.selected)
+        ? body.selected.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0)
+        : null;
+      if (!selected) return json({ error: "Missing selected" }, 400);
+      try {
+        const res = await answerMultiSelect(body.session, selected);
+        return res.ok ? json({ ok: true }) : json({ error: res.error ?? "answer failed" }, 409);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Send a single bare key into a pane (e.g. Enter to clear claude's "Ready to
+    // submit your answers?" gate). Allowlisted to navigation/confirm keys so this
+    // can't be used to inject arbitrary input — text goes through /api/tmux/send.
+    if (req.method === "POST" && url.pathname === "/api/tmux/key") {
+      let body: { session?: unknown; key?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.session !== "string" || !body.session) {
+        return json({ error: "Missing session" }, 400);
+      }
+      const ALLOWED = new Set(["Enter", "Escape", "Up", "Down", "Left", "Right", "Space"]);
+      if (typeof body.key !== "string" || !ALLOWED.has(body.key)) {
+        return json({ error: "Invalid key" }, 400);
+      }
+      try {
+        await $`tmux -L default send-keys -t ${`${body.session}:0.0`} ${body.key}`.quiet();
         return json({ ok: true });
       } catch (e) {
         return json({ error: errText(e) }, 500);
