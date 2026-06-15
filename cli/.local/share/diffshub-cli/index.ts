@@ -2,9 +2,10 @@
 
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
 import { removeFileLines, removePatchAdditions } from "./patch-edit";
 
 const cwd = process.cwd();
@@ -197,6 +198,29 @@ db.run(`CREATE TABLE IF NOT EXISTS files (
   PRIMARY KEY (dir_id, path)
 )`);
 db.run(`CREATE INDEX IF NOT EXISTS files_dir ON files(dir_id)`);
+
+// ---- Web Push (installed-PWA notifications) ----
+// One row per device that opted in. Keyed by the push endpoint; p256dh/auth are
+// the subscription's encryption keys. Dead endpoints (HTTP 404/410 on send) are
+// pruned automatically — see sendPush / notifyAll.
+interface PushSub {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+}
+db.run(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint TEXT PRIMARY KEY,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+)`);
+const upsertSubStmt = db.query(
+  "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?) " +
+    "ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
+);
+const listSubsStmt = db.query<PushSub, []>("SELECT endpoint, p256dh, auth FROM push_subscriptions");
+const deleteSubStmt = db.query("DELETE FROM push_subscriptions WHERE endpoint = ?");
+const countSubsStmt = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM push_subscriptions");
 
 const markReviewedStmt = db.query(
   "INSERT OR REPLACE INTO reviewed (repo, sha, reviewed_at) VALUES (?, ?, ?)",
@@ -1311,6 +1335,9 @@ const page = `<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>diffshub</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#6e56cf" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
 <style>
   :root {
     color-scheme: light;
@@ -2248,6 +2275,15 @@ const page = `<!DOCTYPE html>
   .dir-form input:focus { border-color: var(--accent); }
   .dir-form .dir-form-hint { grid-column: 2; font-size: 11px; color: var(--text-faint); margin-top: -2px; }
   .modal-error { margin-top: 10px; color: var(--red); font-size: 12px; white-space: pre-wrap; }
+  .push-sep { height: 1px; background: var(--border); margin: 14px 0 12px; }
+  .push-box { display: flex; flex-direction: column; gap: 8px; }
+  .push-head { display: flex; align-items: center; gap: 8px; }
+  .push-title { font-size: 13px; font-weight: 600; color: var(--text-strong); }
+  .push-on { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--green); background: var(--green-bg); border: 1px solid var(--green-border); border-radius: 999px; padding: 1px 7px; }
+  .push-hint { font-size: 11.5px; color: var(--text-faint); line-height: 1.45; }
+  .push-hint code { font-size: 11px; padding: 1px 4px; border-radius: 4px; background: var(--bg-muted); color: var(--text-2); }
+  .push-actions { display: flex; gap: 8px; }
+  .push-msg { font-size: 11.5px; color: var(--text-muted); }
 
   /* @-file autocomplete popup in the New Claude session dialog. Portaled to
      <body> with fixed coords (left/top|bottom/width/max-height set inline from
@@ -2313,6 +2349,218 @@ const page = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// ---- PWA: manifest + service worker ----
+// Served so the app is installable on a phone (Android Chrome) and can receive
+// push notifications when closed. NOTE: Service Workers + Push only work over a
+// secure context — open diffshub via its https://<host>.ts.net `tailscale serve`
+// URL, not http://<tailnet-ip>:port.
+const MANIFEST_JSON = JSON.stringify({
+  name: "diffshub",
+  short_name: "diffshub",
+  start_url: "/",
+  scope: "/",
+  display: "standalone",
+  background_color: "#1c1c1f",
+  theme_color: "#6e56cf",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+  ],
+});
+
+// The push handler shows the notification; clicking it focuses an open diffshub
+// tab (or opens one) at the payload's url.
+const SW_JS = `self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+// A registered fetch handler (even a no-op) makes Android Chrome treat this as an
+// installable PWA rather than a plain home-screen shortcut.
+self.addEventListener("fetch", () => {});
+self.addEventListener("push", (event) => {
+  let d = {};
+  try { d = event.data ? event.data.json() : {}; } catch (_) { d = { body: event.data && event.data.text() }; }
+  event.waitUntil(self.registration.showNotification(d.title || "diffshub", {
+    body: d.body || "",
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    tag: d.tag || "diffshub",
+    renotify: true,
+    data: { url: d.url || "/" },
+  }));
+});
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    // Reuse an open diffshub window: focus it and navigate to the chat. A full
+    // navigate reloads the SPA, which reads the ?tmux=… deep link on boot.
+    for (const c of wins) {
+      if ("focus" in c) {
+        await c.focus();
+        if ("navigate" in c) { try { await c.navigate(url); } catch (_) {} }
+        return;
+      }
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(url);
+  })());
+});
+`;
+
+// ---- Web Push crypto (RFC 8291 aes128gcm payload + RFC 8292 VAPID) ----
+// A P-256 VAPID keypair is minted once and persisted; its public key is handed to
+// the browser as the applicationServerKey. Each payload is ECDH-encrypted to the
+// subscription's keys and POSTed to its endpoint (FCM for Chrome). No Firebase
+// project or server key needed — VAPID is the whole auth story.
+const b64url = (b: Buffer) => b.toString("base64url");
+const fromB64url = (s: string) => Buffer.from(s, "base64url");
+
+const vapidPath = `${stateDir}/vapid.json`;
+let vapid: { publicKey: string; privateKeyPem: string };
+try {
+  vapid = JSON.parse(readFileSync(vapidPath, "utf8"));
+} catch {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const jwk = publicKey.export({ format: "jwk" }) as { x: string; y: string };
+  // applicationServerKey is the uncompressed point: 0x04 || X || Y.
+  const pub = Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]);
+  vapid = {
+    publicKey: b64url(pub),
+    privateKeyPem: privateKey.export({ format: "pem", type: "pkcs8" }) as string,
+  };
+  writeFileSync(vapidPath, JSON.stringify(vapid));
+}
+const vapidPrivateKey = crypto.createPrivateKey(vapid.privateKeyPem);
+
+// HKDF-SHA256 (RFC 5869). Outputs here are ≤32 bytes but the loop stays general.
+function hkdf(salt: Buffer, ikm: Buffer, info: Buffer, length: number): Buffer {
+  const prk = crypto.createHmac("sha256", salt).update(ikm).digest();
+  const chunks: Buffer[] = [];
+  let prev = Buffer.alloc(0);
+  for (let i = 0; i < Math.ceil(length / 32); i++) {
+    prev = crypto
+      .createHmac("sha256", prk)
+      .update(Buffer.concat([prev, info, Buffer.from([i + 1])]))
+      .digest();
+    chunks.push(prev);
+  }
+  return Buffer.concat(chunks).subarray(0, length);
+}
+
+// Encrypt `payload` for one subscription using aes128gcm (RFC 8291 §3.4 + 8188).
+function encryptPayload(sub: PushSub, payload: Buffer): Buffer {
+  const uaPublic = fromB64url(sub.p256dh); // browser ECDH public key (65 bytes)
+  const authSecret = fromB64url(sub.auth); // 16-byte shared auth secret
+  const salt = crypto.randomBytes(16);
+
+  const ecdh = crypto.createECDH("prime256v1");
+  ecdh.generateKeys();
+  const asPublic = ecdh.getPublicKey(); // our ephemeral public key (65 bytes)
+  const sharedSecret = ecdh.computeSecret(uaPublic);
+
+  const ikm = hkdf(
+    authSecret,
+    sharedSecret,
+    Buffer.concat([Buffer.from("WebPush: info\0"), uaPublic, asPublic]),
+    32,
+  );
+  const cek = hkdf(salt, ikm, Buffer.from("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = hkdf(salt, ikm, Buffer.from("Content-Encoding: nonce\0"), 12);
+
+  const cipher = crypto.createCipheriv("aes-128-gcm", cek, nonce);
+  const ciphertext = Buffer.concat([
+    cipher.update(payload),
+    cipher.update(Buffer.from([0x02])), // single-record padding delimiter
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+
+  // RFC 8188 header: salt(16) | record-size(u32) | keyid-len(1) | keyid(as_public)
+  const header = Buffer.alloc(21);
+  salt.copy(header, 0);
+  header.writeUInt32BE(4096, 16);
+  header.writeUInt8(asPublic.length, 20);
+  return Buffer.concat([header, asPublic, ciphertext]);
+}
+
+// VAPID Authorization header: an ES256 JWT signed with our private key.
+function vapidAuthHeader(endpoint: string): string {
+  const aud = new URL(endpoint).origin;
+  const head = b64url(Buffer.from(JSON.stringify({ typ: "JWT", alg: "ES256" })));
+  const body = b64url(
+    Buffer.from(
+      JSON.stringify({
+        aud,
+        exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+        sub: "mailto:miguelacero528@gmail.com",
+      }),
+    ),
+  );
+  const signingInput = `${head}.${body}`;
+  const sig = crypto.sign("sha256", Buffer.from(signingInput), {
+    key: vapidPrivateKey,
+    dsaEncoding: "ieee-p1363", // raw r||s, as JOSE requires
+  });
+  return `vapid t=${signingInput}.${b64url(sig)}, k=${vapid.publicKey}`;
+}
+
+async function sendPush(sub: PushSub, payload: object): Promise<{ ok: boolean; gone: boolean }> {
+  try {
+    const res = await fetch(sub.endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: vapidAuthHeader(sub.endpoint),
+        "Content-Encoding": "aes128gcm",
+        "Content-Type": "application/octet-stream",
+        TTL: "86400",
+      },
+      body: encryptPayload(sub, Buffer.from(JSON.stringify(payload))),
+    });
+    return { ok: res.ok, gone: res.status === 404 || res.status === 410 };
+  } catch {
+    return { ok: false, gone: false };
+  }
+}
+
+// Fan a notification out to every stored subscription; prune dead endpoints.
+async function notifyAll(payload: {
+  title: string;
+  body?: string;
+  url?: string;
+  tag?: string;
+}): Promise<{ sent: number; failed: number }> {
+  const subs = listSubsStmt.all();
+  let sent = 0;
+  let failed = 0;
+  await Promise.all(
+    subs.map(async (s) => {
+      const r = await sendPush(s, payload);
+      if (r.ok) sent++;
+      else {
+        failed++;
+        if (r.gone) deleteSubStmt.run(s.endpoint);
+      }
+    }),
+  );
+  return { sent, failed };
+}
+
+// Resolve a tmux session name to its clean chat title (claude's current task),
+// so a notification can name the chat it's about. "" if the pane can't be read.
+async function sessionTaskTitle(name: string): Promise<string> {
+  try {
+    const SEP = "\x1f";
+    const info = (
+      await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_title}", "#{pane_current_command}"].join(SEP)}`
+        .quiet()
+        .text()
+    ).trim();
+    const [title, cmd] = info.split(SEP);
+    return cleanTitle(title ?? "", name, cmd ?? "");
+  } catch {
+    return "";
+  }
+}
+
 const server = Bun.serve({
   port,
   idleTimeout: 255,
@@ -2326,6 +2574,90 @@ const server = Bun.serve({
       return new Response(clientJS, {
         headers: { "Content-Type": "text/javascript; charset=utf-8" },
       });
+    }
+
+    // ---- PWA assets + Web Push API ----
+    if (url.pathname === "/manifest.webmanifest") {
+      return new Response(MANIFEST_JSON, {
+        headers: { "Content-Type": "application/manifest+json", ...CORS },
+      });
+    }
+    if (url.pathname === "/sw.js") {
+      return new Response(SW_JS, {
+        headers: {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Service-Worker-Allowed": "/",
+          "Cache-Control": "no-cache",
+        },
+      });
+    }
+    if (url.pathname === "/icon-192.png" || url.pathname === "/icon-512.png") {
+      return new Response(Bun.file(`${here}${url.pathname}`), {
+        headers: { "Cache-Control": "public, max-age=86400" },
+      });
+    }
+    // The browser fetches the applicationServerKey before subscribing.
+    if (url.pathname === "/api/push/vapid" && req.method === "GET") {
+      return json({ publicKey: vapid.publicKey, count: countSubsStmt.get()?.n ?? 0 });
+    }
+    if (url.pathname === "/api/push/subscribe" && req.method === "POST") {
+      let b: any;
+      try {
+        b = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const endpoint = b?.endpoint;
+      const p256dh = b?.keys?.p256dh;
+      const auth = b?.keys?.auth;
+      if (typeof endpoint !== "string" || typeof p256dh !== "string" || typeof auth !== "string") {
+        return json({ error: "Invalid subscription" }, 400);
+      }
+      upsertSubStmt.run(endpoint, p256dh, auth, Date.now());
+      return json({ ok: true });
+    }
+    if (url.pathname === "/api/push/unsubscribe" && req.method === "POST") {
+      let b: any;
+      try {
+        b = await req.json();
+      } catch {
+        b = {};
+      }
+      if (typeof b?.endpoint === "string") deleteSubStmt.run(b.endpoint);
+      return json({ ok: true });
+    }
+    // Fire a push to every subscribed device. The Claude `Stop`/`Notification`
+    // hooks POST here (from localhost) with a tmux `session` + `kind`; open to any
+    // tailnet caller. When a session is given we label the push with that chat's
+    // task and deep-link the tap to its Tmux tab; otherwise raw title/body/url.
+    if (url.pathname === "/api/notify" && req.method === "POST") {
+      let b: any;
+      try {
+        b = await req.json();
+      } catch {
+        b = {};
+      }
+      const session = typeof b?.session === "string" ? b.session.trim() : "";
+      const kind = b?.kind === "ask" ? "ask" : b?.kind === "stop" ? "stop" : "";
+      let payload: { title: string; body: string; url: string; tag?: string };
+      if (session) {
+        const task = await sessionTaskTitle(session);
+        payload = {
+          title: task || session,
+          body: kind === "ask" ? "Needs your input" : kind === "stop" ? "Finished" : task ? session : "",
+          url: `/?tmux=${encodeURIComponent(session)}`,
+          tag: `claude-${session}`, // same chat ⇒ later status replaces the earlier
+        };
+      } else {
+        payload = {
+          title: typeof b?.title === "string" && b.title.trim() ? b.title.trim() : "diffshub",
+          body: typeof b?.body === "string" ? b.body : "",
+          url: typeof b?.url === "string" ? b.url : "/",
+          tag: typeof b?.tag === "string" ? b.tag : undefined,
+        };
+      }
+      const r = await notifyAll(payload);
+      return json({ ...r, subscribers: countSubsStmt.get()?.n ?? 0 });
     }
 
     // ---- Directory registry (top-left dropdown + settings dialog) ----

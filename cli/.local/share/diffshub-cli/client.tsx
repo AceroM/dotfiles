@@ -1309,6 +1309,146 @@ function tabDefaults(t: Tab): { view: View; param: string } {
   }
 }
 
+// VAPID public key (base64url) → the Uint8Array the Push API wants.
+function urlB64ToUint8Array(base64: string): Uint8Array {
+  const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+  const raw = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+// Per-device push opt-in, shown in the Directories dialog. Subscribes this
+// browser to Web Push and registers the subscription with the server, which then
+// sends notifications (e.g. when a Claude session finishes via the Stop hook).
+// Requires a secure context — only works over the https tailscale URL.
+function PushToggle() {
+  const supported =
+    typeof navigator !== "undefined" && "serviceWorker" in navigator && "PushManager" in window;
+  const secure = typeof window !== "undefined" && window.isSecureContext;
+  const [sub, setSub] = useState<PushSubscription | null>(null);
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    if (!supported || !secure) {
+      setReady(true);
+      return;
+    }
+    navigator.serviceWorker.ready
+      .then((reg) => reg.pushManager.getSubscription())
+      .then((s) => setSub(s))
+      .catch(() => {})
+      .finally(() => setReady(true));
+  }, [supported, secure]);
+
+  const enable = useCallback(async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") {
+        setMsg("Notification permission denied.");
+        return;
+      }
+      const reg = await navigator.serviceWorker.ready;
+      const { publicKey } = await fetch("/api/push/vapid").then((r) => r.json());
+      const s = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlB64ToUint8Array(publicKey),
+      });
+      await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(s),
+      });
+      setSub(s);
+      setMsg("Enabled on this device.");
+    } catch (e) {
+      console.error(e);
+      setMsg("Couldn't enable — see the console.");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const disable = useCallback(async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      if (sub) {
+        await fetch("/api/push/unsubscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: sub.endpoint }),
+        });
+        await sub.unsubscribe();
+      }
+      setSub(null);
+      setMsg("Disabled on this device.");
+    } finally {
+      setBusy(false);
+    }
+  }, [sub]);
+
+  const test = useCallback(async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const r = await fetch("/api/notify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "diffshub", body: "Test notification", tag: "test" }),
+      }).then((x) => x.json());
+      setMsg(`Sent to ${r.sent} device${r.sent === 1 ? "" : "s"}.`);
+    } catch {
+      setMsg("Send failed.");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  return (
+    <div className="push-box">
+      <div className="push-head">
+        <span className="push-title">Phone notifications</span>
+        {sub && <span className="push-on">on</span>}
+      </div>
+      {!supported ? (
+        <div className="push-hint">Not supported in this browser.</div>
+      ) : !secure ? (
+        <div className="push-hint">
+          Needs HTTPS — open diffshub via its <code>tailscale serve</code>{" "}
+          <code>https://…ts.net</code> URL to enable.
+        </div>
+      ) : !ready ? (
+        <div className="push-hint">Checking…</div>
+      ) : (
+        <>
+          <div className="push-actions">
+            {sub ? (
+              <>
+                <button className="act" disabled={busy} onClick={disable}>
+                  Disable
+                </button>
+                <button className="act" disabled={busy} onClick={test}>
+                  Send test
+                </button>
+              </>
+            ) : (
+              <button className="act primary" disabled={busy} onClick={enable}>
+                Enable on this device
+              </button>
+            )}
+          </div>
+          {msg && <div className="push-msg">{msg}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const initial = useMemo(initialView, []);
   const queryClient = useQueryClient();
@@ -1340,6 +1480,15 @@ function App() {
   }, [theme]);
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === "dark" ? "light" : "dark"));
+  }, []);
+
+  // ---- PWA service worker ----
+  // Registers the push/notification worker. No-ops in a non-secure context
+  // (plain http), so it only really activates over the https tailscale URL.
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
   }, []);
 
   // ---- Active directory (top-left dropdown) ----
@@ -5260,6 +5409,8 @@ function App() {
               />
               <div className="dir-form-hint">Leave empty to auto-detect git subdirectories.</div>
             </div>
+            <div className="push-sep" />
+            <PushToggle />
             {dirError && <div className="modal-error">{dirError}</div>}
             <div className="modal-actions">
               {dirForm.id != null && (
