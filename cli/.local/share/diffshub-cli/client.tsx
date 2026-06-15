@@ -2829,10 +2829,19 @@ function App() {
   );
 
   // Toggle back to the directory you were last viewing (recorded by selectDir).
-  // No-op — and the reply-bar button stays disabled — until you've switched once.
+  // Before you've switched once there's no "last" dir, so fall back to flipping
+  // between the first two registered dirs — from index 0 go to 1, otherwise go
+  // to 0 — mirroring the tmux "next, else previous" switch behavior.
   const goToLastDir = useCallback(() => {
-    if (prevDir !== undefined) selectDir(prevDir);
-  }, [prevDir, selectDir]);
+    if (prevDir !== undefined) {
+      selectDir(prevDir);
+      return;
+    }
+    if (dirs.length < 2) return;
+    const curId = activeDir ?? dirsQuery.data?.defaultDirId ?? null;
+    const curIdx = dirs.findIndex((d) => d.id === curId);
+    selectDir((curIdx === 0 ? dirs[1] : dirs[0]).id);
+  }, [prevDir, selectDir, dirs, activeDir, dirsQuery.data]);
 
   // ---- Directory settings (add / edit / delete) ----
   const [dirForm, setDirForm] = useState<{
@@ -4726,7 +4735,7 @@ function App() {
                       />
                       <IconButton
                         title="Go to last directory"
-                        disabled={prevDir === undefined}
+                        disabled={prevDir === undefined && dirs.length < 2}
                         onClick={goToLastDir}
                       >
                         <FolderClock />
