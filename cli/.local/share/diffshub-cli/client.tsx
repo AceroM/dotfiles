@@ -57,6 +57,8 @@ import {
   Sun,
   Moon,
   Gauge,
+  Highlighter,
+  BellDot,
   ExternalLink,
 } from "lucide-react";
 
@@ -377,6 +379,10 @@ interface DiffRowProps {
   // where there isn't room for two columns. Part of the props so the memo busts
   // when the viewport crosses the breakpoint.
   diffStyle: "split" | "unified";
+  // Whether tapping lines highlights them (driving the floating action bar). On
+  // mobile this is off by default — taps then scroll/select normally — and flips
+  // on via the Actions menu. A prop so the memo busts when the toggle changes.
+  selectable: boolean;
   // Light/dark — drives the diff library's own palette + syntax theme. A prop so
   // the memo busts (and the diff re-renders) the moment the theme is toggled.
   themeType: Theme;
@@ -472,6 +478,7 @@ const DiffRow = memo(function DiffRow({
   selectedRange,
   busy,
   diffStyle,
+  selectable,
   themeType,
   registerEl,
   onSelect,
@@ -494,9 +501,11 @@ const DiffRow = memo(function DiffRow({
   ));
   // Passing `selectedLines` puts the diff in controlled-selection mode, so the
   // highlight is driven entirely from App state — selecting in one file clears
-  // the highlight in every other.
+  // the highlight in every other. `enableLineSelection` (off here on mobile by
+  // default) overrides DIFF_OPTIONS' default since it's spread after it.
   const selectionOptions = {
     collapsed,
+    enableLineSelection: selectable,
     onLineSelectionChange: (r: SelectedLineRange | null) => onSelect(file.key, r),
     onLineSelected: (r: SelectedLineRange | null) => onSelect(file.key, r),
   };
@@ -1534,6 +1543,24 @@ function App() {
     }
   }, [autoRefresh]);
 
+  // Whether tapping a diff line highlights it (driving the floating action bar).
+  // Desktop always allows it; on mobile it's off by default so taps scroll and
+  // select text normally, and you flip it on from the Actions menu. Persisted.
+  const [diffHighlights, setDiffHighlights] = useState(() => {
+    try {
+      return localStorage.getItem("diffHighlights") === "true";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("diffHighlights", String(diffHighlights));
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [diffHighlights]);
+
   // ---- Sidebar sizing + responsive layout ----
   // Both sidebars are drag-resizable on desktop (widths persisted); the right one
   // can be minimized to a floating chevron; and below 1024px the columns become
@@ -1744,6 +1771,72 @@ function App() {
   });
   const selectedSessionRef = useRef(selectedSession);
   selectedSessionRef.current = selectedSession;
+
+  // ---- Per-session "unread" tracking (Tmux tab) ----
+  // A session reads as "unread" once it finishes a turn (goes idle) with new
+  // transcript output you haven't opened since — the sidebar dot + the "next
+  // unread" jump button. We track it client-side off the transcript mtime each
+  // session already reports: remember the mtime you last looked at, and anything
+  // newer-while-idle is unread. Persisted per device (keyed by the stable
+  // sessionId), so sessions that finish while the tab is closed still surface.
+  const [seenMtimes, setSeenMtimes] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem("tmuxSeen");
+      return raw ? (JSON.parse(raw) as Record<string, number>) : {};
+    } catch {
+      return {};
+    }
+  });
+  // Whether a seen-map already existed at startup, captured (lazily, so it reads
+  // the value before the persist effect below writes one). Lets the first-load
+  // seeding tell a fresh device — seed everything as read so old idle sessions
+  // don't all light up — apart from a returning one, where the persisted map
+  // already decides and unknown sessions should default to unseen.
+  const [hadStoredSeen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("tmuxSeen") !== null;
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    // Don't write an empty map: it carries no information (unknown sessions
+    // already default to unseen) and writing it early would make a fresh device
+    // look "returning" before first-load seeding gets to run.
+    if (Object.keys(seenMtimes).length === 0) return;
+    try {
+      localStorage.setItem("tmuxSeen", JSON.stringify(seenMtimes));
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [seenMtimes]);
+  // Seed once on first ever load: mark every current session read at its present
+  // mtime so a brand-new device doesn't open with every idle session flagged.
+  // Skipped on returning devices — defaulting unknown sessions to "unseen" is
+  // what surfaces sessions that finished while the tab was closed.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || !tmuxSessions) return;
+    seededRef.current = true;
+    if (hadStoredSeen) return;
+    setSeenMtimes((prev) => {
+      const next = { ...prev };
+      for (const s of tmuxSessions) {
+        const key = s.sessionId || s.name;
+        if (next[key] === undefined) next[key] = s.mtime;
+      }
+      return next;
+    });
+  }, [tmuxSessions, hadStoredSeen]);
+  // Viewing a session marks it read: pin its last-seen mtime to the latest each
+  // poll so the open transcript never shows unread, even as new output streams in.
+  useEffect(() => {
+    if (!selectedSession || !tmuxSessions) return;
+    const s = tmuxSessions.find((x) => x.name === selectedSession);
+    if (!s || !s.mtime) return;
+    const key = s.sessionId || s.name;
+    setSeenMtimes((prev) => (prev[key] === s.mtime ? prev : { ...prev, [key]: s.mtime }));
+  }, [selectedSession, tmuxSessions]);
 
   // Sessions are global (every claude tmux session on the box), but the Tmux tab
   // should only show the ones running under the directory you're browsing. Scope
@@ -2160,6 +2253,13 @@ function App() {
 
   // Highlighted diff lines + the floating action bar they drive.
   const [selection, setSelection] = useState<DiffSelection | null>(null);
+  // Selecting lines is always on at desktop width; on mobile it follows the
+  // `diffHighlights` toggle. When off, the diff swallows no taps (so they scroll
+  // and select text normally) and any stale highlight is dropped.
+  const lineSelectable = isDesktop || diffHighlights;
+  useEffect(() => {
+    if (!lineSelectable) setSelection(null);
+  }, [lineSelectable]);
 
   const fileEls = useRef(new Map<string, HTMLDivElement>());
   const mainEl = useRef<HTMLDivElement | null>(null);
@@ -3356,6 +3456,37 @@ function App() {
     [visibleTmux, selectTmux],
   );
 
+  // A session is "unread" once it's idle (finished its turn — not busy, not
+  // blocked on a prompt) with transcript output newer than you last saw. Drives
+  // the sidebar dots and the "next unread" jump. Waiting rows are excluded: they
+  // carry their own badge and haven't finished.
+  const isUnread = useCallback(
+    (s: TmuxSession) =>
+      !s.busy && !s.waiting && s.mtime > 0 && s.mtime > (seenMtimes[s.sessionId || s.name] ?? 0),
+    [seenMtimes],
+  );
+  // Is there an unread session to jump to other than the one already open? Gates
+  // the "next unread" button's disabled state.
+  const hasNextUnread = useMemo(
+    () => (visibleTmux ?? []).some((s) => s.name !== selectedSession && isUnread(s)),
+    [visibleTmux, selectedSession, isUnread],
+  );
+  // Jump to the next unread session after the current one in the visible list,
+  // wrapping around — same traversal as cycleSession, but skipping read rows.
+  const goToNextUnread = useCallback(() => {
+    const list = visibleTmux;
+    if (!list?.length) return;
+    const start = list.findIndex((s) => s.name === selectedSessionRef.current);
+    for (let i = 1; i <= list.length; i++) {
+      const s = list[(start + i + list.length) % list.length];
+      if (s && isUnread(s)) {
+        selectTmux(s.name);
+        document.getElementById(`row-tmux-${s.name}`)?.scrollIntoView({ block: "nearest" });
+        return;
+      }
+    }
+  }, [visibleTmux, isUnread, selectTmux]);
+
   // Kill every session currently listed on the Tmux tab (the dir-scoped, filtered
   // set the user is looking at — not every claude session on the box). Reuses the
   // single-kill endpoint per session, then refreshes; the auto-select effect picks
@@ -3945,6 +4076,15 @@ function App() {
       onClick: () => toggleReviewed(view.sha, view.repo),
     });
   }
+  // Diff-line highlighting is off by default on mobile (this menu only renders
+  // there), so offer it as a toggle wherever a diff is on screen.
+  if (hasRightSidebar) {
+    actionItems.push({
+      label: diffHighlights ? "Disable line highlights" : "Enable line highlights",
+      icon: <Highlighter />,
+      onClick: () => setDiffHighlights((h) => !h),
+    });
+  }
   // The Tmux tab's "Kill session" lives as a dedicated trash button beside this
   // menu (see the topbar), so it's intentionally not duplicated here.
   actionItems.push({ label: "Claude usage", icon: <Gauge />, onClick: () => setUsageOpen(true) });
@@ -4005,7 +4145,7 @@ function App() {
             </button>
           </>
         )}
-        {tab === "tmux" && (
+        {(tab === "tmux" || tab === "commits") && (
           <button
             className="topbar-btn topbar-new"
             title="New Claude session"
@@ -4454,7 +4594,7 @@ function App() {
                 id={`row-tmux-${s.name}`}
                 className={`commit${selectedSession === s.name ? " active" : ""}${
                   s.waiting && !s.busy ? " waiting" : ""
-                }`}
+                }${selectedSession !== s.name && isUnread(s) ? " unread" : ""}`}
                 onClick={() => selectTmux(s.name)}
               >
                 <div className="sess-top">
@@ -4463,6 +4603,9 @@ function App() {
                   />
                   <span className="sess-name">{s.name}</span>
                   {s.waiting && !s.busy && <span className="waiting-badge">Waiting</span>}
+                  {selectedSession !== s.name && isUnread(s) && (
+                    <span className="unread-dot" title="Finished — unread" />
+                  )}
                 </div>
                 {s.task && <div className="sess-task">{s.task}</div>}
                 <div className="sess-cwd">{s.cwd.replace(/^.*\//, "") || s.cwd}</div>
@@ -4756,6 +4899,17 @@ function App() {
                       </IconButton>
                     </>
                   )}
+                  {/* Jump to the next session that finished with output you haven't
+                      opened — the unread dots in the sidebar. Rendered on desktop
+                      too (no keyboard shortcut drives it); disabled when nothing but
+                      the current chat is unread. */}
+                  <IconButton
+                    title="Go to next unread session"
+                    disabled={!hasNextUnread}
+                    onClick={goToNextUnread}
+                  >
+                    <BellDot />
+                  </IconButton>
                   {replyImgUploading && <span className="reply-hint">Uploading image…</span>}
                   <span className="spacer" />
                   <button
@@ -4830,6 +4984,7 @@ function App() {
                 selectedRange={selection?.fileKey === f.key ? selection.range : null}
                 busy={busyPath !== null}
                 diffStyle={isDesktop ? "split" : "unified"}
+                selectable={lineSelectable}
                 themeType={theme}
                 registerEl={registerEl}
                 onSelect={onDiffSelect}
