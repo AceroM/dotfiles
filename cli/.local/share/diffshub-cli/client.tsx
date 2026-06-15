@@ -736,6 +736,45 @@ const isUl = (l: string) => /^\s*[-*+]\s+/.test(l);
 const isOl = (l: string) => /^\s*\d+[.)]\s+/.test(l);
 const isHeading = (l: string) => /^#{1,6}\s+/.test(l);
 const isQuote = (l: string) => /^>\s?/.test(l);
+// A GFM table row contains at least one unescaped pipe.
+const isTableRow = (l: string) => /\|/.test(l) && l.trim() !== "";
+// The separator under the header: cells of dashes with optional `:` alignment.
+const isTableSep = (l: string) => /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(l);
+
+// Split a table row into trimmed cells, tolerating optional leading/trailing
+// pipes and `\|` escapes inside a cell.
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  const cells: string[] = [];
+  let cur = "";
+  for (let j = 0; j < s.length; j++) {
+    if (s[j] === "\\" && s[j + 1] === "|") {
+      cur += "|";
+      j++;
+    } else if (s[j] === "|") {
+      cells.push(cur.trim());
+      cur = "";
+    } else {
+      cur += s[j];
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+type Align = "left" | "center" | "right" | null;
+function parseAlign(sep: string): Align[] {
+  return splitRow(sep).map((c) => {
+    const l = c.startsWith(":");
+    const r = c.endsWith(":");
+    if (l && r) return "center";
+    if (r) return "right";
+    if (l) return "left";
+    return null;
+  });
+}
 
 function renderBlocks(src: string): ReactNode[] {
   const lines = src.split("\n");
@@ -805,6 +844,44 @@ function renderBlocks(src: string): ReactNode[] {
       );
       continue;
     }
+    // GFM table: a header row immediately followed by a separator row.
+    if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const headers = splitRow(line);
+      const aligns = parseAlign(lines[i + 1]);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && isTableRow(lines[i]) && !isTableSep(lines[i])) {
+        rows.push(splitRow(lines[i++]));
+      }
+      const colAlign = (c: number): Align => aligns[c] ?? null;
+      out.push(
+        <div key={key++} className="md-table-wrap">
+          <table className="md-table">
+            <thead>
+              <tr>
+                {headers.map((c, ci) => (
+                  <th key={ci} style={colAlign(ci) ? { textAlign: colAlign(ci)! } : undefined}>
+                    {parseInline(c)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri}>
+                  {headers.map((_, ci) => (
+                    <td key={ci} style={colAlign(ci) ? { textAlign: colAlign(ci)! } : undefined}>
+                      {parseInline(r[ci] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
     // Paragraph: gather consecutive plain lines, soft-wrapped with <br/>.
     const para: string[] = [];
     while (
@@ -814,7 +891,8 @@ function renderBlocks(src: string): ReactNode[] {
       !isHeading(lines[i]) &&
       !isQuote(lines[i]) &&
       !isUl(lines[i]) &&
-      !isOl(lines[i])
+      !isOl(lines[i]) &&
+      !(isTableRow(lines[i]) && i + 1 < lines.length && isTableSep(lines[i + 1]))
     )
       para.push(lines[i++]);
     const inlined: ReactNode[] = [];
@@ -1661,13 +1739,17 @@ function HomeCard({
   session,
   state,
   onOpen,
+  onDelete,
 }: {
   session: TmuxSession;
   state: string;
   onOpen: (name: string) => void;
+  onDelete: (name: string) => void;
 }) {
+  // A <div> (not a <button>) so the nested kill button stays valid HTML —
+  // matches the Tmux list rows, which are also clickable divs.
   return (
-    <button
+    <div
       id={`row-tmux-${session.name}`}
       className={`home-card ${state}`}
       onClick={() => onOpen(session.name)}
@@ -1678,7 +1760,17 @@ function HomeCard({
       </div>
       {session.task && <div className="home-card-task">{session.task}</div>}
       <div className="home-card-cwd">{session.cwd.replace(/^.*\//, "") || session.cwd}</div>
-    </button>
+      <button
+        className="kill-btn"
+        title={`Kill ${session.name}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(session.name);
+        }}
+      >
+        ✕
+      </button>
+    </div>
   );
 }
 
@@ -1692,6 +1784,8 @@ function HomeView({
   loading,
   error,
   onOpen,
+  onDelete,
+  onCancelQueued,
 }: {
   groups: {
     inProgress: TmuxSession[];
@@ -1703,6 +1797,8 @@ function HomeView({
   loading: boolean;
   error: string | null;
   onOpen: (name: string) => void;
+  onDelete: (name: string) => void;
+  onCancelQueued: (id: number) => void;
 }) {
   if (loading) return <ContentSpinner label="Loading sessions…" />;
   if (error) return <div className="empty error">{error}</div>;
@@ -1719,7 +1815,7 @@ function HomeView({
         {inProgress.length ? (
           <div className="home-cards">
             {inProgress.map((s) => (
-              <HomeCard key={s.name} session={s} state="busy" onOpen={onOpen} />
+              <HomeCard key={s.name} session={s} state="busy" onOpen={onOpen} onDelete={onDelete} />
             ))}
           </div>
         ) : (
@@ -1735,7 +1831,13 @@ function HomeView({
         {needsAction.length ? (
           <div className="home-cards">
             {needsAction.map((s) => (
-              <HomeCard key={s.name} session={s} state="waiting" onOpen={onOpen} />
+              <HomeCard
+                key={s.name}
+                session={s}
+                state="waiting"
+                onOpen={onOpen}
+                onDelete={onDelete}
+              />
             ))}
           </div>
         ) : (
@@ -1758,6 +1860,16 @@ function HomeView({
                 </div>
                 <div className="home-card-task">{q.prompt}</div>
                 <div className="home-card-cwd">{q.cwd.replace(/^.*\//, "") || q.cwd}</div>
+                <button
+                  className="kill-btn"
+                  title="Cancel queued prompt"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCancelQueued(q.id);
+                  }}
+                >
+                  ✕
+                </button>
               </div>
             ))}
           </div>
@@ -1772,7 +1884,13 @@ function HomeView({
           </div>
           <div className="home-cards">
             {done.map((s) => (
-              <HomeCard key={s.name} session={s} state="unread" onOpen={onOpen} />
+              <HomeCard
+                key={s.name}
+                session={s}
+                state="unread"
+                onOpen={onOpen}
+                onDelete={onDelete}
+              />
             ))}
           </div>
         </section>
@@ -1786,7 +1904,7 @@ function HomeView({
           </div>
           <div className="home-cards">
             {idle.map((s) => (
-              <HomeCard key={s.name} session={s} state="idle" onOpen={onOpen} />
+              <HomeCard key={s.name} session={s} state="idle" onOpen={onOpen} onDelete={onDelete} />
             ))}
           </div>
         </section>
@@ -3699,8 +3817,10 @@ function App() {
   useEffect(() => {
     setCollapsedKeys(new Set());
     setSelection(null);
-    // Scroll the diff column back to the top when the viewed commit/PR changes.
-    if (view.kind === "commit" || view.kind === "pr") mainEl.current?.scrollTo({ top: 0 });
+    // Scroll the main column back to the top when the viewed commit/PR changes,
+    // or when landing on the Home dashboard.
+    if (view.kind === "commit" || view.kind === "pr" || view.kind === "home")
+      mainEl.current?.scrollTo({ top: 0 });
   }, [view]);
   const activeKeyRef = useRef(activeKey);
   activeKeyRef.current = activeKey;
@@ -5067,6 +5187,8 @@ function App() {
             {theme === "dark" ? <Sun size={13} /> : <Moon size={13} />}
             <span>{theme === "dark" ? "Light" : "Dark"}</span>
           </button>
+          {/* Shortcut hints hidden — they took up too much sidebar space. The
+              keyboard shortcuts themselves still work; only the legend is gone.
           <span>
             <kbd>1-5</kbd>/<kbd>←/→</kbd> tabs
           </span>
@@ -5119,6 +5241,7 @@ function App() {
           <span>
             <kbd>/</kbd> filter
           </span>
+          */}
         </div>
       </nav>
 
@@ -5135,6 +5258,8 @@ function App() {
             loading={tmuxQuery.isPending && !tmuxSessions}
             error={tmuxQuery.isError ? errMessage(tmuxQuery.error) : null}
             onOpen={openSession}
+            onDelete={killSession}
+            onCancelQueued={cancelQueued}
           />
         )}
         {tab === "tmux" && (
