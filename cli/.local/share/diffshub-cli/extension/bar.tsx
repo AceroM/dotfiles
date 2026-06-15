@@ -61,12 +61,16 @@ function Bar() {
   const [server, setServer] = useState<string | null>(null);
 
   // ---- composer ----
-  const [expanded, setExpanded] = useState(false);
+  // Restore any draft left in localStorage by a previous visit/reload, and open
+  // straight to it so the persisted text is visible. The draft is cleared once a
+  // prompt is sent (see the persist effect + setPrompt("") in submit).
+  const initialDraft = useRef(loadDraft()).current;
+  const [expanded, setExpanded] = useState(initialDraft.length > 0);
   // null = not picking. "inject" (v) drops the picked ref into the composer;
   // "editor" (V) opens its source file in the local $EDITOR instead.
   const [selectMode, setSelectMode] = useState<null | "inject" | "editor">(null);
   const selecting = selectMode !== null;
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(initialDraft);
   const [launching, setLaunching] = useState(false);
   const [launched, setLaunched] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -80,6 +84,14 @@ function Bar() {
     null,
   );
   const [fileMenuIndex, setFileMenuIndex] = useState(0);
+
+  // ---- persist draft ----
+  // Mirror the prompt to localStorage so an in-progress draft survives a reload or
+  // navigation. The empty-string branch removes the key, so setPrompt("") on a
+  // successful send (in submit) clears the stored draft here.
+  useEffect(() => {
+    saveDraft(prompt);
+  }, [prompt]);
 
   // ---- config load + live updates ----
   useEffect(() => {
@@ -533,6 +545,29 @@ function Bar() {
       </div>
     </div>
   );
+}
+
+// The composer's prompt is mirrored to the host page's localStorage (so it's
+// naturally scoped per origin) under this key, so an unsent draft survives a
+// reload. Cleared on send. localStorage access is wrapped because it can throw
+// in private mode / when storage is disabled — drafts are best-effort.
+const DRAFT_KEY = "diffshub-ext:draft";
+
+function loadDraft(): string {
+  try {
+    return localStorage.getItem(DRAFT_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveDraft(value: string): void {
+  try {
+    if (value) localStorage.setItem(DRAFT_KEY, value);
+    else localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    // ignore — private mode / quota / storage disabled
+  }
 }
 
 // The current route (location.pathname), kept live across SPA navigations. The
