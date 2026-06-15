@@ -775,13 +775,15 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
 
 interface TranscriptMsg {
   role: "user" | "assistant" | "tool";
-  kind: "text" | "tool_use" | "tool_result";
+  kind: "text" | "tool_use" | "tool_result" | "image";
   text: string;
   tool?: string; // tool name for tool_use
   ts?: string; // ISO timestamp
   path?: string; // file path for Edit/Write/MultiEdit/Read
   edits?: { old: string; new: string }[]; // hunks for Edit/Write/MultiEdit diff rendering
   lang?: string; // language id for a Read tool result's code block
+  imgRef?: string; // "<lineIdx>:<imgOrdinal>" — locates an image block for /api/tmux/image
+  mediaType?: string; // image media type (e.g. image/png) for an image message
 }
 
 // Map a file path to a language id the diffs highlighter understands. Falls back
@@ -847,6 +849,22 @@ function summarizeToolInput(name: string, input: any): string {
   return s.length > 200 ? s.slice(0, 200) + "…" : s;
 }
 
+// Collect every base64 image block in a message's content, in appearance order.
+// A pasted image lives at the top level of a user message; an image claude read
+// (a Read on a png, or a screenshot MCP tool) is nested inside a tool_result.
+// Used both to emit image messages from parseTranscript and to serve the bytes in
+// /api/tmux/image — they share this walk so the ordinal in an imgRef lines up.
+function collectImages(content: unknown): { mediaType: string; data: string }[] {
+  const out: { mediaType: string; data: string }[] = [];
+  const visit = (b: any) => {
+    if (b?.type === "image" && b.source?.type === "base64" && typeof b.source.data === "string")
+      out.push({ mediaType: b.source.media_type || "image/png", data: b.source.data });
+    else if (b?.type === "tool_result" && Array.isArray(b.content)) b.content.forEach(visit);
+  };
+  if (Array.isArray(content)) content.forEach(visit);
+  return out;
+}
+
 function blockText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content))
@@ -869,7 +887,11 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
   // block in the file's language.
   const toolById = new Map<string, { name: string; path: string }>();
   const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
-  for (const line of text.split("\n")) {
+  // Append-only transcript, so a line's index is stable — image messages carry it
+  // (as "<lineIdx>:<imgOrdinal>") so /api/tmux/image can fetch the bytes lazily.
+  const lines = text.split("\n");
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx];
     if (!line.trim()) continue;
     let d: any;
     try {
@@ -890,12 +912,43 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
       if (typeof content === "string") {
         if (content.trim()) msgs.push({ role: "user", kind: "text", text: trunc(content, 8000), ts });
       } else if (Array.isArray(content)) {
+        // Image ordinal within this line, matching collectImages(content) order so
+        // the imgRef resolves to the right block server-side.
+        let imgOrd = 0;
         for (const b of content) {
           if (b?.type === "text" && b.text?.trim())
             msgs.push({ role: "user", kind: "text", text: trunc(b.text, 8000), ts });
-          else if (b?.type === "tool_result") {
-            const t = blockText(b.content) || (typeof b.content === "string" ? b.content : "");
+          else if (b?.type === "image") {
+            // A pasted image — show it in the user bubble.
+            msgs.push({
+              role: "user",
+              kind: "image",
+              text: "",
+              imgRef: `${lineIdx}:${imgOrd++}`,
+              mediaType: b.source?.media_type || "image/png",
+              ts,
+            });
+          } else if (b?.type === "tool_result") {
             const src = b.tool_use_id ? toolById.get(b.tool_use_id) : undefined;
+            const imgs = collectImages([b]);
+            if (imgs.length) {
+              // claude read an image (Read on a png) or a screenshot tool returned
+              // one — render it inline rather than the "(empty file)" text we'd get
+              // from blockText on an image-only result.
+              for (const img of imgs)
+                msgs.push({
+                  role: "tool",
+                  kind: "image",
+                  tool: src?.name || "Read",
+                  path: src?.path || undefined,
+                  imgRef: `${lineIdx}:${imgOrd++}`,
+                  mediaType: img.mediaType,
+                  text: "",
+                  ts,
+                });
+              continue;
+            }
+            const t = blockText(b.content) || (typeof b.content === "string" ? b.content : "");
             if (src?.name === "Read") {
               // Render Read output as a syntax-highlighted code block: strip the
               // line-number gutter and carry the file's language. Bigger cap than
@@ -1595,6 +1648,23 @@ const page = `<!DOCTYPE html>
   .read-block-head .tool-arg { color: var(--text-muted); }
   .read-block-head .read-block-meta { color: var(--text-muted); opacity: .75; }
 
+  /* An image claude read (Read on a png), a screenshot tool's output, or a pasted
+     image — fetched lazily from /api/tmux/image. Click to open full size. */
+  .img-block { align-self: flex-start; max-width: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .turn.user .img-block { align-self: flex-end; }
+  .img-block-head {
+    align-self: flex-start; display: inline-flex; align-items: baseline; gap: 7px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  }
+  .img-block-head .tool-name { color: var(--accent); font-weight: 600; }
+  .img-block-head .tool-name::before { content: "🖼 "; opacity: .8; }
+  .img-block-head .tool-arg { color: var(--text-muted); }
+  .img-block-img {
+    max-width: min(520px, 100%); max-height: 460px; width: auto; height: auto;
+    border: 1px solid var(--border); border-radius: 8px; display: block;
+    object-fit: contain; background: var(--bg-soft);
+  }
+
   /* ExitPlanMode plan card — the full plan plus claude's approve/keep-planning
      choices, mirroring the in-TUI plan prompt. No max-height: the whole plan is
      meant to be read inline, never trapped in a tiny scroll box. */
@@ -2045,7 +2115,7 @@ const page = `<!DOCTYPE html>
   .modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   /* Mobile "Image" picker button: a comfortable tap target, pinned bottom-left
      in the modal footer (the rest of the row stays right-aligned). */
-  .img-pick { padding: 6px 12px; font-size: 13px; border-radius: 7px; }
+  .img-pick { padding: 6px 10px; font-size: 16px; line-height: 1; border-radius: 7px; }
   .modal-actions .img-pick { margin-right: auto; }
   .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .modal-actions .primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
@@ -2740,6 +2810,47 @@ const server = Bun.serve({
         const text = await Bun.file(path).text();
         const { messages, model, title } = parseTranscript(text, limit);
         return json({ session: name, cwd, sessionId: sid, path, messages, model, title, pendingPane });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Serve one image from a transcript (a png claude read, a screenshot tool's
+    // output, or a pasted image) by the "<lineIdx>:<imgOrdinal>" ref that
+    // parseTranscript emitted. Kept out of the transcript JSON — base64 images are
+    // large and the transcript is polled — so the browser fetches each once and
+    // caches it hard.
+    if (req.method === "GET" && url.pathname === "/api/tmux/image") {
+      const name = url.searchParams.get("session") ?? "";
+      const ref = url.searchParams.get("ref") ?? "";
+      const m = /^(\d+):(\d+)$/.exec(ref);
+      if (!name || !m) return json({ error: "Missing session or ref" }, 400);
+      try {
+        const SEP = "\x1f";
+        const info = (
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}"].join(SEP)}`.quiet().text()
+        ).trim();
+        const [cwd, sid, cmd, paneTitle] = info.split(SEP);
+        const task = cleanTitle(paneTitle ?? "", name, cmd ?? "");
+        const path = await resolveTranscript(cwd ?? "", sid ?? "", task);
+        if (!path || !existsSync(path)) return json({ error: "No transcript" }, 404);
+        const line = (await Bun.file(path).text()).split("\n")[parseInt(m[1], 10)];
+        if (!line) return json({ error: "Out of range" }, 404);
+        let d: any;
+        try {
+          d = JSON.parse(line);
+        } catch {
+          return json({ error: "Unparseable line" }, 404);
+        }
+        const img = collectImages(d?.message?.content)[parseInt(m[2], 10)];
+        if (!img) return json({ error: "No image" }, 404);
+        return new Response(Buffer.from(img.data, "base64"), {
+          headers: {
+            "Content-Type": img.mediaType || "image/png",
+            // ref → fixed bytes for an append-only transcript, so cache hard.
+            "Cache-Control": "public, max-age=31536000, immutable",
+          },
+        });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }

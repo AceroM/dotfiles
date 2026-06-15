@@ -172,13 +172,15 @@ interface QueuedSession {
 // One rendered line of a session's transcript.
 interface TranscriptMsg {
   role: "user" | "assistant" | "tool";
-  kind: "text" | "tool_use" | "tool_result";
+  kind: "text" | "tool_use" | "tool_result" | "image";
   text: string;
   tool?: string;
   ts?: string;
   path?: string; // file path for Edit/Write/MultiEdit/Read
   edits?: { old: string; new: string }[]; // hunks for Edit/Write/MultiEdit diff rendering
   lang?: string; // language id for a Read tool result's code block
+  imgRef?: string; // "<lineIdx>:<imgOrdinal>" — locates the bytes for /api/tmux/image
+  mediaType?: string; // image media type for an image message
 }
 
 interface Transcript {
@@ -979,17 +981,50 @@ const ReadBlock = memo(function ReadBlock({
   );
 });
 
+// An image claude read (Read on a png), a screenshot tool's output, or a pasted
+// image — fetched lazily from /api/tmux/image (kept out of the polled transcript
+// payload, then cached hard). Click to open full size in a new tab.
+const ImageBlock = memo(function ImageBlock({
+  session,
+  imgRef,
+  tool,
+  path,
+}: {
+  session: string;
+  imgRef: string;
+  tool?: string;
+  path?: string;
+}) {
+  const src = `/api/tmux/image?session=${encodeURIComponent(session)}&ref=${encodeURIComponent(imgRef)}`;
+  const name = path ? path.split("/").pop() || path : "";
+  return (
+    <div className="img-block">
+      {(tool || name) && (
+        <div className="img-block-head">
+          {tool ? <span className="tool-name">{tool}</span> : null}
+          {name ? <span className="tool-arg">{name}</span> : null}
+        </div>
+      )}
+      <a href={src} target="_blank" rel="noreferrer">
+        <img className="img-block-img" src={src} loading="lazy" alt={name || "image"} />
+      </a>
+    </div>
+  );
+});
+
 // One conversation turn: a user turn is a right-aligned bubble; an assistant turn
 // is a left avatar + content stack (markdown text, tool calls, tool results).
 const TranscriptTurn = memo(function TranscriptTurn({
   role,
   msgs,
+  session,
   theme,
   onAnswerPlan,
   onAnswerQuestion,
 }: {
   role: "user" | "assistant";
   msgs: TranscriptMsg[];
+  session: string;
   theme: Theme;
   onAnswerPlan?: (choice: number) => Promise<void> | void;
   onAnswerQuestion?: (questionIndex: number, optionIndex: number) => Promise<void> | void;
@@ -997,11 +1032,15 @@ const TranscriptTurn = memo(function TranscriptTurn({
   if (role === "user") {
     return (
       <div className="turn user">
-        {msgs.map((m, i) => (
-          <div key={i} className="bubble">
-            {m.text}
-          </div>
-        ))}
+        {msgs.map((m, i) =>
+          m.kind === "image" ? (
+            <ImageBlock key={i} session={session} imgRef={m.imgRef || ""} tool={m.tool} path={m.path} />
+          ) : (
+            <div key={i} className="bubble">
+              {m.text}
+            </div>
+          ),
+        )}
       </div>
     );
   }
@@ -1030,6 +1069,8 @@ const TranscriptTurn = memo(function TranscriptTurn({
                 {m.text ? <span className="tool-arg">{m.text}</span> : null}
               </div>
             );
+          if (m.kind === "image")
+            return <ImageBlock key={i} session={session} imgRef={m.imgRef || ""} tool={m.tool} path={m.path} />;
           if (m.kind === "tool_result" && m.tool === "Read")
             return <ReadBlock key={i} path={m.path || ""} lang={m.lang || "text"} code={m.text} />;
           if (m.kind === "tool_result")
@@ -3777,6 +3818,7 @@ function App() {
               onClick={() => selectTab("changes")}
             >
               <FileDiffIcon />
+              {!!changeCount && <span className="tab-badge">{changeCount}</span>}
             </button>
             <button
               className={tab === "commits" ? "on" : ""}
@@ -4189,6 +4231,7 @@ function App() {
                       key={i}
                       role={t.role}
                       msgs={t.msgs}
+                      session={selectedSession}
                       theme={theme}
                       onAnswerPlan={i === turns.length - 1 ? answerPlan : undefined}
                       onAnswerQuestion={i === turns.length - 1 ? answerQuestion : undefined}
@@ -4314,28 +4357,14 @@ function App() {
                         className="act img-pick"
                         disabled={replyImgUploading}
                         onClick={() => replyImgInputRef.current?.click()}
+                        title="Attach image"
+                        aria-label="Attach image"
                       >
-                        🖼 Image
+                        {replyImgUploading ? "…" : "🖼"}
                       </button>
                     </>
                   )}
-                  <span className="reply-hint">
-                    {replyImgUploading ? (
-                      "Uploading image…"
-                    ) : (
-                      <>
-                        <span>
-                          <kbd>⌃V</kbd> image
-                        </span>
-                        <span>
-                          <kbd>↵</kbd> send
-                        </span>
-                        <span>
-                          <kbd>⇧↵</kbd> newline
-                        </span>
-                      </>
-                    )}
-                  </span>
+                  {replyImgUploading && <span className="reply-hint">Uploading image…</span>}
                   <span className="spacer" />
                   <button
                     className="act stop"
@@ -4880,8 +4909,10 @@ function App() {
                     className="act img-pick"
                     disabled={imgUploading}
                     onClick={() => claudeImgInputRef.current?.click()}
+                    title="Attach image"
+                    aria-label="Attach image"
                   >
-                    {imgUploading ? "Uploading…" : "🖼 Image"}
+                    {imgUploading ? "…" : "🖼"}
                   </button>
                 </>
               )}
