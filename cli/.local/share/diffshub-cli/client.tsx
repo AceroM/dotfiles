@@ -2521,6 +2521,10 @@ function App() {
       setReplyText("");
       setFileToken(null); // drop any open @-mention popup along with the sent text
       saveDraft(replyDraftKey(session), ""); // sent → drop this tab's saved draft
+      // Drop focus once the reply is on its way — keeps the transcript (not a
+      // blinking caret) the focus after you fire off a message, and on mobile lets
+      // the on-screen keyboard retract so the conversation is fully visible.
+      replyTextareaRef.current?.blur();
       // Give claude a beat to accept the keys before reading the transcript back.
       setTimeout(() => {
         queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
@@ -5388,7 +5392,7 @@ function App() {
       )}
 
       {launchedSession && (
-        <div className="sel-bar">
+        <div className="sel-bar sel-bar-toast">
           <span className="sel-info">New session created</span>
           <button className="sel-x" title="Dismiss" onClick={() => setLaunchedSession(null)}>
             ✕

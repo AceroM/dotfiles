@@ -2374,6 +2374,14 @@ const page = `<!DOCTYPE html>
        by default (it still auto-grows + scrolls past this floor). */
     .claude-overlay { align-items: flex-start; padding-top: 12px; }
     .claude .commit-input.auto { min-height: 180px; }
+
+    /* The "New session created" toast sits at the bottom by default, but on
+       mobile the composer/keyboard area is busy — pin it to the top, just below
+       the top bar (51px) plus any notch inset. Other .sel-bar uses stay put. */
+    .sel-bar-toast {
+      top: calc(60px + env(safe-area-inset-top, 0px));
+      bottom: auto;
+    }
   }
 </style>
 </head>
