@@ -1447,7 +1447,8 @@ const page = `<!DOCTYPE html>
     width: 34px; height: 34px; flex-shrink: 0; cursor: pointer;
     background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--text-strong);
   }
-  .topbar-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  .topbar-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+  .topbar-btn:disabled { opacity: .4; cursor: default; }
   /* New-session (+) and kill (trash) buttons (Tmux tab) — sit beside the actions
      dropdown. */
   .topbar-new { color: var(--accent); border-color: var(--accent); }
@@ -2284,12 +2285,12 @@ const page = `<!DOCTYPE html>
     .resizer { display: none; }
     .tree-min { display: none; }
 
-    /* Drawers: fixed, off-canvas, slide in on transform. They sit below the top
-       bar (top: 51px) and above the scrim. */
+    /* Drawers: fixed, off-canvas, snap in on transform (no transition — the app
+       favors instant response). They sit below the top bar (top: 51px) and
+       above the scrim. */
     .commits, .tree {
       position: fixed; top: 51px; bottom: 0; z-index: 45;
       width: min(86vw, 380px); min-width: 0;
-      transition: transform .22s ease;
     }
     .commits { left: 0; transform: translateX(-100%); }
     .tree { right: 0; left: auto; transform: translateX(100%); }

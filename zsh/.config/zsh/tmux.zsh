@@ -46,15 +46,22 @@ function next_priority_session() {
   return 1
 }
 
-# switch the attached client to the next priority session (else just the next
-# one), then kill the session we left. used by the M-x binding in .tmux.conf
+# switch the attached client to the next priority session, then kill the session
+# we left. with no priority session, fall back to the previous session in the
+# list — unless we're the first one (no previous), in which case go to the next.
+# used by the M-x binding in .tmux.conf
 function _t_switch_next_and_kill() {
   local sock="$1" current="$2"
   local next="$(next_priority_session "$sock" "$current")"
   if [[ -n "$next" ]]; then
     _tm "$sock" switch-client -t "$next"
   else
-    _tm "$sock" switch-client -n
+    local first="$(_tm "$sock" list-sessions -F '#S' 2>/dev/null | sort | head -1)"
+    if [[ "$current" == "$first" ]]; then
+      _tm "$sock" switch-client -n
+    else
+      _tm "$sock" switch-client -p
+    fi
   fi
   _tm "$sock" kill-session -t "$current"
 }
