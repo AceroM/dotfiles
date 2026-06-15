@@ -157,6 +157,7 @@ interface TmuxSession {
   cwd: string;
   task: string; // what claude is doing (cleaned pane title), "" if not meaningful
   busy: boolean; // claude is actively working
+  waiting: boolean; // idle but blocked on an interactive prompt (waiting for input)
   sessionId: string;
   hasTranscript: boolean;
   mtime: number;
@@ -1701,14 +1702,19 @@ function App() {
       ),
     enabled: tab === "tmux",
     refetchOnWindowFocus: false,
-    // Poll while a session is working (live busy dots) or while prompts sit queued
-    // (so they vanish + their real session pops in the moment the network returns).
+    // Poll while a session is working (live busy dots), while one sits waiting for
+    // input (so its "Waiting" badge appears the moment a run pauses on a prompt and
+    // clears once answered — same reason the transcript keeps an idle poll), or
+    // while prompts sit queued (so they vanish + their real session pops in the
+    // moment the network returns).
     refetchInterval: (query) =>
       query.state.data?.sessions.some((s) => s.busy)
         ? TMUX_POLL_MS
-        : query.state.data?.queued?.length
-          ? TMUX_QUEUE_POLL_MS
-          : false,
+        : query.state.data?.sessions.some((s) => s.waiting)
+          ? TMUX_IDLE_POLL_MS
+          : query.state.data?.queued?.length
+            ? TMUX_QUEUE_POLL_MS
+            : false,
   });
   const tmuxSessions = tmuxQuery.data?.sessions ?? null;
   const queuedSessions = tmuxQuery.data?.queued ?? null;
@@ -4390,12 +4396,17 @@ function App() {
               <div
                 key={s.name}
                 id={`row-tmux-${s.name}`}
-                className={`commit${selectedSession === s.name ? " active" : ""}`}
+                className={`commit${selectedSession === s.name ? " active" : ""}${
+                  s.waiting && !s.busy ? " waiting" : ""
+                }`}
                 onClick={() => selectTmux(s.name)}
               >
                 <div className="sess-top">
-                  <span className={`sess-busy${s.busy ? " on" : ""}`} />
+                  <span
+                    className={`sess-busy${s.busy ? " on" : s.waiting ? " waiting" : ""}`}
+                  />
                   <span className="sess-name">{s.name}</span>
+                  {s.waiting && !s.busy && <span className="waiting-badge">Waiting</span>}
                 </div>
                 {s.task && <div className="sess-task">{s.task}</div>}
                 <div className="sess-cwd">{s.cwd.replace(/^.*\//, "") || s.cwd}</div>

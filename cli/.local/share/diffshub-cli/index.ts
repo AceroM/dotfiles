@@ -754,6 +754,7 @@ interface TmuxSession {
   cwd: string;
   task: string; // what claude is doing (cleaned pane title), "" if not meaningful
   busy: boolean; // claude is actively working (braille-spinner pane title)
+  waiting: boolean; // idle but blocked on an interactive prompt in the live pane
   sessionId: string; // @claude_session if tagged, else ""
   hasTranscript: boolean;
   mtime: number; // transcript mtime (ms), 0 if none — used for sorting
@@ -790,8 +791,19 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
         mtime = statSync(path).mtimeMs;
       } catch {}
     }
-    out.push({ name, cwd: cwd ?? "", task, busy, sessionId: sid ?? "", hasTranscript: !!path, mtime });
+    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid ?? "", hasTranscript: !!path, mtime });
   }
+  // An idle session may actually be blocked on an interactive prompt (the same
+  // case capturePendingPrompt handles for the open transcript). Flag those so the
+  // sidebar can mark them "waiting for input" without opening each one. Only idle
+  // sessions can be waiting — a busy pane is mid-turn — and we run the captures in
+  // parallel so a handful of sessions don't serialize a poll. Detection reuses
+  // capturePendingPrompt so the sidebar and transcript views never disagree.
+  await Promise.all(
+    out.map(async (s) => {
+      if (!s.busy) s.waiting = !!(await capturePendingPrompt(s.name));
+    }),
+  );
   // Most recently active first.
   out.sort((a, b) => b.mtime - a.mtime);
   return out;
@@ -1557,6 +1569,15 @@ const page = `<!DOCTYPE html>
   }
   .sess-busy.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(110,86,207,.5); animation: sessPulse 1.4s ease-in-out infinite; }
   @keyframes sessPulse { 0% { box-shadow: 0 0 0 0 rgba(110,86,207,.5); } 70% { box-shadow: 0 0 0 5px rgba(110,86,207,0); } 100% { box-shadow: 0 0 0 0 rgba(110,86,207,0); } }
+  /* Idle-but-blocked: the session is waiting for input. Amber pulse + chip mark it
+     apart from a working (purple) or plain-idle (gray) row, mirroring the queued look. */
+  .sess-busy.waiting { background: var(--amber); animation: pendingPulse 1.6s ease-in-out infinite; }
+  .commit.waiting { border-left-color: var(--amber); }
+  .waiting-badge {
+    margin-left: auto; flex-shrink: 0; font-size: 9px; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase; line-height: 14px;
+    color: var(--amber); border: 1px solid var(--amber); border-radius: 999px; padding: 0 6px;
+  }
   .commit .sess-top { display: flex; align-items: center; }
   .sess-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .commit .sess-task { color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; margin-top: 2px; padding-right: 22px; }
