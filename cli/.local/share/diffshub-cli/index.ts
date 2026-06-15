@@ -2435,12 +2435,16 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     // Reuse an open diffshub window: focus it and navigate to the chat. A full
-    // navigate reloads the SPA, which reads the ?tmux=… deep link on boot.
+    // navigate reloads the SPA, which reads the ?tmux=…&dir=… deep link on boot.
+    // If navigate is unavailable or rejects (uncontrolled client), fall through
+    // to opening a fresh window at the URL rather than focusing the stale view.
     for (const c of wins) {
       if ("focus" in c) {
         await c.focus();
-        if ("navigate" in c) { try { await c.navigate(url); } catch (_) {} }
-        return;
+        if ("navigate" in c) {
+          try { await c.navigate(url); return; } catch (_) {}
+        }
+        break;
       }
     }
     if (self.clients.openWindow) await self.clients.openWindow(url);
@@ -2586,21 +2590,38 @@ async function notifyAll(payload: {
   return { sent, failed };
 }
 
-// Resolve a tmux session name to its clean chat title (claude's current task),
-// so a notification can name the chat it's about. "" if the pane can't be read.
-async function sessionTaskTitle(name: string): Promise<string> {
+// Resolve a tmux session name to its clean chat title (claude's current task) and
+// cwd, so a notification can name the chat and deep-link to its directory. Empty
+// fields if the pane can't be read.
+async function sessionInfo(name: string): Promise<{ task: string; cwd: string }> {
   try {
     const SEP = "\x1f";
     const info = (
-      await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_title}", "#{pane_current_command}"].join(SEP)}`
+      await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_title}", "#{pane_current_command}", "#{pane_current_path}"].join(SEP)}`
         .quiet()
         .text()
     ).trim();
-    const [title, cmd] = info.split(SEP);
-    return cleanTitle(title ?? "", name, cmd ?? "");
+    const [title, cmd, cwd] = info.split(SEP);
+    return { task: cleanTitle(title ?? "", name, cmd ?? ""), cwd: cwd ?? "" };
   } catch {
-    return "";
+    return { task: "", cwd: "" };
   }
+}
+
+// Map a session's cwd to the registered directory it belongs under, choosing the
+// most specific (longest) match — mirrors the client's dir-scoping of the Tmux
+// tab. Returns null when the cwd sits outside every registered directory. The
+// notification deep-link needs this so the app opens the right directory and the
+// target session is in scope (otherwise the Tmux tab snaps to a different chat).
+function dirIdForCwd(cwd: string): number | null {
+  if (!cwd) return null;
+  let best: { id: number; len: number } | null = null;
+  for (const d of listDirsStmt.all()) {
+    if (cwd === d.path || cwd.startsWith(`${d.path}/`)) {
+      if (!best || d.path.length > best.len) best = { id: d.id, len: d.path.length };
+    }
+  }
+  return best?.id ?? null;
 }
 
 const server = Bun.serve({
@@ -2683,11 +2704,15 @@ const server = Bun.serve({
       const kind = b?.kind === "ask" ? "ask" : b?.kind === "stop" ? "stop" : "";
       let payload: { title: string; body: string; url: string; tag?: string };
       if (session) {
-        const task = await sessionTaskTitle(session);
+        const { task, cwd } = await sessionInfo(session);
+        const dirId = dirIdForCwd(cwd);
+        const dirParam = dirId != null ? `&dir=${dirId}` : "";
         payload = {
           title: task || session,
           body: kind === "ask" ? "Needs your input" : kind === "stop" ? "Finished" : task ? session : "",
-          url: `/?tmux=${encodeURIComponent(session)}`,
+          // Pin the directory so the deep-linked session is in the Tmux tab's
+          // dir-scoped list and doesn't get snapped to a different chat on load.
+          url: `/?tmux=${encodeURIComponent(session)}${dirParam}`,
           tag: `claude-${session}`, // same chat ⇒ later status replaces the earlier
         };
       } else {
