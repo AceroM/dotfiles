@@ -1448,7 +1448,10 @@ const page = `<!DOCTYPE html>
     background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--text-strong);
   }
   .topbar-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-  /* Dedicated kill button (Tmux tab) — sits beside the actions dropdown. */
+  /* New-session (+) and kill (trash) buttons (Tmux tab) — sit beside the actions
+     dropdown. */
+  .topbar-new { color: var(--accent); border-color: var(--accent); }
+  .topbar-new:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
   .topbar-kill { color: var(--red); border-color: var(--red-border); }
   .topbar-kill:hover { background: var(--red-bg); border-color: var(--red); color: var(--red); }
   .topbar-title { flex: 1; min-width: 0; font-weight: 600; font-size: 14px;
@@ -2113,9 +2116,15 @@ const page = `<!DOCTYPE html>
   .commit-input.auto { resize: none; }
   .commit-input:focus { border-color: var(--accent); }
   .modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-  /* Mobile "Image" picker button: a comfortable tap target, pinned bottom-left
-     in the modal footer (the rest of the row stays right-aligned). */
-  .img-pick { padding: 6px 10px; font-size: 16px; line-height: 1; border-radius: 7px; }
+  /* Square icon buttons in the composer toolbars (attach image, go to last
+     directory, new session). The lucide glyph is sized to 16px and the padding
+     keeps them square against the wider text .act buttons sharing the row. */
+  .icon-btn { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+  .icon-btn svg { width: 16px; height: 16px; }
+  .icon-btn .icon-spin { font-size: 14px; line-height: 1; }
+  .reply-bar .icon-btn, .modal-actions .icon-btn { padding: 6px; border-radius: 7px; }
+  /* The image picker is pinned bottom-left in the modal footer (the rest of the
+     row stays right-aligned). */
   .modal-actions .img-pick { margin-right: auto; }
   .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .modal-actions .primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
@@ -2288,6 +2297,12 @@ const page = `<!DOCTYPE html>
     .layout[data-drawer="right"] .tree { transform: translateX(0); box-shadow: -6px 0 28px rgba(0,0,0,.18); }
 
     .scrim { position: fixed; top: 51px; inset: 51px 0 0; z-index: 44; background: rgba(0,0,0,.35); }
+
+    /* New Claude session dialog on mobile: a centered dialog gets covered by the
+       on-screen keyboard, so pin it to the top and give the composer more room
+       by default (it still auto-grows + scrolls past this floor). */
+    .claude-overlay { align-items: flex-start; padding-top: 12px; }
+    .claude .commit-input.auto { min-height: 180px; }
   }
 </style>
 </head>
