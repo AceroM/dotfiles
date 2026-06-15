@@ -39,11 +39,13 @@ import {
   PanelRight,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   EllipsisVertical,
   Sparkles,
   Image as ImageIcon,
   FolderClock,
   ArrowUpToLine,
+  ArrowUp,
   RefreshCw,
   RotateCw,
   Plus,
@@ -2173,11 +2175,44 @@ function App() {
     const filtered = editsOnly ? msgs.filter(isEditMsg) : msgs;
     return groupTurns(filtered);
   }, [transcriptData, editsOnly]);
+  // ChatGPT-style "jump to latest" chevron: track whether the transcript is
+  // pinned to the bottom so we can float a chevron above the composer whenever
+  // the user has scrolled up. 80px of slack keeps it hidden while effectively
+  // at the end (and during the brief auto-scroll settle).
+  const [atBottom, setAtBottom] = useState(true);
   useEffect(() => {
     if (tab !== "tmux" || !transcriptData) return;
     const el = mainEl.current;
-    if (el) requestAnimationFrame(() => el.scrollTo({ top: el.scrollHeight }));
+    if (el)
+      requestAnimationFrame(() => {
+        el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+        setAtBottom(true);
+      });
   }, [tab, transcriptData, selectedSession]);
+
+  useEffect(() => {
+    if (tab !== "tmux") return;
+    const el = mainEl.current;
+    if (!el) return;
+    const update = () => setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [tab, transcriptData, selectedSession]);
+  const jumpToBottom = useCallback(() => {
+    const el = mainEl.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+  }, []);
+  // Mobile: jump back to the very top of the transcript — handy on long chats
+  // where the original prompt has scrolled far out of view.
+  const jumpToTop = useCallback(() => {
+    const el = mainEl.current;
+    if (el) el.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
 
   // ---- Reviewed commits (persisted server-side in sqlite) ----
   const reviewedQuery = useQuery({
@@ -3931,6 +3966,14 @@ function App() {
           <>
             <button
               className="topbar-btn"
+              title="Jump to top of chat"
+              aria-label="Jump to top of chat"
+              onClick={jumpToTop}
+            >
+              <ArrowUp size={18} />
+            </button>
+            <button
+              className="topbar-btn"
               title="Previous chat"
               aria-label="Previous chat"
               disabled={!visibleTmux || visibleTmux.length < 2}
@@ -4569,6 +4612,17 @@ function App() {
             )}
             {selectedSession && (
               <div className="reply-box">
+                {!atBottom && (
+                  <button
+                    type="button"
+                    className="scroll-bottom"
+                    title="Scroll to latest"
+                    aria-label="Scroll to latest"
+                    onClick={jumpToBottom}
+                  >
+                    <ChevronDown />
+                  </button>
+                )}
                 <div className="file-menu-wrap">
                   <textarea
                     ref={replyTextareaRef}
