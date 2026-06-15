@@ -1488,8 +1488,8 @@ const page = `<!DOCTYPE html>
   }
   .topbar-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
   .topbar-btn:disabled { opacity: .4; cursor: default; }
-  /* New-session (+) and kill (trash) buttons (Tmux tab) — sit beside the actions
-     dropdown. */
+  /* New-session (+, Tmux + Commits tabs) and kill (trash, Tmux tab) buttons —
+     sit beside the actions dropdown. */
   .topbar-new { color: var(--accent); border-color: var(--accent); }
   .topbar-new:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
   .topbar-kill { color: var(--red); border-color: var(--red-border); }
@@ -1578,6 +1578,15 @@ const page = `<!DOCTYPE html>
     letter-spacing: .04em; text-transform: uppercase; line-height: 14px;
     color: var(--amber); border: 1px solid var(--amber); border-radius: 999px; padding: 0 6px;
   }
+  /* Unread: a session that finished with output you haven't opened since (see
+     seenMtimes in client.tsx). An accent dot on the right + a bolder name, like an
+     unread message. Mutually exclusive with the waiting badge — waiting rows are
+     never flagged unread — so the right-aligned dot never collides with it. */
+  .unread-dot {
+    margin-left: auto; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent); margin-right: 2px;
+  }
+  .commit.unread .sess-name { font-weight: 700; }
   .commit .sess-top { display: flex; align-items: center; }
   .sess-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .commit .sess-task { color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 14px; margin-top: 2px; padding-right: 22px; }
