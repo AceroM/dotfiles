@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#6e56cf"/>
+  <!-- diff "lines": green added, neutral context, red removed, within the
+       maskable safe zone (centre 80%). -->
+  <g>
+    <!-- + marker + green line -->
+    <rect x="104" y="172" width="34" height="8" rx="4" fill="#ffffff" opacity="0.95"/>
+    <rect x="117" y="159" width="8" height="34" rx="4" fill="#ffffff" opacity="0.95"/>
+    <rect x="162" y="160" width="172" height="32" rx="9" fill="#86efac"/>
+
+    <!-- context line -->
+    <rect x="162" y="240" width="246" height="32" rx="9" fill="#ffffff" opacity="0.92"/>
+
+    <!-- - marker + red line -->
+    <rect x="104" y="316" width="34" height="8" rx="4" fill="#ffffff" opacity="0.95"/>
+    <rect x="162" y="320" width="138" height="32" rx="9" fill="#fca5a5"/>
+  </g>
+</svg>
