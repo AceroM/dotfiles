@@ -43,6 +43,7 @@ import {
   Sparkles,
   Image as ImageIcon,
   FolderClock,
+  ArrowUpToLine,
   RefreshCw,
   RotateCw,
   Plus,
@@ -3135,6 +3136,23 @@ function App() {
     [dirScopedTmux, q],
   );
 
+  // Step to the previous (-1) / next (+1) session in the visible, dir-scoped list,
+  // wrapping around — the same traversal as the ↑/↓ keys, surfaced as the mobile
+  // top-bar chevrons so you can flip through chats without opening the sidebar.
+  const cycleSession = useCallback(
+    (dir: 1 | -1) => {
+      const list = visibleTmux;
+      if (!list?.length) return;
+      const idx = list.findIndex((s) => s.name === selectedSessionRef.current);
+      const next = (idx + dir + list.length) % list.length;
+      selectTmux(list[next].name);
+      document
+        .getElementById(`row-tmux-${list[next].name}`)
+        ?.scrollIntoView({ block: "nearest" });
+    },
+    [visibleTmux, selectTmux],
+  );
+
   // Kill every session currently listed on the Tmux tab (the dir-scoped, filtered
   // set the user is looking at — not every claude session on the box). Reuses the
   // single-kill endpoint per session, then refreshes; the auto-select effect picks
@@ -3754,6 +3772,28 @@ function App() {
           <Menu size={18} />
         </button>
         <span className="topbar-title">{meta?.name ?? "diffshub"}</span>
+        {tab === "tmux" && (
+          <>
+            <button
+              className="topbar-btn"
+              title="Previous chat"
+              aria-label="Previous chat"
+              disabled={!visibleTmux || visibleTmux.length < 2}
+              onClick={() => cycleSession(-1)}
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <button
+              className="topbar-btn"
+              title="Next chat"
+              aria-label="Next chat"
+              disabled={!visibleTmux || visibleTmux.length < 2}
+              onClick={() => cycleSession(1)}
+            >
+              <ChevronRight size={18} />
+            </button>
+          </>
+        )}
         {tab === "tmux" && (
           <button
             className="topbar-btn topbar-new"
@@ -4475,6 +4515,17 @@ function App() {
                       </IconButton>
                       <IconButton title="New Claude session" onClick={() => setClaudeOpen(true)}>
                         <Sparkles />
+                      </IconButton>
+                      {/* Jump to the topmost (latest) session in the sidebar — same
+                          target as the `0` key. Disabled when it's already selected. */}
+                      <IconButton
+                        title="Jump to latest chat"
+                        disabled={!visibleTmux?.length || visibleTmux[0].name === selectedSession}
+                        onClick={() => {
+                          if (visibleTmux?.length) selectTmux(visibleTmux[0].name);
+                        }}
+                      >
+                        <ArrowUpToLine />
                       </IconButton>
                     </>
                   )}
