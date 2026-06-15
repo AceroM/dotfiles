@@ -2043,6 +2043,16 @@ const page = `<!DOCTYPE html>
   .md em { font-style: italic; }
   .md blockquote.md-quote { margin: 0 0 10px; padding: 2px 0 2px 13px; border-left: 3px solid var(--border); color: var(--text-2); }
   .md hr.md-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  /* GFM tables. Wrapper scrolls horizontally so wide tables never blow out the
+     chat column on narrow tmux/mobile widths. */
+  .md .md-table-wrap { margin: 0 0 10px; overflow-x: auto; }
+  .md table.md-table { border-collapse: collapse; font-size: 13px; line-height: 1.5; width: auto; }
+  .md table.md-table th, .md table.md-table td {
+    border: 1px solid var(--border); padding: 5px 10px; text-align: left; vertical-align: top;
+    white-space: normal; word-break: normal;
+  }
+  .md table.md-table th { font-weight: 650; background: var(--bg-muted); }
+  .md table.md-table tbody tr:nth-child(even) td { background: var(--bg-raised); }
   .md-code-inline {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em;
     background: var(--bg-hover); border: 1px solid var(--border-code); border-radius: 5px; padding: .5px 5px;
@@ -2293,12 +2303,13 @@ const page = `<!DOCTYPE html>
   .home-empty { font-size: 13px; color: var(--text-muted); padding: 2px 2px 4px; }
   .home-empty-all { font-size: 14px; color: var(--text-muted); text-align: center; padding: 48px 0; }
   .home-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
-  .home-card { display: flex; flex-direction: column; gap: 5px; text-align: left; width: 100%; padding: 11px 13px; border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 8px; background: var(--bg-raised); color: var(--text); cursor: pointer; font: inherit; transition: background .12s, border-color .12s; }
+  .home-card { position: relative; display: flex; flex-direction: column; gap: 5px; text-align: left; width: 100%; padding: 11px 13px; border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 8px; background: var(--bg-raised); color: var(--text); cursor: pointer; font: inherit; transition: background .12s, border-color .12s; }
   .home-card:hover { background: var(--bg-hover); }
+  .home-card:hover .kill-btn, .home-card:focus-within .kill-btn { opacity: 1; }
   .home-card.busy, .home-card.unread { border-left-color: var(--accent); }
   .home-card.waiting, .home-card.queued { border-left-color: var(--amber); }
   .home-card.queued { cursor: default; }
-  .home-card-top { display: flex; align-items: center; gap: 7px; }
+  .home-card-top { display: flex; align-items: center; gap: 7px; padding-right: 22px; }
   .home-card-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-card.unread .home-card-name { font-weight: 700; }
   .home-card-task { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2310,6 +2321,8 @@ const page = `<!DOCTYPE html>
   .home-card.waiting .home-dot, .home-card.queued .home-dot { background: var(--amber); animation: pendingPulse 1.6s ease-in-out infinite; }
   .home-card.unread .home-dot { background: var(--accent); }
   @media (max-width: 640px) { .home-cards { grid-template-columns: 1fr; } }
+  /* Touch devices can't hover, so keep the card's delete button visible there. */
+  @media (hover: none) { .home-card .kill-btn { opacity: 1; } }
   .section-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
   .diff-foot { display: flex; gap: 6px; margin-top: 6px; }
