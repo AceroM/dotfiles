@@ -41,6 +41,8 @@ import {
   ChevronRight,
   EllipsisVertical,
   Sparkles,
+  Image as ImageIcon,
+  FolderClock,
   RefreshCw,
   RotateCw,
   Plus,
@@ -398,6 +400,64 @@ function CopyButton({ label, text, title }: { label: string; text: string; title
     >
       {copied ? "copied" : label}
     </button>
+  );
+}
+
+// A compact square icon button shared by the composer toolbars (attach image, go
+// to last directory, new session). Same surface as the other `.act` buttons —
+// just wrapping a lucide glyph instead of a text label, sized square by `.icon-btn`.
+function IconButton({
+  onClick,
+  title,
+  disabled,
+  className,
+  children,
+}: {
+  onClick: () => void;
+  title: string;
+  disabled?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={`act icon-btn${className ? ` ${className}` : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Attach-image icon button: a hidden file <input> (camera / photo library on
+// mobile) fronted by an IconButton. The parent owns the upload + insert via
+// `onPick`; we only hold the input ref so the button can open the picker. Shows
+// an ellipsis while an upload is in flight. Used by the New Claude session
+// composer and the Tmux reply composer.
+function ImageAttachButton({
+  uploading,
+  onPick,
+}: {
+  uploading: boolean;
+  onPick: (e: ChangeEvent<HTMLInputElement>) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <>
+      <input ref={inputRef} type="file" accept="image/*" hidden onChange={onPick} />
+      <IconButton
+        className="img-pick"
+        disabled={uploading}
+        title="Attach image"
+        onClick={() => inputRef.current?.click()}
+      >
+        {uploading ? <span className="icon-spin">…</span> : <ImageIcon />}
+      </IconButton>
+    </>
   );
 }
 
@@ -1287,6 +1347,10 @@ function App() {
   const [activeDir, setActiveDir] = useState<number | null>(initial.dir);
   const activeDirRef = useRef(activeDir);
   activeDirRef.current = activeDir;
+  // The directory you were viewing before the current one — drives the Tmux reply
+  // bar's "go to last directory" button (a back/toggle). `undefined` until you've
+  // switched dirs at least once, which keeps that button disabled on first load.
+  const [prevDir, setPrevDir] = useState<number | null | undefined>(undefined);
   // Append ?dir=<id> to an API url so every request targets the active directory.
   const qd = useCallback((base: string) => {
     const d = activeDirRef.current;
@@ -1607,9 +1671,6 @@ function App() {
   const [replyStopping, setReplyStopping] = useState(false);
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  // Hidden <input type=file> behind the mobile "Image" button — the reliable way
-  // to attach an image where there's no keyboard for ⌃V (camera / photo library).
-  const replyImgInputRef = useRef<HTMLInputElement | null>(null);
 
   // Transcript header toggle: when on, the chat view is filtered down to just
   // the Edit/Write/MultiEdit tool calls (the inline diffs), hiding prose and
@@ -1678,16 +1739,39 @@ function App() {
     refetchOnWindowFocus: true,
   });
   const claudeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  // Hidden <input type=file> behind the mobile "Image" button in the New Claude
-  // session dialog (same role as replyImgInputRef — see above).
-  const claudeImgInputRef = useRef<HTMLInputElement | null>(null);
   // A live mirror of `claudeOpen` for callbacks/effects that shouldn't re-subscribe
   // just to read it (e.g. the per-dir draft effect restoring focus mid-compose).
   const claudeOpenRef = useRef(claudeOpen);
   claudeOpenRef.current = claudeOpen;
-  // Grow the composer to fit its content (then scroll past the CSS max-height)
-  // so a long prompt never hides behind a fixed-height box.
-  const autosizeClaude = useCallback(() => autosize(claudeTextareaRef.current), []);
+  // Grow the composer to fit its content, but cap it to the *visible* viewport so
+  // a long prompt's caret never slides behind the mobile keyboard. visualViewport
+  // .height excludes the keyboard (vh/innerHeight don't), and offsetTop tells us
+  // where that visible band sits — so we keep the box's bottom above the keyboard
+  // and let it scroll internally past that. Reserve room below for the modal's
+  // action row + padding. Falls back to plain autosize where visualViewport is
+  // unavailable or the box still fits.
+  const autosizeClaude = useCallback(() => {
+    const el = claudeTextareaRef.current;
+    if (!el) return;
+    const vv = window.visualViewport;
+    el.style.height = "auto";
+    let target = el.scrollHeight;
+    if (vv) {
+      const top = el.getBoundingClientRect().top - vv.offsetTop;
+      const room = vv.height - top - 96; // leave space for the footer buttons
+      if (room > 120) target = Math.min(target, room);
+    }
+    el.style.height = `${target}px`;
+  }, []);
+  // Re-fit when the visible viewport changes (the mobile keyboard sliding in or
+  // out) so the cap tracks the keyboard instead of the prompt's last keystroke.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!claudeOpen || !vv) return;
+    const onResize = () => autosizeClaude();
+    vv.addEventListener("resize", onResize);
+    return () => vv.removeEventListener("resize", onResize);
+  }, [claudeOpen, autosizeClaude]);
   // Re-fit on every value change (typing, draft load, dir switch). useLayoutEffect
   // runs after React commits the new value but before paint, so scrollHeight is
   // measured against the text actually in the box — no rAF race, no stale height.
@@ -2533,6 +2617,9 @@ function App() {
   // Tmux) rather than forcing one, and reset the URL to match.
   const selectDir = useCallback(
     (id: number | null) => {
+      // Remember where we came from so "go to last directory" can toggle back.
+      const from = activeDirRef.current;
+      if (from !== id) setPrevDir(from);
       setActiveDir(id);
       activeDirRef.current = id;
       const nextTab = loadLastTab();
@@ -2545,6 +2632,12 @@ function App() {
     },
     [navUrl],
   );
+
+  // Toggle back to the directory you were last viewing (recorded by selectDir).
+  // No-op — and the reply-bar button stays disabled — until you've switched once.
+  const goToLastDir = useCallback(() => {
+    if (prevDir !== undefined) selectDir(prevDir);
+  }, [prevDir, selectDir]);
 
   // ---- Directory settings (add / edit / delete) ----
   const [dirForm, setDirForm] = useState<{
@@ -3601,6 +3694,16 @@ function App() {
     onClick: () => void;
     disabled?: boolean;
   }[] = [{ label: "New Claude session", icon: <Sparkles />, onClick: () => setClaudeOpen(true) }];
+  if (tab === "tmux") {
+    // Mobile mirror of the `_` shortcut: opens the confirmation that kills every
+    // session currently listed (dir-scoped + filtered). Disabled when none.
+    actionItems.push({
+      label: "Close all sessions",
+      icon: <Trash2 />,
+      onClick: () => setKillAllOpen(true),
+      disabled: !visibleTmux?.length,
+    });
+  }
   if (tab === "changes" && view.kind === "changes") {
     const dirty = (changes ?? []).some(
       (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
@@ -3651,6 +3754,16 @@ function App() {
           <Menu size={18} />
         </button>
         <span className="topbar-title">{meta?.name ?? "diffshub"}</span>
+        {tab === "tmux" && (
+          <button
+            className="topbar-btn topbar-new"
+            title="New Claude session"
+            aria-label="New Claude session"
+            onClick={() => setClaudeOpen(true)}
+          >
+            <Plus size={18} />
+          </button>
+        )}
         {tab === "tmux" && selectedSession && (
           <button
             className="topbar-btn topbar-kill"
@@ -4344,24 +4457,25 @@ function App() {
                     )}
                 </div>
                 <div className="reply-bar">
+                  {/* Mobile-only quick actions: the keyboard shortcuts that drive
+                      these on desktop (⌃V paste, dir switch, `'`) aren't reachable
+                      on a phone, so surface them as icon buttons in the reply bar. */}
                   {!isDesktop && (
                     <>
-                      <input
-                        ref={replyImgInputRef}
-                        type="file"
-                        accept="image/*"
-                        hidden
-                        onChange={(e) => handleImageFile(e, insertIntoReply, setReplyImgUploading)}
+                      <ImageAttachButton
+                        uploading={replyImgUploading}
+                        onPick={(e) => handleImageFile(e, insertIntoReply, setReplyImgUploading)}
                       />
-                      <button
-                        className="act img-pick"
-                        disabled={replyImgUploading}
-                        onClick={() => replyImgInputRef.current?.click()}
-                        title="Attach image"
-                        aria-label="Attach image"
+                      <IconButton
+                        title="Go to last directory"
+                        disabled={prevDir === undefined}
+                        onClick={goToLastDir}
                       >
-                        {replyImgUploading ? "…" : "🖼"}
-                      </button>
+                        <FolderClock />
+                      </IconButton>
+                      <IconButton title="New Claude session" onClick={() => setClaudeOpen(true)}>
+                        <Sparkles />
+                      </IconButton>
                     </>
                   )}
                   {replyImgUploading && <span className="reply-hint">Uploading image…</span>}
@@ -4790,8 +4904,8 @@ function App() {
       )}
 
       {claudeOpen && (
-        <div className="modal-overlay" onClick={() => !launching && setClaudeOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay claude-overlay" onClick={() => !launching && setClaudeOpen(false)}>
+          <div className="modal claude" onClick={(e) => e.stopPropagation()}>
             <h3>
               New Claude session
               {meta?.repo ? <span className="modal-repos"> · {meta.repo}</span> : ""}
@@ -4897,24 +5011,10 @@ function App() {
             )}
             <div className="modal-actions">
               {!isDesktop && (
-                <>
-                  <input
-                    ref={claudeImgInputRef}
-                    type="file"
-                    accept="image/*"
-                    hidden
-                    onChange={(e) => handleImageFile(e, insertIntoPrompt, setImgUploading)}
-                  />
-                  <button
-                    className="act img-pick"
-                    disabled={imgUploading}
-                    onClick={() => claudeImgInputRef.current?.click()}
-                    title="Attach image"
-                    aria-label="Attach image"
-                  >
-                    {imgUploading ? "…" : "🖼"}
-                  </button>
-                </>
+                <ImageAttachButton
+                  uploading={imgUploading}
+                  onPick={(e) => handleImageFile(e, insertIntoPrompt, setImgUploading)}
+                />
               )}
               <button className="act" disabled={launching} onClick={() => setClaudeOpen(false)}>
                 Cancel
@@ -5024,16 +5124,7 @@ function App() {
 
       {launchedSession && (
         <div className="sel-bar">
-          <span className="sel-info">
-            Launched <code>{launchedSession}</code> · attach with{" "}
-            <code>tmux attach -t {launchedSession}</code>
-          </span>
-          <button
-            className="sel-act"
-            onClick={() => navigator.clipboard.writeText(`tmux attach -t ${launchedSession}`)}
-          >
-            Copy
-          </button>
+          <span className="sel-info">New session created</span>
           <button className="sel-x" title="Dismiss" onClick={() => setLaunchedSession(null)}>
             ✕
           </button>

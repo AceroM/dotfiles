@@ -322,6 +322,7 @@ function Bar() {
       }
       setLaunched(typeof body.session === "string" ? body.session : "session");
       setPrompt("");
+      setExpanded(false);
       setTimeout(() => setLaunched(null), 4000);
     } finally {
       setLaunching(false);
@@ -407,7 +408,7 @@ function Bar() {
     return (
       <button className="pill" title="Ask diffshub  ( ; )" onClick={open}>
         <SparkIcon />
-        <span>Ask diffshub</span>
+        <span>{launched ? `Launched ${launched}` : "Ask diffshub"}</span>
       </button>
     );
   }
