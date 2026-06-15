@@ -1879,6 +1879,19 @@ const page = `<!DOCTYPE html>
     margin-top: 6px; padding: 10px 0 14px;
     background: var(--bg); border-top: 1px solid var(--border);
   }
+  /* Floating "jump to latest" chevron — anchored to the sticky composer so it
+     hovers just above it, centered over the transcript column. */
+  .scroll-bottom {
+    position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%);
+    margin-bottom: 12px; z-index: 5;
+    display: grid; place-items: center;
+    width: 34px; height: 34px; border-radius: 50%; cursor: pointer;
+    background: var(--bg-muted); color: var(--text-2);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .28);
+  }
+  .scroll-bottom:hover { color: var(--text); border-color: var(--accent); }
+  .scroll-bottom svg { width: 18px; height: 18px; }
   .reply-input {
     width: 100%; min-height: 46px; max-height: 220px; resize: vertical;
     background: var(--bg); color: inherit; font: inherit; line-height: 1.5;
