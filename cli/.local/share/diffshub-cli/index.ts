@@ -2110,6 +2110,7 @@ const page = `<!DOCTYPE html>
   .reply-bar .act.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   .reply-bar .act.stop { background: #b91c1c; border-color: #b91c1c; color: #fff; }
   .reply-bar .act.stop:hover:not(:disabled) { background: #dc2626; border-color: #dc2626; }
+  .reply-bar .icon-btn.delete:hover:not(:disabled) { background: var(--red-bg); border-color: var(--red-border); color: var(--red); }
   .reply-hint { font-size: 11px; color: var(--text-faint); display: flex; gap: 10px; flex-wrap: wrap; }
   .reply-hint kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; }
 
@@ -2309,6 +2310,10 @@ const page = `<!DOCTYPE html>
   .home-card.busy, .home-card.unread { border-left-color: var(--accent); }
   .home-card.waiting, .home-card.queued { border-left-color: var(--amber); }
   .home-card.queued { cursor: default; }
+  /* Keyboard/click focus ring — the "selected card" the arrow keys move and Enter
+     opens. Drawn as an accent border + soft ring so it reads on top of the
+     state-coloured left stripe. */
+  .home-card.selected { border-color: var(--accent); background: var(--accent-bg); box-shadow: 0 0 0 1px var(--accent); }
   .home-card-top { display: flex; align-items: center; gap: 7px; padding-right: 22px; }
   .home-card-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-card.unread .home-card-name { font-weight: 700; }
@@ -2323,6 +2328,44 @@ const page = `<!DOCTYPE html>
   @media (max-width: 640px) { .home-cards { grid-template-columns: 1fr; } }
   /* Touch devices can't hover, so keep the card's delete button visible there. */
   @media (hover: none) { .home-card .kill-btn { opacity: 1; } }
+
+  /* ---- Home dashboard chat side-panel ---- */
+  /* Clicking a card opens its chat here without leaving the dashboard. Desktop:
+     a docked right sidebar. Mobile (≤1024px): a full-screen sheet. Portaled to
+     <body> and fixed so the scrolling card grid behind it stays put. */
+  .home-chat-panel {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 60;
+    width: min(520px, 44vw);
+    display: flex; flex-direction: column;
+    background: var(--bg); border-left: 1px solid var(--border);
+    box-shadow: -10px 0 30px rgba(0, 0, 0, .18);
+    animation: chatPanelIn .16s ease;
+  }
+  @keyframes chatPanelIn { from { transform: translateX(20px); opacity: .3; } to { transform: none; opacity: 1; } }
+  .home-chat-bar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-bottom: 1px solid var(--border);
+  }
+  .home-chat-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-chat-close {
+    flex: 0 0 auto; display: grid; place-items: center;
+    width: 30px; height: 30px; border-radius: 7px; cursor: pointer;
+    background: var(--bg-muted); border: 1px solid var(--border); color: var(--text-2);
+  }
+  .home-chat-close:hover { color: var(--text); border-color: var(--text-muted); }
+  /* The panel's own scroll container: the transcript-head sticks to its top and
+     the composer to its bottom, same as the Tmux tab's main column. */
+  .home-chat-scroll { flex: 1 1 auto; overflow-y: auto; padding: 0 18px; }
+  /* Push the card grid clear of the docked panel on desktop so nothing hides
+     behind it. */
+  @media (min-width: 1025px) {
+    .diffs.home-main.chat-open { padding-right: calc(min(520px, 44vw) + 24px); }
+  }
+  /* Phones/tablets: the chat takes the whole screen, like a dialog. */
+  @media (max-width: 1024px) {
+    .home-chat-panel { width: 100%; border-left: none; box-shadow: none; animation: chatSheetIn .18s ease; }
+  }
+  @keyframes chatSheetIn { from { transform: translateY(14px); opacity: .4; } to { transform: none; opacity: 1; } }
   .section-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
   .diff-foot { display: flex; gap: 6px; margin-top: 6px; }
