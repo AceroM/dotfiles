@@ -16,8 +16,26 @@ declare global {
         addListener(cb: (changes: Record<string, unknown>, area: string) => void): void;
       };
     };
-    runtime: { getURL(path: string): string };
-    tabs: { query(q: { active: boolean; currentWindow: boolean }): Promise<{ url?: string }[]> };
+    runtime: {
+      getURL(path: string): string;
+      // Used by the composer to ask the background service worker to grab the
+      // visible tab (captureVisibleTab only works off an extension page, not a
+      // content script). See extension/background.ts.
+      sendMessage(message: unknown): Promise<unknown>;
+      onMessage: {
+        addListener(
+          cb: (
+            message: unknown,
+            sender: unknown,
+            sendResponse: (response: unknown) => void,
+          ) => boolean | void,
+        ): void;
+      };
+    };
+    tabs: {
+      query(q: { active: boolean; currentWindow: boolean }): Promise<{ url?: string }[]>;
+      captureVisibleTab(options: { format: "png" | "jpeg" }): Promise<string>;
+    };
   };
 }
 
@@ -32,6 +50,60 @@ Live page: {url}
 - Stream live logs with \`wrangler tail\` (run from the app dir).
 - The source is this repo; edit here, then ship via the normal deploy.
 </context>`;
+
+// ---- Environment (dev vs prod) ----
+// Which deploy a mapped origin is. A public https host that isn't localhost /
+// loopback / a tailnet (*.ts.net) dev box is "production"; everything else is the
+// local "development" environment. Drives the dev/prod chip in the composer and
+// the <environment> block folded into each prompt (environmentBlock below), and
+// the popup uses it to seed the prod context on first mapping.
+export type Environment = "development" | "production";
+
+export function detectEnvironment(origin: string): Environment {
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== "https:") return "development";
+    if (u.hostname.endsWith(".ts.net")) return "development";
+    if (/^(localhost|127\.|0\.0\.0\.0$|\[?::1)/.test(u.hostname)) return "development";
+    return "production";
+  } catch {
+    return "development";
+  }
+}
+
+// The <environment> preamble folded into every prompt, so the launched session
+// knows where the request came from before it does anything. Development gets
+// explicit license to poke at the local dev database and to lean on the route I'm
+// looking at; production is flagged read-only so a prompt can't trash live data.
+export function environmentBlock(env: Environment, url: string, route: string): string {
+  if (env === "development") {
+    return `<environment>
+This request comes from the DEVELOPMENT environment (local dev server), not production.
+- Current page: ${url}
+- Current route: ${route}
+- Feel free to inspect the local dev database directly for this prompt — query it, read rows, check the schema, even run migrations against it. It's a throwaway dev DB, so you have free rein to look at whatever helps you answer.
+- Tailor your work to where I am: the route above is the screen I'm looking at right now.
+</environment>`;
+  }
+  return `<environment>
+This request comes from the PRODUCTION environment, not local dev.
+- Current page: ${url}
+- Current route: ${route}
+- Treat the production database as read-only — do not run mutations or migrations against it. Be careful.
+</environment>`;
+}
+
+// The <route> preamble: the SPA route the request is about, paired with the source
+// file that renders it (when known). Folded into the prompt alongside <auth> so the
+// launched session can jump straight to the right file instead of guessing which
+// screen maps to which code. The composer's two route/file fields feed this. The
+// file line is omitted when blank — route alone is still useful context.
+export function routeBlock(route: string, file: string): string {
+  const lines = [`path: ${route}`];
+  const f = file.trim();
+  if (f) lines.push(`file: ${f}`);
+  return `<route>\n${lines.join("\n")}\n</route>`;
+}
 
 export interface DirEntry {
   id: number;

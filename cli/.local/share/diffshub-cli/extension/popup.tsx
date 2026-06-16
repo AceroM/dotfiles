@@ -11,6 +11,7 @@ import {
   setFallbackServerUrl,
   setContext,
   setAuth,
+  detectEnvironment,
   DEFAULT_SERVER,
   DEFAULT_PROD_CONTEXT,
   AUTH_PROBE_EXAMPLE,
@@ -22,14 +23,7 @@ const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false 
 // A public https origin (not localhost / loopback / tailnet dev) — i.e. a real
 // production site, where we seed the prod context template on first mapping.
 function isProdish(origin: string): boolean {
-  try {
-    const u = new URL(origin);
-    if (u.protocol !== "https:") return false;
-    if (u.hostname.endsWith(".ts.net")) return false;
-    return !/^(localhost|127\.|0\.0\.0\.0$|\[?::1)/.test(u.hostname);
-  } catch {
-    return false;
-  }
+  return detectEnvironment(origin) === "production";
 }
 
 function Popup() {
@@ -220,7 +214,8 @@ function Popup() {
       />
 
       <div className="hint">
-        On a mapped site a composer pins to the bottom — <kbd>'</kbd> focus · <kbd>v</kbd> point at an element
+        On a mapped site a composer pins to the bottom — <kbd>'</kbd> focus · <kbd>v</kbd> point at an
+        element · <kbd>s</kbd> screenshot a region
       </div>
     </>
   );
