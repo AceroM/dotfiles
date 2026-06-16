@@ -21,6 +21,9 @@ import {
   authBlock,
   getAuthCache,
   setAuthCache,
+  detectEnvironment,
+  environmentBlock,
+  routeBlock,
 } from "./api";
 
 const HOST_ID = "diffshub-ext-host";
@@ -33,9 +36,11 @@ const queryClient = new QueryClient({
 });
 
 // Kept at module scope so the visual-select handlers can ask "is this on our own
-// UI?" via composedPath, and so unmount() can tear both down.
+// UI?" via composedPath, and so unmount() can tear them down. shotLayerEl is the
+// full-viewport drag surface for the `s` screenshot tool.
 let hostEl: HTMLElement | null = null;
 let overlayEl: HTMLDivElement | null = null;
+let shotLayerEl: HTMLDivElement | null = null;
 
 export function mount(): () => void {
   if (hostEl) return () => {}; // single instance
@@ -59,8 +64,10 @@ export function mount(): () => void {
     root.unmount();
     host.remove();
     overlayEl?.remove();
+    shotLayerEl?.remove();
     hostEl = null;
     overlayEl = null;
+    shotLayerEl = null;
   };
 }
 
@@ -96,10 +103,61 @@ function Bar() {
   // Brief success tick shown on the collapsed pill right after a prompt is sent.
   const [justSent, setJustSent] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // `s` screenshot tool: shooting = dragging the region; capturing = grabbing +
+  // cropping + uploading the shot afterwards.
+  const [shooting, setShooting] = useState(false);
+  const [capturing, setCapturing] = useState(false);
 
-  // Current SPA route (pathname). Shown in the toolbar and folded into the prompt
-  // as context on submit (the `{route}` token, alongside `{url}`).
-  const route = useRoute();
+  // Which deploy this origin is (development vs production). Constant for the page,
+  // so resolved once. Shown as a chip and folded into the prompt as an <environment>
+  // block on submit (dev grants license to poke the local DB; prod is read-only).
+  const env = useMemo(() => detectEnvironment(location.origin), []);
+
+  // Current SPA route (pathname), kept live across SPA navigations. It seeds the
+  // editable "route" field below and the `{route}` token; once you edit that field
+  // it stops tracking the page so a hand-typed route isn't clobbered on navigation.
+  const liveRoute = useRoute();
+  const [routeEdited, setRouteEdited] = useState(false);
+  const [routeInput, setRouteInput] = useState(liveRoute);
+  useEffect(() => {
+    if (!routeEdited) setRouteInput(liveRoute);
+  }, [liveRoute, routeEdited]);
+  // The source file that renders the current route. Paired with the route in the
+  // <route> block so the session edits the right file instead of hunting for it.
+  // Auto-derived from the page's dev `data-loc` source locations (see
+  // detectRouteFile + the effects below) — the same baked-in source mapping the
+  // "open in editor" action uses — and editable so you can correct it. A manual
+  // edit wins until the next navigation; `fileEdited` tracks that.
+  const [routeFile, setRouteFile] = useState("");
+  const [fileEdited, setFileEdited] = useState(false);
+
+  // New screen → the previous route's file no longer applies: clear it and drop
+  // any manual override so detection refills for the route just navigated to.
+  useEffect(() => {
+    setFileEdited(false);
+    setRouteFile("");
+  }, [liveRoute]);
+
+  // Auto-fill the file from the page's source locations while the composer is open
+  // (the field is only visible then, and a just-opened composer means the screen
+  // has settled). The short retry lets a freshly-navigated SPA paint before we scan.
+  // Only ever sets a value we actually found, so a source-less production page (or a
+  // mid-navigation empty DOM) leaves whatever you typed alone.
+  useEffect(() => {
+    if (!expanded || fileEdited) return;
+    let alive = true;
+    const detect = () => {
+      if (!alive || fileEdited) return;
+      const f = detectRouteFile();
+      if (f) setRouteFile(f);
+    };
+    detect();
+    const id = setTimeout(detect, 60);
+    return () => {
+      alive = false;
+      clearTimeout(id);
+    };
+  }, [expanded, fileEdited, liveRoute]);
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const [fileToken, setFileToken] = useState<{ query: string; start: number; caret: number } | null>(
@@ -405,6 +463,58 @@ function Bar() {
     [server, pickServer, insertAtCaret],
   );
 
+  // ---- screenshot tool (`s`): capture the dragged viewport region ----
+  // Same destination as image paste — the cropped PNG goes to the server's
+  // /tmp/images and the path drops into the composer. The pixels come from the
+  // background worker's captureVisibleTab (content scripts can't call it), so we
+  // hide our own UI for a couple of frames first, then crop the returned full-
+  // viewport shot to the region the user dragged (in device pixels, via the
+  // image's true scale so dpr/zoom are exact). `rect` is in CSS viewport coords.
+  const captureRegion = useCallback(
+    async (rect: { left: number; top: number; width: number; height: number }) => {
+      const srv = server ?? (await pickServer());
+      setCapturing(true);
+      // Drop our overlays + the composer out of the frame so they aren't in the shot.
+      if (hostEl) hostEl.style.visibility = "hidden";
+      if (overlayEl) overlayEl.style.display = "none";
+      if (shotLayerEl) shotLayerEl.style.display = "none";
+      try {
+        // Let the page repaint without our UI before the capture lands.
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const resp = (await chrome.runtime.sendMessage({ type: "diffshub-capture" })) as {
+          dataUrl?: string;
+          error?: string;
+        };
+        if (hostEl) hostEl.style.visibility = ""; // bring the composer back for the upload
+        if (!resp?.dataUrl) {
+          alert(`screenshot failed: ${resp?.error ?? "no image returned"}`);
+          return;
+        }
+        const cropped = await cropToRegion(resp.dataUrl, rect);
+        const res = await fetch(`${srv}/api/upload-image`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: cropped }),
+        });
+        const body = (await res.json().catch(() => ({}))) as { path?: string; error?: string };
+        if (!res.ok) {
+          alert(`screenshot upload failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+        if (typeof body.path === "string") {
+          setExpanded(true);
+          insertAtCaret(`${body.path} `);
+        }
+      } catch (err) {
+        alert(`screenshot failed: ${String((err as { message?: string })?.message ?? err)}`);
+      } finally {
+        if (hostEl) hostEl.style.visibility = "";
+        setCapturing(false);
+      }
+    },
+    [server, pickServer, insertAtCaret],
+  );
+
   // ---- submit ----
   const submit = useCallback(async () => {
     const p = prompt.trim();
@@ -413,15 +523,22 @@ function Bar() {
     setLaunching(true);
     try {
       // Prepend an <auth> block with the current user (if a probe resolved one),
-      // then the per-origin context template — both ahead of the actual prompt.
+      // then a <route> block (the route + the file that renders it), then an
+      // <environment> block (dev vs prod, the page + route, and — in dev — license
+      // to inspect the local DB), then the per-origin context template, all ahead
+      // of the actual prompt.
       const auth = await ensureFreshAuth();
+      const routeVal = routeInput.trim() || location.pathname;
+      const fileVal = routeFile.trim();
       const parts: string[] = [];
       if (auth && Object.keys(auth).length) parts.push(authBlock(auth));
+      parts.push(routeBlock(routeVal, fileVal));
+      parts.push(environmentBlock(env, location.href, routeVal));
       if (contextTemplate.trim())
         parts.push(
           contextTemplate
             .replace(/\{url\}/g, location.href)
-            .replace(/\{route\}/g, location.pathname)
+            .replace(/\{route\}/g, routeVal)
             .trim(),
         );
       const preamble = parts.length ? parts.join("\n\n") + "\n\n" : "";
@@ -444,7 +561,7 @@ function Bar() {
     } finally {
       setLaunching(false);
     }
-  }, [prompt, dirId, server, pickServer, contextTemplate, ensureFreshAuth]);
+  }, [prompt, dirId, server, pickServer, contextTemplate, ensureFreshAuth, env, routeInput, routeFile]);
 
   // ---- visual select (cursor button / `v` inject · `V` open in $EDITOR) ----
   useEffect(() => {
@@ -496,12 +613,75 @@ function Bar() {
     };
   }, [selectMode, injectRef, openInEditor]);
 
+  // ---- screenshot drag (`s` / camera button): marquee a region, then capture ----
+  // A full-viewport surface swallows the drag so the page underneath doesn't react.
+  // mousedown anchors the rect, mousemove resizes it, mouseup fires the capture for
+  // anything bigger than a stray click. Escape (or a tiny drag) cancels.
+  useEffect(() => {
+    if (!shooting) return;
+    const layer = ensureShotLayer();
+    const rectEl = layer.firstElementChild as HTMLDivElement;
+    layer.style.display = "block";
+    rectEl.style.display = "none";
+    let start: { x: number; y: number } | null = null;
+
+    const rectFrom = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
+      left: Math.min(a.x, b.x),
+      top: Math.min(a.y, b.y),
+      width: Math.abs(a.x - b.x),
+      height: Math.abs(a.y - b.y),
+    });
+    const paint = (r: { left: number; top: number; width: number; height: number }) => {
+      rectEl.style.display = "block";
+      rectEl.style.left = `${r.left}px`;
+      rectEl.style.top = `${r.top}px`;
+      rectEl.style.width = `${r.width}px`;
+      rectEl.style.height = `${r.height}px`;
+    };
+
+    const onDown = (e: MouseEvent) => {
+      e.preventDefault();
+      start = { x: e.clientX, y: e.clientY };
+      paint(rectFrom(start, start));
+    };
+    const onMove = (e: MouseEvent) => {
+      if (start) paint(rectFrom(start, { x: e.clientX, y: e.clientY }));
+    };
+    const onUp = (e: MouseEvent) => {
+      if (!start) return;
+      const r = rectFrom(start, { x: e.clientX, y: e.clientY });
+      start = null;
+      setShooting(false);
+      if (r.width >= 4 && r.height >= 4) void captureRegion(r); // ignore a click, not a drag
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        start = null;
+        setShooting(false);
+      }
+    };
+    layer.addEventListener("mousedown", onDown, true);
+    window.addEventListener("mousemove", onMove, true);
+    window.addEventListener("mouseup", onUp, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      layer.style.display = "none";
+      rectEl.style.display = "none";
+      layer.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("mousemove", onMove, true);
+      window.removeEventListener("mouseup", onUp, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [shooting, captureRegion]);
+
   // ---- page shortcuts: ; (or ') opens & focuses, v starts select, V starts select
   // that opens the picked element in $EDITOR (all ignored while typing); Escape
   // collapses it back to the pill (handled on the textarea). ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dirId == null || selecting) return;
+      if (dirId == null || selecting || shooting) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (isTyping(e)) return;
       if (e.key === ";" || e.key === "'") {
@@ -513,11 +693,14 @@ function Bar() {
       } else if (e.key === "V") {
         e.preventDefault();
         setSelectMode("editor");
+      } else if (e.key === "s") {
+        e.preventDefault();
+        setShooting(true);
       }
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [dirId, selecting, open]);
+  }, [dirId, selecting, shooting, open]);
 
   // First name for the "Logged in as …" pill (mirrors how the app first-names it),
   // falling back to the userId then a generic label. "" hides the pill.
@@ -550,7 +733,7 @@ function Bar() {
           ref={taRef}
           className="ta"
           rows={3}
-          placeholder="Ask for a change…  (@ a file · ⌃V image · v point at an element · V open it in your editor)"
+          placeholder="Ask for a change…  (@ a file · ⌃V image · v point at an element · V open it in your editor · s screenshot a region)"
           value={prompt}
           onChange={(e) => {
             setPrompt(e.target.value);
@@ -627,6 +810,46 @@ function Bar() {
           </div>
         )}
       </div>
+      <div className="ctx">
+        <span className="ctx-tag">route</span>
+        <input
+          className="cin route-in"
+          value={routeInput}
+          placeholder="/path"
+          spellCheck={false}
+          title="The SPA route this prompt is about — sent as the <route> path. Auto-fills from the page; edit to override."
+          onChange={(e) => {
+            setRouteEdited(true);
+            setRouteInput(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void submit();
+            }
+          }}
+        />
+        <span className="ctx-tag">file</span>
+        <input
+          className="cin file-in"
+          value={routeFile}
+          placeholder="auto-detected from the page (or type the file that renders this route)"
+          spellCheck={false}
+          title="Source file that renders this route — sent as the <route> file so the session edits the right file. Auto-filled from the page's dev source locations (data-loc); edit to override."
+          onChange={(e) => {
+            setFileEdited(true);
+            setRouteFile(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void submit();
+            }
+          }}
+        />
+      </div>
       <div className="toolbar">
         <button
           className={`tool${selecting ? " on" : ""}`}
@@ -635,6 +858,13 @@ function Bar() {
         >
           <CursorIcon />
         </button>
+        <button
+          className={`tool${shooting ? " on" : ""}`}
+          title="Screenshot a region  ( s )"
+          onClick={() => setShooting((v) => !v)}
+        >
+          <ShotIcon />
+        </button>
         <span className="status">
           {selecting ? (
             selectMode === "editor" ? (
@@ -642,6 +872,10 @@ function Bar() {
             ) : (
               "Click an element · Esc to cancel"
             )
+          ) : shooting ? (
+            "Drag to screenshot a region · Esc to cancel"
+          ) : capturing ? (
+            "Capturing screenshot…"
           ) : uploading ? (
             "Uploading image…"
           ) : (
@@ -658,9 +892,16 @@ function Bar() {
                   Logged in as {loggedInName}
                 </span>
               )}
-              <code className="route" title={`This page (${route}) is sent with your prompt as context`}>
-                {route}
-              </code>
+              <span
+                className={`env env-${env}`}
+                title={
+                  env === "development"
+                    ? "Development — Claude is told it may inspect the local dev database; sent with your prompt"
+                    : "Production — Claude is told to treat the database as read-only; sent with your prompt"
+                }
+              >
+                {env === "development" ? "dev" : "prod"}
+              </span>
             </>
           )}
         </span>
@@ -669,7 +910,7 @@ function Bar() {
         </button>
         <button
           className="send"
-          disabled={launching || uploading || !prompt.trim()}
+          disabled={launching || uploading || capturing || !prompt.trim()}
           onClick={() => void submit()}
         >
           {launching ? "…" : "Send"}
@@ -700,6 +941,36 @@ function saveDraft(value: string): void {
   } catch {
     // ignore — private mode / quota / storage disabled
   }
+}
+
+// Best-guess source file for the current screen, read from the page's dev
+// `data-loc` attributes (path:line:col) — the same baked-in source mapping the
+// visual-select / "open in editor" actions rely on. A route's own JSX authors most
+// of the screen's structure, so we tally the file (the path before :line:col)
+// across every located element and return the most common one; shared leaf
+// components point at their own files and fall away. Ties break toward the file
+// seen first (shallowest) in the document. Returns null when the page carries no
+// source locations (a production build), so the file field stays manual.
+function detectRouteFile(): string | null {
+  const counts = new Map<string, number>();
+  const firstSeen = new Map<string, number>();
+  let order = 0;
+  for (const el of document.querySelectorAll("[data-loc]")) {
+    const m = el.getAttribute("data-loc")?.match(/^(.*):\d+:\d+$/);
+    if (!m) continue;
+    const file = m[1];
+    counts.set(file, (counts.get(file) ?? 0) + 1);
+    if (!firstSeen.has(file)) firstSeen.set(file, order++);
+  }
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const [file, count] of counts) {
+    if (count > bestCount || (count === bestCount && firstSeen.get(file)! < firstSeen.get(best!)!)) {
+      best = file;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 // The current route (location.pathname), kept live across SPA navigations. The
@@ -819,6 +1090,74 @@ function ensureOverlay(): HTMLDivElement {
   return o;
 }
 
+// The screenshot tool's drag surface: a full-viewport layer (cursor crosshair)
+// that swallows the marquee drag, holding a single child rect that tracks it.
+function ensureShotLayer(): HTMLDivElement {
+  if (shotLayerEl) return shotLayerEl;
+  const layer = document.createElement("div");
+  layer.id = "diffshub-ext-shotlayer";
+  Object.assign(layer.style, {
+    position: "fixed",
+    inset: "0",
+    zIndex: "2147483647",
+    cursor: "crosshair",
+    background: "rgba(24, 24, 27, 0.06)",
+    display: "none",
+  } as Partial<CSSStyleDeclaration>);
+  const rect = document.createElement("div");
+  Object.assign(rect.style, {
+    position: "fixed",
+    background: "rgba(110, 86, 207, 0.14)",
+    border: "2px solid #6e56cf",
+    borderRadius: "2px",
+    boxShadow: "0 0 0 100vmax rgba(24, 24, 27, 0.12)",
+    pointerEvents: "none",
+    display: "none",
+  } as Partial<CSSStyleDeclaration>);
+  layer.appendChild(rect);
+  document.documentElement.appendChild(layer);
+  shotLayerEl = layer;
+  return layer;
+}
+
+// Crop a full-viewport capture (data URL) to a CSS-pixel viewport region. The
+// capture is at the tab's true pixel scale, so derive it from naturalWidth /
+// innerWidth (handles devicePixelRatio and browser zoom exactly) rather than
+// assuming a value. Returns a PNG data URL of just the region.
+function cropToRegion(
+  dataUrl: string,
+  rect: { left: number; top: number; width: number; height: number },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = img.naturalWidth / window.innerWidth;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(rect.width * scale));
+      canvas.height = Math.max(1, Math.round(rect.height * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("no 2d context"));
+        return;
+      }
+      ctx.drawImage(
+        img,
+        rect.left * scale,
+        rect.top * scale,
+        rect.width * scale,
+        rect.height * scale,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = () => reject(new Error("could not decode capture"));
+    img.src = dataUrl;
+  });
+}
+
 function SparkIcon() {
   return (
     <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -848,6 +1187,26 @@ function CursorIcon() {
   return (
     <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path d="M4 3l13 5.4-5.3 1.6a1 1 0 0 0-.66.66L9.4 16 4 3z" />
+    </svg>
+  );
+}
+
+// A marquee / crop frame: dashed corners around an empty center.
+function ShotIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6.5V4.5A1.5 1.5 0 0 1 4.5 3h2" />
+      <path d="M13.5 3h2A1.5 1.5 0 0 1 17 4.5v2" />
+      <path d="M17 13.5v2a1.5 1.5 0 0 1-1.5 1.5h-2" />
+      <path d="M6.5 17h-2A1.5 1.5 0 0 1 3 15.5v-2" />
     </svg>
   );
 }
@@ -908,16 +1267,31 @@ const CSS = `
   display: flex; align-items: center; gap: 6px;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
-.status .route {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; color: #71717a;
-  background: #f4f4f5; border: 1px solid #e4e4e7; border-radius: 4px; padding: 1px 6px;
+.ctx { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding: 0 2px; }
+.ctx-tag {
+  flex-shrink: 0; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: #a1a1aa;
 }
+.cin {
+  min-width: 0; font: inherit; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px; color: #3f3f46;
+  background: #f9f9fb; border: 1px solid #e4e4e7; border-radius: 6px; padding: 3px 7px; outline: none;
+}
+.cin::placeholder { color: #c4c4cc; }
+.cin:focus { border-color: #6e56cf; background: #fff; }
+.cin.route-in { flex: 1; }
+.cin.file-in { flex: 2; }
 .status .who {
   flex-shrink: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 10px; font-weight: 500; color: #15803d;
   background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 4px; padding: 1px 6px;
 }
+.status .env {
+  flex-shrink: 0; text-transform: uppercase; letter-spacing: .04em;
+  font-size: 9px; font-weight: 600; border-radius: 4px; padding: 1px 6px;
+}
+.status .env-development { color: #4338ca; background: #eef2ff; border: 1px solid #c7d2fe; }
+.status .env-production { color: #b45309; background: #fffbeb; border: 1px solid #fde68a; }
 .collapse {
   flex-shrink: 0; width: 28px; height: 28px; cursor: pointer; padding: 0;
   background: none; border: 1px solid transparent; border-radius: 8px; color: #a1a1aa;

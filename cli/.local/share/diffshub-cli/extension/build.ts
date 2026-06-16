@@ -28,10 +28,14 @@ function check(res: Awaited<ReturnType<typeof Bun.build>>, label: string) {
   }
 }
 
-// Content script — classic script, no module syntax.
+// Content script + background service worker — classic scripts, no module syntax.
 check(
-  await Bun.build({ entrypoints: [join(here, "content.ts")], format: "iife", ...common }),
-  "content",
+  await Bun.build({
+    entrypoints: [join(here, "content.ts"), join(here, "background.ts")],
+    format: "iife",
+    ...common,
+  }),
+  "content+background",
 );
 // Popup + lazy composer — ES modules.
 check(
