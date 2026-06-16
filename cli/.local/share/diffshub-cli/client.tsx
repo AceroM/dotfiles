@@ -47,6 +47,8 @@ import {
   FolderClock,
   ArrowUpToLine,
   ArrowUp,
+  Send,
+  Square,
   RefreshCw,
   RotateCw,
   Plus,
@@ -61,6 +63,7 @@ import {
   Highlighter,
   BellDot,
   ExternalLink,
+  X,
 } from "lucide-react";
 
 type Theme = "light" | "dark";
@@ -1495,6 +1498,36 @@ function saveDraft(key: string, value: string) {
     // ignore storage failures (private mode, quota, etc.)
   }
 }
+// ---- Reply history (localStorage) ----
+// Each session keeps a shell-style history of the replies you've sent it, so
+// ArrowUp on an empty composer walks back through them (see recallReplyHistory).
+// Stored oldest→newest and capped; persisted per session like the reply draft.
+const replyHistoryKey = (session: string) => `replyHistory:${session}`;
+const REPLY_HISTORY_MAX = 50;
+function loadHistory(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function pushHistory(key: string, value: string) {
+  const text = value.trim();
+  if (!text) return;
+  try {
+    // Drop any earlier copy so a repeated reply jumps to the front instead of
+    // leaving you to scroll past duplicates (HIST_IGNORE_ALL_DUPS-style).
+    const hist = loadHistory(key).filter((h) => h !== text);
+    hist.push(text);
+    while (hist.length > REPLY_HISTORY_MAX) hist.shift();
+    localStorage.setItem(key, JSON.stringify(hist));
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
 // The composer caret rides along with its per-directory draft: where the cursor
 // sat when you last closed the dialog (or switched directories) survives reloads
 // and dir hops, so reopening with `'` — or jumping back to a directory — lands
@@ -1738,11 +1771,13 @@ function PushToggle() {
 function HomeCard({
   session,
   state,
+  selected,
   onOpen,
   onDelete,
 }: {
   session: TmuxSession;
   state: string;
+  selected?: boolean;
   onOpen: (name: string) => void;
   onDelete: (name: string) => void;
 }) {
@@ -1751,7 +1786,7 @@ function HomeCard({
   return (
     <div
       id={`row-tmux-${session.name}`}
-      className={`home-card ${state}`}
+      className={`home-card ${state}${selected ? " selected" : ""}`}
       onClick={() => onOpen(session.name)}
     >
       <div className="home-card-top">
@@ -1783,6 +1818,7 @@ function HomeView({
   queued,
   loading,
   error,
+  selectedName,
   onOpen,
   onDelete,
   onCancelQueued,
@@ -1796,6 +1832,7 @@ function HomeView({
   queued: QueuedSession[];
   loading: boolean;
   error: string | null;
+  selectedName: string | null;
   onOpen: (name: string) => void;
   onDelete: (name: string) => void;
   onCancelQueued: (id: number) => void;
@@ -1815,7 +1852,14 @@ function HomeView({
         {inProgress.length ? (
           <div className="home-cards">
             {inProgress.map((s) => (
-              <HomeCard key={s.name} session={s} state="busy" onOpen={onOpen} onDelete={onDelete} />
+              <HomeCard
+                key={s.name}
+                session={s}
+                state="busy"
+                selected={selectedName === s.name}
+                onOpen={onOpen}
+                onDelete={onDelete}
+              />
             ))}
           </div>
         ) : (
@@ -1835,6 +1879,7 @@ function HomeView({
                 key={s.name}
                 session={s}
                 state="waiting"
+                selected={selectedName === s.name}
                 onOpen={onOpen}
                 onDelete={onDelete}
               />
@@ -1888,6 +1933,7 @@ function HomeView({
                 key={s.name}
                 session={s}
                 state="unread"
+                selected={selectedName === s.name}
                 onOpen={onOpen}
                 onDelete={onDelete}
               />
@@ -1904,7 +1950,14 @@ function HomeView({
           </div>
           <div className="home-cards">
             {idle.map((s) => (
-              <HomeCard key={s.name} session={s} state="idle" onOpen={onOpen} onDelete={onDelete} />
+              <HomeCard
+                key={s.name}
+                session={s}
+                state="idle"
+                selected={selectedName === s.name}
+                onOpen={onOpen}
+                onDelete={onDelete}
+              />
             ))}
           </div>
         </section>
@@ -1922,6 +1975,14 @@ function App() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>(initial.tab);
   const [view, setView] = useState<View>(initial.view);
+  // ---- Home dashboard chat side-panel ----
+  // homeSel = the focused card (drives the selection ring + arrow-key nav).
+  // homeChat = the session whose chat panel is open (docked right sidebar on
+  // desktop, full-screen sheet on mobile); null when the panel is closed. Kept
+  // separate so you can arrow through cards with the panel shut, then Enter to
+  // open — and once open, arrowing live-swaps the panel to the focused card.
+  const [homeSel, setHomeSel] = useState<string | null>(null);
+  const [homeChat, setHomeChat] = useState<string | null>(null);
 
   // ---- Light / dark theme ----
   // Toggle with the `t` shortcut or the theme action; no system mode. Defaults to
@@ -2206,7 +2267,15 @@ function App() {
   // Whether the machine can reach the API (so launches run vs. queue). Defaults to
   // online until the first poll; other tabs keep the last polled value.
   const serverOnline = tmuxQuery.data?.online ?? true;
-  const selectedSession = view.kind === "tmux" ? view.session : "";
+  // The session whose chat is on screen. On the Tmux tab that's the tab's
+  // selection; on the Home dashboard it's the card whose chat side-panel is open
+  // (homeChat). Tab wins over view.kind so a stray Tmux `view` left behind by a
+  // shared handler (e.g. killSession's neighbour-select) can't leak into Home.
+  // Both feed the same transcript machinery below (query, turns, reply box), so
+  // the chat renders identically whether it's the full Tmux pane or the Home
+  // right-sidebar.
+  const selectedSession =
+    tab === "home" ? homeChat ?? "" : view.kind === "tmux" ? view.session : "";
   // Stream the open transcript fast while its session is busy. When idle we keep a
   // slow baseline poll rather than stopping: a session paused on an AskUserQuestion
   // / plan / permission prompt reads as not-busy (the pane title drops its braille
@@ -2221,12 +2290,15 @@ function App() {
     queryKey: ["tmux-transcript", selectedSession],
     queryFn: ({ signal }) =>
       fetchJSON<Transcript>(`/api/tmux/transcript?session=${encodeURIComponent(selectedSession)}`, signal),
-    enabled: tab === "tmux" && !!selectedSession,
+    enabled: (tab === "tmux" || tab === "home") && !!selectedSession,
     refetchOnWindowFocus: false,
     refetchInterval: selectedBusy ? TMUX_POLL_MS : TMUX_IDLE_POLL_MS,
   });
   const selectedSessionRef = useRef(selectedSession);
   selectedSessionRef.current = selectedSession;
+  // Latest tab, readable from stable callbacks (chatScroll) without re-binding.
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
 
   // ---- Per-session "unread" tracking (Tmux tab) ----
   // A session reads as "unread" once it finishes a turn (goes idle) with new
@@ -2384,6 +2456,10 @@ function App() {
   const [replyStopping, setReplyStopping] = useState(false);
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Where we are while walking this session's sent-reply history with the arrow
+  // keys: null = editing the live draft (not browsing). Reset on send, on a real
+  // keystroke, and when the selected session changes. See recallReplyHistory.
+  const replyHistoryIndexRef = useRef<number | null>(null);
 
   // Transcript header toggle: when on, the chat view is filtered down to just
   // the Edit/Write/MultiEdit tool calls (the inline diffs), hiding prose and
@@ -2725,6 +2801,14 @@ function App() {
 
   const fileEls = useRef(new Map<string, HTMLDivElement>());
   const mainEl = useRef<HTMLDivElement | null>(null);
+  // The Home chat side-panel owns its own scroll container; on the Tmux tab the
+  // chat scrolls in the main column (mainEl). chatScroll() returns whichever is
+  // live so the auto-scroll / "jump to latest" logic drives the right element.
+  const chatScrollEl = useRef<HTMLDivElement | null>(null);
+  const chatScroll = useCallback(
+    () => (tabRef.current === "home" ? chatScrollEl.current : mainEl.current),
+    [],
+  );
   const searchEl = useRef<HTMLInputElement | null>(null);
 
   // Whenever a transcript loads/refreshes, jump to the bottom so the newest part
@@ -2742,19 +2826,22 @@ function App() {
   // the user has scrolled up. 80px of slack keeps it hidden while effectively
   // at the end (and during the brief auto-scroll settle).
   const [atBottom, setAtBottom] = useState(true);
+  // A chat is on screen whenever a session is selected on the Tmux tab or open in
+  // the Home side-panel — the gate for the transcript scroll effects below.
+  const chatOpen = !!selectedSession && (tab === "tmux" || tab === "home");
   useEffect(() => {
-    if (tab !== "tmux" || !transcriptData) return;
-    const el = mainEl.current;
+    if (!chatOpen || !transcriptData) return;
+    const el = chatScroll();
     if (el)
       requestAnimationFrame(() => {
         el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
         setAtBottom(true);
       });
-  }, [tab, transcriptData, selectedSession]);
+  }, [chatOpen, transcriptData, selectedSession, chatScroll]);
 
   useEffect(() => {
-    if (tab !== "tmux") return;
-    const el = mainEl.current;
+    if (!chatOpen) return;
+    const el = chatScroll();
     if (!el) return;
     const update = () => setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
     update();
@@ -2764,17 +2851,17 @@ function App() {
       el.removeEventListener("scroll", update);
       window.removeEventListener("resize", update);
     };
-  }, [tab, transcriptData, selectedSession]);
+  }, [chatOpen, transcriptData, selectedSession, chatScroll]);
   const jumpToBottom = useCallback(() => {
-    const el = mainEl.current;
+    const el = chatScroll();
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
-  }, []);
+  }, [chatScroll]);
   // Mobile: jump back to the very top of the transcript — handy on long chats
   // where the original prompt has scrolled far out of view.
   const jumpToTop = useCallback(() => {
-    const el = mainEl.current;
+    const el = chatScroll();
     if (el) el.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+  }, [chatScroll]);
 
   // ---- Reviewed commits (persisted server-side in sqlite) ----
   const reviewedQuery = useQuery({
@@ -3080,6 +3167,8 @@ function App() {
         alert(`reply failed: ${body.error ?? res.statusText}`);
         return;
       }
+      pushHistory(replyHistoryKey(session), text); // remember it for ArrowUp recall
+      replyHistoryIndexRef.current = null; // sending ends any history browse
       setReplyText("");
       setFileToken(null); // drop any open @-mention popup along with the sent text
       saveDraft(replyDraftKey(session), ""); // sent → drop this tab's saved draft
@@ -3096,6 +3185,51 @@ function App() {
       setReplySending(false);
     }
   }, [replyText, queryClient]);
+
+  // Drop a recalled history entry into the composer and park the caret at the end
+  // so it's ready to edit or fire off. setReplyText is programmatic, so no onChange
+  // fires — the saved draft and the history index are left untouched on purpose.
+  const applyRecalled = useCallback((next: string) => {
+    setReplyText(next);
+    requestAnimationFrame(() => {
+      const ta = replyTextareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(next.length, next.length);
+    });
+  }, []);
+  // Shell-style history navigation for the reply box. dir = -1 walks toward older
+  // replies, +1 toward newer; past the newest you land back on the empty box.
+  // Recall only *starts* from an empty composer (so a half-typed draft keeps its
+  // normal ArrowUp caret movement); once browsing, both arrows keep stepping.
+  // Returns true when it handled the key so the caller can preventDefault.
+  const recallReplyHistory = useCallback((dir: -1 | 1): boolean => {
+    const session = selectedSessionRef.current;
+    if (!session) return false;
+    const navigating = replyHistoryIndexRef.current !== null;
+    if (dir === -1) {
+      // ArrowUp from a non-empty draft is ordinary caret movement, not recall.
+      if (!navigating && (replyTextareaRef.current?.value ?? "") !== "") return false;
+      const hist = loadHistory(replyHistoryKey(session));
+      if (!hist.length) return false;
+      const idx = navigating ? Math.max(0, replyHistoryIndexRef.current! - 1) : hist.length - 1;
+      replyHistoryIndexRef.current = idx;
+      applyRecalled(hist[idx] ?? "");
+      return true;
+    }
+    // ArrowDown only does anything while we're already browsing history.
+    if (!navigating) return false;
+    const hist = loadHistory(replyHistoryKey(session));
+    const idx = replyHistoryIndexRef.current! + 1;
+    if (idx >= hist.length) {
+      replyHistoryIndexRef.current = null; // past the newest → empty composer
+      applyRecalled("");
+      return true;
+    }
+    replyHistoryIndexRef.current = idx;
+    applyRecalled(hist[idx] ?? "");
+    return true;
+  }, [applyRecalled]);
 
   // Stop claude mid-turn in the selected session: send Escape into its pane (the
   // same key you'd press in the terminal to interrupt). Then refresh so the now-idle
@@ -3386,6 +3520,7 @@ function App() {
   // half-typed reply in localStorage), or clear when nothing is selected.
   useEffect(() => {
     setReplyText(selectedSession ? loadDraft(replyDraftKey(selectedSession)) : "");
+    replyHistoryIndexRef.current = null; // each tab browses its own history afresh
   }, [selectedSession]);
 
   const selectCommit = useCallback(
@@ -4010,15 +4145,45 @@ function App() {
       idle: list.filter((s) => !s.busy && !s.waiting && !isUnread(s)),
     };
   }, [visibleTmux, isUnread]);
-  // Open a session from the Home dashboard: flip to the Tmux tab and select it
-  // (selectTmux sets the view + URL; setTab swaps the main area to the transcript).
-  const openSession = useCallback(
-    (name: string) => {
-      setTab("tmux");
-      selectTmux(name);
-    },
-    [selectTmux],
+  // Flat, display-ordered list of the dashboard's openable cards (queued prompts
+  // aren't sessions, so they're left out). Drives arrow-key navigation across the
+  // responsive card grid as a simple prev/next walk.
+  const homeNav = useMemo(
+    () =>
+      [
+        ...homeGroups.inProgress,
+        ...homeGroups.needsAction,
+        ...homeGroups.done,
+        ...homeGroups.idle,
+      ].map((s) => s.name),
+    [homeGroups],
   );
+  // Open a Home card's chat in the side-panel (a docked right sidebar on desktop,
+  // a full-screen sheet on mobile) without leaving the dashboard. selectedSession
+  // resolves to homeChat on the Home tab, so the existing transcript query + reply
+  // box light up for it automatically.
+  const openHomeChat = useCallback((name: string) => {
+    setHomeSel(name);
+    setHomeChat(name);
+  }, []);
+  const closeHomeChat = useCallback(() => setHomeChat(null), []);
+  // Kill a card's session from the dashboard, closing the panel first if it was
+  // showing the one being killed (otherwise it'd briefly read a dead transcript).
+  const deleteHomeCard = useCallback(
+    (name: string) => {
+      setHomeChat((c) => (c === name ? null : c));
+      void killSession(name);
+    },
+    [killSession],
+  );
+  // Drop the Home selection / open chat when its session disappears — killed, or
+  // gone from view after a directory switch or filter change.
+  useEffect(() => {
+    if (tab !== "home" || !dirScopedTmux) return;
+    const names = new Set(dirScopedTmux.map((s) => s.name));
+    if (homeSel && !names.has(homeSel)) setHomeSel(null);
+    if (homeChat && !names.has(homeChat)) setHomeChat(null);
+  }, [tab, dirScopedTmux, homeSel, homeChat]);
 
   // Kill every session currently listed on the Tmux tab (the dir-scoped, filtered
   // set the user is looking at — not every claude session on the box). Reuses the
@@ -4121,6 +4286,9 @@ function App() {
     fileToken,
     changes,
     dirs,
+    homeNav,
+    homeSel,
+    homeChatOpen: !!homeChat,
   });
   keyCtx.current = {
     tab,
@@ -4143,6 +4311,9 @@ function App() {
     fileToken,
     changes,
     dirs,
+    homeNav,
+    homeSel,
+    homeChatOpen: !!homeChat,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -4176,6 +4347,14 @@ function App() {
         return;
       }
       if (typing) return;
+      // On the Home dashboard, Esc closes the open chat side-panel. (Esc inside
+      // the composer is handled by the textarea — it stops propagation — so this
+      // only fires when focus is outside it.)
+      if (e.key === "Escape" && tab === "home" && keyCtx.current.homeChatOpen) {
+        e.preventDefault();
+        setHomeChat(null);
+        return;
+      }
       // Escape dismisses the line-selection action bar.
       if (e.key === "Escape" && keyCtx.current.selection) {
         e.preventDefault();
@@ -4201,15 +4380,43 @@ function App() {
         setDirMenuOpen(true);
         return;
       }
-      // ←/→ switch between tabs globally
-      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-        e.preventDefault();
-        const idx = TAB_ORDER.indexOf(tab);
-        const delta = e.key === "ArrowRight" ? 1 : TAB_ORDER.length - 1;
-        selectTab(TAB_ORDER[(idx + delta) % TAB_ORDER.length]);
-        return;
+      // Home dashboard: arrow keys walk the card grid (a linear prev/next over
+      // every card in display order); Enter opens the focused card's chat in the
+      // side-panel, and while the panel is open arrowing live-swaps it to the new
+      // card. With no cards on screen the arrows simply do nothing.
+      if (tab === "home" && (e.key === "Enter" || e.key.startsWith("Arrow"))) {
+        const list = keyCtx.current.homeNav;
+        if (e.key === "Enter") {
+          const sel = keyCtx.current.homeSel;
+          if (sel) {
+            e.preventDefault();
+            setHomeSel(sel);
+            setHomeChat(sel);
+          }
+          return;
+        }
+        if (list.length) {
+          e.preventDefault();
+          const fwd = e.key === "ArrowDown" || e.key === "ArrowRight";
+          const cur = keyCtx.current.homeSel;
+          const idx = cur ? list.indexOf(cur) : -1;
+          const next = fwd
+            ? idx + 1 >= list.length
+              ? 0
+              : idx + 1
+            : idx <= 0
+              ? list.length - 1
+              : idx - 1;
+          const name = list[next];
+          setHomeSel(name);
+          if (keyCtx.current.homeChatOpen) setHomeChat(name);
+          document.getElementById(`row-tmux-${name}`)?.scrollIntoView({ block: "nearest" });
+          return;
+        }
       }
-      // 1–5 jump straight to a tab (plain, not ⌥ — that switches directories).
+      // Tabs are switched with the number keys (1–6) below — the ←/→ keys are left
+      // free for in-tab navigation (the Home card grid; otherwise unused).
+      // 1–6 jump straight to a tab (plain, not ⌥ — that switches directories).
       if (!e.altKey && e.key >= "1" && e.key <= String(TAB_ORDER.length)) {
         e.preventDefault();
         selectTab(TAB_ORDER[Number(e.key) - 1]);
@@ -4629,6 +4836,325 @@ function App() {
     onClick: toggleTheme,
   });
 
+  // The chat surface (transcript + composer) for the selected session, shared by
+  // the Tmux tab and the Home dashboard's side-panel. Both resolve the same
+  // selectedSession, so one transcript query / turns list / reply box drives
+  // whichever surface is on screen. A function so it's built only when rendered.
+  const renderChat = () => (
+    <>
+      {!selectedSession && <div className="transcript-empty">Select a session on the left</div>}
+      {selectedSession && transcriptQuery.isPending && (
+        <ContentSpinner label="Loading transcript…" />
+      )}
+      {transcriptQuery.isError && (
+        <div className="empty error">{errMessage(transcriptQuery.error)}</div>
+      )}
+      {transcriptData && (
+        <>
+          <div className="transcript-head">
+            <h2>{transcriptData.title || transcriptData.session}</h2>
+            <span className="t-sub">
+              {transcriptData.cwd}
+              {transcriptData.model ? ` · ${transcriptData.model}` : ""}
+              {transcriptData.session ? ` · ${transcriptData.session}` : ""}
+            </span>
+            <button
+              type="button"
+              className={`edits-toggle${editsOnly ? " on" : ""}`}
+              aria-pressed={editsOnly}
+              title={editsOnly ? "Show all messages" : "Show only edits"}
+              onClick={() => setEditsOnly((v) => !v)}
+            >
+              Edits only
+            </button>
+          </div>
+          {transcriptData.messages.length === 0 ? (
+            <div className="transcript-empty">
+              {transcriptData.path
+                ? "No conversation yet — press space to refresh"
+                : "Starting session…"}
+            </div>
+          ) : editsOnly && turns.length === 0 ? (
+            <div className="transcript-empty">No edits in this conversation yet</div>
+          ) : (
+            turns.map((t, i) => (
+              <TranscriptTurn
+                key={i}
+                role={t.role}
+                msgs={t.msgs}
+                session={selectedSession}
+                theme={theme}
+                onAnswerPlan={i === turns.length - 1 ? answerPlan : undefined}
+                onAnswerQuestion={i === turns.length - 1 ? answerQuestion : undefined}
+              />
+            ))
+          )}
+          {transcriptData.pendingPane && !selectedBusy && (
+            <PendingPrompt
+              // Remount (re-seed checkboxes) when the question changes, but keep
+              // in-progress toggles stable across background polls of the same one.
+              key={
+                transcriptData.pendingPrompt
+                  ? `${transcriptData.pendingPrompt.kind}:${transcriptData.pendingPrompt.question}:${transcriptData.pendingPrompt.options
+                      .map((o) => o.label)
+                      .join("|")}`
+                  : "raw"
+              }
+              text={transcriptData.pendingPane}
+              prompt={transcriptData.pendingPrompt}
+              onAnswerSingle={(d) => sendToSession(String(d))}
+              onAnswerMulti={answerPendingMulti}
+              onConfirm={confirmPending}
+            />
+          )}
+          {selectedBusy && (
+            <div className="turn assistant">
+              <div className="content">
+                <div className="typing">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+      {selectedSession && (
+        <div className="reply-box">
+          {!atBottom && (
+            <button
+              type="button"
+              className="scroll-bottom"
+              title="Scroll to latest"
+              aria-label="Scroll to latest"
+              onClick={jumpToBottom}
+            >
+              <ChevronDown />
+            </button>
+          )}
+          <div className="file-menu-wrap">
+            <textarea
+              ref={replyTextareaRef}
+              className="reply-input"
+              placeholder={`Reply to ${selectedSession}…  (type @ to reference a file, ⌃V to paste an image, ↵ to send, ⇧↵ for newline)`}
+              value={replyText}
+              onChange={(e) => {
+                replyHistoryIndexRef.current = null; // editing exits history browse
+                setReplyText(e.target.value);
+                saveDraft(replyDraftKey(selectedSession), e.target.value);
+                syncFileToken(e.target, replyMentionTarget);
+              }}
+              onPaste={handleReplyPaste}
+              onClick={(e) => syncFileToken(e.currentTarget, replyMentionTarget)}
+              onKeyUp={(e) => {
+                // Let the menu's own ArrowUp/Down win while it's open; otherwise
+                // keep the @token current as the caret moves (arrows/home/end).
+                if (fileMenuOpen && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
+                syncFileToken(e.currentTarget, replyMentionTarget);
+              }}
+              // Leaving the box (clicking into the transcript) dismisses the popup;
+              // a menu click can't trigger this because its onMouseDown preventDefault
+              // keeps focus here.
+              onBlur={() => {
+                if (fileToken?.owner === "reply") setFileToken(null);
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                // While the @-file popup is open it owns navigation/acceptance.
+                if (fileMenuOpen) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setFileMenuIndex((i) => (i + 1) % fileSuggestions.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setFileMenuIndex((i) => (i - 1 + fileSuggestions.length) % fileSuggestions.length);
+                    return;
+                  }
+                  if (e.key === "Enter" || e.key === "Tab") {
+                    e.preventDefault();
+                    acceptFile(fileSuggestions[fileMenuIndex] ?? fileSuggestions[0]);
+                    return;
+                  }
+                }
+                // Shell-style history: ArrowUp on an empty composer recalls
+                // the previous reply sent to this session; ArrowDown walks
+                // back toward the empty box. recallReplyHistory returns false
+                // (leaving the keys to their default caret movement) when
+                // there's nothing to recall or a draft is being edited.
+                if (e.key === "ArrowUp" && recallReplyHistory(-1)) {
+                  e.preventDefault();
+                  return;
+                }
+                if (e.key === "ArrowDown" && recallReplyHistory(1)) {
+                  e.preventDefault();
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  // A live @-token cancels first (keeping the literal "@…" text);
+                  // a second Esc (no token) blurs the composer.
+                  if (fileToken) setFileToken(null);
+                  else e.currentTarget.blur();
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submitReply();
+                }
+              }}
+            />
+            {fileToken?.owner === "reply" &&
+              fileMenuStyle &&
+              createPortal(
+                <div className="file-menu" style={fileMenuStyle}>
+                  {fileSuggestions.length ? (
+                    fileSuggestions.map((f, i) => (
+                      <button
+                        key={f}
+                        className={`file-opt${i === fileMenuIndex ? " on" : ""}`}
+                        title={f}
+                        onMouseDown={(e) => {
+                          e.preventDefault(); // keep focus in the textarea
+                          acceptFile(f);
+                        }}
+                        onMouseEnter={() => setFileMenuIndex(i)}
+                      >
+                        {f}
+                      </button>
+                    ))
+                  ) : (
+                    <div className="file-menu-empty">
+                      {filesQuery.isPending ? "Loading files…" : "No matching files"}
+                    </div>
+                  )}
+                </div>,
+                document.body,
+              )}
+          </div>
+          <div className="reply-bar">
+            {/* Mobile-only quick actions: the keyboard shortcuts that drive
+                these on desktop (⌃V paste, dir switch, `'`) aren't reachable
+                on a phone, so surface them as icon buttons in the reply bar. */}
+            {!isDesktop && (
+              <>
+                {/* Close the Home chat dialog — a thumb-reachable mirror of the
+                    ✕ in the panel's top bar (only this surface is a dialog; the
+                    Tmux tab's reply bar shares renderChat but has nothing to
+                    close). */}
+                {tab === "home" && (
+                  <IconButton title="Close chat" onClick={closeHomeChat}>
+                    <X />
+                  </IconButton>
+                )}
+                {/* Kill the chat you're viewing (and close the panel) — a
+                    thumb-reachable mirror of the ✕ kill button on the card.
+                    Home-only: the Tmux tab has no panel to close and its own
+                    kill lives on the `x` key / sidebar row. */}
+                {tab === "home" && homeChat && (
+                  <IconButton
+                    className="delete"
+                    title="Delete chat"
+                    onClick={() => deleteHomeCard(homeChat)}
+                  >
+                    <Trash2 />
+                  </IconButton>
+                )}
+                <ImageAttachButton
+                  uploading={replyImgUploading}
+                  onPick={(e) => handleImageFile(e, insertIntoReply, setReplyImgUploading)}
+                />
+                <IconButton
+                  title="Go to last directory"
+                  disabled={prevDir === undefined && dirs.length < 2}
+                  onClick={goToLastDir}
+                >
+                  <FolderClock />
+                </IconButton>
+                <IconButton title="New Claude session" onClick={() => setClaudeOpen(true)}>
+                  <Sparkles />
+                </IconButton>
+                {/* Jump to the topmost (latest) session in the sidebar — same
+                    target as the `0` key. Disabled when it's already selected. */}
+                <IconButton
+                  title="Jump to latest chat"
+                  disabled={!visibleTmux?.length || visibleTmux[0].name === selectedSession}
+                  onClick={() => {
+                    if (visibleTmux?.length) selectTmux(visibleTmux[0].name);
+                  }}
+                >
+                  <ArrowUpToLine />
+                </IconButton>
+                {/* Scroll the transcript to its very top — re-read the prompt you
+                    started with on a long chat. Mirrors the topbar's "Jump to
+                    top" (no keyboard shortcut is reachable on a phone). */}
+                <IconButton title="Jump to top of chat" onClick={jumpToTop}>
+                  <ArrowUp />
+                </IconButton>
+              </>
+            )}
+            {/* Jump to the next session that finished with output you haven't
+                opened — the unread dots in the sidebar. Rendered on desktop
+                too (no keyboard shortcut drives it); disabled when nothing but
+                the current chat is unread. */}
+            <IconButton
+              title="Go to next unread session"
+              disabled={!hasNextUnread}
+              onClick={goToNextUnread}
+            >
+              <BellDot />
+            </IconButton>
+            {replyImgUploading && <span className="reply-hint">Uploading image…</span>}
+            <span className="spacer" />
+            {/* Desktop keeps the roomy text buttons; on mobile they collapse to
+                square icon buttons in the right corner to free up room in the bar
+                for the left-cluster quick actions. */}
+            {isDesktop ? (
+              <>
+                <button
+                  className="act stop"
+                  disabled={replyStopping || !selectedBusy}
+                  onClick={stopSession}
+                  title="Interrupt claude (sends Escape)"
+                >
+                  {replyStopping ? "Stopping…" : "Stop"}
+                </button>
+                <button
+                  className="act primary"
+                  disabled={replySending || !replyText.trim()}
+                  onClick={submitReply}
+                >
+                  {replySending ? "Sending…" : "Send"}
+                </button>
+              </>
+            ) : (
+              <>
+                <IconButton
+                  className="stop"
+                  title="Interrupt claude (sends Escape)"
+                  disabled={replyStopping || !selectedBusy}
+                  onClick={stopSession}
+                >
+                  {replyStopping ? <span className="icon-spin">…</span> : <Square />}
+                </IconButton>
+                <IconButton
+                  className="primary"
+                  title="Send reply"
+                  disabled={replySending || !replyText.trim()}
+                  onClick={submitReply}
+                >
+                  {replySending ? <span className="icon-spin">…</span> : <Send />}
+                </IconButton>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+
   return (
     <div
       className="layout"
@@ -4677,6 +5203,17 @@ function App() {
               <ChevronRight size={18} />
             </button>
           </>
+        )}
+        {tab === "home" && (
+          <button
+            className="topbar-btn"
+            title="Go to last directory"
+            aria-label="Go to last directory"
+            disabled={prevDir === undefined && dirs.length < 2}
+            onClick={goToLastDir}
+          >
+            <FolderClock size={18} />
+          </button>
         )}
         {(tab === "home" || tab === "tmux" || tab === "commits") && (
           <button
@@ -5248,7 +5785,9 @@ function App() {
       <div className="resizer rz-left" onPointerDown={startResize("left")} />
 
       <main
-        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : ""}`}
+        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : ""}${
+          tab === "home" && homeChat ? " chat-open" : ""
+        }`}
         ref={mainEl}
       >
         {tab === "home" && (
@@ -5257,257 +5796,39 @@ function App() {
             queued={visibleQueued ?? []}
             loading={tmuxQuery.isPending && !tmuxSessions}
             error={tmuxQuery.isError ? errMessage(tmuxQuery.error) : null}
-            onOpen={openSession}
-            onDelete={killSession}
+            selectedName={homeSel}
+            onOpen={openHomeChat}
+            onDelete={deleteHomeCard}
             onCancelQueued={cancelQueued}
           />
         )}
-        {tab === "tmux" && (
-          <div className="transcript">
-            {!selectedSession && <div className="transcript-empty">Select a session on the left</div>}
-            {selectedSession && transcriptQuery.isPending && (
-              <ContentSpinner label="Loading transcript…" />
-            )}
-            {transcriptQuery.isError && (
-              <div className="empty error">{errMessage(transcriptQuery.error)}</div>
-            )}
-            {transcriptData && (
-              <>
-                <div className="transcript-head">
-                  <h2>{transcriptData.title || transcriptData.session}</h2>
-                  <span className="t-sub">
-                    {transcriptData.cwd}
-                    {transcriptData.model ? ` · ${transcriptData.model}` : ""}
-                    {transcriptData.session ? ` · ${transcriptData.session}` : ""}
-                  </span>
-                  <button
-                    type="button"
-                    className={`edits-toggle${editsOnly ? " on" : ""}`}
-                    aria-pressed={editsOnly}
-                    title={editsOnly ? "Show all messages" : "Show only edits"}
-                    onClick={() => setEditsOnly((v) => !v)}
-                  >
-                    Edits only
-                  </button>
-                </div>
-                {transcriptData.messages.length === 0 ? (
-                  <div className="transcript-empty">
-                    {transcriptData.path
-                      ? "No conversation yet — press space to refresh"
-                      : "Starting session…"}
-                  </div>
-                ) : editsOnly && turns.length === 0 ? (
-                  <div className="transcript-empty">No edits in this conversation yet</div>
-                ) : (
-                  turns.map((t, i) => (
-                    <TranscriptTurn
-                      key={i}
-                      role={t.role}
-                      msgs={t.msgs}
-                      session={selectedSession}
-                      theme={theme}
-                      onAnswerPlan={i === turns.length - 1 ? answerPlan : undefined}
-                      onAnswerQuestion={i === turns.length - 1 ? answerQuestion : undefined}
-                    />
-                  ))
-                )}
-                {transcriptData.pendingPane && !selectedBusy && (
-                  <PendingPrompt
-                    // Remount (re-seed checkboxes) when the question changes, but keep
-                    // in-progress toggles stable across background polls of the same one.
-                    key={
-                      transcriptData.pendingPrompt
-                        ? `${transcriptData.pendingPrompt.kind}:${transcriptData.pendingPrompt.question}:${transcriptData.pendingPrompt.options
-                            .map((o) => o.label)
-                            .join("|")}`
-                        : "raw"
-                    }
-                    text={transcriptData.pendingPane}
-                    prompt={transcriptData.pendingPrompt}
-                    onAnswerSingle={(d) => sendToSession(String(d))}
-                    onAnswerMulti={answerPendingMulti}
-                    onConfirm={confirmPending}
-                  />
-                )}
-                {selectedBusy && (
-                  <div className="turn assistant">
-                    <div className="content">
-                      <div className="typing">
-                        <span />
-                        <span />
-                        <span />
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-            {selectedSession && (
-              <div className="reply-box">
-                {!atBottom && (
-                  <button
-                    type="button"
-                    className="scroll-bottom"
-                    title="Scroll to latest"
-                    aria-label="Scroll to latest"
-                    onClick={jumpToBottom}
-                  >
-                    <ChevronDown />
-                  </button>
-                )}
-                <div className="file-menu-wrap">
-                  <textarea
-                    ref={replyTextareaRef}
-                    className="reply-input"
-                    placeholder={`Reply to ${selectedSession}…  (type @ to reference a file, ⌃V to paste an image, ↵ to send, ⇧↵ for newline)`}
-                    value={replyText}
-                    onChange={(e) => {
-                      setReplyText(e.target.value);
-                      saveDraft(replyDraftKey(selectedSession), e.target.value);
-                      syncFileToken(e.target, replyMentionTarget);
-                    }}
-                    onPaste={handleReplyPaste}
-                    onClick={(e) => syncFileToken(e.currentTarget, replyMentionTarget)}
-                    onKeyUp={(e) => {
-                      // Let the menu's own ArrowUp/Down win while it's open; otherwise
-                      // keep the @token current as the caret moves (arrows/home/end).
-                      if (fileMenuOpen && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
-                      syncFileToken(e.currentTarget, replyMentionTarget);
-                    }}
-                    // Leaving the box (clicking into the transcript) dismisses the popup;
-                    // a menu click can't trigger this because its onMouseDown preventDefault
-                    // keeps focus here.
-                    onBlur={() => {
-                      if (fileToken?.owner === "reply") setFileToken(null);
-                    }}
-                    onKeyDown={(e) => {
-                      e.stopPropagation();
-                      // While the @-file popup is open it owns navigation/acceptance.
-                      if (fileMenuOpen) {
-                        if (e.key === "ArrowDown") {
-                          e.preventDefault();
-                          setFileMenuIndex((i) => (i + 1) % fileSuggestions.length);
-                          return;
-                        }
-                        if (e.key === "ArrowUp") {
-                          e.preventDefault();
-                          setFileMenuIndex((i) => (i - 1 + fileSuggestions.length) % fileSuggestions.length);
-                          return;
-                        }
-                        if (e.key === "Enter" || e.key === "Tab") {
-                          e.preventDefault();
-                          acceptFile(fileSuggestions[fileMenuIndex] ?? fileSuggestions[0]);
-                          return;
-                        }
-                      }
-                      if (e.key === "Escape") {
-                        e.preventDefault();
-                        // A live @-token cancels first (keeping the literal "@…" text);
-                        // a second Esc (no token) blurs the composer.
-                        if (fileToken) setFileToken(null);
-                        else e.currentTarget.blur();
-                        return;
-                      }
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        submitReply();
-                      }
-                    }}
-                  />
-                  {fileToken?.owner === "reply" &&
-                    fileMenuStyle &&
-                    createPortal(
-                      <div className="file-menu" style={fileMenuStyle}>
-                        {fileSuggestions.length ? (
-                          fileSuggestions.map((f, i) => (
-                            <button
-                              key={f}
-                              className={`file-opt${i === fileMenuIndex ? " on" : ""}`}
-                              title={f}
-                              onMouseDown={(e) => {
-                                e.preventDefault(); // keep focus in the textarea
-                                acceptFile(f);
-                              }}
-                              onMouseEnter={() => setFileMenuIndex(i)}
-                            >
-                              {f}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="file-menu-empty">
-                            {filesQuery.isPending ? "Loading files…" : "No matching files"}
-                          </div>
-                        )}
-                      </div>,
-                      document.body,
-                    )}
-                </div>
-                <div className="reply-bar">
-                  {/* Mobile-only quick actions: the keyboard shortcuts that drive
-                      these on desktop (⌃V paste, dir switch, `'`) aren't reachable
-                      on a phone, so surface them as icon buttons in the reply bar. */}
-                  {!isDesktop && (
-                    <>
-                      <ImageAttachButton
-                        uploading={replyImgUploading}
-                        onPick={(e) => handleImageFile(e, insertIntoReply, setReplyImgUploading)}
-                      />
-                      <IconButton
-                        title="Go to last directory"
-                        disabled={prevDir === undefined && dirs.length < 2}
-                        onClick={goToLastDir}
-                      >
-                        <FolderClock />
-                      </IconButton>
-                      <IconButton title="New Claude session" onClick={() => setClaudeOpen(true)}>
-                        <Sparkles />
-                      </IconButton>
-                      {/* Jump to the topmost (latest) session in the sidebar — same
-                          target as the `0` key. Disabled when it's already selected. */}
-                      <IconButton
-                        title="Jump to latest chat"
-                        disabled={!visibleTmux?.length || visibleTmux[0].name === selectedSession}
-                        onClick={() => {
-                          if (visibleTmux?.length) selectTmux(visibleTmux[0].name);
-                        }}
-                      >
-                        <ArrowUpToLine />
-                      </IconButton>
-                    </>
-                  )}
-                  {/* Jump to the next session that finished with output you haven't
-                      opened — the unread dots in the sidebar. Rendered on desktop
-                      too (no keyboard shortcut drives it); disabled when nothing but
-                      the current chat is unread. */}
-                  <IconButton
-                    title="Go to next unread session"
-                    disabled={!hasNextUnread}
-                    onClick={goToNextUnread}
-                  >
-                    <BellDot />
-                  </IconButton>
-                  {replyImgUploading && <span className="reply-hint">Uploading image…</span>}
-                  <span className="spacer" />
-                  <button
-                    className="act stop"
-                    disabled={replyStopping || !selectedBusy}
-                    onClick={stopSession}
-                    title="Interrupt claude (sends Escape)"
-                  >
-                    {replyStopping ? "Stopping…" : "Stop"}
-                  </button>
-                  <button
-                    className="act primary"
-                    disabled={replySending || !replyText.trim()}
-                    onClick={submitReply}
-                  >
-                    {replySending ? "Sending…" : "Send"}
-                  </button>
-                </div>
+        {tab === "tmux" && <div className="transcript">{renderChat()}</div>}
+        {/* Home dashboard: clicking a card opens its chat here instead of leaving
+            the dashboard — a docked right sidebar on desktop, a full-screen sheet
+            on mobile (see .home-chat-panel). Portaled to <body> so the fixed panel
+            isn't clipped by the scrolling main column. Esc or the ✕ closes it. */}
+        {tab === "home" &&
+          homeChat &&
+          createPortal(
+            <aside className="home-chat-panel" role="dialog" aria-modal="true">
+              <div className="home-chat-bar">
+                <button
+                  type="button"
+                  className="home-chat-close"
+                  title="Close chat (Esc)"
+                  aria-label="Close chat"
+                  onClick={closeHomeChat}
+                >
+                  <X size={18} />
+                </button>
+                <span className="home-chat-title">{homeChat}</span>
               </div>
-            )}
-          </div>
-        )}
+              <div className="home-chat-scroll" ref={chatScrollEl}>
+                <div className="transcript">{renderChat()}</div>
+              </div>
+            </aside>,
+            document.body,
+          )}
         {/* Diff-column skeleton: shown while git computes a commit/PR/changes/manual
             diff in the background, and on the commits tab during the brief moment
             before it auto-lands on the newest commit. The layout lands instantly so

@@ -73,6 +73,8 @@ function Bar() {
   const [prompt, setPrompt] = useState(initialDraft);
   const [launching, setLaunching] = useState(false);
   const [launched, setLaunched] = useState<string | null>(null);
+  // Brief success tick shown on the collapsed pill right after a prompt is sent.
+  const [justSent, setJustSent] = useState(false);
   const [uploading, setUploading] = useState(false);
 
   // Current SPA route (pathname). Shown in the toolbar and folded into the prompt
@@ -201,17 +203,27 @@ function Bar() {
     requestAnimationFrame(() => taRef.current?.focus());
   }, []);
 
-  // Drop a picked element's reference into the composer and focus it, caret at end.
+  // Drop a picked element's reference into the composer at the caret (replacing any
+  // selection), then put the caret right after it. No newline prefix — the ref lands
+  // inline where you were typing. Falls back to the end when the textarea isn't
+  // mounted yet (visual-select started from the collapsed pill).
   const injectRef = useCallback((text: string) => {
-    setPrompt((prev) => (prev.trim() ? `${prev.replace(/\s*$/, "")}\n${text}` : text));
-    setExpanded(true);
-    requestAnimationFrame(() => {
-      const el = taRef.current;
-      if (!el) return;
-      el.focus();
-      const n = el.value.length;
-      el.setSelectionRange(n, n);
+    const el = taRef.current;
+    setPrompt((prev) => {
+      const start = el?.selectionStart ?? prev.length;
+      const end = el?.selectionEnd ?? prev.length;
+      const next = prev.slice(0, start) + text + prev.slice(end);
+      const pos = start + text.length;
+      requestAnimationFrame(() => {
+        const e2 = taRef.current;
+        if (e2) {
+          e2.focus();
+          e2.setSelectionRange(pos, pos);
+        }
+      });
+      return next;
     });
+    setExpanded(true);
   }, []);
 
   // Open a picked element's source file in the local $EDITOR (capital `V`). Needs a
@@ -335,6 +347,8 @@ function Bar() {
       setLaunched(typeof body.session === "string" ? body.session : "session");
       setPrompt("");
       setExpanded(false);
+      setJustSent(true);
+      setTimeout(() => setJustSent(false), 1500);
       setTimeout(() => setLaunched(null), 4000);
     } finally {
       setLaunching(false);
@@ -420,7 +434,7 @@ function Bar() {
     return (
       <button className="pill" title="Ask diffshub  ( ; )" onClick={open}>
         <SparkIcon />
-        <span>{launched ? `Launched ${launched}` : "Ask diffshub"}</span>
+        {justSent ? <CheckIcon /> : <span>Ask diffshub</span>}
       </button>
     );
   }
@@ -452,6 +466,12 @@ function Bar() {
           }}
           onKeyDown={(e) => {
             e.stopPropagation();
+            // ⌃; starts visual-select from inside the textarea (mirrors `v` on the page).
+            if (e.key === ";" && e.ctrlKey) {
+              e.preventDefault();
+              setSelectMode("inject");
+              return;
+            }
             if (fileMenuOpen) {
               if (e.key === "ArrowDown") {
                 e.preventDefault();
@@ -695,6 +715,23 @@ function SparkIcon() {
   );
 }
 
+function CheckIcon() {
+  return (
+    <svg
+      className="check"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 8.5l3.5 3.5L13 4.5" />
+    </svg>
+  );
+}
+
 function CursorIcon() {
   return (
     <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -718,6 +755,7 @@ const CSS = `
 }
 .pill:hover { background: #27272a; }
 .pill svg { width: 14px; height: 14px; color: #c4b5fd; }
+.pill svg.check { width: 15px; height: 15px; color: #4ade80; }
 .bar {
   width: 560px; max-width: calc(100vw - 32px);
   background: #fff; border: 1px solid #e4e4e7; border-radius: 14px; padding: 10px;
