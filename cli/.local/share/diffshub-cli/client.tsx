@@ -529,6 +529,24 @@ const DiffRow = memo(function DiffRow({
       {ACTION_LABELS[a].label}
     </button>
   ));
+  // A third action beside stage/unstage + stash: open the file in the configured
+  // editor (zed by default, via /api/open). Gated on file.actions so it only
+  // shows in the Changes view — commit/PR/manual files carry no actions.
+  if (file.actions.length) {
+    acts.push(
+      <button
+        key="open"
+        className="act"
+        title="Open in editor"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenOpaque(file.path, file.repo, file.worktree);
+        }}
+      >
+        open
+      </button>,
+    );
+  }
   // Passing `selectedLines` puts the diff in controlled-selection mode, so the
   // highlight is driven entirely from App state — selecting in one file clears
   // the highlight in every other. `enableLineSelection` (off here on mobile by
