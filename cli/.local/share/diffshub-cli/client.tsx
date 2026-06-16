@@ -22,6 +22,7 @@ import {
   QueryClient,
   QueryClientProvider,
   useInfiniteQuery,
+  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -63,6 +64,9 @@ import {
   Highlighter,
   BellDot,
   ExternalLink,
+  FileCode,
+  Share2,
+  Link2,
   X,
 } from "lucide-react";
 
@@ -261,7 +265,7 @@ interface Section {
   files: SectionFile[];
 }
 
-function timeAgo(iso: string): string {
+function timeAgo(iso: string | number): string {
   const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
   if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
@@ -1441,6 +1445,21 @@ interface Turn {
   role: "user" | "assistant";
   msgs: TranscriptMsg[];
 }
+// Flatten a transcript into one searchable, lowercased blob for the ephemeral
+// "Search html…" index. Pulls every bit of text a message carries — message
+// bodies, edited file paths, and the old/new sides of each edit hunk — so a
+// content search hits both prose and code the session touched.
+function transcriptText(t: Transcript): string {
+  const parts: string[] = [];
+  if (t.title) parts.push(t.title);
+  for (const m of t.messages) {
+    if (m.text) parts.push(m.text);
+    if (m.path) parts.push(m.path);
+    if (m.edits) for (const e of m.edits) parts.push(e.old, e.new);
+  }
+  return parts.join("\n").toLowerCase();
+}
+
 // Group the flat message list into chat turns: a `user` text message starts a
 // user turn; everything else (assistant text, tool_use, tool_result) collects
 // into the surrounding assistant turn.
@@ -1455,7 +1474,7 @@ function groupTurns(messages: TranscriptMsg[]): Turn[] {
   return turns;
 }
 
-function initialView(): { tab: Tab; view: View; dir: number | null } {
+function initialView(): { tab: Tab; view: View; dir: number | null; homeChat?: string | null } {
   const params = new URLSearchParams(location.search);
   const dirRaw = params.get("dir");
   const dir = dirRaw && /^\d+$/.test(dirRaw) ? parseInt(dirRaw, 10) : null;
@@ -1470,6 +1489,11 @@ function initialView(): { tab: Tab; view: View; dir: number | null } {
   if (manual) return { tab: "manual", view: { kind: "manual", name: manual }, dir };
   const sha = params.get("sha");
   if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
+  // Home deep-link (?home=<session>): land on the Home tab with that session's chat
+  // panel open. Drives the push-notification tap target (see /api/notify) and is
+  // kept in sync as you open/close cards (see the URL-sync effect).
+  const home = params.get("home");
+  if (home) return { tab: "home", view: { kind: "home" }, dir, homeChat: home };
   // Default route lands on the first tab (Home — the session monitor); see TAB_ORDER.
   return { tab: "home", view: { kind: "home" }, dir };
 }
@@ -1768,25 +1792,35 @@ function PushToggle() {
 
 // One session tile on the Home dashboard. The `state` class drives the status
 // dot's colour/pulse (see the .home-card CSS); clicking opens the transcript.
+// `onMarkRead` is passed only for the attention states (Done / Needs-action); the
+// mark-read check then shows whenever the card is `unseen`, and once acknowledged
+// the `read` class calms its dot so it stops clamouring for attention.
 function HomeCard({
   session,
   state,
   selected,
+  unseen,
   onOpen,
   onDelete,
+  onMarkRead,
 }: {
   session: TmuxSession;
   state: string;
   selected?: boolean;
+  unseen?: boolean;
   onOpen: (name: string) => void;
   onDelete: (name: string) => void;
+  onMarkRead?: (name: string) => void;
 }) {
+  const attention = !!onMarkRead;
   // A <div> (not a <button>) so the nested kill button stays valid HTML —
   // matches the Tmux list rows, which are also clickable divs.
   return (
     <div
       id={`row-tmux-${session.name}`}
-      className={`home-card ${state}${selected ? " selected" : ""}`}
+      className={`home-card ${state}${selected ? " selected" : ""}${
+        attention && !unseen ? " read" : ""
+      }`}
       onClick={() => onOpen(session.name)}
     >
       <div className="home-card-top">
@@ -1794,7 +1828,26 @@ function HomeCard({
         <span className="home-card-name">{session.name}</span>
       </div>
       {session.task && <div className="home-card-task">{session.task}</div>}
-      <div className="home-card-cwd">{session.cwd.replace(/^.*\//, "") || session.cwd}</div>
+      <div className="home-card-foot">
+        <span className="home-card-cwd">{session.cwd.replace(/^.*\//, "") || session.cwd}</span>
+        {session.mtime > 0 && (
+          <span className="home-card-time" title="Last message">
+            {timeAgo(session.mtime)}
+          </span>
+        )}
+      </div>
+      {attention && unseen && (
+        <button
+          className="read-btn"
+          title={`Mark ${session.name} read`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMarkRead!(session.name);
+          }}
+        >
+          ✓
+        </button>
+      )}
       <button
         className="kill-btn"
         title={`Kill ${session.name}`}
@@ -1819,8 +1872,10 @@ function HomeView({
   loading,
   error,
   selectedName,
+  isUnseen,
   onOpen,
   onDelete,
+  onMarkRead,
   onCancelQueued,
 }: {
   groups: {
@@ -1833,8 +1888,10 @@ function HomeView({
   loading: boolean;
   error: string | null;
   selectedName: string | null;
+  isUnseen: (s: TmuxSession) => boolean;
   onOpen: (name: string) => void;
   onDelete: (name: string) => void;
+  onMarkRead: (name: string) => void;
   onCancelQueued: (id: number) => void;
 }) {
   if (loading) return <ContentSpinner label="Loading sessions…" />;
@@ -1880,8 +1937,10 @@ function HomeView({
                 session={s}
                 state="waiting"
                 selected={selectedName === s.name}
+                unseen={isUnseen(s)}
                 onOpen={onOpen}
                 onDelete={onDelete}
+                onMarkRead={onMarkRead}
               />
             ))}
           </div>
@@ -1934,8 +1993,10 @@ function HomeView({
                 session={s}
                 state="unread"
                 selected={selectedName === s.name}
+                unseen
                 onOpen={onOpen}
                 onDelete={onDelete}
+                onMarkRead={onMarkRead}
               />
             ))}
           </div>
@@ -1970,6 +2031,56 @@ function HomeView({
   );
 }
 
+// Geometric arrow-key navigation across the Home dashboard's card grid. Each state
+// subsection is its own CSS grid whose column count flexes with the viewport (~3 on
+// desktop, 1 on mobile — see the .home-cards `auto-fill` rule), so instead of
+// hard-coding a width we read the cards' real on-screen rects: left/right step to
+// the nearest neighbour within the same row, up/down jump to the nearest row in
+// that direction (which naturally crosses subsection boundaries and keeps you in
+// the column you were in). `cur` is the focused card's name (null seeds the first
+// card); returns the name to focus next, or null to stay put at a grid edge.
+function homeGridTarget(cur: string | null, key: string): string | null {
+  const PREFIX = "row-tmux-";
+  // Only the openable session cards carry this id — queued-prompt tiles don't, so
+  // they're excluded from the walk just like they are from homeNav.
+  const els = Array.from(
+    document.querySelectorAll<HTMLElement>(`.home .home-card[id^="${PREFIX}"]`),
+  );
+  if (!els.length) return null;
+  const cards = els.map((el) => {
+    const r = el.getBoundingClientRect();
+    return { name: el.id.slice(PREFIX.length), cx: r.left + r.width / 2, top: r.top, left: r.left };
+  });
+  const curCard = cur ? cards.find((c) => c.name === cur) : null;
+  if (!curCard) return cards[0].name;
+  // Bucket tops into grid rows: cards on the same row line up to the same top,
+  // while separate rows (and separate subsections) sit at least a row-height-plus-
+  // gap apart — far more than this 8px slop — so rounding cleanly separates rows.
+  const rowOf = (top: number) => Math.round(top / 8);
+  const curRow = rowOf(curCard.top);
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    const right = key === "ArrowRight";
+    const side = cards.filter(
+      (c) =>
+        rowOf(c.top) === curRow && (right ? c.left > curCard.left : c.left < curCard.left),
+    );
+    if (!side.length) return null;
+    side.sort((a, b) => Math.abs(a.left - curCard.left) - Math.abs(b.left - curCard.left));
+    return side[0].name;
+  }
+  if (key === "ArrowUp" || key === "ArrowDown") {
+    const down = key === "ArrowDown";
+    const dir = cards.filter((c) => (down ? rowOf(c.top) > curRow : rowOf(c.top) < curRow));
+    if (!dir.length) return null;
+    const rowKeys = dir.map((c) => rowOf(c.top));
+    const targetRow = down ? Math.min(...rowKeys) : Math.max(...rowKeys);
+    const rowCards = dir.filter((c) => rowOf(c.top) === targetRow);
+    rowCards.sort((a, b) => Math.abs(a.cx - curCard.cx) - Math.abs(b.cx - curCard.cx));
+    return rowCards[0].name;
+  }
+  return null;
+}
+
 function App() {
   const initial = useMemo(initialView, []);
   const queryClient = useQueryClient();
@@ -1981,8 +2092,18 @@ function App() {
   // desktop, full-screen sheet on mobile); null when the panel is closed. Kept
   // separate so you can arrow through cards with the panel shut, then Enter to
   // open — and once open, arrowing live-swaps the panel to the focused card.
-  const [homeSel, setHomeSel] = useState<string | null>(null);
-  const [homeChat, setHomeChat] = useState<string | null>(null);
+  // A ?home=<session> deep-link (push-notification tap) seeds both so the page
+  // boots with that card focused and its chat open.
+  const [homeSel, setHomeSel] = useState<string | null>(initial.homeChat ?? null);
+  const [homeChat, setHomeChat] = useState<string | null>(initial.homeChat ?? null);
+  // The HTML artifact path currently open in the full-screen preview (the second
+  // dialog layered over the Home chat panel), or null when it's closed. Set from
+  // the chat's "Open HTML" button (see htmlArtifact / the .html-overlay portal).
+  const [htmlView, setHtmlView] = useState<string | null>(null);
+  // Whether the "Share" dialog (publishes the open HTML artifact to R2 and shows
+  // the public cdn link) is open. Layers above the HTML preview; the share
+  // request's state lives on shareMut below.
+  const [shareOpen, setShareOpen] = useState(false);
 
   // ---- Light / dark theme ----
   // Toggle with the `t` shortcut or the theme action; no system mode. Defaults to
@@ -2225,7 +2346,10 @@ function App() {
   const changesQuery = useQuery({
     queryKey: ["changes", activeDir],
     queryFn: ({ signal }) => fetchJSON<RepoChanges[]>(qd("/api/changes"), signal),
-    enabled: tab === "changes",
+    // Home also reads this — its top-bar "Commit with Claude" button greys out
+    // when the tree is clean — but only the Changes tab polls; Home settles for a
+    // single fetch (+ refetch-on-focus) so the dashboard doesn't add a 2.5s poll.
+    enabled: tab === "changes" || tab === "home",
     // Poll + refetch-on-focus only while auto-refresh is on. Structural sharing
     // keeps `data` referentially stable when nothing changed, so a poll that
     // finds no diff doesn't re-render the view — replacing the old manual
@@ -2234,6 +2358,11 @@ function App() {
     refetchOnWindowFocus: autoRefresh,
   });
   const changes = changesQuery.data ?? null;
+  // Whether the active dir's working tree has anything to commit — gates the
+  // "Commit with Claude" affordances (Changes-tab actions menu + Home top bar).
+  const dirty = (changes ?? []).some(
+    (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
+  );
 
   // ---- Tmux tab: claude sessions + the selected session's transcript ----
   // These are global (not dir-scoped) — they reflect every claude tmux session.
@@ -2356,9 +2485,14 @@ function App() {
       return next;
     });
   }, [tmuxSessions, hadStoredSeen]);
-  // Viewing a session marks it read: pin its last-seen mtime to the latest each
-  // poll so the open transcript never shows unread, even as new output streams in.
+  // Viewing a session on the *Tmux tab* marks it read: pin its last-seen mtime to
+  // the latest each poll so the open transcript never shows unread, even as new
+  // output streams in. The Home dashboard deliberately opts out — there you clear a
+  // card's unread state with its explicit "mark read" button (or the `r` key), so
+  // arrowing through and peeking at cards never silently acknowledges them. That's
+  // what keeps the grid stable while you navigate it.
   useEffect(() => {
+    if (tabRef.current !== "tmux") return;
     if (!selectedSession || !tmuxSessions) return;
     const s = tmuxSessions.find((x) => x.name === selectedSession);
     if (!s || !s.mtime) return;
@@ -2456,6 +2590,9 @@ function App() {
   const [replyStopping, setReplyStopping] = useState(false);
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Set when `/` opens a Home chat sheet that wasn't open yet, so the effect that
+  // watches homeChat knows to drop focus into the composer once it has mounted.
+  const focusReplyOnOpenRef = useRef(false);
   // Where we are while walking this session's sent-reply history with the arrow
   // keys: null = editing the live draft (not browsing). Reset on send, on a real
   // keystroke, and when the selected session changes. See recallReplyHistory.
@@ -2491,6 +2628,15 @@ function App() {
   }, [queuedNote]);
 
   const [filter, setFilter] = useState("");
+  // Second sidebar box (Tmux/Home): a full-text search over the transcripts you've
+  // already opened. We index whatever the transcript query has fetched into an
+  // ephemeral in-memory map — only viewed sessions are searchable, by design (a
+  // lightweight best-effort search, not a server-side scan of every jsonl). The
+  // ref holds the lowercased blobs; contentVersion just nudges the filter memo to
+  // re-run when the index gains/loses an entry while a search is active.
+  const [contentFilter, setContentFilter] = useState("");
+  const contentIndex = useRef<Map<string, string>>(new Map());
+  const [contentVersion, setContentVersion] = useState(0);
 
   // ---- @-file autocomplete (New Claude session dialog + reply composer) ----
   // The active `@token` being typed: its query text + where the `@` sits + caret,
@@ -2816,11 +2962,114 @@ function App() {
   // selectedBusy), so streamed-in messages auto-scroll to the end; structural
   // sharing means an unchanged poll keeps the same data ref and won't re-scroll.
   const transcriptData = transcriptQuery.data;
+  // Index the open transcript into the ephemeral "Search html…" cache whenever it
+  // (re)loads. Keyed by the stable sessionId so it survives renames; overwritten
+  // each load so an entry always reflects the latest content we've seen. Cheap:
+  // structural sharing keeps the data ref stable on an unchanged poll, and we bail
+  // early when the blob is identical, so an idle session's poll does no work and
+  // never bumps the version (no needless re-render).
+  useEffect(() => {
+    if (!transcriptData) return;
+    const key = transcriptData.sessionId || transcriptData.session;
+    if (!key) return;
+    const text = transcriptText(transcriptData);
+    if (contentIndex.current.get(key) === text) return;
+    contentIndex.current.set(key, text);
+    setContentVersion((v) => v + 1);
+  }, [transcriptData]);
+  // Evict index entries for sessions that no longer exist (killed, or replaced by
+  // a brand-new session). Keeps the ephemeral cache from leaking and stops a
+  // deleted chat's text from still matching a search.
+  useEffect(() => {
+    if (!tmuxSessions) return;
+    const live = new Set(tmuxSessions.map((s) => s.sessionId || s.name));
+    let pruned = false;
+    for (const key of contentIndex.current.keys()) {
+      if (!live.has(key)) {
+        contentIndex.current.delete(key);
+        pruned = true;
+      }
+    }
+    if (pruned) setContentVersion((v) => v + 1);
+  }, [tmuxSessions]);
   const turns = useMemo(() => {
     const msgs = transcriptData?.messages ?? [];
     const filtered = editsOnly ? msgs.filter(isEditMsg) : msgs;
     return groupTurns(filtered);
   }, [transcriptData, editsOnly]);
+  // Detect an HTML artifact the session has been building (the "agents folder"
+  // pattern: an agent writes/appends one .html file across many tool calls). We
+  // pick the most-recently-touched .html path from the transcript's Write/Edit/
+  // MultiEdit calls — regardless of which directory it lives in — and surface an
+  // "Open HTML" button in the Home chat panel that previews its live contents.
+  const htmlArtifact = useMemo(() => {
+    const msgs = transcriptData?.messages ?? [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (
+        m.kind === "tool_use" &&
+        (m.tool === "Write" || m.tool === "Edit" || m.tool === "MultiEdit") &&
+        m.path &&
+        /\.html?$/i.test(m.path)
+      )
+        return m.path;
+    }
+    return null;
+  }, [transcriptData]);
+  // Live contents of the open HTML artifact, read off disk (the transcript caps
+  // each edit hunk, so it can't be reconstructed there). Polls while the preview
+  // is open so the iframe reflects edits the agent keeps making.
+  const htmlQuery = useQuery({
+    queryKey: ["tmux-html", selectedSession, htmlView],
+    queryFn: ({ signal }) =>
+      fetchText(
+        `/api/tmux/html?session=${encodeURIComponent(selectedSession)}&path=${encodeURIComponent(htmlView!)}`,
+        signal,
+      ),
+    enabled: !!htmlView && !!selectedSession,
+    refetchOnWindowFocus: false,
+    refetchInterval: selectedBusy ? TMUX_POLL_MS : TMUX_IDLE_POLL_MS,
+  });
+  // Publish the open HTML artifact to the public R2 bucket (server shells out to
+  // wrangler) and surface the cdn link in a dialog. Idempotent per file: an
+  // unchanged artifact returns its existing link instantly (alreadyShared).
+  type ShareResult = { url: string; alreadyShared: boolean; assets: number; skipped: string[] };
+  const shareMut = useMutation<ShareResult>({
+    mutationFn: async () => {
+      const res = await fetch("/api/tmux/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: selectedSession, path: htmlView }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Partial<ShareResult> & { error?: string };
+      if (!res.ok || data.error || !data.url) throw new Error(data.error || `HTTP ${res.status}`);
+      return data as ShareResult;
+    },
+  });
+  // Undo a share: tell the server to delete the published HTML (and its uploaded
+  // image assets) from R2 and drop the db row, fully retracting the link.
+  const unshareMut = useMutation<{ removed: boolean }>({
+    mutationFn: async () => {
+      const res = await fetch("/api/tmux/unshare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: selectedSession, path: htmlView }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { removed?: boolean; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      return { removed: !!data.removed };
+    },
+  });
+  const openShare = () => {
+    if (!htmlView) return;
+    setShareOpen(true);
+    shareMut.mutate();
+  };
+  const closeShare = () => {
+    setShareOpen(false);
+    shareMut.reset();
+    unshareMut.reset();
+  };
   // ChatGPT-style "jump to latest" chevron: track whether the transcript is
   // pinned to the bottom so we can float a chevron above the composer whenever
   // the user has scrolled up. 80px of slack keeps it hidden while effectively
@@ -2860,7 +3109,7 @@ function App() {
   // where the original prompt has scrolled far out of view.
   const jumpToTop = useCallback(() => {
     const el = chatScroll();
-    if (el) el.scrollTo({ top: 0, behavior: "smooth" });
+    if (el) el.scrollTo({ top: 0, behavior: "auto" });
   }, [chatScroll]);
 
   // ---- Reviewed commits (persisted server-side in sqlite) ----
@@ -3434,6 +3683,7 @@ function App() {
     (next: Tab) => {
       setTab(next);
       setFilter("");
+      setContentFilter("");
       // Always reset the view to the tab's default so the center/right columns
       // never keep showing the previous tab's content (e.g. a commit diff bleeding
       // into the PRs tab). Commits/PRs reset to an empty "none" view and wait for a
@@ -3565,6 +3815,7 @@ function App() {
       setTab(nextTab);
       setView(nextView);
       setFilter("");
+      setContentFilter("");
       setDirMenuOpen(false);
       history.replaceState(null, "", navUrl(param));
     },
@@ -4071,18 +4322,24 @@ function App() {
         : manualPatches,
     [manualPatches, q],
   );
-  const visibleTmux = useMemo(
-    () =>
-      q && dirScopedTmux
-        ? dirScopedTmux.filter(
-            (s) =>
-              s.name.toLowerCase().includes(q) ||
-              s.cwd.toLowerCase().includes(q) ||
-              s.task.toLowerCase().includes(q),
-          )
-        : dirScopedTmux,
-    [dirScopedTmux, q],
-  );
+  const cq = contentFilter.trim().toLowerCase();
+  const visibleTmux = useMemo(() => {
+    if (!dirScopedTmux) return dirScopedTmux;
+    let list = dirScopedTmux;
+    if (q)
+      list = list.filter(
+        (s) =>
+          s.name.toLowerCase().includes(q) ||
+          s.cwd.toLowerCase().includes(q) ||
+          s.task.toLowerCase().includes(q),
+      );
+    // Content search only matches sessions whose transcript we've already indexed;
+    // contentVersion is in the deps so a freshly-opened/pruned chat re-filters live.
+    if (cq)
+      list = list.filter((s) => contentIndex.current.get(s.sessionId || s.name)?.includes(cq));
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirScopedTmux, q, cq, contentVersion]);
 
   // Step to the previous (-1) / next (+1) session in the visible, dir-scoped list,
   // wrapping around — the same traversal as the ↑/↓ keys, surfaced as the mobile
@@ -4108,6 +4365,14 @@ function App() {
   const isUnread = useCallback(
     (s: TmuxSession) =>
       !s.busy && !s.waiting && s.mtime > 0 && s.mtime > (seenMtimes[s.sessionId || s.name] ?? 0),
+    [seenMtimes],
+  );
+  // The raw "new output since you last acknowledged it" test, independent of state.
+  // isUnread narrows this to *idle* sessions (the Done bucket); the Home dashboard
+  // also wants it for *waiting* sessions (a Needs-action prompt you haven't looked
+  // at yet), which isUnread excludes — so the mark-read affordance can cover both.
+  const isUnseen = useCallback(
+    (s: TmuxSession) => s.mtime > 0 && s.mtime > (seenMtimes[s.sessionId || s.name] ?? 0),
     [seenMtimes],
   );
   // Is there an unread session to jump to other than the one already open? Gates
@@ -4138,16 +4403,29 @@ function App() {
   // exactly one of these buckets; queued (offline) prompts come from scopedQueued.
   const homeGroups = useMemo(() => {
     const list = visibleTmux ?? [];
-    return {
-      inProgress: list.filter((s) => s.busy),
-      needsAction: list.filter((s) => s.waiting && !s.busy),
-      done: list.filter((s) => isUnread(s)),
-      idle: list.filter((s) => !s.busy && !s.waiting && !isUnread(s)),
+    // Order each group by recency (most recently updated chat first) — a property
+    // that only changes when a session actually does something, so the grid holds
+    // still while you arrow around it. Read/unread doesn't enter the sort for the
+    // passive states (In progress / Idle); only Needs-action floats the prompts you
+    // haven't looked at yet above the ones you've already acknowledged. .filter()
+    // returns fresh arrays, so the in-place .sort is safe.
+    const byRecency = (a: TmuxSession, b: TmuxSession) => b.mtime - a.mtime;
+    const unseenFirst = (a: TmuxSession, b: TmuxSession) => {
+      const ua = isUnseen(a) ? 1 : 0;
+      const ub = isUnseen(b) ? 1 : 0;
+      return ua !== ub ? ub - ua : b.mtime - a.mtime;
     };
-  }, [visibleTmux, isUnread]);
+    return {
+      inProgress: list.filter((s) => s.busy).sort(byRecency),
+      needsAction: list.filter((s) => s.waiting && !s.busy).sort(unseenFirst),
+      done: list.filter((s) => isUnread(s)).sort(byRecency),
+      idle: list.filter((s) => !s.busy && !s.waiting && !isUnread(s)).sort(byRecency),
+    };
+  }, [visibleTmux, isUnread, isUnseen]);
   // Flat, display-ordered list of the dashboard's openable cards (queued prompts
-  // aren't sessions, so they're left out). Drives arrow-key navigation across the
-  // responsive card grid as a simple prev/next walk.
+  // aren't sessions, so they're left out). Seeds the first selection and gates the
+  // arrow keys (no cards → nothing to do); the actual movement is geometric, read
+  // off the rendered grid by homeGridTarget rather than from this flat order.
   const homeNav = useMemo(
     () =>
       [
@@ -4167,6 +4445,40 @@ function App() {
     setHomeChat(name);
   }, []);
   const closeHomeChat = useCallback(() => setHomeChat(null), []);
+  // Acknowledge a card without opening it: pin its seen-mtime to the latest so it
+  // stops reading as unread. Only meaningful for the attention states — a Done card
+  // (idle + new output) drops to Idle, a Needs-action card stays put but calms. A
+  // no-op on busy sessions and on anything already caught up, so the button/`r` key
+  // can fire freely. This is the *only* path that clears unread on the dashboard
+  // (navigation never does), which is what makes the grid hold still as you move.
+  const markHomeRead = useCallback(
+    (name: string) => {
+      const s = (visibleTmux ?? []).find((x) => x.name === name);
+      if (!s || s.busy || !s.mtime) return;
+      const key = s.sessionId || s.name;
+      if ((seenMtimes[key] ?? 0) >= s.mtime) return;
+      setSeenMtimes((prev) => ({ ...prev, [key]: s.mtime }));
+    },
+    [visibleTmux, seenMtimes],
+  );
+  // Flip the focused card between Done and Idle, the two faces of a finished
+  // session (Done = idle + output you haven't acknowledged, Idle = idle + caught
+  // up). A read card is marked *unread* by rewinding its seen-mtime to just behind
+  // the transcript's latest (mtime - 1ms), so isUnread flips true and it jumps back
+  // to Done; an unread card is marked read (seen = mtime) and drops to Idle. A no-op
+  // on busy sessions — you can't "finish" one that's still working — and on cards
+  // with no transcript yet. The Space-key counterpart to markHomeRead's one-way `r`.
+  const toggleHomeRead = useCallback(
+    (name: string) => {
+      const s = (visibleTmux ?? []).find((x) => x.name === name);
+      if (!s || s.busy || !s.mtime) return;
+      const key = s.sessionId || s.name;
+      const seen = seenMtimes[key] ?? 0;
+      const next = seen >= s.mtime ? s.mtime - 1 : s.mtime; // read → unread, else read
+      setSeenMtimes((prev) => ({ ...prev, [key]: next }));
+    },
+    [visibleTmux, seenMtimes],
+  );
   // Kill a card's session from the dashboard, closing the panel first if it was
   // showing the one being killed (otherwise it'd briefly read a dead transcript).
   const deleteHomeCard = useCallback(
@@ -4184,6 +4496,33 @@ function App() {
     if (homeSel && !names.has(homeSel)) setHomeSel(null);
     if (homeChat && !names.has(homeChat)) setHomeChat(null);
   }, [tab, dirScopedTmux, homeSel, homeChat]);
+  // The HTML preview belongs to the open chat — tear it down whenever the chat
+  // panel itself closes (✕, Esc, or the session being killed / scrolled away).
+  useEffect(() => {
+    if (!homeChat) setHtmlView(null);
+  }, [homeChat]);
+  // `/` on a focused card opens its sheet and wants the composer focused; the
+  // textarea only mounts once the panel renders, so finish the focus here (effects
+  // run after commit, by which point the ref is live).
+  useEffect(() => {
+    if (homeChat && focusReplyOnOpenRef.current) {
+      focusReplyOnOpenRef.current = false;
+      replyTextareaRef.current?.focus();
+    }
+  }, [homeChat]);
+
+  // Mirror the open Home chat into the URL (?home=<session>) so a reload — or a
+  // push-notification tap — reopens the same chat, and closing it clears the
+  // param. Only drives the URL while the Home tab is active; the other tabs own
+  // the URL through their own select* handlers, so we leave it alone there.
+  useEffect(() => {
+    if (tab !== "home") return;
+    history.replaceState(
+      null,
+      "",
+      navUrl(homeChat ? `home=${encodeURIComponent(homeChat)}` : ""),
+    );
+  }, [tab, homeChat, navUrl]);
 
   // Kill every session currently listed on the Tmux tab (the dir-scoped, filtered
   // set the user is looking at — not every claude session on the box). Reuses the
@@ -4289,6 +4628,8 @@ function App() {
     homeNav,
     homeSel,
     homeChatOpen: !!homeChat,
+    htmlViewOpen: !!htmlView,
+    shareOpen,
   });
   keyCtx.current = {
     tab,
@@ -4314,11 +4655,57 @@ function App() {
     homeNav,
     homeSel,
     homeChatOpen: !!homeChat,
+    htmlViewOpen: !!htmlView,
+    shareOpen,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Every shortcut below is a bare keypress — none use ⌘/Ctrl. So when a meta
-      // or ctrl modifier is held, the event belongs to the browser/OS (⌘N new
+      // ⌘↑ / ⌘↓ on the Home dashboard fling the open chat sheet to its top / bottom
+      // — the one bare-modifier shortcut we claim, so it's handled before the
+      // ⌘/Ctrl bail-out below. Only when a sheet is actually open (nothing else to
+      // scroll); ⌘← / ⌘→ stay with the browser for history navigation.
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        (e.key === "ArrowUp" || e.key === "ArrowDown") &&
+        keyCtx.current.tab === "home" &&
+        keyCtx.current.homeChatOpen
+      ) {
+        e.preventDefault();
+        if (e.key === "ArrowUp") jumpToTop();
+        else jumpToBottom();
+        return;
+      }
+      // On the Home dashboard, Ctrl-d/u/j/k scroll the open chat sheet — Vimium's
+      // d/u (half-page) and j/k (line) keys, but aimed at the sheet instead of the
+      // document so you can skim a long transcript while focus stays on the card
+      // grid. Like the ⌘↑/⌘↓ fling above, it's handled before the ⌘/Ctrl bail-out.
+      // We leave them to the browser while typing in the composer, where Ctrl-d/u/k
+      // are the Emacs delete-char / delete-to-start / kill-line edits.
+      if (
+        e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        keyCtx.current.tab === "home" &&
+        keyCtx.current.homeChatOpen &&
+        (e.key === "d" || e.key === "u" || e.key === "j" || e.key === "k")
+      ) {
+        const el = (e.composedPath()[0] ?? e.target) as HTMLElement;
+        const typing =
+          el instanceof HTMLInputElement ||
+          el instanceof HTMLTextAreaElement ||
+          el.isContentEditable;
+        const sheet = chatScroll();
+        if (!typing && sheet) {
+          e.preventDefault();
+          const half = sheet.clientHeight / 2;
+          const top =
+            e.key === "j" ? 64 : e.key === "k" ? -64 : e.key === "d" ? half : -half;
+          sheet.scrollBy({ top });
+          return;
+        }
+      }
+      // Every other shortcut below is a bare keypress — none use ⌘/Ctrl. So when a
+      // meta or ctrl modifier is held, the event belongs to the browser/OS (⌘N new
       // window, ⌘T, ⌘L, ⌘A, ⌘D…); bail so we never shadow the native shortcut.
       if (e.metaKey || e.ctrlKey) return;
       const { tab, view, visibleCommits, visiblePrs, visibleManual, visibleTmux, selectedTmux } =
@@ -4333,9 +4720,18 @@ function App() {
       // can swallow Esc via e.stopPropagation() — one source of truth.
       if (e.key === "/" && !typing) {
         e.preventDefault();
-        // In an open Tmux chat, `/` jumps to the reply composer (where you spend
-        // your time); elsewhere it focuses the sidebar filter.
-        if (tab === "tmux" && selectedTmux && replyTextareaRef.current) {
+        // On Home, `/` dives into the focused card's chat composer — opening its
+        // sheet first if it isn't already (the focus then lands once the textarea
+        // mounts, via focusReplyOnOpenRef). In an open Tmux chat it jumps to the
+        // reply composer; otherwise it focuses the sidebar filter.
+        if (tab === "home" && keyCtx.current.homeSel) {
+          if (keyCtx.current.homeChatOpen && replyTextareaRef.current) {
+            replyTextareaRef.current.focus();
+          } else {
+            focusReplyOnOpenRef.current = true;
+            setHomeChat(keyCtx.current.homeSel);
+          }
+        } else if (tab === "tmux" && selectedTmux && replyTextareaRef.current) {
           replyTextareaRef.current.focus();
         } else {
           searchEl.current?.focus();
@@ -4344,6 +4740,23 @@ function App() {
       }
       if (e.key === "Escape" && typing) {
         (target as HTMLInputElement).blur();
+        return;
+      }
+      // On the Home dashboard, ArrowDown from the filter box drops focus into the
+      // card grid and points at the first card, so you can keep arrowing through
+      // them straight after typing a filter (without it, `typing` swallows it).
+      if (
+        tab === "home" &&
+        e.key === "ArrowDown" &&
+        target === searchEl.current &&
+        keyCtx.current.homeNav.length
+      ) {
+        e.preventDefault();
+        searchEl.current?.blur();
+        const name = keyCtx.current.homeNav[0];
+        setHomeSel(name);
+        if (keyCtx.current.homeChatOpen) setHomeChat(name);
+        document.getElementById(`row-tmux-${name}`)?.scrollIntoView({ block: "nearest" });
         return;
       }
       if (typing) return;
@@ -4368,6 +4781,25 @@ function App() {
         if (canDeleteRef.current) void deleteSelectionRef.current();
         return;
       }
+      // On the Home dashboard, Backspace kills the focused card's session — the
+      // keyboard mirror of its ✕ button. Rather than dump you out, it advances to
+      // the card that slides into the gap (the next in display order, or the
+      // previous one if we killed the last card) and, if the chat sheet was open,
+      // swaps it to that card instead of closing — so you can keep clearing through
+      // the grid. Focus is on the grid here, not the composer; typing in the reply
+      // box was already filtered out above.
+      if (e.key === "Backspace" && tab === "home" && keyCtx.current.homeSel) {
+        e.preventDefault();
+        const sel = keyCtx.current.homeSel;
+        const list = keyCtx.current.homeNav;
+        const idx = list.indexOf(sel);
+        const next = idx >= 0 ? (list[idx + 1] ?? list[idx - 1] ?? null) : null;
+        setHomeSel(next);
+        if (keyCtx.current.homeChatOpen) setHomeChat(next);
+        if (next) document.getElementById(`row-tmux-${next}`)?.scrollIntoView({ block: "nearest" });
+        void killSession(sel);
+        return;
+      }
       // Leave keys alone while focus is inside the file tree (it has its own nav)
       if (e.composedPath().some((n) => n instanceof HTMLElement && n.classList?.contains("tree"))) {
         return;
@@ -4380,10 +4812,12 @@ function App() {
         setDirMenuOpen(true);
         return;
       }
-      // Home dashboard: arrow keys walk the card grid (a linear prev/next over
-      // every card in display order); Enter opens the focused card's chat in the
-      // side-panel, and while the panel is open arrowing live-swaps it to the new
-      // card. With no cards on screen the arrows simply do nothing.
+      // Home dashboard: arrow keys walk the card grid geometrically (left/right
+      // step within a row, up/down jump to the nearest row above/below — which
+      // crosses subsection boundaries and tracks your column; see homeGridTarget).
+      // Enter opens the focused card's chat in the side-panel, and while the panel
+      // is open arrowing live-swaps it to the new card. At a grid edge (or with no
+      // cards) the arrows do nothing.
       if (tab === "home" && (e.key === "Enter" || e.key.startsWith("Arrow"))) {
         const list = keyCtx.current.homeNav;
         if (e.key === "Enter") {
@@ -4397,22 +4831,23 @@ function App() {
         }
         if (list.length) {
           e.preventDefault();
-          const fwd = e.key === "ArrowDown" || e.key === "ArrowRight";
-          const cur = keyCtx.current.homeSel;
-          const idx = cur ? list.indexOf(cur) : -1;
-          const next = fwd
-            ? idx + 1 >= list.length
-              ? 0
-              : idx + 1
-            : idx <= 0
-              ? list.length - 1
-              : idx - 1;
-          const name = list[next];
-          setHomeSel(name);
-          if (keyCtx.current.homeChatOpen) setHomeChat(name);
-          document.getElementById(`row-tmux-${name}`)?.scrollIntoView({ block: "nearest" });
+          const name = homeGridTarget(keyCtx.current.homeSel, e.key);
+          if (name) {
+            setHomeSel(name);
+            if (keyCtx.current.homeChatOpen) setHomeChat(name);
+            document.getElementById(`row-tmux-${name}`)?.scrollIntoView({ block: "nearest" });
+          }
           return;
         }
+      }
+      // Home dashboard: `r` marks the focused card read (same as its check button) —
+      // the keyboard half of the "clear it and move on" loop. A no-op unless the
+      // card is an unacknowledged attention card (Done / Needs-action), so it's safe
+      // to mash; markHomeRead does the gating.
+      if (tab === "home" && e.key === "r" && keyCtx.current.homeSel) {
+        e.preventDefault();
+        markHomeRead(keyCtx.current.homeSel);
+        return;
       }
       // Tabs are switched with the number keys (1–6) below — the ←/→ keys are left
       // free for in-tab navigation (the Home card grid; otherwise unused).
@@ -4508,6 +4943,14 @@ function App() {
         else if (staged > 0) runGit("unstage");
         return;
       }
+      // On the Home dashboard, Space toggles the focused card between Done and Idle
+      // (mark unread / mark read) — the bidirectional counterpart to `r`, which only
+      // clears. Scoped to Home so Space keeps its global refresh meaning elsewhere.
+      if (e.key === " " && tab === "home" && keyCtx.current.homeSel) {
+        e.preventDefault();
+        toggleHomeRead(keyCtx.current.homeSel);
+        return;
+      }
       // Space forces a refresh of the current tab: resetting the query drops its
       // cached data, so the sidebar skeleton + content spinner flash while it
       // refetches.
@@ -4591,6 +5034,12 @@ function App() {
       // `X` (Shift+X) does the same commit+push, then also tells Claude to deploy.
       if (e.key === "x" || e.key === "X") {
         e.preventDefault();
+        // On the Home dashboard, `x` closes the open card's chat panel (same as
+        // Escape) — there's no commit/kill action mapped to `x` there.
+        if (tab === "home") {
+          if (e.key === "x" && keyCtx.current.homeChatOpen) setHomeChat(null);
+          return;
+        }
         if (tab === "tmux") {
           if (e.key === "x" && selectedTmux) void killSession(selectedTmux);
           return;
@@ -4676,6 +5125,22 @@ function App() {
     const onEscClose = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const k = keyCtx.current;
+      // The share dialog layers above the HTML preview, which layers above the
+      // Home chat panel — so Esc peels them off one at a time, innermost first.
+      if (k.shareOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setShareOpen(false);
+        shareMut.reset();
+        unshareMut.reset();
+        return;
+      }
+      if (k.htmlViewOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setHtmlView(null);
+        return;
+      }
       if (!(k.restartOpen || k.killAllOpen || k.commitOpen || k.claudeOpen || k.usageOpen || k.dirsOpen || k.dirMenuOpen))
         return;
       // In the Claude composer a live @-mention should be cancelled first; its
@@ -4722,7 +5187,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
+  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, markHomeRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -4797,9 +5262,6 @@ function App() {
     });
   }
   if (tab === "changes" && view.kind === "changes") {
-    const dirty = (changes ?? []).some(
-      (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
-    );
     actionItems.push(
       { label: "Stage all", icon: <Plus />, onClick: () => runGit("stage"), disabled: busyPath !== null },
       { label: "Unstage all", icon: <Minus />, onClick: () => runGit("unstage"), disabled: busyPath !== null },
@@ -5035,10 +5497,14 @@ function App() {
               )}
           </div>
           <div className="reply-bar">
-            {/* Mobile-only quick actions: the keyboard shortcuts that drive
-                these on desktop (⌃V paste, dir switch, `'`) aren't reachable
-                on a phone, so surface them as icon buttons in the reply bar. */}
-            {!isDesktop && (
+            {/* Quick-action cluster. On a phone none of the desktop keyboard
+                shortcuts (⌃V paste, dir switch, `'`) are reachable, so these are
+                always surfaced as icon buttons. The desktop *Home* chat sheet shows
+                them too: it's a focused dialog floating over the dashboard without
+                the sidebar's affordances to hand, so the buttons earn their place
+                there. The desktop Tmux tab stays lean — its sidebar already does
+                all of this. */}
+            {(!isDesktop || tab === "home") && (
               <>
                 {/* Close the Home chat dialog — a thumb-reachable mirror of the
                     ✕ in the panel's top bar (only this surface is a dialog; the
@@ -5073,7 +5539,15 @@ function App() {
                 >
                   <FolderClock />
                 </IconButton>
-                <IconButton title="New Claude session" onClick={() => setClaudeOpen(true)}>
+                <IconButton
+                  title="New Claude session"
+                  onClick={() => {
+                    // Close the Home chat dialog as we open the new-session
+                    // modal (no-op on Tmux, where homeChat is already null).
+                    closeHomeChat();
+                    setClaudeOpen(true);
+                  }}
+                >
                   <Sparkles />
                 </IconButton>
                 {/* Jump to the topmost (latest) session in the sidebar — same
@@ -5213,6 +5687,17 @@ function App() {
             onClick={goToLastDir}
           >
             <FolderClock size={18} />
+          </button>
+        )}
+        {tab === "home" && (
+          <button
+            className="topbar-btn"
+            title="Commit with Claude"
+            aria-label="Commit with Claude"
+            disabled={!dirty}
+            onClick={() => void commitWithClaude()}
+          >
+            <Bot size={18} />
           </button>
         )}
         {(tab === "home" || tab === "tmux" || tab === "commits") && (
@@ -5445,6 +5930,15 @@ function App() {
               }
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
+            />
+          )}
+          {(tab === "tmux" || tab === "home") && (
+            <input
+              className="content-search"
+              type="text"
+              placeholder="Search html for string…"
+              value={contentFilter}
+              onChange={(e) => setContentFilter(e.target.value)}
             />
           )}
         </header>
@@ -5797,8 +6291,10 @@ function App() {
             loading={tmuxQuery.isPending && !tmuxSessions}
             error={tmuxQuery.isError ? errMessage(tmuxQuery.error) : null}
             selectedName={homeSel}
+            isUnseen={isUnseen}
             onOpen={openHomeChat}
             onDelete={deleteHomeCard}
+            onMarkRead={markHomeRead}
             onCancelQueued={cancelQueued}
           />
         )}
@@ -5822,11 +6318,144 @@ function App() {
                   <X size={18} />
                 </button>
                 <span className="home-chat-title">{homeChat}</span>
+                {/* Surfaces only once the chat has written an .html file — opens
+                    its live contents in a full-screen iframe over this panel. */}
+                {htmlArtifact && (
+                  <button
+                    type="button"
+                    className="home-chat-html"
+                    title={`Open HTML preview (${htmlArtifact})`}
+                    aria-label="Open HTML preview"
+                    onClick={() => setHtmlView(htmlArtifact)}
+                  >
+                    <FileCode size={15} />
+                    <span>HTML</span>
+                  </button>
+                )}
               </div>
               <div className="home-chat-scroll" ref={chatScrollEl}>
                 <div className="transcript">{renderChat()}</div>
               </div>
             </aside>,
+            document.body,
+          )}
+        {/* The HTML artifact preview — a second full-screen dialog layered over the
+            Home chat panel, showing the live .html the chat has been building in a
+            sandboxed iframe. Refetches while the panel is open so edits stream in.
+            Portaled to <body> and z-indexed above the chat panel. */}
+        {htmlView &&
+          createPortal(
+            <div className="html-overlay" role="dialog" aria-modal="true">
+              <div className="html-bar">
+                <FileCode size={16} className="html-bar-icon" />
+                <span className="html-title">{htmlView.split("/").pop()}</span>
+                <span className="html-path" title={htmlView}>
+                  {htmlView}
+                </span>
+                <span className="spacer" />
+                {/* The preview auto-polls while open; this just forces a refetch now. */}
+                <IconButton title="Reload preview" onClick={() => htmlQuery.refetch()}>
+                  <RefreshCw size={16} />
+                </IconButton>
+                <IconButton
+                  title="Open in new tab"
+                  onClick={() =>
+                    window.open(
+                      `/api/tmux/html?session=${encodeURIComponent(selectedSession)}&path=${encodeURIComponent(htmlView)}`,
+                      "_blank",
+                      "noopener",
+                    )
+                  }
+                >
+                  <ExternalLink size={16} />
+                </IconButton>
+                {/* Publish this artifact to the public R2 bucket and show the link. */}
+                <IconButton
+                  title="Share — publish to a public link"
+                  disabled={shareMut.isPending}
+                  onClick={openShare}
+                >
+                  {shareMut.isPending ? <RefreshCw size={16} className="spin" /> : <Share2 size={16} />}
+                </IconButton>
+                <IconButton title="Close preview (Esc)" onClick={() => setHtmlView(null)}>
+                  <X size={16} />
+                </IconButton>
+              </div>
+              <div className="html-body">
+                {htmlQuery.isError ? (
+                  <div className="empty error">{errMessage(htmlQuery.error)}</div>
+                ) : htmlQuery.data !== undefined ? (
+                  <iframe
+                    className="html-frame"
+                    title="HTML preview"
+                    sandbox="allow-scripts allow-popups allow-forms allow-modals allow-downloads"
+                    srcDoc={htmlQuery.data}
+                  />
+                ) : (
+                  <div className="empty">Loading…</div>
+                )}
+              </div>
+            </div>,
+            document.body,
+          )}
+        {/* The "Share" dialog — a compact modal layered above the HTML preview that
+            reports the public R2 link for the open artifact. Opens immediately on
+            click in a loading state, then resolves to the link (with a copy button)
+            or an error. Portaled to <body>; Esc / the ✕ / a backdrop click closes. */}
+        {shareOpen &&
+          createPortal(
+            <div className="share-overlay" role="dialog" aria-modal="true" onClick={closeShare}>
+              <div className="share-card" onClick={(e) => e.stopPropagation()}>
+                <div className="share-head">
+                  <Link2 size={16} />
+                  <span className="share-title">Share link</span>
+                  <span className="spacer" />
+                  <IconButton title="Close (Esc)" onClick={closeShare}>
+                    <X size={16} />
+                  </IconButton>
+                </div>
+                {unshareMut.isSuccess ? (
+                  <div className="share-status">Link removed — the public files were deleted.</div>
+                ) : shareMut.isPending ? (
+                  <div className="share-status">Uploading to R2…</div>
+                ) : shareMut.isError ? (
+                  <div className="share-status error">{errMessage(shareMut.error)}</div>
+                ) : shareMut.data ? (
+                  <>
+                    <div className="share-row">
+                      <input className="share-url" readOnly value={shareMut.data.url} onFocus={(e) => e.currentTarget.select()} />
+                      <CopyButton label="copy" title="Copy link" text={shareMut.data.url} />
+                    </div>
+                    <div className="share-meta">
+                      {shareMut.data.alreadyShared
+                        ? "Already shared — unchanged since last time."
+                        : `Published${shareMut.data.assets ? ` with ${shareMut.data.assets} image asset${shareMut.data.assets === 1 ? "" : "s"}` : ""}.`}
+                      {shareMut.data.skipped.length > 0 &&
+                        ` ${shareMut.data.skipped.length} local ref${shareMut.data.skipped.length === 1 ? "" : "s"} skipped.`}
+                      {" "}
+                      <a href={shareMut.data.url} target="_blank" rel="noopener noreferrer">
+                        Open ↗
+                      </a>
+                    </div>
+                    {/* Undo retracts the link entirely — deletes the HTML + assets
+                        from R2 and clears the db row. */}
+                    <div className="share-foot">
+                      <button
+                        className="act danger"
+                        title="Delete the public link and its files from R2"
+                        disabled={unshareMut.isPending}
+                        onClick={() => unshareMut.mutate()}
+                      >
+                        {unshareMut.isPending ? "Removing…" : "Undo share"}
+                      </button>
+                      {unshareMut.isError && (
+                        <span className="share-foot-err">{errMessage(unshareMut.error)}</span>
+                      )}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            </div>,
             document.body,
           )}
         {/* Diff-column skeleton: shown while git computes a commit/PR/changes/manual

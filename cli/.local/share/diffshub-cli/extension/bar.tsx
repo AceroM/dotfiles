@@ -13,9 +13,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { getConfig, DEFAULT_SERVER } from "./api";
+import {
+  getConfig,
+  DEFAULT_SERVER,
+  parseAuthProbe,
+  runAuthProbe,
+  authBlock,
+  getAuthCache,
+  setAuthCache,
+} from "./api";
 
 const HOST_ID = "diffshub-ext-host";
+// How long a resolved identity stays "fresh" before we revalidate it (on tab focus,
+// and right before a send). Re-fetching the session endpoint also slides the app's
+// session expiry, so this doubles as a keep-alive.
+const AUTH_FRESH_MS = 60_000;
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
 });
@@ -59,6 +71,14 @@ function Bar() {
   const [fallback, setFallback] = useState("");
   const [contextTemplate, setContextTemplate] = useState("");
   const [server, setServer] = useState<string | null>(null);
+
+  // ---- logged-in user (auth probe) ----
+  // The per-origin probe config (see api.parseAuthProbe) and the identity it last
+  // resolved to. `authValues` drives the "Logged in as …" pill and the <auth> block
+  // folded into the prompt on send; authTs tracks freshness for revalidation.
+  const [authProbe, setAuthProbe] = useState("");
+  const [authValues, setAuthValues] = useState<Record<string, string> | null>(null);
+  const authTsRef = useRef(0);
 
   // ---- composer ----
   // Restore any draft left in localStorage by a previous visit/reload, and open
@@ -105,6 +125,7 @@ function Bar() {
       setPrimary(cfg.serverUrl);
       setFallback(cfg.fallbackServerUrl ?? "");
       setContextTemplate(cfg.contexts?.[location.origin] ?? "");
+      setAuthProbe(cfg.auths?.[location.origin] ?? "");
     };
     void load();
     chrome.storage.onChanged.addListener(() => void load());
@@ -134,6 +155,69 @@ function Bar() {
       alive = false;
     };
   }, [pickServer]);
+
+  // ---- logged-in user (auth probe) ----
+  // Paint the pill instantly from the last cached identity (it survives reloads),
+  // then let the revalidation effect below confirm it's still current. The ts===0
+  // guard keeps a slow cache read from clobbering a probe that already resolved.
+  useEffect(() => {
+    let alive = true;
+    void getAuthCache(location.origin).then((e) => {
+      if (alive && e && authTsRef.current === 0) {
+        setAuthValues(e.values);
+        authTsRef.current = e.ts;
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Re-run the probe and cache the result. null (logged out / no probe / fetch
+  // failed) clears the cached identity so the pill disappears.
+  const refreshAuth = useCallback(async (): Promise<Record<string, string> | null> => {
+    const probe = parseAuthProbe(authProbe);
+    authTsRef.current = Date.now();
+    if (!probe) {
+      setAuthValues(null);
+      void setAuthCache(location.origin, null);
+      return null;
+    }
+    const values = await runAuthProbe(probe);
+    authTsRef.current = Date.now();
+    setAuthValues(values);
+    void setAuthCache(location.origin, values ? { values, ts: authTsRef.current } : null);
+    return values;
+  }, [authProbe]);
+
+  // Revalidate on load / whenever the probe config changes, and again on tab focus
+  // once the cached identity goes stale. (The session fetch also slides the app's
+  // session expiry, so this is the keep-it-fresh mechanism.)
+  useEffect(() => {
+    if (!authProbe.trim()) {
+      setAuthValues(null);
+      return;
+    }
+    void refreshAuth();
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && Date.now() - authTsRef.current > AUTH_FRESH_MS)
+        void refreshAuth();
+    };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [authProbe, refreshAuth]);
+
+  // Guarantee a reasonably fresh identity right before a send, so the <auth> block
+  // folded into the prompt never carries a stale userId/orgId.
+  const ensureFreshAuth = useCallback(async (): Promise<Record<string, string> | null> => {
+    if (!parseAuthProbe(authProbe)) return null;
+    if (Date.now() - authTsRef.current > AUTH_FRESH_MS) return refreshAuth();
+    return authValues;
+  }, [authProbe, authValues, refreshAuth]);
 
   // ---- @-file autocomplete (loaded lazily once the composer is open) ----
   const filesQuery = useQuery({
@@ -328,12 +412,19 @@ function Bar() {
     const srv = server ?? (await pickServer());
     setLaunching(true);
     try {
-      const preamble = contextTemplate.trim()
-        ? `${contextTemplate
+      // Prepend an <auth> block with the current user (if a probe resolved one),
+      // then the per-origin context template — both ahead of the actual prompt.
+      const auth = await ensureFreshAuth();
+      const parts: string[] = [];
+      if (auth && Object.keys(auth).length) parts.push(authBlock(auth));
+      if (contextTemplate.trim())
+        parts.push(
+          contextTemplate
             .replace(/\{url\}/g, location.href)
             .replace(/\{route\}/g, location.pathname)
-            .trim()}\n\n`
-        : "";
+            .trim(),
+        );
+      const preamble = parts.length ? parts.join("\n\n") + "\n\n" : "";
       const res = await fetch(`${srv}/api/claude?dir=${dirId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -353,7 +444,7 @@ function Bar() {
     } finally {
       setLaunching(false);
     }
-  }, [prompt, dirId, server, pickServer, contextTemplate]);
+  }, [prompt, dirId, server, pickServer, contextTemplate, ensureFreshAuth]);
 
   // ---- visual select (cursor button / `v` inject · `V` open in $EDITOR) ----
   useEffect(() => {
@@ -427,6 +518,13 @@ function Bar() {
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
   }, [dirId, selecting, open]);
+
+  // First name for the "Logged in as …" pill (mirrors how the app first-names it),
+  // falling back to the userId then a generic label. "" hides the pill.
+  const loggedInName =
+    authValues == null
+      ? ""
+      : authValues.name?.trim().split(/\s+/)[0] || authValues.userId || "user";
 
   if (dirId == null) return null;
 
@@ -547,9 +645,23 @@ function Bar() {
           ) : uploading ? (
             "Uploading image…"
           ) : (
-            <code className="route" title={`This page (${route}) is sent with your prompt as context`}>
-              {route}
-            </code>
+            <>
+              {loggedInName && (
+                <span
+                  className="who"
+                  title={
+                    authValues?.name
+                      ? `Logged in as ${authValues.name} — sent with your prompt`
+                      : "Logged-in user is sent with your prompt"
+                  }
+                >
+                  Logged in as {loggedInName}
+                </span>
+              )}
+              <code className="route" title={`This page (${route}) is sent with your prompt as context`}>
+                {route}
+              </code>
+            </>
           )}
         </span>
         <button className="collapse" title="Collapse" onClick={() => setExpanded(false)}>
@@ -800,6 +912,11 @@ const CSS = `
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; color: #71717a;
   background: #f4f4f5; border: 1px solid #e4e4e7; border-radius: 4px; padding: 1px 6px;
+}
+.status .who {
+  flex-shrink: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10px; font-weight: 500; color: #15803d;
+  background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 4px; padding: 1px 6px;
 }
 .collapse {
   flex-shrink: 0; width: 28px; height: 28px; cursor: pointer; padding: 0;

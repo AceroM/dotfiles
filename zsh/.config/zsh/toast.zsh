@@ -27,7 +27,7 @@ function toast() {
   emulate -L zsh
   local msg="${*:-done}"
   local title="${TOAST_TITLE:-Claude Code}"
-  local timeout="${TOAST_TIMEOUT:-4}"
+  local timeout="${TOAST_TIMEOUT:-1.5}"
 
   open -g "hammerspoon://claudedone?msg=$(_toast_urlencode "$msg")&title=$(_toast_urlencode "$title")&timeout=$(_toast_urlencode "$timeout")"
 }

@@ -102,7 +102,7 @@ local function topRightToast(text, opts)
   relayout()
   canvas:show(0.15)
 
-  toast.timer = hs.timer.doAfter(opts.timeout or 4, function()
+  toast.timer = hs.timer.doAfter(opts.timeout or 1.5, function()
     removeToast(toast)
   end)
 
