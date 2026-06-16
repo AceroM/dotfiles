@@ -10,8 +10,10 @@ import {
   setServerUrl,
   setFallbackServerUrl,
   setContext,
+  setAuth,
   DEFAULT_SERVER,
   DEFAULT_PROD_CONTEXT,
+  AUTH_PROBE_EXAMPLE,
   type DirEntry,
 } from "./api";
 
@@ -41,6 +43,7 @@ function Popup() {
   const [mappings, setMappings] = useState<Record<string, number>>({});
   const [fallbackInput, setFallbackInput] = useState("");
   const [contextInput, setContextInput] = useState("");
+  const [authInput, setAuthInput] = useState("");
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -60,6 +63,7 @@ function Popup() {
       setOrigin(org);
       setMapped(org && cfg.mappings[org] != null ? cfg.mappings[org] : null);
       setContextInput(org ? (cfg.contexts?.[org] ?? "") : "");
+      setAuthInput(org ? (cfg.auths?.[org] ?? "") : "");
       setReady(true);
     })();
   }, []);
@@ -119,6 +123,11 @@ function Popup() {
     await setContext(origin, contextInput);
   };
 
+  const commitAuth = async () => {
+    if (!origin) return;
+    await setAuth(origin, authInput);
+  };
+
   return (
     <>
       <h1>diffshub</h1>
@@ -156,11 +165,27 @@ function Popup() {
           <textarea
             className="ctx"
             rows={5}
-            placeholder="Optional preamble prepended to every prompt on this site. Use {url} for the page URL."
+            placeholder="Optional preamble prepended to every prompt on this site. Use {url} for the page URL and {route} for the path."
             value={contextInput}
             onChange={(e) => setContextInput(e.target.value)}
             onBlur={() => void commitContext()}
           />
+
+          <label>Logged-in user probe</label>
+          <textarea
+            className="ctx"
+            rows={5}
+            spellCheck={false}
+            placeholder={AUTH_PROBE_EXAMPLE}
+            value={authInput}
+            onChange={(e) => setAuthInput(e.target.value)}
+            onBlur={() => void commitAuth()}
+          />
+          <div className="note">
+            Fetched same-origin with cookies to read the current user. First line is{" "}
+            <b>[METHOD] url</b>, then <b>key: json.path</b> lines. Resolved fields ride along with
+            each prompt as an <b>&lt;auth&gt;</b> block; <b>name</b> drives the “Logged in as …” pill.
+          </div>
         </>
       )}
 

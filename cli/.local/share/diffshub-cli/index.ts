@@ -2,8 +2,8 @@
 
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { removeFileLines, removePatchAdditions } from "./patch-edit";
@@ -261,6 +261,201 @@ const listQueuedStmt = db.query<QueuedRow, []>(
   "SELECT * FROM queued_sessions ORDER BY created_at, id",
 );
 const deleteQueuedStmt = db.query("DELETE FROM queued_sessions WHERE id = ?");
+
+// ---- Public sharing (R2 via the wrangler CLI) ----
+// The "Share" button in the HTML preview uploads an artifact's .html (plus any
+// local, non-base64 image assets it references) to a public R2 bucket and hands
+// back a cdn link. Bucket + public base live in env vars so these dotfiles stay
+// generic — defaults point at my porio-public bucket / cdn.porio.ai domain.
+const R2_BUCKET = process.env.DIFFSHUB_R2_BUCKET || "porio-public";
+const R2_PUBLIC_BASE = (process.env.DIFFSHUB_R2_PUBLIC_BASE || "https://cdn.porio.ai").replace(
+  /\/+$/,
+  "",
+);
+const R2_PREFIX = "diffshub"; // namespace under the shared public bucket
+// One row per shared artifact, keyed by its absolute path so re-sharing the same
+// file always resolves to the same link (we re-upload in place when the contents
+// changed, leaving the URL stable). content_hash lets us skip a no-op re-upload.
+db.run(`CREATE TABLE IF NOT EXISTS shares (
+  abs_path TEXT PRIMARY KEY,
+  share_id TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  asset_keys TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)`);
+// Migration for any pre-existing shares table (asset_keys was added later, to let
+// "Undo" delete the artifact's uploaded image objects too). Dupe-column throws.
+try {
+  db.run("ALTER TABLE shares ADD COLUMN asset_keys TEXT");
+} catch {}
+interface ShareRow {
+  abs_path: string;
+  share_id: string;
+  url: string;
+  content_hash: string;
+  asset_keys: string | null; // JSON array of uploaded R2 asset keys
+  created_at: number;
+  updated_at: number;
+}
+const getShareStmt = db.query<ShareRow, [string]>("SELECT * FROM shares WHERE abs_path = ?");
+const upsertShareStmt = db.query(
+  "INSERT INTO shares (abs_path, share_id, url, content_hash, asset_keys, created_at, updated_at) " +
+    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(abs_path) DO UPDATE SET " +
+    "url = excluded.url, content_hash = excluded.content_hash, asset_keys = excluded.asset_keys, " +
+    "updated_at = excluded.updated_at",
+);
+const deleteShareStmt = db.query("DELETE FROM shares WHERE abs_path = ?");
+
+// Image extensions we know how to serve — also the allowlist deciding which
+// local refs in an HTML artifact are worth uploading (we leave fonts/css/js).
+const IMG_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  svg: "image/svg+xml",
+  ico: "image/x-icon",
+  avif: "image/avif",
+  apng: "image/apng",
+};
+const extOf = (p: string) => (p.split(".").pop() || "").toLowerCase();
+
+// Upload bytes to R2 at <key> via the wrangler CLI. Writes a temp file and
+// shells out to `wrangler r2 object put … --remote` (the --remote flag is
+// required — without it wrangler targets its local simulation, not the real
+// bucket). Throws a ShellError carrying wrangler's stderr on a non-zero exit,
+// which errText() surfaces to the share dialog.
+async function r2Put(key: string, body: Buffer | string, contentType: string): Promise<void> {
+  const tmp = `/tmp/diffshub-share-${crypto.randomUUID()}`;
+  await Bun.write(tmp, body);
+  try {
+    // Run in the state dir (not the server's cwd) so wrangler's .wrangler cache
+    // doesn't get scattered into whatever repo diffshub was launched from. The
+    // --file path is absolute, so the cwd change doesn't affect it.
+    await $`wrangler r2 object put ${`${R2_BUCKET}/${key}`} --file ${tmp} --content-type ${contentType} --remote`
+      .cwd(stateDir)
+      .quiet();
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {}
+  }
+}
+
+// Delete an object from R2 by key (used by Undo). Tolerates an already-missing
+// object — wrangler treats a delete of a non-existent key as success.
+async function r2Delete(key: string): Promise<void> {
+  await $`wrangler r2 object delete ${`${R2_BUCKET}/${key}`} --remote`.cwd(stateDir).quiet();
+}
+
+// Pull every src/href/poster/srcset/url(...) reference out of an HTML string.
+function collectAssetRefs(html: string): string[] {
+  const refs = new Set<string>();
+  const add = (u?: string | null) => {
+    if (u && u.trim()) refs.add(u.trim());
+  };
+  for (const m of html.matchAll(/\b(?:src|href|poster)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi))
+    add(m[1] ?? m[2]);
+  for (const m of html.matchAll(/\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const val = m[1] ?? m[2] ?? "";
+    for (const cand of val.split(",")) add(cand.trim().split(/\s+/)[0]);
+  }
+  for (const m of html.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi))
+    add(m[1] ?? m[2] ?? m[3]);
+  return [...refs];
+}
+
+// A ref we should leave alone: already-inlined (data:), already-remote (http(s)
+// or protocol-relative //), or a non-asset URL (anchors, mailto, tel).
+const isExternalRef = (u: string) => /^(?:data:|https?:|\/\/|#|mailto:|tel:|blob:)/i.test(u);
+
+// Find local, non-base64 image assets referenced by an HTML artifact, upload
+// each to R2 under the share's asset folder, and return the HTML with those
+// references rewritten to absolute cdn URLs. Assets are resolved against the
+// HTML file's own directory and must stay inside the session cwd (same guard as
+// /api/tmux/html), so a crafted ref can't exfiltrate arbitrary files. Refs we
+// can't resolve to a local image are left untouched and reported in `skipped`.
+async function uploadHtmlAssets(
+  html: string,
+  htmlDir: string,
+  cwd: string,
+  shareId: string,
+): Promise<{ html: string; uploaded: string[]; skipped: string[]; keys: string[] }> {
+  const uploaded: string[] = [];
+  const skipped: string[] = [];
+  const keys: string[] = []; // R2 object keys we created (for Undo)
+  const map = new Map<string, string>(); // original ref -> cdn url
+
+  for (const ref of collectAssetRefs(html)) {
+    if (isExternalRef(ref) || map.has(ref)) continue;
+    const clean = ref.replace(/[?#].*$/, ""); // drop ?query / #frag
+    if (!IMG_MIME[extOf(clean)]) continue; // only images
+    let absAsset: string;
+    try {
+      absAsset = resolve(htmlDir, decodeURIComponent(clean));
+    } catch {
+      absAsset = resolve(htmlDir, clean);
+    }
+    if (absAsset !== cwd && !absAsset.startsWith(cwd + sep)) {
+      skipped.push(ref);
+      continue;
+    }
+    if (!existsSync(absAsset) || !statSync(absAsset).isFile()) {
+      skipped.push(ref);
+      continue;
+    }
+    // Tag the basename with a short path hash so two same-named files in
+    // different folders don't collide in the flat asset directory. The basename
+    // is sanitized to a URL-safe charset so the resulting cdn link never needs
+    // quoting/escaping (it goes into bare url(...) / src="" without breakage).
+    const base = (absAsset.split(sep).pop() || "asset").replace(/[^A-Za-z0-9._-]/g, "_");
+    const tag = crypto.createHash("sha1").update(absAsset).digest("hex").slice(0, 8);
+    const key = `${R2_PREFIX}/${shareId}/${tag}-${base}`;
+    const bytes = Buffer.from(await Bun.file(absAsset).arrayBuffer());
+    await r2Put(key, bytes, IMG_MIME[extOf(clean)]);
+    map.set(ref, `${R2_PUBLIC_BASE}/${key}`);
+    uploaded.push(ref);
+    keys.push(key);
+  }
+
+  if (map.size === 0) return { html, uploaded, skipped, keys };
+
+  // Single pass per pattern, each match swapped via the map — no literal
+  // string replace, which would corrupt refs that are substrings of others.
+  let out = html.replace(
+    /(\b(?:src|href|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi,
+    (full, pre, dq, sq) => {
+      const raw = dq ?? sq;
+      const mapped = map.get(raw.trim());
+      return mapped ? `${pre}"${mapped}"` : full;
+    },
+  );
+  out = out.replace(/(\bsrcset\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi, (full, pre, dq, sq) => {
+    const raw = dq ?? sq ?? "";
+    const rebuilt = raw
+      .split(",")
+      .map((cand: string) => {
+        const t = cand.trim();
+        if (!t) return cand;
+        const [u, ...descr] = t.split(/\s+/);
+        const mapped = map.get(u.trim());
+        return mapped ? [mapped, ...descr].join(" ") : t;
+      })
+      .join(", ");
+    return `${pre}"${rebuilt}"`;
+  });
+  out = out.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi, (full, dq, sq, bare) => {
+    const mapped = map.get((dq ?? sq ?? bare ?? "").trim());
+    // Emit a bare url(...) — our cdn links are quote/space-free, so this stays
+    // valid CSS whether it sits in a <style> block or a quoted style="" attr.
+    return mapped ? `url(${mapped})` : full;
+  });
+  return { html: out, uploaded, skipped, keys };
+}
 
 // ---- Resolved-workspace cache (gh calls are slow) ----
 const wsCache = new Map<number, Promise<Workspace>>();
@@ -1677,6 +1872,7 @@ const page = `<!DOCTYPE html>
     border: 1px solid var(--border-strong); border-radius: 6px; outline: none;
   }
   .commits-header input:focus { border-color: var(--accent); }
+  .commits-header input.content-search { margin-top: 6px; }
 
   .tabs { display: flex; gap: 2px; margin-bottom: 10px; background: var(--bg-tabs); border: 1px solid var(--border); border-radius: 7px; padding: 2px; }
   .tabs button {
@@ -2320,14 +2516,34 @@ const page = `<!DOCTYPE html>
   .home-card-task { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-card.queued .home-card-task { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .home-card-cwd { font-size: 11px; color: var(--text-muted); opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* cwd (left, ellipsised) + last-message time (right) share the card's bottom row. */
+  .home-card-foot { display: flex; align-items: baseline; gap: 8px; }
+  .home-card-foot .home-card-cwd { flex: 1; min-width: 0; }
+  .home-card-time { flex: none; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* Status dot — mirrors .sess-busy in the sidebar. */
   .home-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
   .home-card.busy .home-dot { background: var(--accent); animation: sessPulse 1.4s ease-in-out infinite; }
   .home-card.waiting .home-dot, .home-card.queued .home-dot { background: var(--amber); animation: pendingPulse 1.6s ease-in-out infinite; }
   .home-card.unread .home-dot { background: var(--accent); }
   @media (max-width: 640px) { .home-cards { grid-template-columns: 1fr; } }
-  /* Touch devices can't hover, so keep the card's delete button visible there. */
-  @media (hover: none) { .home-card .kill-btn { opacity: 1; } }
+  /* Mark-read check — shows on unacknowledged attention cards (Done / Needs-action),
+     sat just left of the kill button. Same chip as .kill-btn, but it acknowledges
+     (accent) rather than destroys (red). */
+  .read-btn {
+    position: absolute; top: 9px; right: 34px; width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+    background: none; border: 1px solid var(--border-strong); border-radius: 50%;
+    color: var(--text-faint); font-size: 11px; cursor: pointer; opacity: 0;
+  }
+  .home-card:hover .read-btn, .home-card:focus-within .read-btn { opacity: 1; }
+  .read-btn:hover { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+  /* Two action chips need more clear space to the right of the name than one. */
+  .home-card:has(.read-btn) .home-card-top { padding-right: 44px; }
+  /* An acknowledged Needs-action card (seen, but still waiting) calms its dot, so
+     only the genuinely-new prompts keep pulsing for your attention. */
+  .home-card.waiting.read .home-dot { animation: none; opacity: .55; }
+  /* Touch devices can't hover, so keep the card's action buttons visible there. */
+  @media (hover: none) { .home-card .kill-btn, .home-card .read-btn { opacity: 1; } }
 
   /* ---- Home dashboard chat side-panel ---- */
   /* Clicking a card opens its chat here without leaving the dashboard. Desktop:
@@ -2346,13 +2562,22 @@ const page = `<!DOCTYPE html>
     flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
     padding: 9px 12px; border-bottom: 1px solid var(--border);
   }
-  .home-chat-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-chat-title { flex: 1 1 auto; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-chat-close {
     flex: 0 0 auto; display: grid; place-items: center;
     width: 30px; height: 30px; border-radius: 7px; cursor: pointer;
     background: var(--bg-muted); border: 1px solid var(--border); color: var(--text-2);
   }
   .home-chat-close:hover { color: var(--text); border-color: var(--text-muted); }
+  /* "Open HTML" button — appears in the chat bar once the session has written an
+     .html artifact; opens the .html-overlay preview. */
+  .home-chat-html {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+    height: 30px; padding: 0 10px; border-radius: 7px; cursor: pointer;
+    font-size: 12px; font-weight: 600;
+    background: var(--accent-bg); border: 1px solid var(--accent); color: var(--accent-strong);
+  }
+  .home-chat-html:hover { background: var(--accent-bg-hover); }
   /* The panel's own scroll container: the transcript-head sticks to its top and
      the composer to its bottom, same as the Tmux tab's main column. */
   .home-chat-scroll { flex: 1 1 auto; overflow-y: auto; padding: 0 18px; }
@@ -2366,6 +2591,62 @@ const page = `<!DOCTYPE html>
     .home-chat-panel { width: 100%; border-left: none; box-shadow: none; animation: chatSheetIn .18s ease; }
   }
   @keyframes chatSheetIn { from { transform: translateY(14px); opacity: .4; } to { transform: none; opacity: 1; } }
+
+  /* Full-screen HTML artifact preview, layered above the Home chat panel. */
+  .html-overlay {
+    position: fixed; inset: 0; z-index: 70;
+    display: flex; flex-direction: column;
+    background: var(--bg);
+    animation: chatSheetIn .16s ease;
+  }
+  .html-bar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar);
+  }
+  .html-bar-icon { flex: 0 0 auto; color: var(--accent); }
+  .html-title { flex: 0 0 auto; font-size: 13px; font-weight: 600; }
+  .html-path {
+    flex: 0 1 auto; min-width: 0; font-size: 11px; color: var(--text-muted);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .html-bar .spacer { flex: 1 1 auto; }
+  .html-body { flex: 1 1 auto; min-height: 0; background: #fff; }
+  .html-frame { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+  .spin { animation: spin .8s linear infinite; }
+  /* Share dialog: a centered modal layered above the .html-overlay preview. */
+  .share-overlay {
+    position: fixed; inset: 0; z-index: 80;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.45); padding: 20px;
+    animation: chatSheetIn .14s ease;
+  }
+  .share-card {
+    width: 100%; max-width: 460px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.3); padding: 14px 16px 16px;
+  }
+  .share-head { display: flex; align-items: center; gap: 8px; color: var(--accent); margin-bottom: 12px; }
+  .share-head .spacer { flex: 1 1 auto; }
+  .share-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .share-status { font-size: 13px; color: var(--text-muted); padding: 8px 2px; }
+  .share-status.error { color: var(--red); white-space: pre-wrap; }
+  .share-row { display: flex; gap: 8px; align-items: center; }
+  .share-url {
+    flex: 1 1 auto; min-width: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-sidebar); color: var(--text);
+  }
+  .share-url:focus { outline: none; border-color: var(--accent); }
+  .share-meta { margin-top: 10px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+  .share-meta a { color: var(--accent); text-decoration: none; }
+  .share-meta a:hover { text-decoration: underline; }
+  .share-foot { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+  .act.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+  .act.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 12%, transparent); border-color: var(--red); }
+  .act.danger:disabled { opacity: .6; cursor: default; }
+  .share-foot-err { font-size: 11px; color: var(--red); white-space: pre-wrap; }
   .section-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 6px 2px 10px; }
   .file-diff { margin-bottom: 16px; position: relative; }
   .diff-foot { display: flex; gap: 6px; margin-top: 6px; }
@@ -2719,7 +3000,7 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     // Reuse an open diffshub window: focus it and navigate to the chat. A full
-    // navigate reloads the SPA, which reads the ?tmux=…&dir=… deep link on boot.
+    // navigate reloads the SPA, which reads the ?home=…&dir=… deep link on boot.
     // If navigate is unavailable or rejects (uncontrolled client), fall through
     // to opening a fresh window at the URL rather than focusing the stale view.
     for (const c of wins) {
@@ -2976,7 +3257,8 @@ const server = Bun.serve({
     // Fire a push to every subscribed device. The Claude `Stop`/`Notification`
     // hooks POST here (from localhost) with a tmux `session` + `kind`; open to any
     // tailnet caller. When a session is given we label the push with that chat's
-    // task and deep-link the tap to its Tmux tab; otherwise raw title/body/url.
+    // task and deep-link the tap to the Home tab with that chat open; otherwise
+    // raw title/body/url.
     if (url.pathname === "/api/notify" && req.method === "POST") {
       let b: any;
       try {
@@ -2994,9 +3276,9 @@ const server = Bun.serve({
         payload = {
           title: task || session,
           body: kind === "ask" ? "Needs your input" : kind === "stop" ? "Finished" : task ? session : "",
-          // Pin the directory so the deep-linked session is in the Tmux tab's
-          // dir-scoped list and doesn't get snapped to a different chat on load.
-          url: `/?tmux=${encodeURIComponent(session)}${dirParam}`,
+          // Pin the directory so the deep-linked session is in the Home tab's
+          // dir-scoped list and doesn't get dropped from the open chat on load.
+          url: `/?home=${encodeURIComponent(session)}${dirParam}`,
           tag: `claude-${session}`, // same chat ⇒ later status replaces the earlier
         };
       } else {
@@ -3553,6 +3835,135 @@ const server = Bun.serve({
             "Cache-Control": "public, max-age=31536000, immutable",
           },
         });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Serve the live contents of an HTML artifact a session has been building
+    // (the "agents folder" pattern: an agent writes/appends a single .html file
+    // across many edits). The client finds the path from the transcript's
+    // Write/Edit tool calls and the Home chat's "Open HTML" button renders this in
+    // a sandboxed iframe. The requested path is resolved against the session cwd
+    // and must stay inside it, so a crafted ?path can't read arbitrary files.
+    if (req.method === "GET" && url.pathname === "/api/tmux/html") {
+      const name = url.searchParams.get("session") ?? "";
+      const want = url.searchParams.get("path") ?? "";
+      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      try {
+        const cwd = (
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+        ).trim();
+        if (!cwd) return json({ error: "No such session" }, 404);
+        const abs = resolve(cwd, want);
+        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
+        if (!/\.html?$/i.test(abs)) return json({ error: "Not an HTML file" }, 400);
+        if (!existsSync(abs)) return json({ error: "File not found" }, 404);
+        const html = await Bun.file(abs).text();
+        return new Response(html, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            // Live file — the client polls while the preview is open, so never cache.
+            "Cache-Control": "no-store",
+          },
+        });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Publish an HTML artifact to the public R2 bucket and return a cdn link.
+    // Uploads any local, non-base64 image assets it references (rewriting their
+    // URLs), then the HTML itself, via the wrangler CLI. Idempotent per file:
+    // the share is keyed by the artifact's absolute path, so re-sharing returns
+    // the same stable link — and skips the upload entirely when the contents
+    // haven't changed since last time (see the shares table).
+    if (req.method === "POST" && url.pathname === "/api/tmux/share") {
+      let body: { session?: unknown; path?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const name = typeof body.session === "string" ? body.session : "";
+      const want = typeof body.path === "string" ? body.path : "";
+      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      try {
+        const cwd = (
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+        ).trim();
+        if (!cwd) return json({ error: "No such session" }, 404);
+        const abs = resolve(cwd, want);
+        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
+        if (!/\.html?$/i.test(abs)) return json({ error: "Not an HTML file" }, 400);
+        if (!existsSync(abs)) return json({ error: "File not found" }, 404);
+        const html = await Bun.file(abs).text();
+        const hash = crypto.createHash("sha256").update(html).digest("hex");
+        const existing = getShareStmt.get(abs);
+        // Unchanged since the last share → hand back the existing link, no upload.
+        if (existing && existing.content_hash === hash) {
+          return json({ url: existing.url, alreadyShared: true, assets: 0, skipped: [] });
+        }
+        // Reuse the prior id so edits re-upload in place and the URL stays stable.
+        const shareId = existing?.share_id ?? crypto.randomBytes(6).toString("hex");
+        const { html: rewritten, uploaded, skipped, keys } = await uploadHtmlAssets(
+          html,
+          dirname(abs),
+          cwd,
+          shareId,
+        );
+        const htmlKey = `${R2_PREFIX}/${shareId}.html`;
+        await r2Put(htmlKey, rewritten, "text/html; charset=utf-8");
+        const shareUrl = `${R2_PUBLIC_BASE}/${htmlKey}`;
+        const now = Date.now();
+        upsertShareStmt.run(
+          abs,
+          shareId,
+          shareUrl,
+          hash,
+          JSON.stringify(keys),
+          existing?.created_at ?? now,
+          now,
+        );
+        return json({ url: shareUrl, alreadyShared: false, assets: uploaded.length, skipped });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Undo a share: delete the published HTML object (and any image assets it
+    // uploaded) from R2, then drop the sqlite row so the link is fully retracted.
+    // Keyed by the artifact path, like /api/tmux/share. A no-op (still 200) when
+    // the file was never shared, so Undo is always safe to call.
+    if (req.method === "POST" && url.pathname === "/api/tmux/unshare") {
+      let body: { session?: unknown; path?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const name = typeof body.session === "string" ? body.session : "";
+      const want = typeof body.path === "string" ? body.path : "";
+      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      try {
+        const cwd = (
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+        ).trim();
+        if (!cwd) return json({ error: "No such session" }, 404);
+        const abs = resolve(cwd, want);
+        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
+        const existing = getShareStmt.get(abs);
+        if (!existing) return json({ ok: true, removed: false });
+        let assetKeys: string[] = [];
+        try {
+          assetKeys = JSON.parse(existing.asset_keys || "[]");
+        } catch {}
+        // HTML first, then its assets — deleting a missing key is a no-op.
+        for (const key of [`${R2_PREFIX}/${existing.share_id}.html`, ...assetKeys]) {
+          await r2Delete(key);
+        }
+        deleteShareStmt.run(abs);
+        return json({ ok: true, removed: true });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
