@@ -727,19 +727,21 @@ async function capturePendingPrompt(name: string): Promise<string | null> {
 // capturePendingPrompt returns the raw TUI text of a selection prompt claude is
 // blocked on. For the web UI we want real controls (checkboxes / buttons) instead
 // of asking the user to read ASCII and hand-type a digit, so we parse that text
-// into options. The layout claude renders (verified against the 2.1.x TUI):
+// into options. The layout claude renders (verified against the 2.1.179 TUI):
 //
 //   ❯ 1. [ ] Label            ← multi-select option (checkbox); ❯ marks the cursor
 //        description…          ← dim, indented, may wrap across lines
-//     4. [ ] Type something    ← claude appends a free-text option as the last one
+//     4. [✔] Type something    ← a ticked box renders [✔] (U+2714), not [x]
 //          Submit
+//     5. Chat about this        ← a "discuss instead" affordance, not an answer
 //
 // Single-select / plan-approval / permission prompts render the same numbered list
-// WITHOUT the [ ]/[x] checkboxes (a digit picks + submits). A final-submit screen
+// WITHOUT the [ ]/[✔] checkboxes (a digit picks + submits). A final-submit screen
 // shows "Ready to submit your answers?" with no options. We classify accordingly.
 //
 // Digit i maps straight to option i in claude's key handler, so the client never
-// needs cursor tracking — it sends the digit(s) and (for multi) an Enter to submit.
+// needs cursor tracking. For multi-select a bare Enter no longer submits (it
+// toggles the focused row) — you press Tab to open the submit gate, then Enter.
 export type PendingOption = {
   index: number; // 1-based, exactly the digit you'd press in the pane
   label: string;
@@ -755,9 +757,11 @@ export type PendingPrompt = {
   multiQuestion: boolean; // one question of a multi-question AskUserQuestion (tab strip)
 };
 
-// A numbered option row: optional ❯ cursor, the index, an optional [ ]/[x] box, label.
-const OPT_RE = /^(\s*)(❯|>)?\s*(\d+)\.\s+(\[([ xX✓·])\]\s+)?(.*\S)\s*$/u;
-const FREE_TEXT_RE = /^(?:type something|type your own|something else|none of the above)\b/iu;
+// A numbered option row: optional ❯ cursor, the index, an optional [ ]/[✔] box, label.
+// The ticked box is U+2714 (✔) in claude's TUI — NOT the lighter U+2713 (✓); both are
+// accepted here so a marker change can't silently leave a [✔] glyph stuck in the label.
+const OPT_RE = /^(\s*)(❯|>)?\s*(\d+)\.\s+(\[([ xX✓✔·])\]\s+)?(.*\S)\s*$/u;
+const FREE_TEXT_RE = /^(?:type something|type your own|something else|none of the above|chat about this)\b/iu;
 // A multi-question AskUserQuestion renders a tab strip ("← ⊟ Scope ☐ State ✓ Submit →").
 const TAB_BAR_RE = /[←→]|[⊟☐☑✓▢]\s+\S+\s+[⊟☐☑✓▢]/u;
 const CONFIRM_RE = /ready to submit your answers|submit your answers\?/iu;
@@ -784,7 +788,7 @@ function parsePendingPrompt(pane: string | null): PendingPrompt | null {
         opt: {
           index: expecting,
           label,
-          checked: m[5] != null && /[xX✓·]/u.test(m[5]),
+          checked: m[5] != null && /[xX✓✔·]/u.test(m[5]),
           cursor: !!m[2],
           freeText: FREE_TEXT_RE.test(label),
         },
@@ -839,8 +843,9 @@ async function sendKeySeq(name: string, keys: string[]): Promise<void> {
 // end up checked. We capture the pane, toggle only the options whose state differs
 // (digit i toggles option i), re-capture to CONFIRM the checkbox pattern matches
 // before committing — so a wrong protocol assumption can never submit a bad answer
-// — then press Enter (and a second Enter if claude shows its "Ready to submit?"
-// confirm). Returns {ok:false} without submitting if verification fails.
+// — then press Tab to open claude's "Ready to submit your answers?" gate and Enter
+// to commit it. (A bare Enter would just toggle the focused row, not submit.)
+// Returns {ok:false} without submitting if verification fails.
 async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok: boolean; error?: string }> {
   const parsed = parsePendingPrompt(await capturePendingPrompt(name));
   if (!parsed || parsed.kind !== "multi") return { ok: false, error: "no multi-select prompt is waiting" };
@@ -860,8 +865,13 @@ async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok
     .every((o) => o.checked === want.has(o.index));
   if (!ok) return { ok: false, error: "could not confirm the selection in the pane" };
 
-  await sendKeySeq(name, ["Enter"]);
-  // A multi-question prompt may show a final "Ready to submit your answers?" gate.
+  // Tab opens claude's "Review your answers / Ready to submit your answers?" screen
+  // (cursor defaulting to "Submit answers"); Enter there commits. A bare Enter here
+  // would instead toggle whichever option the cursor sits on. For a multi-question
+  // prompt Tab lands on the next question instead of the gate — we leave this
+  // question's picks recorded and let the web UI render the next one rather than
+  // forcing a submit.
+  await sendKeySeq(name, ["Tab"]);
   await Bun.sleep(VERIFY_SETTLE_MS);
   const gate = await capturePendingPrompt(name);
   if (gate && CONFIRM_RE.test(gate)) await sendKeySeq(name, ["Enter"]);
