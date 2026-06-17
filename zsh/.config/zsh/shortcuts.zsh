@@ -15,6 +15,7 @@ alias y="yazi"
 alias lg="lazygit"
 alias ob="obsidian"
 alias rnd="openssl rand -base64 32"
+alias kc='pkill -i "Google Chrome"; pkill -i "chrome"; echo "Done"'
 
 unalias rs 2>/dev/null
 rs() {

@@ -31,6 +31,9 @@ const HOST_ID = "diffshub-ext-host";
 // and right before a send). Re-fetching the session endpoint also slides the app's
 // session expiry, so this doubles as a keep-alive.
 const AUTH_FRESH_MS = 60_000;
+// Min spacing between full-page scroll grabs — captureVisibleTab is rate-limited
+// (~2/s), so we pace each frame to stay under quota (grabVisible also retries).
+const CAPTURE_INTERVAL_MS = 350;
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
 });
@@ -186,9 +189,23 @@ function Bar() {
       setAuthProbe(cfg.auths?.[location.origin] ?? "");
     };
     void load();
-    chrome.storage.onChanged.addListener(() => void load());
+    // Reload config whenever storage changes (mapping/context/auth edited in the
+    // popup). Kept in a named handler so we can detach it on unmount — both to avoid
+    // leaking a listener per mount and so it stops firing into a torn-down tree.
+    const onChange = () => void load();
+    try {
+      chrome.storage.onChanged.addListener(onChange);
+    } catch {
+      // dead extension context (reloaded while this tab's old script lingers) — the
+      // tab will reload and re-inject; nothing useful to listen for until then.
+    }
     return () => {
       alive = false;
+      try {
+        chrome.storage.onChanged.removeListener(onChange);
+      } catch {
+        // context already gone — listener went with it
+      }
     };
   }, []);
 
@@ -463,48 +480,46 @@ function Bar() {
     [server, pickServer, insertAtCaret],
   );
 
-  // ---- screenshot tool (`s`): capture the dragged viewport region ----
-  // Same destination as image paste — the cropped PNG goes to the server's
-  // /tmp/images and the path drops into the composer. The pixels come from the
-  // background worker's captureVisibleTab (content scripts can't call it), so we
-  // hide our own UI for a couple of frames first, then crop the returned full-
-  // viewport shot to the region the user dragged (in device pixels, via the
-  // image's true scale so dpr/zoom are exact). `rect` is in CSS viewport coords.
-  const captureRegion = useCallback(
-    async (rect: { left: number; top: number; width: number; height: number }) => {
+  // POST a finished PNG (data URL) to the same image store as paste, then drop the
+  // returned path into the composer. Shared by the region and full-page shots.
+  const uploadShot = useCallback(
+    async (srv: string, dataUrl: string) => {
+      const res = await fetch(`${srv}/api/upload-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: dataUrl }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { path?: string; error?: string };
+      if (!res.ok) {
+        alert(`screenshot upload failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      if (typeof body.path === "string") {
+        setExpanded(true);
+        insertAtCaret(`${body.path} `);
+      }
+    },
+    [insertAtCaret],
+  );
+
+  // Drop our overlays + composer out of the frame so they aren't in the shot, run
+  // `grab` to produce the PNG (cropped region / stitched page), bring the composer
+  // back, and upload it. The pixels come from the background worker's
+  // captureVisibleTab (content scripts can't call it). Stays `capturing` through
+  // the upload; shared error handling for both screenshot tools.
+  const runShot = useCallback(
+    async (grab: () => Promise<string>) => {
       const srv = server ?? (await pickServer());
       setCapturing(true);
-      // Drop our overlays + the composer out of the frame so they aren't in the shot.
       if (hostEl) hostEl.style.visibility = "hidden";
       if (overlayEl) overlayEl.style.display = "none";
       if (shotLayerEl) shotLayerEl.style.display = "none";
       try {
-        // Let the page repaint without our UI before the capture lands.
+        // Let the page repaint without our UI before the first capture lands.
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-        const resp = (await chrome.runtime.sendMessage({ type: "diffshub-capture" })) as {
-          dataUrl?: string;
-          error?: string;
-        };
+        const png = await grab();
         if (hostEl) hostEl.style.visibility = ""; // bring the composer back for the upload
-        if (!resp?.dataUrl) {
-          alert(`screenshot failed: ${resp?.error ?? "no image returned"}`);
-          return;
-        }
-        const cropped = await cropToRegion(resp.dataUrl, rect);
-        const res = await fetch(`${srv}/api/upload-image`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ data: cropped }),
-        });
-        const body = (await res.json().catch(() => ({}))) as { path?: string; error?: string };
-        if (!res.ok) {
-          alert(`screenshot upload failed: ${body.error ?? res.statusText}`);
-          return;
-        }
-        if (typeof body.path === "string") {
-          setExpanded(true);
-          insertAtCaret(`${body.path} `);
-        }
+        await uploadShot(srv, png);
       } catch (err) {
         alert(`screenshot failed: ${String((err as { message?: string })?.message ?? err)}`);
       } finally {
@@ -512,8 +527,23 @@ function Bar() {
         setCapturing(false);
       }
     },
-    [server, pickServer, insertAtCaret],
+    [server, pickServer, uploadShot],
   );
+
+  // ---- screenshot tool (`s`): capture the dragged viewport region ----
+  // Crop the returned full-viewport shot to the region the user dragged (in device
+  // pixels, via the image's true scale so dpr/zoom are exact). `rect` is in CSS
+  // viewport coords.
+  const captureRegion = useCallback(
+    (rect: { left: number; top: number; width: number; height: number }) =>
+      runShot(async () => cropToRegion(await grabVisible(), rect)),
+    [runShot],
+  );
+
+  // ---- screenshot tool (`⇧S` / page button): capture the whole scrollable page ----
+  // Scrolls the page viewport-by-viewport, stitching each grab onto one tall PNG.
+  // No drag — a click grabs the full page.
+  const captureFullPage = useCallback(() => runShot(stitchFullPage), [runShot]);
 
   // ---- submit ----
   const submit = useCallback(async () => {
@@ -677,11 +707,20 @@ function Bar() {
   }, [shooting, captureRegion]);
 
   // ---- page shortcuts: ; (or ') opens & focuses, v starts select, V starts select
-  // that opens the picked element in $EDITOR (all ignored while typing); Escape
-  // collapses it back to the pill (handled on the textarea). ----
+  // that opens the picked element in $EDITOR, s drags a region shot, ⇧S grabs the
+  // full page (all ignored while typing); Escape collapses it back to the pill
+  // (handled on the textarea). ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dirId == null || selecting || shooting) return;
+      if (dirId == null || selecting || shooting || capturing) return;
+      // ctrl + ' also opens (mirrors the bare ' shortcut) — check before the
+      // modifier guard below swallows it.
+      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "'") {
+        if (isTyping(e)) return;
+        e.preventDefault();
+        open();
+        return;
+      }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (isTyping(e)) return;
       if (e.key === ";" || e.key === "'") {
@@ -696,11 +735,14 @@ function Bar() {
       } else if (e.key === "s") {
         e.preventDefault();
         setShooting(true);
+      } else if (e.key === "S") {
+        e.preventDefault();
+        void captureFullPage();
       }
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [dirId, selecting, shooting, open]);
+  }, [dirId, selecting, shooting, capturing, open, captureFullPage]);
 
   // First name for the "Logged in as …" pill (mirrors how the app first-names it),
   // falling back to the userId then a generic label. "" hides the pill.
@@ -733,7 +775,7 @@ function Bar() {
           ref={taRef}
           className="ta"
           rows={3}
-          placeholder="Ask for a change…  (@ a file · ⌃V image · v point at an element · V open it in your editor · s screenshot a region)"
+          placeholder="Ask for a change…  (@ a file · ⌃V image · v point at an element · V open it in your editor · s screenshot a region · ⇧S full page)"
           value={prompt}
           onChange={(e) => {
             setPrompt(e.target.value);
@@ -864,6 +906,14 @@ function Bar() {
           onClick={() => setShooting((v) => !v)}
         >
           <ShotIcon />
+        </button>
+        <button
+          className="tool"
+          title="Screenshot the full page  ( ⇧S )"
+          disabled={capturing}
+          onClick={() => void captureFullPage()}
+        >
+          <FullPageIcon />
         </button>
         <span className="status">
           {selecting ? (
@@ -1158,6 +1208,89 @@ function cropToRegion(
   });
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Grab the visible tab as a PNG data URL off the background worker, retrying a
+// couple of times on a capture-quota error (captureVisibleTab is rate-limited).
+async function grabVisible(): Promise<string> {
+  for (let attempt = 0; ; attempt++) {
+    const resp = (await chrome.runtime.sendMessage({ type: "diffshub-capture" })) as {
+      dataUrl?: string;
+      error?: string;
+    };
+    if (resp?.dataUrl) return resp.dataUrl;
+    if (attempt >= 3) throw new Error(resp?.error ?? "no image returned");
+    await sleep(700); // back off the captureVisibleTab quota, then retry
+  }
+}
+
+function decodeImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("could not decode capture"));
+    img.src = dataUrl;
+  });
+}
+
+// Capture the entire scrollable page: scroll it down a viewport at a time,
+// grab each visible frame, and stitch them onto one tall canvas at the tab's
+// true pixel scale (so dpr / browser-zoom stay exact, like cropToRegion).
+// captureVisibleTab is rate-limited, so we pace the grabs; position:fixed /
+// sticky elements paint into every frame, so they repeat down the stitched
+// image — an inherent limit of scroll-and-stitch we accept here. The original
+// scroll position is restored when done. Returns a PNG data URL.
+async function stitchFullPage(): Promise<string> {
+  const de = document.documentElement;
+  const body = document.body;
+  const viewportH = window.innerHeight;
+  const fullH = Math.max(
+    de.scrollHeight,
+    de.offsetHeight,
+    body?.scrollHeight ?? 0,
+    body?.offsetHeight ?? 0,
+    viewportH,
+  );
+  const prevX = window.scrollX;
+  const prevY = window.scrollY;
+  const prevBehavior = de.style.scrollBehavior;
+  de.style.scrollBehavior = "auto"; // no smooth-scroll animation between grabs
+
+  let canvas: HTMLCanvasElement | null = null;
+  let ctx: CanvasRenderingContext2D | null = null;
+  let scale = 1; // device-pixels per CSS-pixel, fixed from the first frame
+  try {
+    let target = 0;
+    for (let guard = 0; guard < 200; guard++) {
+      // Hard stop at 200 frames so a runaway/infinite-scroll page can't hang us.
+      window.scrollTo(0, target);
+      // Let the page paint at the new offset, then stay under the capture quota.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await sleep(CAPTURE_INTERVAL_MS);
+      const y = window.scrollY; // real (clamped) offset
+      const img = await decodeImage(await grabVisible());
+      if (!canvas) {
+        scale = img.naturalWidth / window.innerWidth;
+        canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = Math.max(1, Math.round(fullH * scale));
+        ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("no 2d context");
+      }
+      ctx!.drawImage(img, 0, Math.round(y * scale));
+      if (y + viewportH >= fullH - 1) break; // reached the bottom
+      const next = y + viewportH;
+      if (next <= target) break; // scroll didn't advance — bail rather than loop
+      target = next;
+    }
+    if (!canvas) throw new Error("nothing captured");
+    return canvas.toDataURL("image/png");
+  } finally {
+    de.style.scrollBehavior = prevBehavior;
+    window.scrollTo(prevX, prevY);
+  }
+}
+
 function SparkIcon() {
   return (
     <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -1207,6 +1340,26 @@ function ShotIcon() {
       <path d="M13.5 3h2A1.5 1.5 0 0 1 17 4.5v2" />
       <path d="M17 13.5v2a1.5 1.5 0 0 1-1.5 1.5h-2" />
       <path d="M6.5 17h-2A1.5 1.5 0 0 1 3 15.5v-2" />
+    </svg>
+  );
+}
+
+// A page/document: a tall framed rectangle with content lines — "the whole page".
+function FullPageIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="4" y="2.5" width="12" height="15" rx="1.6" />
+      <path d="M7 6.5h6" />
+      <path d="M7 10h6" />
+      <path d="M7 13.5h3.5" />
     </svg>
   );
 }

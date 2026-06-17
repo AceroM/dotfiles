@@ -14,6 +14,7 @@ declare global {
       };
       onChanged: {
         addListener(cb: (changes: Record<string, unknown>, area: string) => void): void;
+        removeListener(cb: (changes: Record<string, unknown>, area: string) => void): void;
       };
     };
     runtime: {
@@ -133,8 +134,38 @@ export interface Config {
   auths?: Record<string, string>;
 }
 
+// True for the "Extension context invalidated" error Chrome throws when a content
+// script outlives the extension that injected it — i.e. the unpacked extension was
+// reloaded/updated while a tab still ran the old script. Every chrome.* call from
+// that orphaned script rejects this way, and there's nothing to do but wait for the
+// tab to reload, so we swallow it instead of spamming uncaught-rejection errors.
+export function isContextInvalidated(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /context invalidated|extension context|message port closed/i.test(msg);
+}
+
+// chrome.storage.local get/set that no-op on a dead extension context (see
+// isContextInvalidated): get resolves to {} so callers fall back to their defaults,
+// set resolves quietly. Any other error still propagates.
+async function storageGet(keys: string[] | string | null): Promise<Record<string, unknown>> {
+  try {
+    return await chrome.storage.local.get(keys);
+  } catch (err) {
+    if (isContextInvalidated(err)) return {};
+    throw err;
+  }
+}
+
+async function storageSet(items: Record<string, unknown>): Promise<void> {
+  try {
+    await chrome.storage.local.set(items);
+  } catch (err) {
+    if (!isContextInvalidated(err)) throw err;
+  }
+}
+
 export async function getConfig(): Promise<Config> {
-  const s = await chrome.storage.local.get([
+  const s = await storageGet([
     "serverUrl",
     "fallbackServerUrl",
     "mappings",
@@ -154,15 +185,15 @@ export async function setMapping(origin: string, dirId: number | null): Promise<
   const { mappings } = await getConfig();
   if (dirId == null) delete mappings[origin];
   else mappings[origin] = dirId;
-  await chrome.storage.local.set({ mappings });
+  await storageSet({ mappings });
 }
 
 export async function setServerUrl(serverUrl: string): Promise<void> {
-  await chrome.storage.local.set({ serverUrl: serverUrl.replace(/\/+$/, "") });
+  await storageSet({ serverUrl: serverUrl.replace(/\/+$/, "") });
 }
 
 export async function setFallbackServerUrl(url: string): Promise<void> {
-  await chrome.storage.local.set({ fallbackServerUrl: url.replace(/\/+$/, "") });
+  await storageSet({ fallbackServerUrl: url.replace(/\/+$/, "") });
 }
 
 export async function setContext(origin: string, template: string): Promise<void> {
@@ -170,7 +201,7 @@ export async function setContext(origin: string, template: string): Promise<void
   const map = contexts ?? {};
   if (template.trim()) map[origin] = template;
   else delete map[origin];
-  await chrome.storage.local.set({ contexts: map });
+  await storageSet({ contexts: map });
 }
 
 export async function setAuth(origin: string, probe: string): Promise<void> {
@@ -178,7 +209,7 @@ export async function setAuth(origin: string, probe: string): Promise<void> {
   const map = auths ?? {};
   if (probe.trim()) map[origin] = probe;
   else delete map[origin];
-  await chrome.storage.local.set({ auths: map });
+  await storageSet({ auths: map });
 }
 
 // ---- Auth probe ----
@@ -278,15 +309,15 @@ export interface AuthCacheEntry {
 }
 
 export async function getAuthCache(origin: string): Promise<AuthCacheEntry | null> {
-  const s = await chrome.storage.local.get(["authCache"]);
+  const s = await storageGet(["authCache"]);
   const map = (s.authCache as Record<string, AuthCacheEntry>) || {};
   return map[origin] ?? null;
 }
 
 export async function setAuthCache(origin: string, entry: AuthCacheEntry | null): Promise<void> {
-  const s = await chrome.storage.local.get(["authCache"]);
+  const s = await storageGet(["authCache"]);
   const map = (s.authCache as Record<string, AuthCacheEntry>) || {};
   if (entry) map[origin] = entry;
   else delete map[origin];
-  await chrome.storage.local.set({ authCache: map });
+  await storageSet({ authCache: map });
 }
