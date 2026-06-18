@@ -4895,25 +4895,6 @@ function App() {
         if (canDeleteRef.current) void deleteSelectionRef.current();
         return;
       }
-      // On the Home dashboard, Backspace kills the focused card's session — the
-      // keyboard mirror of its ✕ button. Rather than dump you out, it advances to
-      // the card that slides into the gap (the next in display order, or the
-      // previous one if we killed the last card) and, if the chat sheet was open,
-      // swaps it to that card instead of closing — so you can keep clearing through
-      // the grid. Focus is on the grid here, not the composer; typing in the reply
-      // box was already filtered out above.
-      if (e.key === "Backspace" && tab === "home" && keyCtx.current.homeSel) {
-        e.preventDefault();
-        const sel = keyCtx.current.homeSel;
-        const list = keyCtx.current.homeNav;
-        const idx = list.indexOf(sel);
-        const next = idx >= 0 ? (list[idx + 1] ?? list[idx - 1] ?? null) : null;
-        setHomeSel(next);
-        if (keyCtx.current.homeChatOpen) setHomeChat(next);
-        if (next) document.getElementById(`row-tmux-${next}`)?.scrollIntoView({ block: "nearest" });
-        void killSession(sel);
-        return;
-      }
       // Leave keys alone while focus is inside the file tree (it has its own nav)
       if (e.composedPath().some((n) => n instanceof HTMLElement && n.classList?.contains("tree"))) {
         return;
@@ -5148,10 +5129,24 @@ function App() {
       // `X` (Shift+X) does the same commit+push, then also tells Claude to deploy.
       if (e.key === "x" || e.key === "X") {
         e.preventDefault();
-        // On the Home dashboard, `x` closes the open card's chat panel (same as
-        // Escape) — there's no commit/kill action mapped to `x` there.
+        // On the Home dashboard, `x` kills the focused card's session — the
+        // keyboard mirror of its ✕ button, matching how the Tmux tab's `x` kills
+        // the selected session. Rather than dump you out, it advances to the card
+        // that slides into the gap (the next in display order, or the previous one
+        // if we killed the last card) and, if the chat sheet was open, swaps it to
+        // that card instead of closing — so you can keep clearing through the
+        // grid. (Esc still closes the chat; `X` has no Home action.)
         if (tab === "home") {
-          if (e.key === "x" && keyCtx.current.homeChatOpen) setHomeChat(null);
+          if (e.key === "x" && keyCtx.current.homeSel) {
+            const sel = keyCtx.current.homeSel;
+            const list = keyCtx.current.homeNav;
+            const idx = list.indexOf(sel);
+            const next = idx >= 0 ? (list[idx + 1] ?? list[idx - 1] ?? null) : null;
+            setHomeSel(next);
+            if (keyCtx.current.homeChatOpen) setHomeChat(next);
+            if (next) document.getElementById(`row-tmux-${next}`)?.scrollIntoView({ block: "nearest" });
+            void killSession(sel);
+          }
           return;
         }
         if (tab === "tmux") {
