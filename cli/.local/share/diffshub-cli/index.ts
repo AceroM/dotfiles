@@ -1165,7 +1165,7 @@ interface TranscriptMsg {
   text: string;
   tool?: string; // tool name for tool_use
   ts?: string; // ISO timestamp
-  path?: string; // file path for Edit/Write/MultiEdit/Read
+  path?: string; // file path for Edit/Write/MultiEdit/Read; sub-agent description for a Task/Agent result
   edits?: { old: string; new: string }[]; // hunks for Edit/Write/MultiEdit diff rendering
   lang?: string; // language id for a Read tool result's code block
   imgRef?: string; // "<lineIdx>:<imgOrdinal>" — locates an image block for /api/tmux/image
@@ -1221,7 +1221,7 @@ function summarizeToolInput(name: string, input: any): string {
     return pick("file_path") || pick("notebook_path");
   if (name === "Grep") return [pick("pattern"), pick("path") && `in ${pick("path")}`].filter(Boolean).join(" ");
   if (name === "Glob") return pick("pattern");
-  if (name === "Task") return pick("description") || pick("subagent_type");
+  if (name === "Task" || name === "Agent") return pick("description") || pick("subagent_type");
   // The whole plan is carried through verbatim — the client renders it as a
   // dedicated plan card (full markdown + approve/keep-planning choices) rather
   // than a one-line tool summary, so it must not be collapsed here.
@@ -1271,7 +1271,7 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
   // Remember each tool_use by id so its matching tool_result (which arrives in a
   // later user message) can be enriched — e.g. a Read result rendered as a code
   // block in the file's language.
-  const toolById = new Map<string, { name: string; path: string }>();
+  const toolById = new Map<string, { name: string; path: string; label?: string }>();
   const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
   // Append-only transcript, so a line's index is stable — image messages carry it
   // (as "<lineIdx>:<imgOrdinal>") so /api/tmux/image can fetch the bytes lazily.
@@ -1348,6 +1348,20 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
                 text: trunc(stripLineNumbers(t) || "(empty file)", 8000),
                 ts,
               });
+            } else if (src?.name === "Task" || src?.name === "Agent") {
+              // A sub-agent's final report — typically a long, important
+              // deliverable (a plan or an investigation summary). Carry it
+              // through at length and tag it with the sub-agent name +
+              // description so the client renders an expandable report block,
+              // never trapping it in a tiny scroll box.
+              msgs.push({
+                role: "tool",
+                kind: "tool_result",
+                tool: src.name,
+                path: src.label || undefined,
+                text: trunc(t || "(tool result)", 16000),
+                ts,
+              });
             } else {
               msgs.push({ role: "tool", kind: "tool_result", text: trunc(t || "(tool result)", 2000), ts });
             }
@@ -1366,7 +1380,18 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
                 : typeof b.input?.notebook_path === "string"
                   ? b.input.notebook_path
                   : "";
-            if (typeof b.id === "string") toolById.set(b.id, { name: b.name, path });
+            if (typeof b.id === "string")
+              toolById.set(b.id, {
+                name: b.name,
+                path,
+                // A sub-agent's description, kept so its result block can be
+                // labelled with what it was asked to do (results come back in a
+                // later message, detached from this tool_use card).
+                label:
+                  b.name === "Task" || b.name === "Agent"
+                    ? summarizeToolInput(b.name, b.input)
+                    : undefined,
+              });
             msgs.push({
               role: "assistant",
               kind: "tool_use",
@@ -2034,15 +2059,42 @@ const page = `<!DOCTYPE html>
   .tool-use .tool-name { color: var(--accent); font-weight: 600; }
   .tool-use .tool-name::before { content: "⚒ "; opacity: .8; }
   .tool-use .tool-arg { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  /* Generic tool output. Long results collapse to a preview with a "show more"
+     toggle that expands the FULL content inline — no inner scrollbar to trap it. */
   .tool-result {
     align-self: flex-start; max-width: 100%;
-    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
   }
   .tool-result pre {
-    margin: 0; padding: 7px 10px; max-height: 9em; overflow: auto;
+    margin: 0; padding: 7px 10px; max-width: 100%;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
     color: var(--text-muted); white-space: pre-wrap; word-break: break-word;
   }
+  .tool-result-toggle, .tool-report-toggle {
+    background: none; border: none; padding: 2px 4px; cursor: pointer;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--accent);
+  }
+  .tool-result-toggle:hover, .tool-report-toggle:hover { text-decoration: underline; }
+
+  /* A sub-agent (Task/Agent) result — a report worth reading at length. Collapsed
+     to a header by default; expands to full markdown inline, never an inner scroll. */
+  .tool-report { align-self: stretch; max-width: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .tool-report-head {
+    align-self: flex-start; max-width: 100%; display: inline-flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    color: var(--text-2); background: var(--bg-muted); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 9px; cursor: pointer; text-align: left;
+  }
+  .tool-report-head:hover { border-color: var(--accent-border); }
+  .tool-report-head .tool-name { color: var(--accent); font-weight: 600; }
+  .tool-report-head .tool-name::before { content: "✳ "; opacity: .8; }
+  .tool-report-head .tool-arg { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tool-report-head .tool-report-meta { color: var(--text-muted); opacity: .75; }
+  .tool-report-body {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); padding: 11px 14px;
+  }
+  .tool-report-body .md { font-size: 13.5px; }
 
   /* Edit/Write/MultiEdit shown as inline diff hunks (diffs library), and Read
      output as a collapsible highlighted code block — same renderers as the
@@ -2453,6 +2505,49 @@ const page = `<!DOCTYPE html>
   .wt-caret { flex-shrink: 0; font-size: 9px; color: var(--accent-faint); transition: transform .12s; }
   .wt-label.collapsed .wt-caret { transform: rotate(-90deg); }
   .wt-label + .group-label { padding-top: 4px; }
+
+  /* Worktree switcher (Changes sidebar) — picks which tree's diffs are shown. */
+  .wt-dropdown { position: relative; padding: 6px 14px 2px; }
+  .wt-trigger {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    padding: 6px 10px; cursor: pointer; text-align: left; font-family: inherit;
+    background: var(--accent-bg); border: 1px solid var(--accent-ring); border-radius: 7px; color: var(--accent);
+  }
+  .wt-trigger:hover { border-color: var(--accent); }
+  .wt-trigger::before { content: "⎇"; opacity: .75; font-size: 12px; flex-shrink: 0; }
+  .wt-trigger-label {
+    font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .wt-trigger .wt-caret { margin-left: 2px; }
+  .wt-menu {
+    position: absolute; top: calc(100% + 4px); left: 14px; right: 14px; z-index: 30;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 10px 34px rgba(0, 0, 0, .16); padding: 4px;
+    display: flex; flex-direction: column; max-height: 60vh; overflow-y: auto;
+  }
+  .wt-item {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer;
+    padding: 6px 9px; background: none; border: none; border-radius: 6px; color: var(--text); font-family: inherit;
+  }
+  .wt-item:hover { background: var(--bg-hover); }
+  .wt-item.on { background: var(--accent-bg); }
+  .wt-item-label {
+    font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+  }
+
+  /* "Which worktree" banner at the top of the diff column. Not sticky — the
+     per-file headers (stickyHeader) own top:0 as you scroll. */
+  .wt-banner {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 16px; margin-bottom: 8px;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .wt-banner::before { content: "⎇"; color: var(--accent); opacity: .8; font-size: 13px; }
+  .wt-banner-name { font-size: 13px; font-weight: 700; color: var(--text); }
+  .wt-banner-count {
+    margin-left: auto; font-size: 11px; font-weight: 600;
+    color: var(--accent-dim); background: var(--accent-bg); border-radius: 999px; padding: 1px 8px;
+  }
   .group-label {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 14px 4px; font-size: 11px; font-weight: 600;

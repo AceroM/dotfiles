@@ -1349,6 +1349,54 @@ const ReadBlock = memo(function ReadBlock({
   );
 });
 
+const TOOL_PREVIEW_LINES = 10;
+// A tool result. A sub-agent (Task/Agent) result is a report worth reading at
+// length, so it renders as collapsible markdown with a header. Other long output
+// collapses to a preview with a "show more" toggle that expands the FULL content
+// inline — neither path traps content in a tiny inner scrollbar.
+const ToolResult = memo(function ToolResult({
+  text,
+  tool,
+  label,
+}: {
+  text: string;
+  tool?: string;
+  label?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const lines = text ? text.split("\n").length : 0;
+  if (tool === "Task" || tool === "Agent") {
+    return (
+      <div className="tool-report">
+        <button className="tool-report-head" onClick={() => setOpen((o) => !o)}>
+          <span className="tool-name">{tool}</span>
+          {label ? <span className="tool-arg">{label}</span> : null}
+          <span className="tool-report-meta">
+            {lines} {lines === 1 ? "line" : "lines"} · {open ? "hide" : "show"}
+          </span>
+        </button>
+        {open ? (
+          <div className="tool-report-body">
+            <Markdown text={text} />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+  const long = lines > TOOL_PREVIEW_LINES;
+  const shown = long && !open ? text.split("\n").slice(0, TOOL_PREVIEW_LINES).join("\n") : text;
+  return (
+    <div className="tool-result">
+      <pre>{shown}</pre>
+      {long ? (
+        <button className="tool-result-toggle" onClick={() => setOpen((o) => !o)}>
+          {open ? "show less" : `show ${lines - TOOL_PREVIEW_LINES} more lines`}
+        </button>
+      ) : null}
+    </div>
+  );
+});
+
 // An image claude read (Read on a png), a screenshot tool's output, or a pasted
 // image — fetched lazily from /api/tmux/image (kept out of the polled transcript
 // payload, then cached hard). Click to open full size in a new tab.
@@ -1442,11 +1490,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
           if (m.kind === "tool_result" && m.tool === "Read")
             return <ReadBlock key={i} path={m.path || ""} lang={m.lang || "text"} code={m.text} />;
           if (m.kind === "tool_result")
-            return (
-              <div key={i} className="tool-result">
-                <pre>{m.text}</pre>
-              </div>
-            );
+            return <ToolResult key={i} text={m.text} tool={m.tool} label={m.path} />;
           return <Markdown key={i} text={m.text} />;
         })}
       </div>
@@ -2381,6 +2425,39 @@ function App() {
   const dirty = (changes ?? []).some(
     (rc) => rc.staged.length || rc.unstaged.length || rc.untracked.length,
   );
+
+  // ---- One worktree at a time (Changes tab) ----
+  // Rendering every worktree's diff at once is a lot to take in (and to parse),
+  // so the Changes tab shows a single worktree and a sidebar dropdown switches
+  // between them. Keyed by the absolute worktree dir (stable + unique).
+  const [selectedWorktree, setSelectedWorktree] = useState<string | null>(null);
+  const [wtMenuOpen, setWtMenuOpen] = useState(false);
+  // Worktrees that actually have pending changes — what the dropdown lists.
+  const dirtyWorktrees = useMemo(
+    () =>
+      (changes ?? [])
+        .map((rc) => ({
+          dir: rc.dir,
+          label: rc.segment || rc.repo || "Working tree",
+          count: rc.staged.length + rc.unstaged.length + rc.untracked.length,
+        }))
+        .filter((w) => w.count > 0),
+    [changes],
+  );
+  // The current pick, falling back to the first dirty worktree when the stored
+  // one is gone (switched dirs, or it went clean on an auto-refresh).
+  const activeWorktreeDir =
+    selectedWorktree && dirtyWorktrees.some((w) => w.dir === selectedWorktree)
+      ? selectedWorktree
+      : (dirtyWorktrees[0]?.dir ?? null);
+  const activeWorktree = dirtyWorktrees.find((w) => w.dir === activeWorktreeDir) ?? null;
+  // Pending-change count for the worktree currently in view — drives the Changes
+  // tab badge and the details footer so both match the banner (not the all-trees
+  // total). 0 when everything's clean, which hides the badge.
+  const selectedChangeCount = activeWorktree?.count ?? 0;
+  // More than one worktree has changes → show the switcher + the "which tree"
+  // banner. A single (or zero) worktree keeps the original, chrome-free view.
+  const multiWorktree = dirtyWorktrees.length > 1;
 
   // ---- Tmux tab: claude sessions + the selected session's transcript ----
   // These are global (not dir-scoped) — they reflect every claude tmux session.
@@ -3936,6 +4013,17 @@ function App() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [dirMenuOpen]);
 
+  // Close the worktree switcher on an outside click.
+  useEffect(() => {
+    if (!wtMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest?.(".wt-dropdown")) setWtMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [wtMenuOpen]);
+
   // Close the mobile Actions menu on an outside click.
   useEffect(() => {
     if (!actionsOpen) return;
@@ -4004,6 +4092,10 @@ function App() {
     if (view.kind === "changes" && changes) {
       const out: Section[] = [];
       for (const rc of changes) {
+        // Only the selected worktree's diffs are built/rendered (others stay in
+        // the dropdown). Clean worktrees add no sections, so this is a no-op for
+        // them and for single-worktree repos.
+        if (activeWorktreeDir && rc.dir !== activeWorktreeDir) continue;
         const idns = rc.segment || rc.repo; // unique per worktree change-source
         if (rc.staged.length) {
           const files = parseSectionFiles(rc.stagedDiff);
@@ -4083,7 +4175,7 @@ function App() {
       ];
     }
     return [];
-  }, [view, diffText, changes, manualPatches, workspace]);
+  }, [view, diffText, changes, manualPatches, workspace, activeWorktreeDir]);
 
   // ---- Highlighted-line action bar (Delete / Open in $EDITOR) ----
   const selFile = useMemo(
@@ -4242,19 +4334,6 @@ function App() {
     });
     // Keep the toggled file's header in view once layout settles
     setTimeout(() => fileEls.current.get(key)?.scrollIntoView({ block: "nearest" }), 50);
-  }, []);
-
-  // ---- Per-worktree collapse (Changes sidebar) ----
-  // Click a worktree header to fold/unfold its staged/unstaged groups. Keyed by
-  // the worktree segment, so the state survives auto-refresh refetches.
-  const [collapsedWorktrees, setCollapsedWorktrees] = useState<Set<string>>(new Set());
-  const toggleWorktree = useCallback((segment: string) => {
-    setCollapsedWorktrees((prev) => {
-      const next = new Set(prev);
-      if (next.has(segment)) next.delete(segment);
-      else next.add(segment);
-      return next;
-    });
   }, []);
 
   // ---- File tree (right sidebar) ----
@@ -5227,6 +5306,8 @@ function App() {
       </button>
     ));
 
+  // The staged/unstaged groups for the worktree currently in view — `sections`
+  // is already filtered to the selected worktree, so this is its groups only.
   const changeGroups: {
     label: string;
     segment: string;
@@ -5236,18 +5317,6 @@ function App() {
   }[] = sections
     .filter((s) => s.label)
     .map((s) => ({ label: s.label!, segment: s.segment ?? "", repo: s.repo, dir: s.dir, files: s.files }));
-
-  // Group the staged/unstaged groups under their worktree segment so the
-  // sidebar shows each worktree (when there's more than one) with its files.
-  const worktreeSegments: { segment: string; groups: typeof changeGroups }[] = [];
-  for (const g of changeGroups) {
-    let seg = worktreeSegments.find((w) => w.segment === g.segment);
-    if (!seg) {
-      seg = { segment: g.segment, groups: [] };
-      worktreeSegments.push(seg);
-    }
-    seg.groups.push(g);
-  }
 
   // The directory currently in view, and the launch cwd's id (can't be removed).
   const defaultDirId = dirsQuery.data?.defaultDirId ?? meta?.defaultDirId ?? null;
@@ -5281,9 +5350,9 @@ function App() {
   }
   if (tab === "changes" && view.kind === "changes") {
     actionItems.push(
-      { label: "Stage all", icon: <Plus />, onClick: () => runGit("stage"), disabled: busyPath !== null },
-      { label: "Unstage all", icon: <Minus />, onClick: () => runGit("unstage"), disabled: busyPath !== null },
-      { label: "Stash all", icon: <Archive />, onClick: () => runGit("stash"), disabled: busyPath !== null },
+      { label: "Stage all", icon: <Plus />, onClick: () => runGit("stage", undefined, undefined, activeWorktreeDir ?? undefined), disabled: busyPath !== null },
+      { label: "Unstage all", icon: <Minus />, onClick: () => runGit("unstage", undefined, undefined, activeWorktreeDir ?? undefined), disabled: busyPath !== null },
+      { label: "Stash all", icon: <Archive />, onClick: () => runGit("stash", undefined, undefined, activeWorktreeDir ?? undefined), disabled: busyPath !== null },
       { label: "Commit with Claude", icon: <Bot />, onClick: () => void commitWithClaude(), disabled: !dirty },
       { label: "Commit & deploy with Claude", icon: <Bot />, onClick: () => void commitWithClaude(true), disabled: !dirty },
       { label: "Commit & push…", icon: <GitCommitHorizontal />, onClick: () => setCommitOpen(true) },
@@ -5906,7 +5975,7 @@ function App() {
               onClick={() => selectTab("changes")}
             >
               <FileDiffIcon />
-              {!!changeCount && <span className="tab-badge">{changeCount}</span>}
+              {!!selectedChangeCount && <span className="tab-badge">{selectedChangeCount}</span>}
             </button>
             <button
               className={tab === "commits" ? "on" : ""}
@@ -6078,14 +6147,56 @@ function App() {
               </button>
               <span className="switch-state">{autoRefresh ? "On" : "Off"}</span>
             </div>
+            {/* Worktree switcher — only when more than one worktree has changes.
+                Picks which tree's diffs the center column shows; the bulk actions
+                below scope to it too. */}
+            {multiWorktree && (
+              <div className="wt-dropdown">
+                <button
+                  className="wt-trigger"
+                  title="Switch worktree"
+                  onClick={() => setWtMenuOpen((o) => !o)}
+                >
+                  <span className="wt-trigger-label">{activeWorktree?.label ?? "Worktree"}</span>
+                  <span className="wt-count">{activeWorktree?.count ?? 0}</span>
+                  <span className="wt-caret">▾</span>
+                </button>
+                {wtMenuOpen && (
+                  <div className="wt-menu">
+                    {dirtyWorktrees.map((w) => (
+                      <button
+                        key={w.dir}
+                        className={`wt-item${w.dir === activeWorktreeDir ? " on" : ""}`}
+                        onClick={() => {
+                          setSelectedWorktree(w.dir);
+                          setWtMenuOpen(false);
+                        }}
+                      >
+                        <span className="wt-item-label">{w.label}</span>
+                        <span className="wt-count">{w.count}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="bulk-actions">
-              <button disabled={busyPath !== null} onClick={() => runGit("stage")}>
+              <button
+                disabled={busyPath !== null}
+                onClick={() => runGit("stage", undefined, undefined, activeWorktreeDir ?? undefined)}
+              >
                 Stage all
               </button>
-              <button disabled={busyPath !== null} onClick={() => runGit("unstage")}>
+              <button
+                disabled={busyPath !== null}
+                onClick={() => runGit("unstage", undefined, undefined, activeWorktreeDir ?? undefined)}
+              >
                 Unstage all
               </button>
-              <button disabled={busyPath !== null} onClick={() => runGit("stash")}>
+              <button
+                disabled={busyPath !== null}
+                onClick={() => runGit("stash", undefined, undefined, activeWorktreeDir ?? undefined)}
+              >
                 Stash all
               </button>
             </div>
@@ -6093,59 +6204,36 @@ function App() {
             {changes !== null && changeCount === 0 && (
               <div className="side-note">Working tree clean ✨</div>
             )}
-            {worktreeSegments.map((seg) => {
-              // Only worktrees with a segment header collapse; a single working
-              // tree (segment "") has no header and always shows its groups.
-              const collapsed = !!seg.segment && collapsedWorktrees.has(seg.segment);
-              const wtFiles = seg.groups.reduce((n, g) => n + g.files.length, 0);
-              return (
-                <div key={seg.segment || "_"}>
-                  {seg.segment && (
+            {changeGroups.map((group) => (
+              <div key={group.label}>
+                <div className="group-label">
+                  <span>
+                    {group.label} ({group.files.length})
+                  </span>
+                  {group.label === "Unstaged" && (
                     <button
-                      className={`wt-label${collapsed ? " collapsed" : ""}`}
-                      title={collapsed ? "Expand worktree" : "Collapse worktree"}
-                      aria-expanded={!collapsed}
-                      onClick={() => toggleWorktree(seg.segment)}
+                      className="group-act"
+                      title="git add -A"
+                      disabled={busyPath !== null}
+                      onClick={() => runGit("stage", undefined, undefined, group.dir)}
                     >
-                      <span className="wt-name">{seg.segment}</span>
-                      <span className="wt-count">{wtFiles}</span>
-                      <span className="wt-caret">▾</span>
+                      stage all
                     </button>
                   )}
-                  {!collapsed &&
-                    seg.groups.map((group) => (
-                      <div key={group.label}>
-                        <div className="group-label">
-                          <span>
-                            {group.label} ({group.files.length})
-                          </span>
-                          {group.label === "Unstaged" && (
-                            <button
-                              className="group-act"
-                              title="git add -A"
-                              disabled={busyPath !== null}
-                              onClick={() => runGit("stage", undefined, undefined, group.dir)}
-                            >
-                              stage all
-                            </button>
-                          )}
-                        </div>
-                        {group.files.map((f) => (
-                          <div key={f.key} className="change-row" onClick={() => scrollToKey(f.key)}>
-                            <code className={`st st-${f.untracked ? "untracked" : (f.fileDiff && STATUS_FOR_CHANGE[f.fileDiff.type]) || "modified"}`}>
-                              {f.untracked ? "?" : f.fileDiff?.type === "new" ? "A" : f.fileDiff?.type === "deleted" ? "D" : f.fileDiff?.type.startsWith("rename") ? "R" : "M"}
-                            </code>
-                            <span className="change-path" title={f.path}>
-                              {f.path}
-                            </span>
-                            <span className="change-acts">{actionButtons(f)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
                 </div>
-              );
-            })}
+                {group.files.map((f) => (
+                  <div key={f.key} className="change-row" onClick={() => scrollToKey(f.key)}>
+                    <code className={`st st-${f.untracked ? "untracked" : (f.fileDiff && STATUS_FOR_CHANGE[f.fileDiff.type]) || "modified"}`}>
+                      {f.untracked ? "?" : f.fileDiff?.type === "new" ? "A" : f.fileDiff?.type === "deleted" ? "D" : f.fileDiff?.type.startsWith("rename") ? "R" : "M"}
+                    </code>
+                    <span className="change-path" title={f.path}>
+                      {f.path}
+                    </span>
+                    <span className="change-acts">{actionButtons(f)}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         )}
 
@@ -6516,6 +6604,18 @@ function App() {
           diffQuery.isSuccess &&
           sections.every((s) => !s.files.length) && <div className="empty">No file changes</div>}
 
+        {/* Which worktree these diffs belong to — sticky at the top of the column
+            so it's clear even after scrolling. Only when more than one worktree
+            has changes (the dropdown switches between them). */}
+        {view.kind === "changes" && multiWorktree && activeWorktree && (
+          <div className="wt-banner">
+            <span className="wt-banner-name">{activeWorktree.label}</span>
+            <span className="wt-banner-count">
+              {activeWorktree.count} {activeWorktree.count === 1 ? "file" : "files"}
+            </span>
+          </div>
+        )}
+
         {sections.map((section) => (
           <div key={section.label ?? "main"}>
             {section.label && <h3 className="section-label">{section.label}</h3>}
@@ -6667,7 +6767,7 @@ function App() {
             <>
               <h2>Pending changes</h2>
               <div className="meta-line">
-                <span>{changeCount ?? 0} files</span>
+                <span>{selectedChangeCount} files</span>
                 {workspace ? (
                   <>
                     <span>·</span>
