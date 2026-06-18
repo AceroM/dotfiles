@@ -4419,6 +4419,23 @@ function App() {
         : manualPatches,
     [manualPatches, q],
   );
+  // A session is "unread" once it's idle (finished its turn — not busy, not
+  // blocked on a prompt) with transcript output newer than you last saw. Drives
+  // the sidebar dots and the "next unread" jump. Waiting rows are excluded: they
+  // carry their own badge and haven't finished.
+  const isUnread = useCallback(
+    (s: TmuxSession) =>
+      !s.busy && !s.waiting && s.mtime > 0 && s.mtime > (seenMtimes[s.sessionId || s.name] ?? 0),
+    [seenMtimes],
+  );
+  // The raw "new output since you last acknowledged it" test, independent of state.
+  // isUnread narrows this to *idle* sessions (the Done bucket); the Home dashboard
+  // also wants it for *waiting* sessions (a Needs-action prompt you haven't looked
+  // at yet), which isUnread excludes — so the mark-read affordance can cover both.
+  const isUnseen = useCallback(
+    (s: TmuxSession) => s.mtime > 0 && s.mtime > (seenMtimes[s.sessionId || s.name] ?? 0),
+    [seenMtimes],
+  );
   const cq = contentFilter.trim().toLowerCase();
   const visibleTmux = useMemo(() => {
     if (!dirScopedTmux) return dirScopedTmux;
@@ -4434,9 +4451,24 @@ function App() {
     // contentVersion is in the deps so a freshly-opened/pruned chat re-filters live.
     if (cq)
       list = list.filter((s) => contentIndex.current.get(s.sessionId || s.name)?.includes(cq));
-    return list;
+    // Group the sidebar list the same way the Home dashboard does: In progress →
+    // Needs action → Done (idle + unread) → Idle. Within each bucket, recency wins;
+    // needs-action floats the prompts you haven't looked at yet. Spread first so we
+    // never mutate the underlying query data in place.
+    const rank = (s: TmuxSession) => (s.busy ? 0 : s.waiting ? 1 : isUnread(s) ? 2 : 3);
+    return [...list].sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      if (ra === 1) {
+        const ua = isUnseen(a) ? 1 : 0;
+        const ub = isUnseen(b) ? 1 : 0;
+        if (ua !== ub) return ub - ua;
+      }
+      return b.mtime - a.mtime;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirScopedTmux, q, cq, contentVersion]);
+  }, [dirScopedTmux, q, cq, contentVersion, isUnread, isUnseen]);
 
   // Step to the previous (-1) / next (+1) session in the visible, dir-scoped list,
   // wrapping around — the same traversal as the ↑/↓ keys, surfaced as the mobile
@@ -4455,23 +4487,6 @@ function App() {
     [visibleTmux, selectTmux],
   );
 
-  // A session is "unread" once it's idle (finished its turn — not busy, not
-  // blocked on a prompt) with transcript output newer than you last saw. Drives
-  // the sidebar dots and the "next unread" jump. Waiting rows are excluded: they
-  // carry their own badge and haven't finished.
-  const isUnread = useCallback(
-    (s: TmuxSession) =>
-      !s.busy && !s.waiting && s.mtime > 0 && s.mtime > (seenMtimes[s.sessionId || s.name] ?? 0),
-    [seenMtimes],
-  );
-  // The raw "new output since you last acknowledged it" test, independent of state.
-  // isUnread narrows this to *idle* sessions (the Done bucket); the Home dashboard
-  // also wants it for *waiting* sessions (a Needs-action prompt you haven't looked
-  // at yet), which isUnread excludes — so the mark-read affordance can cover both.
-  const isUnseen = useCallback(
-    (s: TmuxSession) => s.mtime > 0 && s.mtime > (seenMtimes[s.sessionId || s.name] ?? 0),
-    [seenMtimes],
-  );
   // Is there an unread session to jump to other than the one already open? Gates
   // the "next unread" button's disabled state.
   const hasNextUnread = useMemo(
@@ -4727,6 +4742,7 @@ function App() {
     homeChatOpen: !!homeChat,
     htmlViewOpen: !!htmlView,
     shareOpen,
+    goToLastDir,
   });
   keyCtx.current = {
     tab,
@@ -4754,6 +4770,7 @@ function App() {
     homeChatOpen: !!homeChat,
     htmlViewOpen: !!htmlView,
     shareOpen,
+    goToLastDir,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5263,7 +5280,12 @@ function App() {
     // since ⌥+digit yields a special glyph for e.key on macOS but e.code stays
     // "Digit1"…"Digit9".
     const onDirHotkey = (e: KeyboardEvent) => {
-      if (!e.altKey || !/^Digit[1-9]$/.test(e.code)) return;
+      // ⌥T toggles back to the last directory (the "Go to last directory" button),
+      // falling back to flipping between the first two dirs before you've switched
+      // once. Same capture-phase precedence as ⌥+digit so it wins mid-typing.
+      const lastDir = e.altKey && e.code === "KeyT";
+      if (!lastDir && !/^Digit[1-9]$/.test(e.code)) return;
+      if (!e.altKey) return;
       e.preventDefault();
       e.stopPropagation();
       // Keep focus in the Claude composer when switching dirs mid-prompt so you can
@@ -5272,6 +5294,10 @@ function App() {
       if (!keyCtx.current.claudeOpen) {
         const active = document.activeElement;
         if (active instanceof HTMLElement) active.blur();
+      }
+      if (lastDir) {
+        keyCtx.current.goToLastDir();
+        return;
       }
       const d = keyCtx.current.dirs[Number(e.code.slice(5)) - 1];
       if (d) selectDir(d.id);
@@ -5620,7 +5646,7 @@ function App() {
                   onPick={(e) => handleImageFile(e, insertIntoReply, setReplyImgUploading)}
                 />
                 <IconButton
-                  title="Go to last directory"
+                  title="Go to last directory (⌥T)"
                   disabled={prevDir === undefined && dirs.length < 2}
                   onClick={goToLastDir}
                 >
@@ -5768,8 +5794,8 @@ function App() {
         {tab === "home" && (
           <button
             className="topbar-btn"
-            title="Go to last directory"
-            aria-label="Go to last directory"
+            title="Go to last directory (⌥T)"
+            aria-label="Go to last directory (⌥T)"
             disabled={prevDir === undefined && dirs.length < 2}
             onClick={goToLastDir}
           >

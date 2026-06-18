@@ -3876,7 +3876,7 @@ const server = Bun.serve({
     if (req.method === "GET" && url.pathname === "/api/tmux/transcript") {
       const name = url.searchParams.get("session") ?? "";
       if (!name) return json({ error: "Missing session" }, 400);
-      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "150", 10) || 150, 1), 1000);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "500", 10) || 500, 1), 1000);
       try {
         const SEP = "\x1f";
         const info = (
