@@ -1,14 +1,16 @@
 # Tailscale serve — expose localhost services to your tailnet over HTTPS.
 # Tailnet-only (not public). For public access use `tailscale funnel`.
 #
-# Tailscale only allows HTTPS on ports 443, 8443, 10000, so at most 3 ports
-# can be served at once. One command upserts the full set:
+# serve (unlike funnel, which is limited to 443/8443/10000) can use any HTTPS
+# port, so we map up to 4 local ports onto a fixed set. One command upserts
+# the full set:
 #
 #   ts 5173,4321,3333   serve these local ports, and ONLY these
 #   ts                  show current serve status
 #
 # Ports map in order to the HTTPS ports: 1st -> https:443, 2nd -> https:8443,
-# 3rd -> https:10000. https:443 is the short URL, so put your primary first.
+# 3rd -> https:10000, 4th -> https:9443. https:443 is the short URL (no :port),
+# so put your primary first.
 function ts() {
   if [[ $# -eq 0 ]]; then
     tailscale serve status
@@ -27,12 +29,12 @@ function ts() {
     fi
   done
 
-  if (( ${#ports} > 3 )); then
-    echo "At most 3 ports (Tailscale serves HTTPS only on 443, 8443, 10000)."
+  if (( ${#ports} > 4 )); then
+    echo "At most 4 ports (mapped to HTTPS 443, 8443, 10000, 9443)."
     return 1
   fi
 
-  local -a https_ports=(443 8443 10000)
+  local -a https_ports=(443 8443 10000 9443)
   tailscale serve reset
   local i
   for (( i = 1; i <= ${#ports}; i++ )); do
