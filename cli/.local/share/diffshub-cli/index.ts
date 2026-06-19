@@ -749,6 +749,7 @@ export type PendingOption = {
   checked: boolean; // [x] vs [ ] — meaningful for multi-select only
   cursor: boolean; // the ❯-highlighted row
   freeText: boolean; // claude's appended "Type something" option (answer via reply box)
+  preview?: string; // the option's boxed preview art (see detectBoxLeftCol / enrichSinglePreviews)
 };
 export type PendingPrompt = {
   kind: "multi" | "single" | "confirm";
@@ -766,11 +767,70 @@ const FREE_TEXT_RE = /^(?:type something|type your own|something else|none of th
 const TAB_BAR_RE = /[←→]|[⊟☐☑✓▢]\s+\S+\s+[⊟☐☑✓▢]/u;
 const CONFIRM_RE = /ready to submit your answers|submit your answers\?/iu;
 
+// When an AskUserQuestion option carries a `preview`, claude paints that art in a
+// box to the RIGHT of the option list — but only for the *focused* option, and a
+// single capture interleaves the box columns with the option columns. We detect the
+// box, slice it off so labels parse clean (instead of smearing the art across every
+// label/description), and hand the art back as the focused option's preview.
+const BOX_TOP_RE = /[┌╭][─━]{2,}/u; // a boxed top border: a corner immediately followed by a rule
+const BOX_BORDER_CH = /[│┃┌┐└┘├┤┬┴┼╭╮╰╯─━]/u;
+// The preview box sits well to the right of the options; ignore any corner closer
+// than this so claude's full-width prompt rules (col 0, no corner) and short labels
+// can't be mistaken for it.
+const MIN_BOX_COL = 12;
+
+// Column where the preview box's left edge starts, or null if there's no box. Keyed
+// on the top border (┌/╭ immediately followed by a ─ run) so the diagram's own inner
+// tree glyphs (┌ pass / └ fail — followed by text, not a rule) can't trigger a split.
+function detectBoxLeftCol(lines: string[]): number | null {
+  let best: number | null = null;
+  for (const l of lines) {
+    const idx = l.search(/[┌╭]/u);
+    if (idx < MIN_BOX_COL) continue;
+    if (!BOX_TOP_RE.test(l.slice(idx))) continue;
+    if (best == null || idx < best) best = idx;
+  }
+  return best;
+}
+
+// True if column `bx` of `l` holds a box border char — i.e. this row is part of the
+// preview box (vs. a full-width question line that merely runs past `bx`).
+function isBoxRow(l: string, bx: number): boolean {
+  return bx < l.length && BOX_BORDER_CH.test(l[bx]);
+}
+
+// Pull the boxed preview (columns at/after `bx`, box rows only) out as plain text:
+// drop the frame borders and the now-empty border rows, then dedent by the common
+// indent so the diagram keeps its relative alignment.
+function extractPreviewAt(lines: string[], bx: number): string {
+  const segs = lines.map((l) => {
+    if (!isBoxRow(l, bx)) return "";
+    let seg = l.slice(bx);
+    seg = seg.replace(/^[│┃┌└├╭╰]/u, ""); // drop the left border char
+    seg = seg.replace(/[\s│┃┌┐└┘├┤┬┴┼╭╮╰╯─━]+$/u, ""); // drop trailing border + ws (kills border-only rows)
+    return seg.replace(/\s+$/u, "");
+  });
+  while (segs.length && !segs[0].trim()) segs.shift();
+  while (segs.length && !segs[segs.length - 1].trim()) segs.pop();
+  if (!segs.length) return "";
+  const indent = Math.min(...segs.filter((s) => s.trim()).map((s) => (s.match(/^ */u)?.[0].length ?? 0)));
+  return segs
+    .map((s) => s.slice(indent))
+    .join("\n")
+    .replace(/\n{3,}/gu, "\n\n");
+}
+
 function parsePendingPrompt(pane: string | null): PendingPrompt | null {
   if (!pane) return null;
   // Strip any box-drawing side borders so the option regex anchors cleanly.
   const lines = pane.split("\n").map((l) => l.replace(/^\s*[│┃]\s?/u, "").replace(/\s*[│┃]\s*$/u, ""));
   const multiQuestion = lines.some((l) => TAB_BAR_RE.test(l));
+
+  // Split a side preview box off the option columns (only on the box's own rows, so
+  // the full-width question above it is left intact), and lift its art separately.
+  const bx = detectBoxLeftCol(lines);
+  const optLines = bx == null ? lines : lines.map((l) => (isBoxRow(l, bx) ? l.slice(0, bx) : l));
+  const focusedPreview = bx == null ? "" : extractPreviewAt(lines, bx);
 
   type Row = { opt: PendingOption; hasBox: boolean; descLines: string[] };
   const rows: Row[] = [];
@@ -778,7 +838,7 @@ function parsePendingPrompt(pane: string | null): PendingPrompt | null {
   let expecting = 1;
   let last: Row | null = null;
 
-  for (const line of lines) {
+  for (const line of optLines) {
     const m = OPT_RE.exec(line);
     // Accept only sequential indices (1,2,3,…) so a number inside a description
     // ("the existing isUnread state") can't masquerade as a new option.
@@ -801,8 +861,15 @@ function parsePendingPrompt(pane: string | null): PendingPrompt | null {
     }
     const t = line.trim();
     if (last) {
-      // Continuation: a dim description line or the bare "Submit" affordance.
-      if (t && !/^submit$/iu.test(t)) last.descLines.push(t);
+      // Continuation: a dim description line. Skip the chrome that trails the option
+      // list (the "Submit" affordance, a horizontal rule, the notes hint, the nav
+      // footer) so it doesn't get glued onto the last option's description.
+      const chrome =
+        /^submit$/iu.test(t) ||
+        /^[─━]{3,}$/u.test(t) ||
+        /press .* to add notes|^notes:/iu.test(t) ||
+        PROMPT_FOOTER.test(t);
+      if (t && !chrome) last.descLines.push(t);
     } else if (t) {
       preamble.push(t);
     }
@@ -815,9 +882,14 @@ function parsePendingPrompt(pane: string | null): PendingPrompt | null {
       : null;
   }
   const anyBox = rows.some((r) => r.hasBox);
+  // The captured frame paints only the focused option's preview; attach it there
+  // (enrichSinglePreviews fills the rest by walking the other options).
+  const focusedRow = rows.find((r) => r.opt.cursor) ?? rows[0];
   const options = rows.map((r) => {
     const desc = r.descLines.join(" ").trim();
-    return desc ? { ...r.opt, desc } : r.opt;
+    const opt: PendingOption = desc ? { ...r.opt, desc } : { ...r.opt };
+    if (r === focusedRow && focusedPreview) opt.preview = focusedPreview;
+    return opt;
   });
   return { kind: anyBox ? "multi" : "single", question, options, multiQuestion };
 }
@@ -835,6 +907,91 @@ async function sendKeySeq(name: string, keys: string[]): Promise<void> {
   for (const key of keys) {
     await $`tmux -L default send-keys -t ${`${name}:0.0`} ${key}`.quiet();
     await Bun.sleep(KEY_SETTLE_MS);
+  }
+}
+
+// ---- Per-option preview capture ----
+// A single pane capture paints only the *focused* option's preview box. To show
+// every option's art in the web UI we briefly drive the TUI — focus each option in
+// turn (Up/Down only; never a digit, which would submit) and capture its preview,
+// then restore the original focus. This perturbs the user's live terminal, so we run
+// it at most once per distinct prompt and cache the result; later polls reuse the
+// cache and never touch the pane. Keyed by session, invalidated when the prompt's
+// question/labels change (a new question of a multi-question ask, or a new prompt).
+type PreviewCache = { sig: string; previews: Map<number, string> };
+const previewCacheBySession = new Map<string, PreviewCache>();
+const enrichingSessions = new Set<string>();
+
+function promptSignature(p: PendingPrompt): string {
+  return `${p.question} ${p.options.map((o) => o.label).join(" ")}`;
+}
+
+// Step the TUI cursor onto `target` (1-based option index) by reading the live cursor
+// and pressing Up/Down toward it — robust to list wrapping and interleaved non-answer
+// rows. Returns the parsed prompt once focused, or null if it can't land.
+async function focusOption(name: string, target: number, maxSteps: number): Promise<PendingPrompt | null> {
+  for (let step = 0; step < maxSteps; step++) {
+    const p = parsePendingPrompt(await capturePendingPrompt(name));
+    if (!p) return null;
+    const cur = p.options.find((o) => o.cursor)?.index;
+    if (cur == null) return null;
+    if (cur === target) return p;
+    await sendKeySeq(name, [cur < target ? "Down" : "Up"]);
+    await Bun.sleep(VERIFY_SETTLE_MS);
+  }
+  return null;
+}
+
+// Walk every real (non-free-text) option, capturing each one's preview box, then
+// return focus to where it started. Returns index → preview-text.
+async function captureAllPreviews(name: string, prompt: PendingPrompt): Promise<Map<number, string>> {
+  const real = prompt.options.filter((o) => !o.freeText);
+  const startFocus = prompt.options.find((o) => o.cursor)?.index ?? real[0]?.index ?? 1;
+  const maxSteps = prompt.options.length * 2 + 4;
+  const out = new Map<number, string>();
+  for (const o of real) {
+    const focused = await focusOption(name, o.index, maxSteps);
+    if (!focused) continue;
+    await Bun.sleep(VERIFY_SETTLE_MS); // let the preview pane repaint for the new focus
+    const reread = parsePendingPrompt(await capturePendingPrompt(name));
+    const cur = reread?.options.find((x) => x.cursor);
+    if (cur?.preview) out.set(o.index, cur.preview);
+  }
+  await focusOption(name, startFocus, maxSteps); // leave the pane as we found it
+  return out;
+}
+
+function applyPreviews(prompt: PendingPrompt, previews: Map<number, string>): PendingPrompt {
+  if (!previews.size) return prompt;
+  return {
+    ...prompt,
+    options: prompt.options.map((o) => (previews.has(o.index) ? { ...o, preview: previews.get(o.index) } : o)),
+  };
+}
+
+// Fill in every option's preview for a single-select prompt that has preview art,
+// via the once-per-prompt cache. No-ops (returns the prompt unchanged) for prompts
+// without a preview box, while a capture is already in flight, or on any tmux error.
+async function enrichSinglePreviews(name: string, prompt: PendingPrompt): Promise<PendingPrompt> {
+  if (prompt.kind !== "single") return prompt;
+  const sig = promptSignature(prompt);
+  const cached = previewCacheBySession.get(name);
+  if (cached && cached.sig === sig) return applyPreviews(prompt, cached.previews);
+  // Nothing to capture if claude rendered no preview art for this prompt.
+  if (!prompt.options.some((o) => o.preview)) {
+    previewCacheBySession.set(name, { sig, previews: new Map() });
+    return prompt;
+  }
+  if (enrichingSessions.has(name)) return prompt; // a capture is already running; use focused-only for now
+  enrichingSessions.add(name);
+  try {
+    const previews = await captureAllPreviews(name, prompt);
+    previewCacheBySession.set(name, { sig, previews });
+    return applyPreviews(prompt, previews);
+  } catch {
+    return prompt;
+  } finally {
+    enrichingSessions.delete(name);
   }
 }
 
@@ -1264,7 +1421,7 @@ function blockText(content: unknown): string {
 // Parse a claude .jsonl transcript into a readable conversation, keeping only the
 // last `limit` messages (the "latest part" the Tmux tab shows). Text is truncated
 // so a multi-MB transcript stays a small payload.
-function parseTranscript(text: string, limit: number): { messages: TranscriptMsg[]; model: string; title: string } {
+function parseTranscript(text: string, limit: number): { messages: TranscriptMsg[]; model: string; title: string; total: number } {
   const msgs: TranscriptMsg[] = [];
   let model = "";
   let title = "";
@@ -1416,7 +1573,9 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
       }
     }
   }
-  return { messages: msgs.slice(-limit), model, title };
+  // `total` is the full message count so the client can tell when older history
+  // is still on disk above the returned window (drives the scroll-up paging).
+  return { messages: msgs.slice(-limit), model, title, total: msgs.length };
 }
 
 interface CommitSummary {
@@ -2276,6 +2435,34 @@ const page = `<!DOCTYPE html>
   .pending-raw > summary:hover { color: var(--text-2); }
   .pending-raw[open] > summary { border-bottom: 1px solid var(--border); }
   .pending-raw .pending-pane-body { border-top: none; }
+
+  /* Single-select pending prompt: radio list on the left, the selected option's
+     preview art in a monospace pane on the right, explicit Submit at the bottom. */
+  .pending-split { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; }
+  .pending-split.no-preview { display: block; }
+  .pending-split > .q-radios { flex: 1 1 240px; min-width: 220px; }
+  .q-radio.on { border-color: var(--accent); background: var(--accent-bg-hover); }
+  .q-radio-dot {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; margin-top: 1px; border-radius: 50%;
+    border: 1.5px solid var(--accent-border); background: var(--accent-card);
+    color: var(--accent); font-size: 9px; line-height: 1;
+  }
+  .q-radio.on .q-radio-dot { border-color: var(--accent); }
+  .pending-preview {
+    flex: 2 1 320px; min-width: 240px; display: flex; flex-direction: column;
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-soft);
+  }
+  .pending-preview-head {
+    padding: 6px 12px; font-size: 11px; font-weight: 650; color: var(--text-hint);
+    border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pending-preview-body {
+    margin: 0; padding: 10px 12px; overflow: auto; max-height: 24em; flex: 1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.5;
+    color: var(--text-md); white-space: pre;
+  }
+  .pending-preview-empty { padding: 14px 12px; font-size: 12px; color: var(--text-hint); }
 
   /* "Claude is working" typing indicator */
   .typing { display: inline-flex; gap: 4px; padding: 6px 2px; }
@@ -3891,14 +4078,17 @@ const server = Bun.serve({
         const pendingPane = busy ? null : await capturePendingPrompt(name);
         // Parse the raw pane into renderable controls; pendingPane stays as the
         // always-correct fallback the client can drop back to ("show raw pane").
-        const pendingPrompt = parsePendingPrompt(pendingPane);
+        // For a single-select with option previews, fill in every option's art (the
+        // capture only has the focused one) — once per prompt, cached thereafter.
+        const parsedPrompt = parsePendingPrompt(pendingPane);
+        const pendingPrompt = parsedPrompt ? await enrichSinglePreviews(name, parsedPrompt) : parsedPrompt;
         const path = await resolveTranscript(cwd ?? "", sid ?? "", task);
         if (!path || !existsSync(path)) {
-          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "", pendingPane, pendingPrompt });
+          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "", total: 0, pendingPane, pendingPrompt });
         }
         const text = await Bun.file(path).text();
-        const { messages, model, title } = parseTranscript(text, limit);
-        return json({ session: name, cwd, sessionId: sid, path, messages, model, title, pendingPane, pendingPrompt });
+        const { messages, model, title, total } = parseTranscript(text, limit);
+        return json({ session: name, cwd, sessionId: sid, path, messages, model, title, total, pendingPane, pendingPrompt });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
