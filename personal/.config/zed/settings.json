@@ -52,13 +52,13 @@
       "formatter": [{ "language_server": { "name": "oxfmt" } }],
     },
     "TSX": {
-      "language_servers": ["...", "oxfmt"],
+      "language_servers": ["...", "!eslint", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }],
     },
     "JavaScript": {
-      "language_servers": ["...", "oxfmt"],
+      "language_servers": ["...", "!eslint", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }],
