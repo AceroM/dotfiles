@@ -1059,6 +1059,19 @@ async function newClaudeSession(dir: string, prompt: string): Promise<string> {
   return name;
 }
 
+// Resume a closed claude session by id, mirroring newClaudeSession: a detached
+// tmux session running `claude --resume <sid>` in the directory, re-stamped with
+// @claude_session so the Tmux tab maps it straight back to its transcript. We omit
+// --fork-session, so claude reuses the same session id and appends to the existing
+// <sid>.jsonl rather than starting a fresh transcript.
+async function resumeClaudeSession(dir: string, sid: string): Promise<string> {
+  const name = await pickClaudeSessionName();
+  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --resume ${sid}`;
+  await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
+  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
+  return name;
+}
+
 // ---- Offline queue ----
 // claude needs to reach the Anthropic API to do anything, so when the machine is
 // offline we enqueue new-session prompts instead of launching dead sessions, then
@@ -1176,6 +1189,34 @@ async function tailAiTitle(path: string): Promise<string> {
   }
 }
 
+// The first human prompt in a transcript — the resume dialog's fallback label for
+// a session claude never titled (it only writes an ai-title after a few turns). We
+// only read the head: the opening user message is always near the top.
+async function headFirstPrompt(path: string): Promise<string> {
+  try {
+    const text = await Bun.file(path).slice(0, 65536).text();
+    for (const line of text.split("\n")) {
+      if (!line.includes('"user"')) continue;
+      let d: any;
+      try {
+        d = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (d?.type !== "user") continue;
+      const c = d?.message?.content;
+      let s = "";
+      if (typeof c === "string") s = c;
+      else if (Array.isArray(c)) s = c.filter((p) => p?.type === "text").map((p) => p.text).join(" ");
+      s = s.replace(/\s+/g, " ").trim();
+      // Skip meta turns (tool results, slash-command/system-reminder wrappers in
+      // <…> tags) that aren't a real first prompt; keep scanning for one that is.
+      if (s && !s.startsWith("<")) return s.slice(0, 140);
+    }
+  } catch {}
+  return "";
+}
+
 // The recent .jsonl transcripts in a cwd's project folder, newest first, each
 // with its ai-title. Capped so a busy folder stays cheap.
 async function dirCandidates(cwd: string): Promise<Candidate[]> {
@@ -1200,6 +1241,52 @@ async function dirCandidates(cwd: string): Promise<Candidate[]> {
     // files are older) need a wide enough net to title-match against.
     .slice(0, 400);
   return Promise.all(recent.map(async (c) => ({ ...c, aiTitle: await tailAiTitle(c.path) })));
+}
+
+interface ResumableSession {
+  sid: string;
+  title: string; // ai-title, falling back to the session's first human prompt
+  mtime: number;
+}
+
+// The closed claude sessions in a cwd's project folder, newest first — every
+// <sid>.jsonl that isn't currently open in a live tmux session — so the resume
+// dialog can relaunch one via `claude --resume <sid>`. Title is the ai-title (read
+// from the tail like the sidebar) or, when claude never wrote one, the first
+// prompt. Capped: a resume picker doesn't need the whole history of a busy folder.
+async function resumableSessions(cwd: string): Promise<ResumableSession[]> {
+  // sids already attached to a running tmux session aren't "old" — skip them.
+  const live = new Set<string>();
+  try {
+    const raw = await $`tmux -L default list-sessions -F ${"#{@claude_session}"}`.quiet().text();
+    for (const s of raw.split("\n")) if (s.trim()) live.add(s.trim());
+  } catch {}
+  const dir = `${claudeProjectsRoot}/${mungeDir(cwd)}`;
+  let files: string[] = [];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    return [];
+  }
+  const recent = files
+    .map((f) => {
+      const sid = f.replace(/\.jsonl$/, "");
+      let mtime = 0;
+      try {
+        mtime = statSync(`${dir}/${f}`).mtimeMs;
+      } catch {}
+      return { sid, path: `${dir}/${f}`, mtime };
+    })
+    .filter((c) => /^[0-9a-fA-F-]{8,}$/.test(c.sid) && !live.has(c.sid))
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, 100);
+  return Promise.all(
+    recent.map(async (c) => ({
+      sid: c.sid,
+      mtime: c.mtime,
+      title: (await tailAiTitle(c.path)) || (await headFirstPrompt(c.path)),
+    })),
+  );
 }
 
 // Tolerant title comparison — terminal titles can be truncated, so accept a
@@ -1878,6 +1965,44 @@ async function runGitAction(action: string, dir: string, path?: string) {
       : $`git stash push -u`.cwd(dir).quiet();
   }
   throw new Error(`Unknown action: ${action}`);
+}
+
+// Make sure `entry` is ignored by the repo at `dir`, appending it to (or
+// creating) the local `.gitignore`. A no-op if it's already listed.
+async function ensureGitignored(dir: string, entry: string) {
+  const gi = `${dir}/.gitignore`;
+  let text = "";
+  try {
+    text = await Bun.file(gi).text();
+  } catch {
+    // no .gitignore yet — we'll create one
+  }
+  const bare = entry.replace(/\/$/, "");
+  const listed = text.split("\n").some((l) => {
+    const t = l.trim();
+    return t === entry || t === bare || t === `/${entry}` || t === `/${bare}`;
+  });
+  if (listed) return;
+  const prefix = text.length && !text.endsWith("\n") ? "\n" : "";
+  await Bun.write(gi, `${text}${prefix}${entry}\n`);
+}
+
+// Snapshot the working tree (staged + unstaged tracked changes vs HEAD) into a
+// local `diffs/<branch>-<stamp>.patch` that `git apply` can replay. Keeps the
+// `diffs/` dir out of version control. Returns the repo-relative file written,
+// or null when there's nothing to save.
+async function savePatch(dir: string): Promise<string | null> {
+  const diff = await $`git diff HEAD`.cwd(dir).nothrow().quiet().text();
+  if (!diff.trim()) return null;
+  await ensureGitignored(dir, "diffs/");
+  const branch =
+    (await $`git symbolic-ref --quiet --short HEAD`.cwd(dir).nothrow().quiet().text()).trim() ||
+    "detached";
+  const safeBranch = branch.replace(/[^A-Za-z0-9._-]+/g, "-") || "patch";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+  const rel = `diffs/${safeBranch}-${stamp}.patch`;
+  await Bun.write(`${dir}/${rel}`, diff);
+  return rel;
 }
 
 // Bundle the React client once at startup and serve it from memory
@@ -3108,6 +3233,20 @@ const page = `<!DOCTYPE html>
   .usage-reset strong { color: var(--text); font-weight: 600; }
   .usage-clock { color: var(--text-faint); }
 
+  /* Resume-session dialog (⇧') — a filterable list of the active directory's past
+     claude transcripts; clicking one relaunches it via claude --resume. */
+  .modal.resume { width: 520px; }
+  .resume-list { display: flex; flex-direction: column; gap: 2px; max-height: 56vh; overflow-y: auto; margin-top: 8px; }
+  .resume-item {
+    display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; cursor: pointer;
+    padding: 7px 9px; background: none; border: none; border-radius: 6px; color: var(--text);
+  }
+  .resume-item:hover { background: var(--bg-hover); }
+  .resume-item.active { background: var(--bg-hover); box-shadow: inset 0 0 0 1px var(--accent-ring); }
+  .resume-item:disabled { cursor: default; }
+  .resume-item .resume-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .resume-item .resume-time { flex-shrink: 0; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
   /* Floating action bar shown when diff lines are highlighted */
   .sel-bar {
     position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
@@ -3858,7 +3997,12 @@ const server = Bun.serve({
         return json({ error: "Invalid JSON" }, 400);
       }
       const action = body.action;
-      if (action !== "stage" && action !== "unstage" && action !== "stash") {
+      if (
+        action !== "stage" &&
+        action !== "unstage" &&
+        action !== "stash" &&
+        action !== "save-patch"
+      ) {
         return json({ error: "Invalid action" }, 400);
       }
       const path = body.path;
@@ -3879,6 +4023,14 @@ const server = Bun.serve({
         dirs = ws.worktreeDirs.size ? [...ws.worktreeDirs] : ws.repos.map((r) => r.dir);
       }
       try {
+        if (action === "save-patch") {
+          const files: string[] = [];
+          for (const dir of dirs) {
+            const rel = await savePatch(dir);
+            if (rel) files.push(rel);
+          }
+          return json({ ok: true, files });
+        }
         for (const dir of dirs) await runGitAction(action, dir, path as string | undefined);
       } catch (e) {
         return json({ error: errText(e) }, 500);
@@ -4093,6 +4245,49 @@ const server = Bun.serve({
       }
       try {
         const session = await newClaudeSession(ws.path, body.prompt);
+        return json({ ok: true, session });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // The closed claude sessions in the active directory available to resume
+    // (powers the resume dialog's list — see resumableSessions).
+    if (req.method === "GET" && url.pathname === "/api/claude/resumable") {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      try {
+        return json({ sessions: await resumableSessions(ws.path), cwd: ws.path });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Resume a closed claude session by id: launch `claude --resume <sid>` in a
+    // fresh detached tmux session in the active directory.
+    if (req.method === "POST" && url.pathname === "/api/claude/resume") {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      let body: { sid?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const sid = typeof body.sid === "string" ? body.sid.trim() : "";
+      if (!/^[0-9a-fA-F-]{8,}$/.test(sid)) return json({ error: "Invalid session id" }, 400);
+      // claude needs the API to do anything; don't spawn a session that can't reach it.
+      if (!(await checkOnline(true))) return json({ error: "You're offline" }, 503);
+      try {
+        const session = await resumeClaudeSession(ws.path, sid);
         return json({ ok: true, session });
       } catch (e) {
         return json({ error: errText(e) }, 500);

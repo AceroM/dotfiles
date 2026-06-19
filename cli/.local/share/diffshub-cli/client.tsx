@@ -54,7 +54,7 @@ import {
   RotateCw,
   Plus,
   Minus,
-  Archive,
+  FileDown,
   Bot,
   Check,
   Trash2,
@@ -297,6 +297,14 @@ interface UsageData {
   five_hour: UsageWindow | null;
   seven_day: UsageWindow | null;
   updated_at: number | null;
+}
+
+// One past claude transcript the resume dialog (⇧') can relaunch via
+// `claude --resume <sid>` — see /api/claude/resumable.
+interface ResumableSession {
+  sid: string;
+  title: string;
+  mtime: number;
 }
 
 // Compact countdown to a future unix-seconds timestamp: "2h 14m", "8m", "<1m",
@@ -2746,6 +2754,15 @@ function App() {
   // rate-limit windows is spent and when each resets (see usageQuery below).
   const [usageOpen, setUsageOpen] = useState(false);
 
+  // Resume-session dialog (`⇧'`) — a filterable list of the active directory's
+  // past claude transcripts; picking one relaunches it as `claude --resume <sid>`
+  // in a fresh tmux session (see resumableQuery + submitResume). `resuming` holds
+  // the sid currently being launched ("" = idle) so the row can show progress.
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [resumeFilter, setResumeFilter] = useState("");
+  const [resumeIndex, setResumeIndex] = useState(0);
+  const [resuming, setResuming] = useState("");
+
   // Reply composer (Tmux tab) — types a reply into the selected session's pane.
   const [replyText, setReplyText] = useState("");
   const [replySending, setReplySending] = useState(false);
@@ -2835,6 +2852,35 @@ function App() {
     staleTime: 5_000,
     refetchOnWindowFocus: true,
   });
+
+  // ---- Resume a past Claude session (⇧') ----
+  // The closed transcripts in the active directory, fetched only while the dialog
+  // is open. Re-keyed by directory so switching dirs reloads the right folder.
+  const resumableQuery = useQuery({
+    queryKey: ["resumable", activeDir],
+    queryFn: ({ signal }) =>
+      fetchJSON<{ sessions: ResumableSession[]; cwd: string }>(qd("/api/claude/resumable"), signal),
+    enabled: resumeOpen,
+    staleTime: 5_000,
+  });
+  const resumeFiltered = useMemo(() => {
+    const all = resumableQuery.data?.sessions ?? [];
+    const q = resumeFilter.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter((s) => s.title.toLowerCase().includes(q) || s.sid.includes(q));
+  }, [resumableQuery.data, resumeFilter]);
+  // Reset the filter + highlight each time the dialog opens.
+  useEffect(() => {
+    if (resumeOpen) {
+      setResumeFilter("");
+      setResumeIndex(0);
+    }
+  }, [resumeOpen]);
+  // Keep the keyboard-highlighted row in view as you arrow through the list.
+  useEffect(() => {
+    if (!resumeOpen) return;
+    document.getElementById(`resume-row-${resumeIndex}`)?.scrollIntoView({ block: "nearest" });
+  }, [resumeIndex, resumeOpen]);
   const claudeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   // A live mirror of `claudeOpen` for callbacks/effects that shouldn't re-subscribe
   // just to read it (e.g. the per-dir draft effect restoring focus mid-compose).
@@ -3368,6 +3414,33 @@ function App() {
     [queryClient, qd],
   );
 
+  // Save the current working-tree diff (staged + unstaged vs HEAD) to a local,
+  // git-ignored `diffs/*.patch` file. With no worktree it covers every known
+  // tree. The server returns the files it wrote so we can report where they went.
+  const savePatch = useCallback(
+    async (worktree?: string) => {
+      setBusyPath(worktree ?? "*");
+      try {
+        const res = await fetch(qd("/api/git"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "save-patch", worktree }),
+        });
+        const body = await res.json().catch(() => ({}) as any);
+        if (!res.ok) {
+          alert(`save patch failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+        const files: string[] = body.files ?? [];
+        alert(files.length ? `Saved patch:\n${files.join("\n")}` : "Nothing to save — no changes.");
+      } finally {
+        setBusyPath(null);
+        queryClient.invalidateQueries({ queryKey: ["changes"] });
+      }
+    },
+    [queryClient, qd],
+  );
+
   // Remove a worktree (`git worktree remove --force`, server-side). The dialog
   // gates this and the server refuses the main tree, so by here `dir` is a
   // removable linked tree. Drops the selection if it pointed at the gone tree.
@@ -3615,6 +3688,36 @@ function App() {
       setLaunching(false);
     }
   }, [claudePrompt, qd, queryClient]);
+
+  // Relaunch a closed session: the server starts `claude --resume <sid>` detached
+  // in the active directory. Mirrors submitClaude's refresh dance so the resumed
+  // session pops into the Tmux sidebar without waiting for the next poll.
+  const submitResume = useCallback(
+    async (sid: string) => {
+      if (!sid || resuming) return;
+      setResuming(sid);
+      try {
+        const res = await fetch(qd("/api/claude/resume"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sid }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}) as any);
+          alert(`resume failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+        const body = await res.json().catch(() => ({}) as any);
+        setResumeOpen(false);
+        setLaunchedSession(typeof body.session === "string" ? body.session : null);
+        queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+        setTimeout(() => queryClient.refetchQueries({ queryKey: ["tmux-sessions"] }), 900);
+      } finally {
+        setResuming("");
+      }
+    },
+    [qd, queryClient, resuming],
+  );
 
   // Send a reply into the selected session's claude pane (server pastes the text
   // + Enter), then refresh the transcript + session list once so the new turn and
@@ -4875,6 +4978,7 @@ function App() {
     commitOpen,
     claudeOpen,
     usageOpen,
+    resumeOpen,
     dirsOpen,
     dirMenuOpen,
     fileToken,
@@ -4908,6 +5012,7 @@ function App() {
     commitOpen,
     claudeOpen,
     usageOpen,
+    resumeOpen,
     dirsOpen,
     dirMenuOpen,
     fileToken,
@@ -5318,6 +5423,14 @@ function App() {
         setClaudeOpen(true);
         return;
       }
+      // `⇧'` (") opens the Resume dialog — a filterable list of this directory's
+      // past claude transcripts, each relaunchable as `claude --resume`. Paired
+      // with `'` (new session): same key, shifted to "reopen an old one".
+      if (e.key === '"') {
+        e.preventDefault();
+        setResumeOpen(true);
+        return;
+      }
       // `x` kills the selected session on the Tmux tab; otherwise it stages
       // everything and launches a claude session to author the commit message and
       // push (Changes view only, and only when there's something to commit).
@@ -5459,7 +5572,7 @@ function App() {
         setWtMenuOpen(false);
         return;
       }
-      if (!(k.restartOpen || k.killAllOpen || k.commitOpen || k.claudeOpen || k.usageOpen || k.dirsOpen || k.dirMenuOpen))
+      if (!(k.restartOpen || k.killAllOpen || k.commitOpen || k.claudeOpen || k.usageOpen || k.resumeOpen || k.dirsOpen || k.dirMenuOpen))
         return;
       // In the Claude composer a live @-mention should be cancelled first; its
       // textarea's own Esc handler does that, so defer to it. A second Esc (no
@@ -5472,6 +5585,7 @@ function App() {
       setCommitOpen(false);
       setClaudeOpen(false);
       setUsageOpen(false);
+      setResumeOpen(false);
       setDirsOpen(false);
       setDirMenuOpen(false);
     };
@@ -5582,7 +5696,7 @@ function App() {
     actionItems.push(
       { label: "Stage all", icon: <Plus />, onClick: () => runGit("stage", undefined, undefined, activeWorktreeDir ?? undefined), disabled: busyPath !== null },
       { label: "Unstage all", icon: <Minus />, onClick: () => runGit("unstage", undefined, undefined, activeWorktreeDir ?? undefined), disabled: busyPath !== null },
-      { label: "Stash all", icon: <Archive />, onClick: () => runGit("stash", undefined, undefined, activeWorktreeDir ?? undefined), disabled: busyPath !== null },
+      { label: "Save Patch", icon: <FileDown />, onClick: () => void savePatch(activeWorktreeDir ?? undefined), disabled: busyPath !== null },
       { label: "Commit with Claude", icon: <Bot />, onClick: () => void commitWithClaude(), disabled: !dirty },
       { label: "Commit & deploy with Claude", icon: <Bot />, onClick: () => void commitWithClaude(true), disabled: !dirty },
       { label: "Commit & push…", icon: <GitCommitHorizontal />, onClick: () => setCommitOpen(true) },
@@ -6471,9 +6585,9 @@ function App() {
               </button>
               <button
                 disabled={busyPath !== null}
-                onClick={() => runGit("stash", undefined, undefined, activeWorktreeDir ?? undefined)}
+                onClick={() => void savePatch(activeWorktreeDir ?? undefined)}
               >
-                Stash all
+                Save Patch
               </button>
             </div>
             {changes === null && <SkeletonList />}
@@ -7521,6 +7635,90 @@ function App() {
               ) : null}
               <span>
                 <kbd>esc</kbd> close
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resumeOpen && (
+        <div className="modal-overlay" onClick={() => !resuming && setResumeOpen(false)}>
+          <div className="modal resume" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              Resume a Claude session
+              {meta?.repo ? <span className="modal-repos"> · {meta.repo}</span> : ""}
+            </h3>
+            <input
+              autoFocus
+              className="dir-search"
+              placeholder="Filter past sessions…"
+              value={resumeFilter}
+              onChange={(e) => {
+                setResumeFilter(e.target.value);
+                setResumeIndex(0);
+              }}
+              onKeyDown={(e) => {
+                // Keep keystrokes out of the global shortcut handler; drive the list
+                // from here so ↑/↓ pick and ↵ resumes the highlighted row.
+                e.stopPropagation();
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setResumeIndex((i) => Math.min(i + 1, resumeFiltered.length - 1));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setResumeIndex((i) => Math.max(i - 1, 0));
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  const s = resumeFiltered[resumeIndex];
+                  if (s) void submitResume(s.sid);
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setResumeOpen(false);
+                }
+              }}
+            />
+            <div className="resume-list">
+              {resumableQuery.isLoading && !resumableQuery.data ? (
+                <div className="usage-note">Loading…</div>
+              ) : resumableQuery.isError ? (
+                <div className="usage-note error">{errMessage(resumableQuery.error)}</div>
+              ) : !resumeFiltered.length ? (
+                <div className="usage-note">
+                  {resumeFilter.trim()
+                    ? "No matching sessions."
+                    : "No past Claude sessions in this directory."}
+                </div>
+              ) : (
+                resumeFiltered.map((s, i) => (
+                  <button
+                    key={s.sid}
+                    id={`resume-row-${i}`}
+                    className={`resume-item${i === resumeIndex ? " active" : ""}`}
+                    disabled={!!resuming}
+                    title={s.sid}
+                    onMouseEnter={() => setResumeIndex(i)}
+                    onClick={() => void submitResume(s.sid)}
+                  >
+                    <span className="resume-title">{s.title || "(untitled session)"}</span>
+                    <span className="resume-time">
+                      {resuming === s.sid ? "Resuming…" : timeAgo(s.mtime)}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="modal-hint">
+              <span>
+                <kbd>↑/↓</kbd> pick
+              </span>
+              <span>
+                <kbd>↵</kbd> resume
+              </span>
+              <span>
+                <kbd>esc</kbd> close
+              </span>
+              <span>
+                runs <code>claude --resume</code> in a new tmux session
               </span>
             </div>
           </div>
