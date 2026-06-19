@@ -1708,6 +1708,9 @@ interface RepoChanges {
   // Absolute worktree directory — echoed back by the client to route git/open/
   // delete/commit actions to the right working tree (validated server-side).
   dir: string;
+  // The repo's main working tree (git's first `worktree list` entry). Can't be
+  // removed via `git worktree remove`, so the client hides its delete affordance.
+  isMain: boolean;
   staged: { path: string; status: string }[];
   unstaged: { path: string; status: string }[];
   untracked: UntrackedEntry[];
@@ -1775,7 +1778,9 @@ async function getChangesForRepo(ws: Workspace, r: RepoCtx): Promise<RepoChanges
   const worktrees = await listWorktrees(r.dir);
   const multiWt = worktrees.length > 1;
   return Promise.all(
-    worktrees.map(async (wt) => {
+    // `git worktree list` always reports the main working tree first (index 0),
+    // so that entry is the one we won't let the client remove.
+    worktrees.map(async (wt, i) => {
       const status = await statusDir(wt.dir);
       const wtLabel = wt.branch || wt.dir.split("/").pop() || wt.dir;
       const segment =
@@ -1786,7 +1791,7 @@ async function getChangesForRepo(ws: Workspace, r: RepoCtx): Promise<RepoChanges
             : ws.isWorkspace
               ? r.key
               : "";
-      return { repo: r.key, segment, dir: wt.dir, ...status };
+      return { repo: r.key, segment, dir: wt.dir, isMain: i === 0, ...status };
     }),
   );
 }
@@ -1806,6 +1811,20 @@ async function getChanges(ws: Workspace): Promise<RepoChanges[]> {
 function dirForWorktree(ws: Workspace, worktree: unknown, repoKey: unknown): string {
   if (typeof worktree === "string" && ws.worktreeDirs.has(worktree)) return worktree;
   return repoByKey(ws, typeof repoKey === "string" ? repoKey : null)?.dir ?? ws.path;
+}
+
+// Locate which repo owns a worktree dir (re-listing live, so we never trust the
+// client's view of which tree is the removable one). Returns the repo's main dir
+// to run `git -C` from, plus whether `dir` is that repo's main working tree.
+async function repoOfWorktree(
+  ws: Workspace,
+  dir: string,
+): Promise<{ repoDir: string; isMain: boolean } | null> {
+  for (const r of ws.repos) {
+    const wts = await listWorktrees(r.dir);
+    if (wts.some((w) => w.dir === dir)) return { repoDir: r.dir, isMain: wts[0]?.dir === dir };
+  }
+  return null;
 }
 
 // ---- Manual patches (./diffs/*.patch in the directory) ----
@@ -2718,9 +2737,26 @@ const page = `<!DOCTYPE html>
   }
   .wt-item:hover { background: var(--bg-hover); }
   .wt-item.on { background: var(--accent-bg); }
+  /* The select half fills the row; the delete (✕) sits after it. */
+  .wt-item-select {
+    display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+    background: none; border: none; padding: 0; margin: 0;
+    text-align: left; cursor: pointer; color: inherit; font-family: inherit;
+  }
   .wt-item-label {
     font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
   }
+  .wt-item .wt-count { flex-shrink: 0; }
+  /* Per-worktree delete (✕) — dim by default (so it stays tappable on touch,
+     where there's no hover), louder on hover. Never shown for the main tree. */
+  .wt-item-del {
+    flex-shrink: 0; display: grid; place-items: center;
+    width: 18px; height: 18px; padding: 0; border: none; border-radius: 5px;
+    background: none; color: var(--text-muted); cursor: pointer; font-size: 13px; line-height: 1;
+    opacity: .45; transition: opacity .12s, color .12s, background .12s;
+  }
+  .wt-item:hover .wt-item-del, .wt-item-del:focus-visible { opacity: 1; }
+  .wt-item-del:hover { color: var(--red); background: var(--red-bg); opacity: 1; }
 
   /* "Which worktree" banner at the top of the diff column. Not sticky — the
      per-file headers (stickyHeader) own top:0 as you scroll. */
@@ -3847,6 +3883,38 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
+      return json({ ok: true });
+    }
+
+    // Remove a linked worktree (`git worktree remove`). The main working tree is
+    // refused both here and in the UI. `--force` so a tree with pending/untracked
+    // changes still goes — the client confirms (and warns) before calling.
+    if (req.method === "POST" && url.pathname === "/api/worktree/remove") {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      let body: { worktree?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const dir = body.worktree;
+      if (typeof dir !== "string" || !ws.worktreeDirs.has(dir)) {
+        return json({ error: "Unknown worktree" }, 400);
+      }
+      const info = await repoOfWorktree(ws, dir);
+      if (!info) return json({ error: "Worktree not found" }, 404);
+      if (info.isMain) return json({ error: "Can't remove the main worktree" }, 400);
+      try {
+        await $`git -C ${info.repoDir} worktree remove --force ${dir}`.quiet();
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      ws.worktreeDirs.delete(dir);
       return json({ ok: true });
     }
 
