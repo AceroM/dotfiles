@@ -63,6 +63,8 @@ import {
   Gauge,
   Highlighter,
   BellDot,
+  Mail,
+  MailOpen,
   ExternalLink,
   FileCode,
   Share2,
@@ -207,6 +209,9 @@ interface Transcript {
   messages: TranscriptMsg[];
   model: string;
   title: string;
+  // Full message count on disk (the returned `messages` is only the last `limit`).
+  // When total > messages.length there's older history to page in on scroll-up.
+  total?: number;
   // Live capture of a pending interactive prompt (AskUserQuestion / plan /
   // permission) that claude hasn't written to the transcript yet — set only when
   // the session is idle and the pane is showing a selection prompt. Null otherwise.
@@ -226,6 +231,7 @@ interface PendingOption {
   checked: boolean; // [x] vs [ ] — multi-select only
   cursor: boolean; // the ❯-highlighted row
   freeText: boolean; // claude's appended "Type something" option
+  preview?: string; // the option's boxed preview art, shown in the side pane
 }
 interface PendingPrompt {
   kind: "multi" | "single" | "confirm";
@@ -347,6 +353,10 @@ const TMUX_IDLE_POLL_MS = 3000;
 // Cadence for the session list while prompts sit in the offline queue, so they
 // flip to real sessions promptly once the network is back (no busy-polling).
 const TMUX_QUEUE_POLL_MS = 5000;
+// How many transcript messages the chat fetches up front, and the size of each
+// older-history page loaded when you scroll back up. Keeps the initial payload
+// small while still letting you walk back through a long conversation.
+const CHAT_PAGE = 150;
 
 // ---- Fetch helpers shared by every query ----
 async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -1125,6 +1135,14 @@ const PendingPrompt = memo(function PendingPrompt({
   );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Single-select radio choice — seeded to the focused option, then independent of
+  // the terminal so picking on the web doesn't move the live cursor. The call site
+  // keys this component by question, so it re-seeds per question.
+  const [selected, setSelected] = useState<number | null>(() => {
+    if (prompt?.kind !== "single") return null;
+    const real = prompt.options.filter((o) => !o.freeText);
+    return (real.find((o) => o.cursor) ?? real[0])?.index ?? null;
+  });
 
   const head = (
     <div className="pending-pane-head">
@@ -1183,11 +1201,17 @@ const PendingPrompt = memo(function PendingPrompt({
   }
 
   if (prompt.kind === "single") {
-    const pick = async (i: number) => {
-      if (!onAnswerSingle || busy) return;
+    // A radio list (pick without sending) on the left; the selected option's preview
+    // art in a monospace pane on the right; an explicit Submit at the bottom. Unlike
+    // the old click-to-send, this lets you read each option's ASCII art before
+    // committing — the terminal forces you to arrow between options to see them.
+    const anyPreview = real.some((o) => o.preview);
+    const sel = selected == null ? null : (real.find((o) => o.index === selected) ?? null);
+    const submit = async () => {
+      if (!onAnswerSingle || busy || selected == null) return;
       setBusy(true);
       try {
-        await onAnswerSingle(i);
+        await onAnswerSingle(selected);
       } finally {
         setBusy(false);
       }
@@ -1197,24 +1221,45 @@ const PendingPrompt = memo(function PendingPrompt({
         {head}
         <div className="pending-body">
           {prompt.question ? <div className="q-text">{prompt.question}</div> : null}
-          <div className="q-opts">
-            {real.map((o) => (
-              <button
-                key={o.index}
-                className="q-choice"
-                disabled={!onAnswerSingle || busy}
-                onClick={() => pick(o.index)}
-                title="Send this answer"
-              >
-                <span className="q-choice-n">{o.index}</span>
-                <span className="q-choice-body">
-                  <span className="q-choice-label">{o.label}</span>
-                  {o.desc ? <span className="q-choice-desc">{o.desc}</span> : null}
-                </span>
-              </button>
-            ))}
+          <div className={`pending-split${anyPreview ? "" : " no-preview"}`}>
+            <div className="q-opts q-radios" role="radiogroup">
+              {real.map((o) => {
+                const on = o.index === selected;
+                return (
+                  <button
+                    key={o.index}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    className={`q-choice q-radio${on ? " on" : ""}`}
+                    disabled={busy}
+                    onClick={() => setSelected(o.index)}
+                  >
+                    <span className="q-radio-dot">{on ? "●" : ""}</span>
+                    <span className="q-choice-n">{o.index}</span>
+                    <span className="q-choice-body">
+                      <span className="q-choice-label">{o.label}</span>
+                      {o.desc ? <span className="q-choice-desc">{o.desc}</span> : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {anyPreview ? (
+              <div className="pending-preview">
+                <div className="pending-preview-head">{sel ? `Preview · ${sel.label}` : "Preview"}</div>
+                {sel?.preview ? (
+                  <pre className="pending-preview-body">{sel.preview}</pre>
+                ) : (
+                  <div className="pending-preview-empty">Loading preview…</div>
+                )}
+              </div>
+            ) : null}
           </div>
           {freeHint}
+          <button className="pending-submit" disabled={!onAnswerSingle || busy || selected == null} onClick={submit}>
+            {busy ? "submitting…" : "Submit answer"}
+          </button>
         </div>
         {rawDetails}
       </div>
@@ -2510,13 +2555,32 @@ function App() {
   // an unchanged poll's data ref stable, so reading back through an idle transcript
   // still isn't yanked to the end.
   const selectedBusy = !!tmuxSessions?.find((s) => s.name === selectedSession)?.busy;
+  // How many messages to pull for the open chat — starts at one page and grows by
+  // a page each time you scroll back to the top (see the load-older effect). Reset
+  // to a single page whenever the chat switches sessions, during render (the React
+  // "reset state on prop change" pattern) so we never fire a fetch at the previous
+  // session's larger window before settling back to one page.
+  const [chatLimit, setChatLimit] = useState(CHAT_PAGE);
+  const prevSelectedSession = useRef(selectedSession);
+  if (prevSelectedSession.current !== selectedSession) {
+    prevSelectedSession.current = selectedSession;
+    setChatLimit(CHAT_PAGE);
+  }
   const transcriptQuery = useQuery({
-    queryKey: ["tmux-transcript", selectedSession],
+    queryKey: ["tmux-transcript", selectedSession, chatLimit],
     queryFn: ({ signal }) =>
-      fetchJSON<Transcript>(`/api/tmux/transcript?session=${encodeURIComponent(selectedSession)}`, signal),
+      fetchJSON<Transcript>(
+        `/api/tmux/transcript?session=${encodeURIComponent(selectedSession)}&limit=${chatLimit}`,
+        signal,
+      ),
     enabled: (tab === "tmux" || tab === "home") && !!selectedSession,
     refetchOnWindowFocus: false,
     refetchInterval: selectedBusy ? TMUX_POLL_MS : TMUX_IDLE_POLL_MS,
+    // Keep the current messages on screen while a larger window loads so paging
+    // older history doesn't blank the chat — but only within the same session, so
+    // switching sessions still shows a clean load rather than the old transcript.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery && (prevQuery.queryKey as unknown[])[1] === selectedSession ? prev : undefined,
   });
   const selectedSessionRef = useRef(selectedSession);
   selectedSessionRef.current = selectedSession;
@@ -2580,20 +2644,10 @@ function App() {
       return next;
     });
   }, [tmuxSessions, hadStoredSeen]);
-  // Viewing a session on the *Tmux tab* marks it read: pin its last-seen mtime to
-  // the latest each poll so the open transcript never shows unread, even as new
-  // output streams in. The Home dashboard deliberately opts out — there you clear a
-  // card's unread state with its explicit "mark read" button (or the `r` key), so
-  // arrowing through and peeking at cards never silently acknowledges them. That's
-  // what keeps the grid stable while you navigate it.
-  useEffect(() => {
-    if (tabRef.current !== "tmux") return;
-    if (!selectedSession || !tmuxSessions) return;
-    const s = tmuxSessions.find((x) => x.name === selectedSession);
-    if (!s || !s.mtime) return;
-    const key = s.sessionId || s.name;
-    setSeenMtimes((prev) => (prev[key] === s.mtime ? prev : { ...prev, [key]: s.mtime }));
-  }, [selectedSession, tmuxSessions]);
+  // The Tmux tab no longer auto-marks a session read just by opening it — clearing
+  // an unread dot is now a deliberate act (the `r` key or the reply bar's read
+  // toggle, both via toggleTmuxRead), matching the Home dashboard where navigation
+  // never silently acknowledges a card. Opening a session leaves its read state be.
 
   // Sessions are global (every claude tmux session on the box), but the Tmux tab
   // should only show the ones running under the directory you're browsing. Scope
@@ -3173,21 +3227,50 @@ function App() {
   // A chat is on screen whenever a session is selected on the Tmux tab or open in
   // the Home side-panel — the gate for the transcript scroll effects below.
   const chatOpen = !!selectedSession && (tab === "tmux" || tab === "home");
+  // Older history is still on disk above the current window whenever the server's
+  // full count outruns what we've fetched — the trigger for scroll-up paging.
+  const hasMoreOlder = (transcriptData?.total ?? 0) > (transcriptData?.messages.length ?? 0);
+  // When a scroll-up paging load is in flight, this holds the distance from the
+  // bottom captured at trigger time. The load-older branch below restores it once
+  // the larger window renders so the prepended messages don't shove the view down,
+  // and its non-null value doubles as the lock that stops repeat triggers mid-load.
+  const pendingOlderAnchor = useRef<number | null>(null);
   useEffect(() => {
     if (!chatOpen || !transcriptData) return;
     const el = chatScroll();
-    if (el)
+    if (!el) return;
+    // Just paged in older messages: pin the view to the same content by restoring
+    // distance-from-bottom instead of yanking to the end. Release the lock only
+    // after the scroll is set, so the listener below can't re-trigger from the
+    // still-near-top scrollTop before this runs.
+    const anchor = pendingOlderAnchor.current;
+    if (anchor != null) {
       requestAnimationFrame(() => {
-        el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
-        setAtBottom(true);
+        el.scrollTop = el.scrollHeight - anchor;
+        pendingOlderAnchor.current = null;
       });
+      return;
+    }
+    requestAnimationFrame(() => {
+      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+      setAtBottom(true);
+    });
   }, [chatOpen, transcriptData, selectedSession, chatScroll]);
 
   useEffect(() => {
     if (!chatOpen) return;
     const el = chatScroll();
     if (!el) return;
-    const update = () => setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    const update = () => {
+      setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+      // Near the top with older history still on disk → grow the window by a page.
+      // Capture distance-from-bottom first (the load-older effect restores it), and
+      // gate on a null anchor so we fire once per page rather than every scroll tick.
+      if (hasMoreOlder && pendingOlderAnchor.current == null && el.scrollTop < 200) {
+        pendingOlderAnchor.current = el.scrollHeight - el.scrollTop;
+        setChatLimit((l) => l + CHAT_PAGE);
+      }
+    };
     update();
     el.addEventListener("scroll", update, { passive: true });
     window.addEventListener("resize", update);
@@ -3195,7 +3278,7 @@ function App() {
       el.removeEventListener("scroll", update);
       window.removeEventListener("resize", update);
     };
-  }, [chatOpen, transcriptData, selectedSession, chatScroll]);
+  }, [chatOpen, transcriptData, selectedSession, chatScroll, hasMoreOlder]);
   const jumpToBottom = useCallback(() => {
     const el = chatScroll();
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
@@ -4508,6 +4591,28 @@ function App() {
       }
     }
   }, [visibleTmux, isUnread, selectTmux]);
+  // Flip the open Tmux session between read and unread by hand — the manual
+  // counterpart now that opening a session no longer auto-clears its unread dot.
+  // Rewind the seen-mtime to just behind the transcript's latest (mtime - 1ms) to
+  // force unread, or pin it to the latest to mark read; the exact mirror of the
+  // Home tab's toggleHomeRead. A no-op on busy sessions (you can't "finish" one
+  // still working) and on sessions with no transcript yet, so the `r` key / button
+  // can fire freely.
+  const toggleTmuxRead = useCallback(
+    (name: string) => {
+      const s = (visibleTmux ?? []).find((x) => x.name === name);
+      if (!s || s.busy || !s.mtime) return;
+      const key = s.sessionId || s.name;
+      const seen = seenMtimes[key] ?? 0;
+      const next = seen >= s.mtime ? s.mtime - 1 : s.mtime; // read → unread, else read
+      setSeenMtimes((prev) => ({ ...prev, [key]: next }));
+    },
+    [visibleTmux, seenMtimes],
+  );
+  // The open session's read state, for the reply bar's read toggle (icon + title)
+  // and its disabled gate — the same session toggleTmuxRead acts on.
+  const selectedSessionObj = (visibleTmux ?? []).find((s) => s.name === selectedSession) ?? null;
+  const selectedUnread = !!selectedSessionObj && isUnread(selectedSessionObj);
 
   // ---- Home (session monitor) groups ----
   // Partition the visible, dir-scoped + filtered sessions by state for the Home
@@ -4944,6 +5049,15 @@ function App() {
         markHomeRead(keyCtx.current.homeSel);
         return;
       }
+      // Tmux tab: `r` toggles the open session between read and unread — the manual
+      // replacement for the auto-read-on-open we dropped, and the keyboard half of
+      // the reply bar's read toggle. Mirrors the Home tab's read toggle; a no-op
+      // without a selected session (toggleTmuxRead gates busy / no-transcript).
+      if (tab === "tmux" && e.key === "r" && selectedTmux) {
+        e.preventDefault();
+        toggleTmuxRead(selectedTmux);
+        return;
+      }
       // Tabs are switched with the number keys (1–6) below — the ←/→ keys are left
       // free for in-tab navigation (the Home card grid; otherwise unused).
       // 1–6 jump straight to a tab (plain, not ⌥ — that switches directories).
@@ -5305,7 +5419,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, markHomeRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
+  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -5676,6 +5790,20 @@ function App() {
                   <ArrowUp />
                 </IconButton>
               </>
+            )}
+            {/* Toggle the open session between read and unread by hand — the manual
+                replacement for the old auto-read-on-open (the `r` key does the same).
+                Icon shows the current state (sealed = unread, open = read); the title
+                says what a click does. Tmux-only: the Home dashboard clears unread from
+                its card check buttons / Space instead. */}
+            {tab === "tmux" && (
+              <IconButton
+                title={selectedUnread ? "Mark chat read (r)" : "Mark chat unread (r)"}
+                disabled={!selectedSessionObj || selectedSessionObj.busy || !selectedSessionObj.mtime}
+                onClick={() => selectedSession && toggleTmuxRead(selectedSession)}
+              >
+                {selectedUnread ? <Mail /> : <MailOpen />}
+              </IconButton>
             )}
             {/* Jump to the next session that finished with output you haven't
                 opened — the unread dots in the sidebar. Rendered on desktop
@@ -6296,7 +6424,7 @@ function App() {
                 id={`row-tmux-${s.name}`}
                 className={`commit${selectedSession === s.name ? " active" : ""}${
                   s.waiting && !s.busy ? " waiting" : ""
-                }${selectedSession !== s.name && isUnread(s) ? " unread" : ""}`}
+                }${isUnread(s) ? " unread" : ""}`}
                 onClick={() => selectTmux(s.name)}
               >
                 <div className="sess-top">
@@ -6305,7 +6433,7 @@ function App() {
                   />
                   <span className="sess-name">{s.name}</span>
                   {s.waiting && !s.busy && <span className="waiting-badge">Waiting</span>}
-                  {selectedSession !== s.name && isUnread(s) && (
+                  {isUnread(s) && (
                     <span className="unread-dot" title="Finished — unread" />
                   )}
                 </div>
