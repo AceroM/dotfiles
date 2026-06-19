@@ -114,6 +114,7 @@ interface RepoChanges {
   repo: string;
   segment: string; // worktree segment header ("" when there's a single worktree)
   dir: string; // absolute worktree dir, echoed back to route git ops
+  isMain: boolean; // the repo's main working tree — can't be removed
   staged: ChangeEntry[];
   unstaged: ChangeEntry[];
   untracked: UntrackedEntry[];
@@ -2477,32 +2478,44 @@ function App() {
   // between them. Keyed by the absolute worktree dir (stable + unique).
   const [selectedWorktree, setSelectedWorktree] = useState<string | null>(null);
   const [wtMenuOpen, setWtMenuOpen] = useState(false);
-  // Worktrees that actually have pending changes — what the dropdown lists.
-  const dirtyWorktrees = useMemo(
+  // Worktree to remove once the confirmation dialog is accepted (null = closed).
+  const [wtToDelete, setWtToDelete] = useState<{
+    dir: string;
+    label: string;
+    count: number;
+  } | null>(null);
+  const [deletingWt, setDeletingWt] = useState(false);
+  // Every worktree (dirty or clean) — so the switcher stays usable, and the
+  // diffs of a tree with changes stay reachable, even when the tree you landed
+  // on is clean. `isMain` flags the one tree we won't offer to delete.
+  const allWorktrees = useMemo(
     () =>
-      (changes ?? [])
-        .map((rc) => ({
-          dir: rc.dir,
-          label: rc.segment || rc.repo || "Working tree",
-          count: rc.staged.length + rc.unstaged.length + rc.untracked.length,
-        }))
-        .filter((w) => w.count > 0),
+      (changes ?? []).map((rc) => ({
+        dir: rc.dir,
+        label: rc.segment || rc.repo || "Working tree",
+        count: rc.staged.length + rc.unstaged.length + rc.untracked.length,
+        isMain: rc.isMain,
+      })),
     [changes],
   );
-  // The current pick, falling back to the first dirty worktree when the stored
-  // one is gone (switched dirs, or it went clean on an auto-refresh).
+  // Just the worktrees with pending changes — drives the "land on a dirty tree"
+  // fallback and the "switch to see changes" hint when the active tree is clean.
+  const dirtyWorktrees = useMemo(() => allWorktrees.filter((w) => w.count > 0), [allWorktrees]);
+  // The current pick. An explicit selection wins; otherwise prefer a tree that
+  // actually has changes, falling back to the first tree of all (so a fully
+  // clean repo still has an active tree to delete/switch from).
   const activeWorktreeDir =
-    selectedWorktree && dirtyWorktrees.some((w) => w.dir === selectedWorktree)
+    selectedWorktree && allWorktrees.some((w) => w.dir === selectedWorktree)
       ? selectedWorktree
-      : (dirtyWorktrees[0]?.dir ?? null);
-  const activeWorktree = dirtyWorktrees.find((w) => w.dir === activeWorktreeDir) ?? null;
+      : (dirtyWorktrees[0]?.dir ?? allWorktrees[0]?.dir ?? null);
+  const activeWorktree = allWorktrees.find((w) => w.dir === activeWorktreeDir) ?? null;
   // Pending-change count for the worktree currently in view — drives the Changes
   // tab badge and the details footer so both match the banner (not the all-trees
-  // total). 0 when everything's clean, which hides the badge.
+  // total). 0 when the active tree is clean, which hides the badge.
   const selectedChangeCount = activeWorktree?.count ?? 0;
-  // More than one worktree has changes → show the switcher + the "which tree"
-  // banner. A single (or zero) worktree keeps the original, chrome-free view.
-  const multiWorktree = dirtyWorktrees.length > 1;
+  // More than one worktree exists → show the switcher + the "which tree" banner,
+  // even when everything is clean. A single worktree keeps the chrome-free view.
+  const multiWorktree = allWorktrees.length > 1;
 
   // ---- Tmux tab: claude sessions + the selected session's transcript ----
   // These are global (not dir-scoped) — they reflect every claude tmux session.
@@ -3350,6 +3363,34 @@ function App() {
       } finally {
         setBusyPath(null);
         queryClient.invalidateQueries({ queryKey: ["changes"] });
+      }
+    },
+    [queryClient, qd],
+  );
+
+  // Remove a worktree (`git worktree remove --force`, server-side). The dialog
+  // gates this and the server refuses the main tree, so by here `dir` is a
+  // removable linked tree. Drops the selection if it pointed at the gone tree.
+  const removeWorktree = useCallback(
+    async (dir: string) => {
+      setDeletingWt(true);
+      try {
+        const res = await fetch(qd("/api/worktree/remove"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ worktree: dir }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}) as any);
+          alert(`remove worktree failed: ${body.error ?? res.statusText}`);
+          return;
+        }
+        setSelectedWorktree((cur) => (cur === dir ? null : cur));
+        setWtToDelete(null);
+        setWtMenuOpen(false);
+        queryClient.invalidateQueries({ queryKey: ["changes"] });
+      } finally {
+        setDeletingWt(false);
       }
     },
     [queryClient, qd],
@@ -4812,9 +4853,6 @@ function App() {
           (p) => p.number === view.number && (view.repo === undefined || p.repo === view.repo),
         )
       : null;
-  const changeCount = changes
-    ? changes.reduce((n, rc) => n + rc.staged.length + rc.unstaged.length + rc.untracked.length, 0)
-    : null;
   // Worktrees with something staged — what the commit dialog will actually commit.
   const stagedWorktrees = (changes ?? [])
     .filter((rc) => rc.staged.length)
@@ -4848,6 +4886,11 @@ function App() {
     htmlViewOpen: !!htmlView,
     shareOpen,
     goToLastDir,
+    allWorktrees,
+    activeWorktreeDir,
+    activeWorktree,
+    wtMenuOpen,
+    wtDeleteOpen: !!wtToDelete,
   });
   keyCtx.current = {
     tab,
@@ -4876,6 +4919,11 @@ function App() {
     htmlViewOpen: !!htmlView,
     shareOpen,
     goToLastDir,
+    allWorktrees,
+    activeWorktreeDir,
+    activeWorktree,
+    wtMenuOpen,
+    wtDeleteOpen: !!wtToDelete,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5002,6 +5050,39 @@ function App() {
       }
       // Leave keys alone while focus is inside the file tree (it has its own nav)
       if (e.composedPath().some((n) => n instanceof HTMLElement && n.classList?.contains("tree"))) {
+        return;
+      }
+      // `[` / `]` cycle the worktree switcher (Changes tab), wrapping around. They
+      // work even on a clean tree, so the diffs of another tree stay one keypress
+      // away when the one you landed on has nothing pending.
+      if (
+        (e.key === "[" || e.key === "]") &&
+        !typing &&
+        tab === "changes" &&
+        keyCtx.current.allWorktrees.length > 1
+      ) {
+        e.preventDefault();
+        const wts = keyCtx.current.allWorktrees;
+        const idx = wts.findIndex((w) => w.dir === keyCtx.current.activeWorktreeDir);
+        const next = e.key === "]" ? (idx + 1) % wts.length : (idx - 1 + wts.length) % wts.length;
+        setSelectedWorktree(wts[next].dir);
+        return;
+      }
+      // Backspace (with nothing highlighted — the selection case is handled above)
+      // deletes the worktree in view: linked trees only (the main tree offers no
+      // delete) and only on the Changes tab. Opens a confirmation first.
+      if (
+        e.key === "Backspace" &&
+        !typing &&
+        tab === "changes" &&
+        keyCtx.current.allWorktrees.length > 1 &&
+        keyCtx.current.activeWorktree &&
+        !keyCtx.current.activeWorktree.isMain
+      ) {
+        const w = keyCtx.current.activeWorktree;
+        e.preventDefault();
+        setWtMenuOpen(false);
+        setWtToDelete({ dir: w.dir, label: w.label, count: w.count });
         return;
       }
       // `D` opens the directory dropdown and focuses its filter box, so you can
@@ -5364,6 +5445,20 @@ function App() {
         setHtmlView(null);
         return;
       }
+      // The worktree delete confirmation layers above the switcher menu, so Esc
+      // peels the dialog first, then the open menu.
+      if (k.wtDeleteOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setWtToDelete(null);
+        return;
+      }
+      if (k.wtMenuOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setWtMenuOpen(false);
+        return;
+      }
       if (!(k.restartOpen || k.killAllOpen || k.commitOpen || k.claudeOpen || k.usageOpen || k.dirsOpen || k.dirMenuOpen))
         return;
       // In the Claude composer a live @-mention should be cancelled first; its
@@ -5492,6 +5587,20 @@ function App() {
       { label: "Commit & deploy with Claude", icon: <Bot />, onClick: () => void commitWithClaude(true), disabled: !dirty },
       { label: "Commit & push…", icon: <GitCommitHorizontal />, onClick: () => setCommitOpen(true) },
     );
+    // Mobile path to the worktree delete (no keyboard ⌫). Only for a linked tree
+    // in view — the main tree can't be removed.
+    if (activeWorktree && !activeWorktree.isMain) {
+      actionItems.push({
+        label: "Delete worktree",
+        icon: <Trash2 />,
+        onClick: () =>
+          setWtToDelete({
+            dir: activeWorktree.dir,
+            label: activeWorktree.label,
+            count: activeWorktree.count,
+          }),
+      });
+    }
   }
   if (tab === "commits" && view.kind === "commit") {
     actionItems.push({
@@ -6296,34 +6405,52 @@ function App() {
               </button>
               <span className="switch-state">{autoRefresh ? "On" : "Off"}</span>
             </div>
-            {/* Worktree switcher — only when more than one worktree has changes.
-                Picks which tree's diffs the center column shows; the bulk actions
-                below scope to it too. */}
+            {/* Worktree switcher — shown whenever more than one worktree exists,
+                clean or not, so other trees' diffs stay reachable and trees can
+                be deleted. Picks which tree's diffs the center column shows; the
+                bulk actions below scope to it too. [ / ] cycle, ⌫ deletes. */}
             {multiWorktree && (
               <div className="wt-dropdown">
                 <button
                   className="wt-trigger"
-                  title="Switch worktree"
+                  title="Switch worktree ( [ / ] )"
                   onClick={() => setWtMenuOpen((o) => !o)}
                 >
                   <span className="wt-trigger-label">{activeWorktree?.label ?? "Worktree"}</span>
-                  <span className="wt-count">{activeWorktree?.count ?? 0}</span>
+                  {!!activeWorktree?.count && <span className="wt-count">{activeWorktree.count}</span>}
                   <span className="wt-caret">▾</span>
                 </button>
                 {wtMenuOpen && (
                   <div className="wt-menu">
-                    {dirtyWorktrees.map((w) => (
-                      <button
+                    {allWorktrees.map((w) => (
+                      <div
                         key={w.dir}
                         className={`wt-item${w.dir === activeWorktreeDir ? " on" : ""}`}
-                        onClick={() => {
-                          setSelectedWorktree(w.dir);
-                          setWtMenuOpen(false);
-                        }}
                       >
-                        <span className="wt-item-label">{w.label}</span>
-                        <span className="wt-count">{w.count}</span>
-                      </button>
+                        <button
+                          className="wt-item-select"
+                          onClick={() => {
+                            setSelectedWorktree(w.dir);
+                            setWtMenuOpen(false);
+                          }}
+                        >
+                          <span className="wt-item-label">{w.label}</span>
+                          <span className="wt-count">{w.count || "clean"}</span>
+                        </button>
+                        {!w.isMain && (
+                          <button
+                            className="wt-item-del"
+                            title="Delete worktree"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setWtMenuOpen(false);
+                              setWtToDelete({ dir: w.dir, label: w.label, count: w.count });
+                            }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
                     ))}
                   </div>
                 )}
@@ -6350,8 +6477,10 @@ function App() {
               </button>
             </div>
             {changes === null && <SkeletonList />}
-            {changes !== null && changeCount === 0 && (
-              <div className="side-note">Working tree clean ✨</div>
+            {changes !== null && selectedChangeCount === 0 && (
+              <div className="side-note">
+                {multiWorktree ? "This worktree is clean ✨" : "Working tree clean ✨"}
+              </div>
             )}
             {changeGroups.map((group) => (
               <div key={group.label}>
@@ -6504,6 +6633,11 @@ function App() {
           {tab === "changes" && (
             <span>
               <kbd>a</kbd> stage <kbd>A</kbd> all <kbd>x</kbd> commit w/ claude <kbd>⇧X</kbd> + deploy
+            </span>
+          )}
+          {tab === "changes" && multiWorktree && (
+            <span>
+              <kbd>[/]</kbd> worktree <kbd>⌫</kbd> delete worktree
             </span>
           )}
           <span>
@@ -6736,8 +6870,12 @@ function App() {
         {diffQuery.isError && (view.kind === "commit" || view.kind === "pr") && (
           <div className="empty error">{diffError}</div>
         )}
-        {view.kind === "changes" && changes !== null && changeCount === 0 && (
-          <div className="empty">Working tree clean — nothing pending</div>
+        {view.kind === "changes" && changes !== null && selectedChangeCount === 0 && (
+          <div className="empty">
+            {dirtyWorktrees.length
+              ? "This worktree is clean — switch worktrees ( [ / ] ) to see pending changes"
+              : "Working tree clean — nothing pending"}
+          </div>
         )}
         {view.kind === "manual" &&
           manualPatches !== null &&
@@ -6754,13 +6892,15 @@ function App() {
           sections.every((s) => !s.files.length) && <div className="empty">No file changes</div>}
 
         {/* Which worktree these diffs belong to — sticky at the top of the column
-            so it's clear even after scrolling. Only when more than one worktree
-            has changes (the dropdown switches between them). */}
+            so it's clear even after scrolling. Shown whenever more than one
+            worktree exists (the dropdown switches between them), clean or not. */}
         {view.kind === "changes" && multiWorktree && activeWorktree && (
           <div className="wt-banner">
             <span className="wt-banner-name">{activeWorktree.label}</span>
             <span className="wt-banner-count">
-              {activeWorktree.count} {activeWorktree.count === 1 ? "file" : "files"}
+              {activeWorktree.count
+                ? `${activeWorktree.count} ${activeWorktree.count === 1 ? "file" : "files"}`
+                : "clean"}
             </span>
           </div>
         )}
@@ -7065,6 +7205,45 @@ function App() {
             <div className="modal-hint">
               <span>
                 <kbd>↵</kbd> kill all
+              </span>
+              <span>
+                <kbd>esc</kbd> cancel
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {wtToDelete && (
+        <div className="modal-overlay" onClick={() => !deletingWt && setWtToDelete(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Delete worktree</h3>
+            <p className="modal-body">
+              Remove the worktree <code>{wtToDelete.label}</code>?
+              {wtToDelete.count > 0 ? (
+                <>
+                  {" "}It has {wtToDelete.count} pending{" "}
+                  {wtToDelete.count === 1 ? "change" : "changes"} that will be discarded.
+                </>
+              ) : null}{" "}
+              This removes the working tree only — the branch stays.
+            </p>
+            <div className="modal-actions">
+              <button className="act" disabled={deletingWt} onClick={() => setWtToDelete(null)}>
+                Cancel
+              </button>
+              <button
+                autoFocus
+                className="act primary"
+                disabled={deletingWt}
+                onClick={() => void removeWorktree(wtToDelete.dir)}
+              >
+                {deletingWt ? "Deleting…" : "Delete worktree"}
+              </button>
+            </div>
+            <div className="modal-hint">
+              <span>
+                <kbd>↵</kbd> delete
               </span>
               <span>
                 <kbd>esc</kbd> cancel
