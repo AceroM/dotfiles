@@ -8,51 +8,30 @@ if not in_ssh then
   end
 end
 
--- Detect macOS system appearance
-local function is_dark_mode()
-  local handle = io.popen("defaults read -g AppleInterfaceStyle 2>/dev/null")
-  if handle then
-    local result = handle:read("*a")
-    handle:close()
-    return result:match("Dark") ~= nil
-  end
-  return true -- Default to dark if detection fails
-end
-
-local flavour = in_ssh and "mocha" or (is_dark_mode() and "macchiato" or "latte")
-
 return {
-  -- Configure catppuccin theme
+  -- Configure rose-pine theme (dawn = light variant)
   {
-    "catppuccin/nvim",
-    name = "catppuccin",
+    "rose-pine/neovim",
+    name = "rose-pine",
     lazy = false,
     priority = 1000,
     config = function()
-      require("catppuccin").setup({
-        flavour = flavour,
+      require("rose-pine").setup({
+        variant = "dawn", -- light. Use "main"/"moon" for dark, or "auto" to follow background
+        dark_variant = "main",
       })
-      vim.cmd("colorscheme catppuccin")
+      vim.o.background = "light"
+      vim.cmd("colorscheme rose-pine")
     end,
   },
 
-  -- Configure LazyVim to load catppuccin
+  -- Tell LazyVim to use rose-pine
   {
     "LazyVim/LazyVim",
     opts = {
-      colorscheme = "catppuccin",
+      colorscheme = "rose-pine",
     },
   },
 
-  -- You can add other themes here and switch between them
-  -- Example: gruvbox theme (commented out)
-  -- { "ellisonleao/gruvbox.nvim" },
-
-  -- Example: rose-pine theme (commented out)
-  -- {
-  --   "rose-pine/neovim",
-  --   name = "rose-pine",
-  --   lazy = false,
-  --   priority = 1000,
-  -- },
+  -- You can switch back to catppuccin by setting colorscheme = "catppuccin" above.
 }
