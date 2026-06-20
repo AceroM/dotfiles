@@ -59,6 +59,28 @@ vim.keymap.set("n", "<C-y>", function()
   vim.api.nvim_win_set_cursor(0, pos)
 end, { desc = "Copy entire file to clipboard", silent = true })
 
+-- Send to the clipboard of whatever device I'm physically on, via OSC 52.
+-- Unlike an `ssh box pbcopy` relay (which only ever targets one fixed machine),
+-- OSC 52 rides the terminal connection back to the device in front of me — Mac,
+-- Windows Terminal, Android (Termux), iOS (Blink) — so it adapts to wherever I
+-- SSH'd from, with zero per-machine setup. Forced directly here so it works even
+-- when SSH isn't auto-detected (e.g. under mosh). Needs the terminal emulator
+-- (and any tmux/mosh in between) to honor OSC 52 — see the tmux `Ms` override.
+local function osc52_send(lines)
+  require("vim.ui.clipboard.osc52").copy("+")(lines)
+end
+
+vim.keymap.set("n", "<leader>y", function()
+  osc52_send(vim.api.nvim_buf_get_lines(0, 0, -1, false))
+  vim.notify("Sent buffer to local clipboard (OSC 52)")
+end, { desc = "Send buffer to local clipboard (OSC 52)" })
+
+vim.keymap.set("v", "<leader>y", function()
+  vim.cmd('noautocmd normal! "zy')
+  osc52_send(vim.split(vim.fn.getreg("z"), "\n", { plain = true }))
+  vim.notify("Sent selection to local clipboard (OSC 52)")
+end, { desc = "Send selection to local clipboard (OSC 52)" })
+
 vim.keymap.set("n", "<C-;>", 'ggdG', { desc = "Clear entire file" })
 vim.keymap.set("n", "<A-Down>", "<C-d>", { desc = "Half-page down" })
 vim.keymap.set("n", "<A-Up>", "<C-u>", { desc = "Half-page up" })
