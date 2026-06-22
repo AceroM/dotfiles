@@ -56,6 +56,7 @@ import {
   Minus,
   FileDown,
   Bot,
+  ListChecks,
   Check,
   Trash2,
   Sun,
@@ -69,6 +70,7 @@ import {
   FileCode,
   Share2,
   Link2,
+  Copy,
   X,
 } from "lucide-react";
 
@@ -458,6 +460,43 @@ function CopyButton({ label, text, title }: { label: string; text: string; title
       }}
     >
       {copied ? "copied" : label}
+    </button>
+  );
+}
+
+// Copies a claude session id (the @claude_session UUID) to the clipboard,
+// flashing a check for a beat after. Surfaces on each Home card and in the chat
+// bar so a session's id can be pasted into another chat to reference it. `compact`
+// drops the label (card footer) and stops click propagation so it doesn't open the
+// card; `iconSize`/`className` let the chat bar render a larger, labelled variant.
+function CopyIdButton({
+  sessionId,
+  className,
+  compact,
+  iconSize = 13,
+}: {
+  sessionId: string;
+  className: string;
+  compact?: boolean;
+  iconSize?: number;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className={className}
+      title={`Copy session ID\n${sessionId}`}
+      aria-label="Copy session ID"
+      onClick={(e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(sessionId).catch(() => {});
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      }}
+    >
+      {copied ? <Check size={iconSize} /> : <Copy size={iconSize} />}
+      {!compact && <span>{copied ? "Copied" : "Copy ID"}</span>}
+      {compact && <span>{copied ? "copied" : sessionId.slice(0, 8)}</span>}
     </button>
   );
 }
@@ -1916,17 +1955,25 @@ function HomeCard({
   state,
   selected,
   unseen,
+  selectMode,
+  picked,
   onOpen,
   onDelete,
   onMarkRead,
+  onTogglePick,
 }: {
   session: TmuxSession;
   state: string;
   selected?: boolean;
   unseen?: boolean;
+  // "Commit with context" selection mode: cards act as checkboxes you tick to
+  // mark which sessions produced the pending changes, instead of opening a chat.
+  selectMode?: boolean;
+  picked?: boolean;
   onOpen: (name: string) => void;
   onDelete: (name: string) => void;
   onMarkRead?: (name: string) => void;
+  onTogglePick?: (name: string) => void;
 }) {
   const attention = !!onMarkRead;
   // A <div> (not a <button>) so the nested kill button stays valid HTML —
@@ -1936,23 +1983,30 @@ function HomeCard({
       id={`row-tmux-${session.name}`}
       className={`home-card ${state}${selected ? " selected" : ""}${
         attention && !unseen ? " read" : ""
-      }`}
-      onClick={() => onOpen(session.name)}
+      }${selectMode ? " picking" : ""}${selectMode && picked ? " picked" : ""}`}
+      onClick={() => (selectMode ? onTogglePick!(session.name) : onOpen(session.name))}
     >
       <div className="home-card-top">
-        <span className="home-dot" />
+        {selectMode ? (
+          <span className="home-card-check" aria-hidden="true">
+            {picked ? "✓" : ""}
+          </span>
+        ) : (
+          <span className="home-dot" />
+        )}
         <span className="home-card-name">{session.name}</span>
       </div>
       {session.task && <div className="home-card-task">{session.task}</div>}
       <div className="home-card-foot">
         <span className="home-card-cwd">{session.cwd.replace(/^.*\//, "") || session.cwd}</span>
+        {session.sessionId && <CopyIdButton sessionId={session.sessionId} className="home-card-id" compact iconSize={11} />}
         {session.mtime > 0 && (
           <span className="home-card-time" title="Last message">
             {timeAgo(session.mtime)}
           </span>
         )}
       </div>
-      {attention && unseen && (
+      {!selectMode && attention && unseen && (
         <button
           className="read-btn"
           title={`Mark ${session.name} read`}
@@ -1964,16 +2018,18 @@ function HomeCard({
           ✓
         </button>
       )}
-      <button
-        className="kill-btn"
-        title={`Kill ${session.name}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(session.name);
-        }}
-      >
-        ✕
-      </button>
+      {!selectMode && (
+        <button
+          className="kill-btn"
+          title={`Kill ${session.name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(session.name);
+          }}
+        >
+          ✕
+        </button>
+      )}
     </div>
   );
 }
@@ -1989,10 +2045,13 @@ function HomeView({
   error,
   selectedName,
   isUnseen,
+  selectMode,
+  pickedNames,
   onOpen,
   onDelete,
   onMarkRead,
   onCancelQueued,
+  onTogglePick,
 }: {
   groups: {
     inProgress: TmuxSession[];
@@ -2005,10 +2064,13 @@ function HomeView({
   error: string | null;
   selectedName: string | null;
   isUnseen: (s: TmuxSession) => boolean;
+  selectMode: boolean;
+  pickedNames: Set<string>;
   onOpen: (name: string) => void;
   onDelete: (name: string) => void;
   onMarkRead: (name: string) => void;
   onCancelQueued: (id: number) => void;
+  onTogglePick: (name: string) => void;
 }) {
   if (loading) return <ContentSpinner label="Loading sessions…" />;
   if (error) return <div className="empty error">{error}</div>;
@@ -2030,8 +2092,11 @@ function HomeView({
                 session={s}
                 state="busy"
                 selected={selectedName === s.name}
+                selectMode={selectMode}
+                picked={pickedNames.has(s.name)}
                 onOpen={onOpen}
                 onDelete={onDelete}
+                onTogglePick={onTogglePick}
               />
             ))}
           </div>
@@ -2054,9 +2119,12 @@ function HomeView({
                 state="waiting"
                 selected={selectedName === s.name}
                 unseen={isUnseen(s)}
+                selectMode={selectMode}
+                picked={pickedNames.has(s.name)}
                 onOpen={onOpen}
                 onDelete={onDelete}
                 onMarkRead={onMarkRead}
+                onTogglePick={onTogglePick}
               />
             ))}
           </div>
@@ -2110,9 +2178,12 @@ function HomeView({
                 state="unread"
                 selected={selectedName === s.name}
                 unseen
+                selectMode={selectMode}
+                picked={pickedNames.has(s.name)}
                 onOpen={onOpen}
                 onDelete={onDelete}
                 onMarkRead={onMarkRead}
+                onTogglePick={onTogglePick}
               />
             ))}
           </div>
@@ -2132,8 +2203,11 @@ function HomeView({
                 session={s}
                 state="idle"
                 selected={selectedName === s.name}
+                selectMode={selectMode}
+                picked={pickedNames.has(s.name)}
                 onOpen={onOpen}
                 onDelete={onDelete}
+                onTogglePick={onTogglePick}
               />
             ))}
           </div>
@@ -2212,6 +2286,12 @@ function App() {
   // boots with that card focused and its chat open.
   const [homeSel, setHomeSel] = useState<string | null>(initial.homeChat ?? null);
   const [homeChat, setHomeChat] = useState<string | null>(initial.homeChat ?? null);
+  // ---- "Commit with context" selection mode ----
+  // contextMode turns the Home cards into checkboxes; contextSel holds the tmux
+  // session names you've ticked as the work behind the pending changes. Confirming
+  // hands those panes + their claude session ids to the commit-authoring session.
+  const [contextMode, setContextMode] = useState(false);
+  const [contextSel, setContextSel] = useState<Set<string>>(new Set());
   // The HTML artifact path currently open in the full-screen preview (the second
   // dialog layered over the Home chat panel), or null when it's closed. Set from
   // the chat's "Open HTML" button (see htmlArtifact / the .html-overlay portal).
@@ -2744,6 +2824,20 @@ function App() {
   // Loaded per-directory by the effect below once `meta` (the active dir) is known.
   const [claudePrompt, setClaudePrompt] = useState("");
   const [launching, setLaunching] = useState(false);
+  // Reasoning effort for the new session, passed as `claude --effort <level>`.
+  // "" means inherit the global settings.json `effortLevel`. Persisted across
+  // sessions (a single global key — effort is a preference, not a per-repo draft).
+  const [claudeEffort, setClaudeEffort] = useState<string>(() => {
+    try {
+      return localStorage.getItem("claudeEffort") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  useEffect(() => {
+    if (claudeEffort) localStorage.setItem("claudeEffort", claudeEffort);
+    else localStorage.removeItem("claudeEffort");
+  }, [claudeEffort]);
   const [launchedSession, setLaunchedSession] = useState<string | null>(null);
   // Brief confirmation shown after an offline prompt is queued (auto-dismissed).
   const [queuedNote, setQueuedNote] = useState(false);
@@ -3658,7 +3752,7 @@ function App() {
       const res = await fetch(qd("/api/claude"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, effort: claudeEffort || undefined }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}) as any);
@@ -3687,7 +3781,7 @@ function App() {
     } finally {
       setLaunching(false);
     }
-  }, [claudePrompt, qd, queryClient]);
+  }, [claudePrompt, claudeEffort, qd, queryClient]);
 
   // Relaunch a closed session: the server starts `claude --resume <sid>` detached
   // in the active directory. Mirrors submitClaude's refresh dance so the resumed
@@ -3910,20 +4004,16 @@ function App() {
     }, 500);
   }, [queryClient]);
 
-  // `x` — stage everything, then hand the commit off to a detached claude
-  // session that writes the message itself (and pushes). Skips the `;` dialog
-  // for when you'd rather claude author an informative commit from the diff.
-  const commitWithClaude = useCallback(async (deploy = false) => {
+  // Stage everything, then hand the given prompt off to a detached claude session.
+  // Shared by "Commit with Claude" and "Commit with context" — both stage, launch,
+  // and surface the same launched/queued feedback toast.
+  const stageAndLaunch = useCallback(async (prompt: string) => {
     await runGit("stage");
     try {
       const res = await fetch(qd("/api/claude"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: deploy
-            ? "Commit and push the staged changes with a clear, informative commit message, then deploy the changes."
-            : "Commit and push the staged changes with a clear, informative commit message.",
-        }),
+        body: JSON.stringify({ prompt }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}) as any);
@@ -3938,6 +4028,44 @@ function App() {
       alert(`launch failed: ${errMessage(e)}`);
     }
   }, [runGit, qd, queryClient]);
+
+  // `x` — stage everything, then hand the commit off to a detached claude
+  // session that writes the message itself (and pushes). Skips the `;` dialog
+  // for when you'd rather claude author an informative commit from the diff.
+  const commitWithClaude = useCallback(
+    (deploy = false) =>
+      stageAndLaunch(
+        deploy
+          ? "Commit and push the staged changes with a clear, informative commit message, then deploy the changes."
+          : "Commit and push the staged changes with a clear, informative commit message.",
+      ),
+    [stageAndLaunch],
+  );
+
+  // Toggle a card in/out of the "Commit with context" selection.
+  const toggleContextPick = useCallback((name: string) => {
+    setContextSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }, []);
+
+  // Leave selection mode and drop any ticked cards.
+  const exitContextMode = useCallback(() => {
+    setContextMode(false);
+    setContextSel(new Set());
+  }, []);
+
+  // Enter selection mode (or leave it). Clears the picks on the way out so a
+  // re-entry always starts fresh.
+  const toggleContextMode = useCallback(() => {
+    setContextMode((on) => {
+      if (on) setContextSel(new Set());
+      return !on;
+    });
+  }, []);
 
   // Refetch the current tab's data — the same thing `space` does, exposed to the
   // mobile Actions menu (where there's no keyboard). Resetting the list query
@@ -4168,6 +4296,8 @@ function App() {
   }>({ id: null, name: "", path: "", repos: "" });
   const [dirError, setDirError] = useState("");
   const [dirSaving, setDirSaving] = useState(false);
+  // id of the directory currently rebuilding its @-file index (null = none).
+  const [reindexingId, setReindexingId] = useState<number | null>(null);
 
   const openDirForm = useCallback((d?: DirEntry) => {
     setDirError("");
@@ -4227,6 +4357,27 @@ function App() {
       if (activeDirRef.current === d.id) selectDir(null); // fall back to the default
     },
     [queryClient, selectDir, dirForm.id],
+  );
+
+  // Force a full rebuild of a directory's @-file index (the "Reindex" button).
+  const reindexDir = useCallback(
+    async (d: DirEntry) => {
+      setDirError("");
+      setReindexingId(d.id);
+      try {
+        const res = await fetch(`/api/dirs/${d.id}/reindex`, { method: "POST" });
+        const body = await res.json().catch(() => ({}) as any);
+        if (!res.ok) {
+          setDirError(body.error ?? res.statusText);
+          return;
+        }
+        // Refresh the @-mention file list (no-op unless a files query is live).
+        queryClient.invalidateQueries({ queryKey: ["files"] });
+      } finally {
+        setReindexingId(null);
+      }
+    },
+    [queryClient],
   );
 
   // Close the directory dropdown on an outside click.
@@ -4806,6 +4957,32 @@ function App() {
     setHomeChat(name);
   }, []);
   const closeHomeChat = useCallback(() => setHomeChat(null), []);
+  // Confirm "Commit with context": like Commit with Claude, but the prompt names
+  // the tmux panes and claude session ids that produced these changes so the
+  // authoring session can fold them into the commit message (and trace the work).
+  const commitWithContext = useCallback(async () => {
+    const picked = (visibleTmux ?? []).filter((s) => contextSel.has(s.name));
+    if (!picked.length) return;
+    const lines = picked
+      .map((s) => {
+        const sid = s.sessionId ? ` — claude session id ${s.sessionId}` : "";
+        const task = s.task ? ` (${s.task})` : "";
+        return `- tmux pane "${s.name}"${sid}${task}`;
+      })
+      .join("\n");
+    const prompt =
+      "Commit and push the staged changes with a clear, informative commit message.\n\n" +
+      "The following tmux panes and Claude sessions produced these changes. Reference them in the commit " +
+      "message (e.g. as trailers listing the relevant claude session ids) so the work can be traced back:\n" +
+      lines;
+    exitContextMode();
+    await stageAndLaunch(prompt);
+  }, [visibleTmux, contextSel, exitContextMode, stageAndLaunch]);
+  // Leaving the Home tab drops selection mode so its bottom bar / ticked cards
+  // don't linger when you come back to a different view.
+  useEffect(() => {
+    if (tab !== "home" && contextMode) exitContextMode();
+  }, [tab, contextMode, exitContextMode]);
   // Acknowledge a card without opening it: pin its seen-mtime to the latest so it
   // stops reading as unread. Only meaningful for the attention states — a Done card
   // (idle + new output) drops to Idle, a Needs-action card stays put but calms. A
@@ -4986,6 +5163,7 @@ function App() {
     dirs,
     homeNav,
     homeSel,
+    contextMode,
     homeChatOpen: !!homeChat,
     htmlViewOpen: !!htmlView,
     shareOpen,
@@ -5020,6 +5198,7 @@ function App() {
     dirs,
     homeNav,
     homeSel,
+    contextMode,
     homeChatOpen: !!homeChat,
     htmlViewOpen: !!htmlView,
     shareOpen,
@@ -5132,6 +5311,27 @@ function App() {
         return;
       }
       if (typing) return;
+      // "Commit with context" selection mode owns Esc (cancel) and Enter (toggle the
+      // focused card's checkbox, instead of opening its chat) while it's active.
+      if (keyCtx.current.tab === "home" && keyCtx.current.contextMode) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setContextMode(false);
+          setContextSel(new Set());
+          return;
+        }
+        if (e.key === "Enter" && keyCtx.current.homeSel) {
+          e.preventDefault();
+          const name = keyCtx.current.homeSel;
+          setContextSel((prev) => {
+            const next = new Set(prev);
+            if (next.has(name)) next.delete(name);
+            else next.add(name);
+            return next;
+          });
+          return;
+        }
+      }
       // On the Home dashboard, Esc closes the open chat side-panel. (Esc inside
       // the composer is handled by the textarea — it stops propagation — so this
       // only fires when focus is outside it.)
@@ -5445,7 +5645,9 @@ function App() {
         // that card instead of closing — so you can keep clearing through the
         // grid. (Esc still closes the chat; `X` has no Home action.)
         if (tab === "home") {
-          if (e.key === "x" && keyCtx.current.homeSel) {
+          // In "commit with context" selection mode `x` isn't a kill — leave the
+          // ticked cards alone (Esc cancels, the bar's button confirms).
+          if (e.key === "x" && keyCtx.current.homeSel && !keyCtx.current.contextMode) {
             const sel = keyCtx.current.homeSel;
             const list = keyCtx.current.homeNav;
             const idx = list.indexOf(sel);
@@ -6159,6 +6361,18 @@ function App() {
             <Bot size={18} />
           </button>
         )}
+        {tab === "home" && (
+          <button
+            className={`topbar-btn${contextMode ? " active" : ""}`}
+            title={contextMode ? "Cancel commit with context" : "Commit with context"}
+            aria-label={contextMode ? "Cancel commit with context" : "Commit with context"}
+            aria-pressed={contextMode}
+            disabled={!dirty && !contextMode}
+            onClick={toggleContextMode}
+          >
+            <ListChecks size={18} />
+          </button>
+        )}
         {(tab === "home" || tab === "tmux" || tab === "commits") && (
           <button
             className="topbar-btn topbar-new"
@@ -6795,10 +7009,13 @@ function App() {
             error={tmuxQuery.isError ? errMessage(tmuxQuery.error) : null}
             selectedName={homeSel}
             isUnseen={isUnseen}
+            selectMode={contextMode}
+            pickedNames={contextSel}
             onOpen={openHomeChat}
             onDelete={deleteHomeCard}
             onMarkRead={markHomeRead}
             onCancelQueued={cancelQueued}
+            onTogglePick={toggleContextPick}
           />
         )}
         {tab === "tmux" && <div className="transcript">{renderChat()}</div>}
@@ -6821,6 +7038,11 @@ function App() {
                   <X size={18} />
                 </button>
                 <span className="home-chat-title">{homeChat}</span>
+                {/* Copies this session's claude id so it can be referenced from
+                    another chat. Shows once the transcript has resolved an id. */}
+                {transcriptData?.sessionId && (
+                  <CopyIdButton sessionId={transcriptData.sessionId} className="home-chat-id" iconSize={14} />
+                )}
                 {/* Surfaces only once the chat has written an .html file — opens
                     its live contents in a full-screen iframe over this panel. */}
                 {htmlArtifact && (
@@ -7521,6 +7743,23 @@ function App() {
                   document.body,
                 )}
             </div>
+            <div className="claude-opts">
+              <label className="claude-opt">
+                <span>Effort</span>
+                <select
+                  value={claudeEffort}
+                  onChange={(e) => setClaudeEffort(e.target.value)}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <option value="">Default</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="xhigh">Extra high</option>
+                  <option value="max">Max</option>
+                </select>
+              </label>
+            </div>
             {!serverOnline && (
               <div className="modal-offline">
                 <span className="offline-dot" />
@@ -7725,6 +7964,33 @@ function App() {
         </div>
       )}
 
+      {tab === "home" && contextMode && (
+        <div className="sel-bar">
+          <span className="sel-info">
+            {contextSel.size
+              ? `${contextSel.size} session${contextSel.size > 1 ? "s" : ""} selected`
+              : "Tick the sessions behind these changes"}
+          </span>
+          <button
+            className="sel-act"
+            disabled={!contextSel.size || !dirty}
+            title={
+              !dirty
+                ? "Nothing to commit"
+                : !contextSel.size
+                  ? "Tick at least one session"
+                  : "Commit with the selected sessions as context"
+            }
+            onClick={() => void commitWithContext()}
+          >
+            Commit with context
+          </button>
+          <button className="sel-x" title="Cancel (esc)" onClick={exitContextMode}>
+            ✕
+          </button>
+        </div>
+      )}
+
       {launchedSession && (
         <div className="sel-bar sel-bar-toast">
           <span className="sel-info">New session created</span>
@@ -7762,6 +8028,14 @@ function App() {
                       {d.repos.length ? ` — ${d.repos.join(", ")}` : ""}
                     </div>
                   </div>
+                  <button
+                    className="act"
+                    disabled={reindexingId === d.id}
+                    title="Rebuild the @-file index from git"
+                    onClick={() => reindexDir(d)}
+                  >
+                    {reindexingId === d.id ? "Reindexing…" : "Reindex"}
+                  </button>
                   <button className="act" onClick={() => openDirForm(d)}>
                     Edit
                   </button>

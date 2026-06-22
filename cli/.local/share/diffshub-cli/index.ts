@@ -1049,11 +1049,18 @@ async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok
 // positional arg has zero timing: claude reads it on boot and submits it itself.
 // Images still work because the upload route embeds /tmp/images/<id> paths as text
 // in the prompt, and claude's Read tool resolves those paths.
-async function newClaudeSession(dir: string, prompt: string): Promise<string> {
+// Reasoning effort levels accepted by `claude --effort`. Anything outside this set
+// is dropped so the session inherits the global settings.json `effortLevel`.
+const CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+async function newClaudeSession(dir: string, prompt: string, effort?: string): Promise<string> {
   const name = await pickClaudeSessionName();
   const sid = crypto.randomUUID();
   const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
-  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${promptArg}`;
+  // effort is validated against CLAUDE_EFFORTS before it reaches here, so it's a
+  // plain word — safe unquoted in the command.
+  const effortArg = effort && CLAUDE_EFFORTS.has(effort) ? ` --effort ${effort}` : "";
+  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${effortArg}${promptArg}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
   await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
   return name;
@@ -2166,6 +2173,9 @@ const page = `<!DOCTYPE html>
   }
   .topbar-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
   .topbar-btn:disabled { opacity: .4; cursor: default; }
+  /* Toggled-on state (e.g. Home's "Commit with context" while you're picking cards). */
+  .topbar-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+  .topbar-btn.active:hover:not(:disabled) { background: var(--accent-bg); border-color: var(--accent); }
   /* New-session (+, Tmux + Commits tabs) and kill (trash, Tmux tab) buttons —
      sit beside the actions dropdown. */
   .topbar-new { color: var(--accent); border-color: var(--accent); }
@@ -2973,12 +2983,34 @@ const page = `<!DOCTYPE html>
   .home-card-foot { display: flex; align-items: baseline; gap: 8px; }
   .home-card-foot .home-card-cwd { flex: 1; min-width: 0; }
   .home-card-time { flex: none; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* Click-to-copy claude session id chip — sits between the cwd and the time in
+     the footer. Monospace short id (first 8 of the UUID); copies the full id.
+     Stays muted until hover so it doesn't compete with the cwd/time. */
+  .home-card-id {
+    flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 5px;
+    border: 1px solid var(--border-soft); border-radius: 5px; background: none;
+    color: var(--text-faint); font: inherit; font-size: 10px; cursor: pointer;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .home-card-id:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
   /* Status dot — mirrors .sess-busy in the sidebar. */
   .home-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
   .home-card.busy .home-dot { background: var(--accent); animation: sessPulse 1.4s ease-in-out infinite; }
   .home-card.waiting .home-dot, .home-card.queued .home-dot { background: var(--amber); animation: pendingPulse 1.6s ease-in-out infinite; }
   .home-card.unread .home-dot { background: var(--accent); }
   @media (max-width: 640px) { .home-cards { grid-template-columns: 1fr; } }
+  /* "Commit with context" selection mode — cards become checkboxes you tick to mark
+     which sessions produced the pending changes. A ticked card lights up like the
+     keyboard-selected one (accent border + ring) so the picks read at a glance. */
+  .home-card.picking { cursor: pointer; }
+  .home-card-check {
+    flex: none; width: 14px; height: 14px; border-radius: 4px;
+    border: 1.5px solid var(--border-strong); background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; line-height: 1; color: #fff;
+  }
+  .home-card.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .home-card.picked .home-card-check { background: var(--accent); border-color: var(--accent); }
   /* Mark-read check — shows on unacknowledged attention cards (Done / Needs-action),
      sat just left of the kill button. Same chip as .kill-btn, but it acknowledges
      (accent) rather than destroys (red). */
@@ -3031,6 +3063,15 @@ const page = `<!DOCTYPE html>
     background: var(--accent-bg); border: 1px solid var(--accent); color: var(--accent-strong);
   }
   .home-chat-html:hover { background: var(--accent-bg-hover); }
+  /* "Copy ID" button — copies this session's claude id so it can be referenced
+     from another chat. Neutral chip sat next to the accent "Open HTML" button. */
+  .home-chat-id {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+    height: 30px; padding: 0 10px; border-radius: 7px; cursor: pointer;
+    font-size: 12px; font-weight: 600;
+    background: var(--bg-muted); border: 1px solid var(--border); color: var(--text-2);
+  }
+  .home-chat-id:hover { color: var(--text); border-color: var(--text-muted); }
   /* The panel's own scroll container: the transcript-head sticks to its top and
      the composer to its bottom, same as the Tmux tab's main column. */
   .home-chat-scroll { flex: 1 1 auto; overflow-y: auto; padding: 0 18px; }
@@ -3211,6 +3252,14 @@ const page = `<!DOCTYPE html>
   .modal-hint { margin-top: 10px; font-size: 11px; color: var(--text-faint); display: flex; gap: 8px; flex-wrap: wrap; }
   .modal-hint kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; }
   .modal-hint code { color: var(--text-muted); }
+  /* Options row in the New Claude session composer (effort picker, etc.). */
+  .claude-opts { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .claude-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
+  .claude-opt select {
+    font: inherit; font-size: 11px; color: var(--text-2); cursor: pointer; outline: none;
+    background: var(--bg-muted); border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 6px;
+  }
+  .claude-opt select:hover, .claude-opt select:focus { color: var(--text); border-color: var(--accent); }
 
   /* Claude usage dialog (⇧U) — one row per rate-limit window: label, percent,
      a fill bar, and the reset countdown. */
@@ -3884,6 +3933,32 @@ const server = Bun.serve({
       return json({ ok: true });
     }
 
+    // Force a full rebuild of a directory's @-file index (the "Reindex" button).
+    // Normally the index self-syncs on every Changes refresh; this is the manual
+    // escape hatch — re-collects from git and replaces all rows in one shot.
+    const reindexMatch = url.pathname.match(/^\/api\/dirs\/(\d+)\/reindex$/);
+    if (reindexMatch && req.method === "POST") {
+      const id = parseInt(reindexMatch[1], 10);
+      const row = getDirStmt.get(id);
+      if (!row) return json({ error: "No such directory" }, 404);
+      let paths: string[];
+      try {
+        const { repos, isWorkspace } = await resolveMembers(row.path, parseRepos(row.repos));
+        paths = await collectFiles(repos, isWorkspace);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      if (paths.length > MAX_INDEX_FILES) {
+        return json({ error: new TooManyFiles(paths.length).message }, 400);
+      }
+      db.transaction(() => {
+        db.run("DELETE FROM files WHERE dir_id = ?", [id]);
+        for (const p of paths) insertFileStmt.run(id, p);
+      })();
+      invalidateWorkspace(id);
+      return json({ ok: true, count: paths.length });
+    }
+
     // Indexed (gitignore-respecting) file list for the active directory.
     if (url.pathname === "/api/files") {
       let ws: Workspace;
@@ -4228,7 +4303,7 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-      let body: { prompt?: unknown };
+      let body: { prompt?: unknown; effort?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -4237,6 +4312,12 @@ const server = Bun.serve({
       if (typeof body.prompt !== "string" || !body.prompt.trim()) {
         return json({ error: "Empty prompt" }, 400);
       }
+      // Allowlisted so it's safe to splice straight into the shell command, and so a
+      // bad value falls back to the global default rather than erroring the launch.
+      const effort =
+        typeof body.effort === "string" && CLAUDE_EFFORTS.has(body.effort)
+          ? body.effort
+          : undefined;
       // Offline → enqueue instead of launching a session that couldn't reach the
       // API. drainQueue() launches it automatically once we're back online.
       if (!(await checkOnline(true))) {
@@ -4244,7 +4325,7 @@ const server = Bun.serve({
         return json({ ok: true, queued: true, id });
       }
       try {
-        const session = await newClaudeSession(ws.path, body.prompt);
+        const session = await newClaudeSession(ws.path, body.prompt, effort);
         return json({ ok: true, session });
       } catch (e) {
         return json({ error: errText(e) }, 500);
