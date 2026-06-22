@@ -103,6 +103,12 @@ if tab_colors then
 end
 update_claude_theme(appearance)
 
+-- Open the window maximized on launch
+wezterm.on("gui-startup", function(cmd)
+	local _, _, window = wezterm.mux.spawn_window(cmd or {})
+	window:gui_window():maximize()
+end)
+
 -- Watch for appearance changes
 wezterm.on("window-config-reloaded", function(window, pane)
 	local overrides = window:get_config_overrides() or {}
@@ -322,6 +328,14 @@ config.keys = {
 					return
 				end
 			end
+		end),
+	},
+	{
+		key = "n",
+		mods = "CMD",
+		action = wezterm.action_callback(function()
+			local _, _, window = wezterm.mux.spawn_window({})
+			window:gui_window():maximize()
 		end),
 	},
 }
