@@ -96,6 +96,9 @@ function Bar() {
   // prompt is sent (see the persist effect + setPrompt("") in submit).
   const initialDraft = useRef(loadDraft()).current;
   const [expanded, setExpanded] = useState(initialDraft.length > 0);
+  // Hide the whole surface (pill + composer) out of the way without unmapping the
+  // site. Toggled with ⌃⌥R; resets on reload, so a refresh always brings it back.
+  const [hidden, setHidden] = useState(false);
   // null = not picking. "inject" (v) drops the picked ref into the composer;
   // "editor" (V) opens its source file in the local $EDITOR instead.
   const [selectMode, setSelectMode] = useState<null | "inject" | "editor">(null);
@@ -712,7 +715,15 @@ function Bar() {
   // (handled on the textarea). ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dirId == null || selecting || shooting || capturing) return;
+      // ⌃⌥R toggles the whole surface hidden/visible. Checked first — even while
+      // hidden — so it can always bring it back. e.code (not e.key) because Option
+      // rewrites the character on macOS (⌥R → "®").
+      if (e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey && e.code === "KeyR") {
+        e.preventDefault();
+        setHidden((h) => !h);
+        return;
+      }
+      if (dirId == null || hidden || selecting || shooting || capturing) return;
       // ctrl + ' also opens (mirrors the bare ' shortcut) — check before the
       // modifier guard below swallows it.
       if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "'") {
@@ -742,7 +753,7 @@ function Bar() {
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [dirId, selecting, shooting, capturing, open, captureFullPage]);
+  }, [dirId, hidden, selecting, shooting, capturing, open, captureFullPage]);
 
   // First name for the "Logged in as …" pill (mirrors how the app first-names it),
   // falling back to the userId then a generic label. "" hides the pill.
@@ -752,6 +763,7 @@ function Bar() {
       : authValues.name?.trim().split(/\s+/)[0] || authValues.userId || "user";
 
   if (dirId == null) return null;
+  if (hidden) return null;
 
   if (!expanded) {
     return (

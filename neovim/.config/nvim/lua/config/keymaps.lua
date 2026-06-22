@@ -63,9 +63,9 @@ end, { desc = "Copy entire file to clipboard", silent = true })
 -- Unlike an `ssh box pbcopy` relay (which only ever targets one fixed machine),
 -- OSC 52 rides the terminal connection back to the device in front of me — Mac,
 -- Windows Terminal, Android (Termux), iOS (Blink) — so it adapts to wherever I
--- SSH'd from, with zero per-machine setup. Forced directly here so it works even
--- when SSH isn't auto-detected (e.g. under mosh). Needs the terminal emulator
--- (and any tmux/mosh in between) to honor OSC 52 — see the tmux `Ms` override.
+-- SSH'd from, with zero per-machine setup. Forced directly here (not via the +
+-- register) so it works the same locally and remotely. Needs the terminal
+-- emulator (and any tmux in between) to honor OSC 52 — see the tmux `Ms` override.
 local function osc52_send(lines)
   require("vim.ui.clipboard.osc52").copy("+")(lines)
 end

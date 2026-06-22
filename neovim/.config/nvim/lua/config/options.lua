@@ -11,7 +11,7 @@ vim.g.lazyvim_prettier_needs_config = false
 -- yank lands on the clipboard of whatever device I'm sitting at — no per-machine
 -- relay. This makes all the existing + mappings (<C-y>, <leader>cp, gcc+, "+y)
 -- work remotely too. Paste falls back to the last in-Neovim yank because
--- terminals don't allow OSC 52 *reads* (and querying would just hang over mosh).
+-- terminals don't allow OSC 52 *reads* (querying would just block on no reply).
 local in_ssh = vim.env.SSH_CONNECTION ~= nil or vim.env.SSH_TTY ~= nil or vim.env.SSH_CLIENT ~= nil
 if in_ssh then
   local osc52 = require("vim.ui.clipboard.osc52")
