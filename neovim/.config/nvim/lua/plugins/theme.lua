@@ -9,19 +9,24 @@ if not in_ssh then
 end
 
 return {
-  -- Configure rose-pine theme (dawn = light variant)
+  -- Follow the terminal's background. Neovim 0.10+ queries the terminal
+  -- (OSC 11) on startup and sets `vim.o.background` to "dark"/"light".
+  -- rose-pine's `variant = "auto"` then uses `dark_variant` (main) when the
+  -- terminal is dark and "dawn" when it's light. Neovim defaults `background`
+  -- to "dark", so an undetectable terminal falls back to the dark variant.
+  -- (The terminal's response lands after startup, so `config/autocmds.lua`
+  -- re-applies the colorscheme on `OptionSet background` to keep this in sync.)
   {
     "rose-pine/neovim",
     name = "rose-pine",
     lazy = false,
     priority = 1000,
-    config = function()
-      require("rose-pine").setup({
-        variant = "dawn", -- light. Use "main"/"moon" for dark, or "auto" to follow background
-        dark_variant = "main",
-      })
-      vim.o.background = "light"
-      vim.cmd("colorscheme rose-pine")
+    opts = {
+      variant = "auto",
+      dark_variant = "main", -- "main" or "moon" for the dark flavor
+    },
+    config = function(_, opts)
+      require("rose-pine").setup(opts)
     end,
   },
 
@@ -32,6 +37,4 @@ return {
       colorscheme = "rose-pine",
     },
   },
-
-  -- You can switch back to catppuccin by setting colorscheme = "catppuccin" above.
 }
