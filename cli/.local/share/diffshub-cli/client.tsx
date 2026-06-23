@@ -464,9 +464,15 @@ function CopyButton({ label, text, title }: { label: string; text: string; title
   );
 }
 
-// Copies a claude session id (the @claude_session UUID) to the clipboard,
-// flashing a check for a beat after. Surfaces on each Home card and in the chat
-// bar so a session's id can be pasted into another chat to reference it. `compact`
+// The canonical way to name a claude session inside a prompt. Shared by the
+// Copy-ID buttons and "Prompt with context" so a pasted (or seeded) id always
+// reads as an instruction the next session can act on.
+const sessionRef = (sessionId: string) => `Look at Claude session ID ${sessionId}`;
+
+// Copies a reference to a claude session id — "Look at Claude session ID <uuid>" —
+// to the clipboard, flashing a check for a beat after. The "Look at…" prefix means
+// the paste reads as a ready-to-send prompt, since these ids are usually dropped
+// straight into a new chat. Surfaces on each Home card and in the chat bar. `compact`
 // drops the label (card footer) and stops click propagation so it doesn't open the
 // card; `iconSize`/`className` let the chat bar render a larger, labelled variant.
 function CopyIdButton({
@@ -489,7 +495,7 @@ function CopyIdButton({
       aria-label="Copy session ID"
       onClick={(e) => {
         e.stopPropagation();
-        navigator.clipboard.writeText(sessionId).catch(() => {});
+        navigator.clipboard.writeText(sessionRef(sessionId)).catch(() => {});
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}
@@ -1966,8 +1972,8 @@ function HomeCard({
   state: string;
   selected?: boolean;
   unseen?: boolean;
-  // "Commit with context" selection mode: cards act as checkboxes you tick to
-  // mark which sessions produced the pending changes, instead of opening a chat.
+  // "Prompt with context" selection mode: cards act as checkboxes you tick to
+  // pick which sessions a new prompt should reference, instead of opening a chat.
   selectMode?: boolean;
   picked?: boolean;
   onOpen: (name: string) => void;
@@ -2286,10 +2292,10 @@ function App() {
   // boots with that card focused and its chat open.
   const [homeSel, setHomeSel] = useState<string | null>(initial.homeChat ?? null);
   const [homeChat, setHomeChat] = useState<string | null>(initial.homeChat ?? null);
-  // ---- "Commit with context" selection mode ----
+  // ---- "Prompt with context" selection mode ----
   // contextMode turns the Home cards into checkboxes; contextSel holds the tmux
-  // session names you've ticked as the work behind the pending changes. Confirming
-  // hands those panes + their claude session ids to the commit-authoring session.
+  // session names you've ticked. Confirming seeds the New Claude session composer
+  // with a "Look at Claude session ID …" line for each, ready for you to write the ask.
   const [contextMode, setContextMode] = useState(false);
   const [contextSel, setContextSel] = useState<Set<string>>(new Set());
   // The HTML artifact path currently open in the full-screen preview (the second
@@ -4017,9 +4023,8 @@ function App() {
     }, 500);
   }, [queryClient]);
 
-  // Stage everything, then hand the given prompt off to a detached claude session.
-  // Shared by "Commit with Claude" and "Commit with context" — both stage, launch,
-  // and surface the same launched/queued feedback toast.
+  // Stage everything, then hand the given prompt off to a detached claude session,
+  // surfacing the launched/queued feedback toast. Backs "Commit with Claude".
   const stageAndLaunch = useCallback(async (prompt: string) => {
     await runGit("stage");
     try {
@@ -4055,7 +4060,7 @@ function App() {
     [stageAndLaunch],
   );
 
-  // Toggle a card in/out of the "Commit with context" selection.
+  // Toggle a card in/out of the "Prompt with context" selection.
   const toggleContextPick = useCallback((name: string) => {
     setContextSel((prev) => {
       const next = new Set(prev);
@@ -4970,27 +4975,20 @@ function App() {
     setHomeChat(name);
   }, []);
   const closeHomeChat = useCallback(() => setHomeChat(null), []);
-  // Confirm "Commit with context": like Commit with Claude, but the prompt names
-  // the tmux panes and claude session ids that produced these changes so the
-  // authoring session can fold them into the commit message (and trace the work).
-  const commitWithContext = useCallback(async () => {
+  // Confirm "Prompt with context": open the New Claude session composer seeded with
+  // a "Look at Claude session ID …" line for each ticked card, so a fresh session
+  // starts already pointed at the work behind them. Unlike Commit with Claude this
+  // launches nothing — it hands you the composer to write the actual ask. Mirrors
+  // the `'` new-session pre-fill (seed the prompt, drop the caret, open).
+  const promptWithContext = useCallback(() => {
     const picked = (visibleTmux ?? []).filter((s) => contextSel.has(s.name));
-    if (!picked.length) return;
-    const lines = picked
-      .map((s) => {
-        const sid = s.sessionId ? ` — claude session id ${s.sessionId}` : "";
-        const task = s.task ? ` (${s.task})` : "";
-        return `- tmux pane "${s.name}"${sid}${task}`;
-      })
-      .join("\n");
-    const prompt =
-      "Commit and push the staged changes with a clear, informative commit message.\n\n" +
-      "The following tmux panes and Claude sessions produced these changes. Reference them in the commit " +
-      "message (e.g. as trailers listing the relevant claude session ids) so the work can be traced back:\n" +
-      lines;
+    const refs = picked.filter((s) => s.sessionId).map((s) => sessionRef(s.sessionId));
+    if (!refs.length) return;
     exitContextMode();
-    await stageAndLaunch(prompt);
-  }, [visibleTmux, contextSel, exitContextMode, stageAndLaunch]);
+    setClaudePrompt(`${refs.join("\n")}\n\n`);
+    claudeCaretRef.current = null; // land the caret after the seeded refs
+    setClaudeOpen(true);
+  }, [visibleTmux, contextSel, exitContextMode]);
   // Leaving the Home tab drops selection mode so its bottom bar / ticked cards
   // don't linger when you come back to a different view.
   useEffect(() => {
@@ -5324,7 +5322,7 @@ function App() {
         return;
       }
       if (typing) return;
-      // "Commit with context" selection mode owns Esc (cancel) and Enter (toggle the
+      // "Prompt with context" selection mode owns Esc (cancel) and Enter (toggle the
       // focused card's checkbox, instead of opening its chat) while it's active.
       if (keyCtx.current.tab === "home" && keyCtx.current.contextMode) {
         if (e.key === "Escape") {
@@ -5658,7 +5656,7 @@ function App() {
         // that card instead of closing — so you can keep clearing through the
         // grid. (Esc still closes the chat; `X` has no Home action.)
         if (tab === "home") {
-          // In "commit with context" selection mode `x` isn't a kill — leave the
+          // In "prompt with context" selection mode `x` isn't a kill — leave the
           // ticked cards alone (Esc cancels, the bar's button confirms).
           if (e.key === "x" && keyCtx.current.homeSel && !keyCtx.current.contextMode) {
             const sel = keyCtx.current.homeSel;
@@ -6377,10 +6375,9 @@ function App() {
         {tab === "home" && (
           <button
             className={`topbar-btn${contextMode ? " active" : ""}`}
-            title={contextMode ? "Cancel commit with context" : "Commit with context"}
-            aria-label={contextMode ? "Cancel commit with context" : "Commit with context"}
+            title={contextMode ? "Cancel prompt with context" : "Prompt with context"}
+            aria-label={contextMode ? "Cancel prompt with context" : "Prompt with context"}
             aria-pressed={contextMode}
-            disabled={!dirty && !contextMode}
             onClick={toggleContextMode}
           >
             <ListChecks size={18} />
@@ -7991,21 +7988,19 @@ function App() {
           <span className="sel-info">
             {contextSel.size
               ? `${contextSel.size} session${contextSel.size > 1 ? "s" : ""} selected`
-              : "Tick the sessions behind these changes"}
+              : "Tick the sessions to reference"}
           </span>
           <button
             className="sel-act"
-            disabled={!contextSel.size || !dirty}
+            disabled={!contextSel.size}
             title={
-              !dirty
-                ? "Nothing to commit"
-                : !contextSel.size
-                  ? "Tick at least one session"
-                  : "Commit with the selected sessions as context"
+              !contextSel.size
+                ? "Tick at least one session"
+                : "Open a new prompt referencing the selected sessions"
             }
-            onClick={() => void commitWithContext()}
+            onClick={promptWithContext}
           >
-            Commit with context
+            Prompt with context
           </button>
           <button className="sel-x" title="Cancel (esc)" onClick={exitContextMode}>
             ✕
