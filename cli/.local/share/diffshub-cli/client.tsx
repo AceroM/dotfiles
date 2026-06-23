@@ -2838,6 +2838,19 @@ function App() {
     if (claudeEffort) localStorage.setItem("claudeEffort", claudeEffort);
     else localStorage.removeItem("claudeEffort");
   }, [claudeEffort]);
+  // Launch the session with `claude --chrome` (Claude in Chrome integration).
+  // Persisted across sessions like effort — a global preference, not a per-repo draft.
+  const [claudeChrome, setClaudeChrome] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("claudeChrome") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (claudeChrome) localStorage.setItem("claudeChrome", "1");
+    else localStorage.removeItem("claudeChrome");
+  }, [claudeChrome]);
   const [launchedSession, setLaunchedSession] = useState<string | null>(null);
   // Brief confirmation shown after an offline prompt is queued (auto-dismissed).
   const [queuedNote, setQueuedNote] = useState(false);
@@ -3752,7 +3765,7 @@ function App() {
       const res = await fetch(qd("/api/claude"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, effort: claudeEffort || undefined }),
+        body: JSON.stringify({ prompt, effort: claudeEffort || undefined, chrome: claudeChrome || undefined }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}) as any);
@@ -3781,7 +3794,7 @@ function App() {
     } finally {
       setLaunching(false);
     }
-  }, [claudePrompt, claudeEffort, qd, queryClient]);
+  }, [claudePrompt, claudeEffort, claudeChrome, qd, queryClient]);
 
   // Relaunch a closed session: the server starts `claude --resume <sid>` detached
   // in the active directory. Mirrors submitClaude's refresh dance so the resumed
@@ -7758,6 +7771,15 @@ function App() {
                   <option value="xhigh">Extra high</option>
                   <option value="max">Max</option>
                 </select>
+              </label>
+              <label className="claude-opt">
+                <span>Chrome</span>
+                <input
+                  type="checkbox"
+                  checked={claudeChrome}
+                  onChange={(e) => setClaudeChrome(e.target.checked)}
+                  onKeyDown={(e) => e.stopPropagation()}
+                />
               </label>
             </div>
             {!serverOnline && (

@@ -1053,14 +1053,21 @@ async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok
 // is dropped so the session inherits the global settings.json `effortLevel`.
 const CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
-async function newClaudeSession(dir: string, prompt: string, effort?: string): Promise<string> {
+async function newClaudeSession(
+  dir: string,
+  prompt: string,
+  effort?: string,
+  chrome?: boolean,
+): Promise<string> {
   const name = await pickClaudeSessionName();
   const sid = crypto.randomUUID();
   const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
   // effort is validated against CLAUDE_EFFORTS before it reaches here, so it's a
   // plain word — safe unquoted in the command.
   const effortArg = effort && CLAUDE_EFFORTS.has(effort) ? ` --effort ${effort}` : "";
-  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${effortArg}${promptArg}`;
+  // --chrome enables the Claude-in-Chrome integration for this session.
+  const chromeArg = chrome ? " --chrome" : "";
+  const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${effortArg}${chromeArg}${promptArg}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
   await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
   return name;
@@ -3260,6 +3267,7 @@ const page = `<!DOCTYPE html>
     background: var(--bg-muted); border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 6px;
   }
   .claude-opt select:hover, .claude-opt select:focus { color: var(--text); border-color: var(--accent); }
+  .claude-opt input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; margin: 0; }
 
   /* Claude usage dialog (⇧U) — one row per rate-limit window: label, percent,
      a fill bar, and the reset countdown. */
@@ -4303,7 +4311,7 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-      let body: { prompt?: unknown; effort?: unknown };
+      let body: { prompt?: unknown; effort?: unknown; chrome?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -4318,6 +4326,7 @@ const server = Bun.serve({
         typeof body.effort === "string" && CLAUDE_EFFORTS.has(body.effort)
           ? body.effort
           : undefined;
+      const chrome = body.chrome === true;
       // Offline → enqueue instead of launching a session that couldn't reach the
       // API. drainQueue() launches it automatically once we're back online.
       if (!(await checkOnline(true))) {
@@ -4325,7 +4334,7 @@ const server = Bun.serve({
         return json({ ok: true, queued: true, id });
       }
       try {
-        const session = await newClaudeSession(ws.path, body.prompt, effort);
+        const session = await newClaudeSession(ws.path, body.prompt, effort, chrome);
         return json({ ok: true, session });
       } catch (e) {
         return json({ error: errText(e) }, 500);
