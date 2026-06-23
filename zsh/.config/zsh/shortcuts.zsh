@@ -5,6 +5,7 @@ alias wr="wrangler"
 alias wd="wrangler deploy"
 alias b="bun"
 alias n="nvim"
+alias nl="NVIM_NO_LSP=1 nvim" # open without any LSP (see nvim options.lua)
 alias c="claude"
 alias cs="claude --dangerously-skip-permissions"
 alias ca="claude --permission-mode plan"

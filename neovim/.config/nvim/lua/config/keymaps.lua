@@ -106,6 +106,88 @@ vim.keymap.set("n", "<leader>gH", function()
   vim.notify("Git hunks " .. (git_hunks_shown and "shown" or "hidden"))
 end, { desc = "Toggle visibility of all git hunks" })
 
+-- :PRDiff — the whole `gh pr diff` in ONE scrollable buffer (Zed-multibuffer-ish).
+-- Improves on `gh pr diff | bat`: real nvim motions/search, per-file folds, and
+-- <CR> jumps into the actual file at the hunk's line. Note: ft=diff only colors
+-- the diff itself (+/- lines, hunk headers), not per-language syntax — for full
+-- syntax review use diffview (<leader>gd / :DiffviewOpen origin/main...HEAD).
+
+-- Fold each file's section (a fold starts at every "diff --git ..." line).
+function _G.prdiff_foldexpr()
+  return vim.fn.getline(vim.v.lnum):match("^diff ") and ">1" or "1"
+end
+
+-- From the cursor, walk up to find the file (+++ b/…) and nearest hunk header,
+-- compute the corresponding new-file line, and open it in a vertical split.
+local function prdiff_jump()
+  local cur = vim.api.nvim_win_get_cursor(0)[1]
+  local file, hunk_line, new_start
+  for l = cur, 1, -1 do
+    local line = vim.fn.getline(l)
+    if not new_start then
+      local s = line:match("^@@ %-%d+,?%d* %+(%d+)")
+      if s then
+        hunk_line, new_start = l, tonumber(s)
+      end
+    end
+    if not file then
+      file = line:match("^%+%+%+ b/(%S+)") or line:match("^diff %-%-git a/%S+ b/(%S+)")
+    end
+    if line:match("^diff ") then
+      break
+    end
+  end
+  if not file then
+    vim.notify("PRDiff: no file under cursor", vim.log.levels.WARN)
+    return
+  end
+  local target = new_start or 1
+  if hunk_line then
+    local count = 0
+    for l = hunk_line + 1, cur do
+      if vim.fn.getline(l):sub(1, 1) ~= "-" then -- deletions don't advance the new file
+        count = count + 1
+      end
+    end
+    target = new_start + math.max(count - 1, 0)
+  end
+  local root = vim.fn.systemlist({ "git", "rev-parse", "--show-toplevel" })[1] or ""
+  local path = root ~= "" and (root .. "/" .. file) or file
+  vim.cmd("vsplit " .. vim.fn.fnameescape(path))
+  pcall(vim.api.nvim_win_set_cursor, 0, { target, 0 })
+end
+
+local prdiff_buf
+local function open_pr_diff()
+  local out = vim.fn.systemlist({ "gh", "pr", "diff" })
+  if vim.v.shell_error ~= 0 then
+    vim.notify(table.concat(out, "\n"), vim.log.levels.ERROR, { title = "PRDiff" })
+    return
+  end
+  if not (prdiff_buf and vim.api.nvim_buf_is_valid(prdiff_buf)) then
+    prdiff_buf = vim.api.nvim_create_buf(false, true) -- unlisted scratch
+    vim.bo[prdiff_buf].buftype = "nofile"
+    vim.bo[prdiff_buf].bufhidden = "hide" -- keep it around after <CR> jumps
+    vim.bo[prdiff_buf].swapfile = false
+    vim.api.nvim_buf_set_name(prdiff_buf, "PR Diff")
+    vim.keymap.set("n", "<CR>", prdiff_jump, { buffer = prdiff_buf, desc = "PRDiff: open file at hunk" })
+  end
+  vim.bo[prdiff_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(prdiff_buf, 0, -1, false, out)
+  vim.bo[prdiff_buf].modifiable = false
+  vim.bo[prdiff_buf].filetype = "diff"
+  vim.api.nvim_set_current_buf(prdiff_buf)
+  vim.wo.wrap = false
+  vim.wo.foldmethod = "expr"
+  vim.wo.foldexpr = "v:lua.prdiff_foldexpr()"
+  vim.wo.foldenable = true
+  vim.wo.foldlevel = 99 -- start fully expanded; zM collapses to one line per file
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+end
+
+vim.api.nvim_create_user_command("PRDiff", open_pr_diff, { desc = "Open full PR diff in one scrollable buffer" })
+vim.keymap.set("n", "<leader>gp", open_pr_diff, { desc = "PR diff (single scroll buffer)" })
+
 -- Go to definition in vertical/horizontal splits
 vim.keymap.set(
   "n",
