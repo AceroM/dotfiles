@@ -22,3 +22,17 @@ vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
     end
   end,
 })
+
+-- Follow the terminal's light/dark appearance. Neovim queries the terminal
+-- (OSC 11) at startup and updates `background` once the response arrives, which
+-- is after the colorscheme has been applied. It also fires if you toggle your
+-- terminal's theme while Neovim is open. Re-apply the colorscheme so rose-pine's
+-- `variant = "auto"` picks up the new background.
+vim.api.nvim_create_autocmd("OptionSet", {
+  pattern = "background",
+  callback = function()
+    if vim.g.colors_name then
+      vim.cmd.colorscheme(vim.g.colors_name)
+    end
+  end,
+})
