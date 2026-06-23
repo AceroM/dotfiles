@@ -1,6 +1,10 @@
 # Ghostty config
 # Stowed with: stow ghostty  ->  ~/.config/ghostty/config
 
+# Don't prompt "Close Tab? The terminal still has a running process."
+# when closing a surface/tab/window that has a running process.
+confirm-close-surface = false
+
 # Block cursor instead of the default "bar" (the Microsoft-Word-looking beam)
 cursor-style = block
 

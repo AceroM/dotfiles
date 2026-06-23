@@ -77,7 +77,36 @@ return {
       end,
     }
 
-    -- "Git PR Diff" entry: pipe `gh pr diff` into the diff picker
+    -- Wraps a diff_finder so the first run executes the command (e.g. `gh pr
+    -- diff`) and caches the parsed hunks; every later run serves from cache.
+    -- `Snacks.picker.resume()` recreates the picker from its saved opts, which
+    -- re-invokes this same closure — so resume reuses the cache instead of
+    -- re-shelling to `gh`, and (since we return a plain table) snacks takes its
+    -- fast synchronous path and instantly restores the last cursor/index.
+    local function cached_diff_finder(cmd, cmd_args)
+      local base = diff_finder(cmd, cmd_args)
+      local cache ---@type snacks.picker.finder.Item[]?
+      ---@type snacks.picker.finder
+      return function(finder_opts, ctx)
+        if cache then
+          return cache
+        end
+        local items = {} ---@type snacks.picker.finder.Item[]
+        local produce = base(finder_opts, ctx)
+        return function(cb)
+          produce(function(item)
+            items[#items + 1] = item
+            cb(item)
+          end)
+          cache = items
+        end
+      end
+    end
+
+    -- "Git PR Diff" entry: pipe `gh pr diff` into the diff picker. Each press of
+    -- "p" builds a fresh finder (so it re-fetches the latest PR diff); <C-g>
+    -- (Snacks.picker.resume) reopens this same instance from cache, at the index
+    -- you left off — see lua/config/keymaps.lua.
     local pr_diff_item = {
       icon = "󰊢 ",
       key = "p",
@@ -86,7 +115,7 @@ return {
         Snacks.picker.pick({
           source = "pr_diff",
           title = "PR Diff",
-          finder = diff_finder("gh", { "pr", "diff" }),
+          finder = cached_diff_finder("gh", { "pr", "diff" }),
           format = "file",
           preview = "diff",
         })
