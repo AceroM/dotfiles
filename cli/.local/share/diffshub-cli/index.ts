@@ -373,6 +373,42 @@ function collectAssetRefs(html: string): string[] {
 // or protocol-relative //), or a non-asset URL (anchors, mailto, tel).
 const isExternalRef = (u: string) => /^(?:data:|https?:|\/\/|#|mailto:|tel:|blob:)/i.test(u);
 
+// Replace every src/href/poster/srcset/url() ref present in `map` with its mapped
+// value — one pass per attribute family, since a literal string replace would
+// corrupt a ref that's a substring of another. Shared by the R2 share rewrite and
+// the live-preview asset rewrite (rewriteLocalAssets). Emits a bare url(...) so the
+// result stays valid CSS in a <style> block or a quoted style="" attribute.
+function applyRefMap(html: string, map: Map<string, string>): string {
+  if (map.size === 0) return html;
+  let out = html.replace(
+    /(\b(?:src|href|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi,
+    (full, pre, dq, sq) => {
+      const raw = dq ?? sq;
+      const mapped = map.get(raw.trim());
+      return mapped ? `${pre}"${mapped}"` : full;
+    },
+  );
+  out = out.replace(/(\bsrcset\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi, (full, pre, dq, sq) => {
+    const raw = dq ?? sq ?? "";
+    const rebuilt = raw
+      .split(",")
+      .map((cand: string) => {
+        const t = cand.trim();
+        if (!t) return cand;
+        const [u, ...descr] = t.split(/\s+/);
+        const mapped = map.get(u.trim());
+        return mapped ? [mapped, ...descr].join(" ") : t;
+      })
+      .join(", ");
+    return `${pre}"${rebuilt}"`;
+  });
+  out = out.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi, (full, dq, sq, bare) => {
+    const mapped = map.get((dq ?? sq ?? bare ?? "").trim());
+    return mapped ? `url(${mapped})` : full;
+  });
+  return out;
+}
+
 // Find local, non-base64 image assets referenced by an HTML artifact, upload
 // each to R2 under the share's asset folder, and return the HTML with those
 // references rewritten to absolute cdn URLs. Assets are resolved against the
@@ -422,39 +458,38 @@ async function uploadHtmlAssets(
     keys.push(key);
   }
 
-  if (map.size === 0) return { html, uploaded, skipped, keys };
+  return { html: applyRefMap(html, map), uploaded, skipped, keys };
+}
 
-  // Single pass per pattern, each match swapped via the map — no literal
-  // string replace, which would corrupt refs that are substrings of others.
-  let out = html.replace(
-    /(\b(?:src|href|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi,
-    (full, pre, dq, sq) => {
-      const raw = dq ?? sq;
-      const mapped = map.get(raw.trim());
-      return mapped ? `${pre}"${mapped}"` : full;
-    },
-  );
-  out = out.replace(/(\bsrcset\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi, (full, pre, dq, sq) => {
-    const raw = dq ?? sq ?? "";
-    const rebuilt = raw
-      .split(",")
-      .map((cand: string) => {
-        const t = cand.trim();
-        if (!t) return cand;
-        const [u, ...descr] = t.split(/\s+/);
-        const mapped = map.get(u.trim());
-        return mapped ? [mapped, ...descr].join(" ") : t;
-      })
-      .join(", ");
-    return `${pre}"${rebuilt}"`;
-  });
-  out = out.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi, (full, dq, sq, bare) => {
-    const mapped = map.get((dq ?? sq ?? bare ?? "").trim());
-    // Emit a bare url(...) — our cdn links are quote/space-free, so this stays
-    // valid CSS whether it sits in a <style> block or a quoted style="" attr.
-    return mapped ? `url(${mapped})` : full;
-  });
-  return { html: out, uploaded, skipped, keys };
+// Rewrite an HTML artifact's local asset refs (images, css, js, fonts, …) to
+// absolute /api/tmux/asset URLs so the srcDoc preview can load the files sitting
+// next to the HTML. Mirrors uploadHtmlAssets' resolve + cwd guard, but points at
+// our own asset route instead of uploading to R2: the rewritten URLs are
+// same-origin as the diffshub page, so they work over the https tailscale URL (no
+// mixed content) where a bare relative ref — resolved against the diffshub origin,
+// not the file's folder — just 404s into the SPA fallback. Refs that don't resolve
+// to a real file inside cwd (and .html links, which aren't this preview's job) are
+// left untouched.
+function rewriteLocalAssets(html: string, htmlDir: string, cwd: string, session: string): string {
+  const map = new Map<string, string>(); // original ref -> /api/tmux/asset url
+  for (const ref of collectAssetRefs(html)) {
+    if (isExternalRef(ref) || map.has(ref)) continue;
+    const clean = ref.replace(/[?#].*$/, ""); // drop ?query / #frag for resolution
+    if (!clean || /\.html?$/i.test(clean)) continue;
+    let absAsset: string;
+    try {
+      absAsset = resolve(htmlDir, decodeURIComponent(clean));
+    } catch {
+      absAsset = resolve(htmlDir, clean);
+    }
+    if (absAsset !== cwd && !absAsset.startsWith(cwd + sep)) continue; // escape guard
+    if (!existsSync(absAsset) || !statSync(absAsset).isFile()) continue;
+    map.set(
+      ref,
+      `/api/tmux/asset?session=${encodeURIComponent(session)}&path=${encodeURIComponent(absAsset)}`,
+    );
+  }
+  return applyRefMap(html, map);
 }
 
 // ---- Resolved-workspace cache (gh calls are slow) ----
@@ -2180,7 +2215,7 @@ const page = `<!DOCTYPE html>
   }
   .topbar-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
   .topbar-btn:disabled { opacity: .4; cursor: default; }
-  /* Toggled-on state (e.g. Home's "Commit with context" while you're picking cards). */
+  /* Toggled-on state (e.g. Home's "Prompt with context" while you're picking cards). */
   .topbar-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
   .topbar-btn.active:hover:not(:disabled) { background: var(--accent-bg); border-color: var(--accent); }
   /* New-session (+, Tmux + Commits tabs) and kill (trash, Tmux tab) buttons —
@@ -3006,8 +3041,8 @@ const page = `<!DOCTYPE html>
   .home-card.waiting .home-dot, .home-card.queued .home-dot { background: var(--amber); animation: pendingPulse 1.6s ease-in-out infinite; }
   .home-card.unread .home-dot { background: var(--accent); }
   @media (max-width: 640px) { .home-cards { grid-template-columns: 1fr; } }
-  /* "Commit with context" selection mode — cards become checkboxes you tick to mark
-     which sessions produced the pending changes. A ticked card lights up like the
+  /* "Prompt with context" selection mode — cards become checkboxes you tick to pick
+     which sessions a new prompt should reference. A ticked card lights up like the
      keyboard-selected one (accent border + ring) so the picks read at a glance. */
   .home-card.picking { cursor: pointer; }
   .home-card-check {
@@ -4508,11 +4543,47 @@ const server = Bun.serve({
         if (!/\.html?$/i.test(abs)) return json({ error: "Not an HTML file" }, 400);
         if (!existsSync(abs)) return json({ error: "File not found" }, 404);
         const html = await Bun.file(abs).text();
-        return new Response(html, {
+        // Rewrite local asset refs (sibling images/css/js/fonts) to absolute
+        // /api/tmux/asset URLs so they resolve inside the srcDoc iframe — a bare
+        // relative ref there resolves against the diffshub origin, not this file's
+        // folder, so it would otherwise 404 into the SPA fallback.
+        const rewritten = rewriteLocalAssets(html, dirname(abs), cwd, name);
+        return new Response(rewritten, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             // Live file — the client polls while the preview is open, so never cache.
             "Cache-Control": "no-store",
+          },
+        });
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Serve a single asset (image/css/js/font/…) sitting next to a previewed HTML
+    // artifact, so the srcDoc preview's rewritten refs resolve. Same session-cwd
+    // escape guard as /api/tmux/html; `path` is the absolute file path embedded by
+    // rewriteLocalAssets. Same-origin as the diffshub page → works over the https
+    // tailscale URL. CORS is set so CSS @font-face fetches (always CORS-checked,
+    // and issued from the sandboxed iframe's opaque origin) succeed.
+    if (req.method === "GET" && url.pathname === "/api/tmux/asset") {
+      const name = url.searchParams.get("session") ?? "";
+      const want = url.searchParams.get("path") ?? "";
+      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      try {
+        const cwd = (
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+        ).trim();
+        if (!cwd) return json({ error: "No such session" }, 404);
+        const abs = resolve(cwd, want);
+        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
+        if (!existsSync(abs) || !statSync(abs).isFile()) return json({ error: "File not found" }, 404);
+        const file = Bun.file(abs);
+        return new Response(file, {
+          headers: {
+            "Content-Type": file.type || "application/octet-stream",
+            "Cache-Control": "no-store",
+            ...CORS,
           },
         });
       } catch (e) {
