@@ -168,6 +168,7 @@ config.initial_rows = 28
 -- Font size configuration
 config.font_size = 15
 config.window_decorations = "RESIZE"
+config.native_macos_fullscreen_mode = true
 
 -- Make BOTH Option keys act as Alt/Meta (send ESC-prefixed sequences) instead
 -- of composing accented characters. Required for tmux/shell `M-` bindings to
