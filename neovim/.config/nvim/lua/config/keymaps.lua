@@ -18,6 +18,11 @@ vim.keymap.set("n", "<F2>", "*N", { desc = "Highlight current word" })
 vim.keymap.set("n", "<C-p>", function()
   Snacks.picker.files()
 end, { desc = "Find files" })
+-- Resume the last picker (e.g. dashboard "p" PR diff) with its previous
+-- cursor position/state, so you can jump back in and keep navigating.
+vim.keymap.set("n", "<C-g>", function()
+  Snacks.picker.resume()
+end, { desc = "Resume last picker" })
 vim.keymap.set("n", "'", ":bd<CR>", { desc = "Close current buffer" })
 vim.keymap.set({ "n", "v" }, "<c-/>", function()
   vim.cmd("normal gcc+")
