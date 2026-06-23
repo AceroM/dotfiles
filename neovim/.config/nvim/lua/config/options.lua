@@ -7,6 +7,13 @@ vim.opt.scrolloff = 0
 vim.opt.spell = false
 vim.g.lazyvim_prettier_needs_config = false
 
+-- `nl` shell alias launches nvim with NVIM_NO_LSP=1 to open files fast with no
+-- language servers. options.lua loads before lazy.nvim, so no-op'ing vim.lsp.start
+-- here (every LSP attach routes through it) means nothing ever spawns or attaches.
+if vim.env.NVIM_NO_LSP == "1" then
+  vim.lsp.start = function() end
+end
+
 -- When SSH'd in, route the system clipboard (+ register) through OSC 52 so every
 -- yank lands on the clipboard of whatever device I'm sitting at — no per-machine
 -- relay. This makes all the existing + mappings (<C-y>, <leader>cp, gcc+, "+y)
