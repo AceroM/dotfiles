@@ -28,4 +28,6 @@ alias ...='cd ../..'
 for i in 0 1 2 3 4 5 6 7 8 9; do
   unalias "$i" 2>/dev/null  # avoid "defining function based on alias" on re-source
   eval "$i() { local p; p=\$(bm path $i) || { echo 'slot $i empty' >&2; return 1; }; cd \"\$p\"; }"
+  # <i>p: jump to slot <i>, then launch a Claude session there (p, defined in claude.zsh)
+  eval "${i}p() { $i && p \"\$@\"; }"
 done
