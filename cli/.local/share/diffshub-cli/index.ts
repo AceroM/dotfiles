@@ -21,6 +21,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Members come from the directory's `repos` column, then (for the launch cwd
 // only) $DIFFSHUB_REPOS, then ./.diffshub.json, then the app+web default, then a
 // scan of every immediate child git repo.
+// Each member entry may be an exact sub-dir name OR a glob (`*`, `?`, `[2-6]`)
+// matched against the immediate child git repos/worktrees — so `tax-holiday.[2-6]`
+// keeps picking up worktrees as they come and go without re-editing the list.
 
 interface RepoCtx {
   key: string;
@@ -102,6 +105,47 @@ function parseRepos(repos: string | null): string[] | null {
   return null;
 }
 
+// Immediate child directories of `path` that are git repos or worktrees (a `.git`
+// dir or file), sorted. Shared by glob expansion and the auto-detect fallback.
+function childGitRepos(path: string): string[] {
+  try {
+    return readdirSync(path, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(`${path}/${e.name}/.git`))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+// Expand a member spec into concrete child directory names. Each entry is either an
+// exact name or a glob (`*`, `?`, `[2-6]`) matched against the immediate child git
+// repos. A glob matches a single path segment only (no recursion). An exact name
+// keeps the prior behavior: kept only if it's actually a git repo/worktree. Order
+// follows the spec; duplicates are dropped. The child scan runs only when a glob is
+// present, so the common exact-list case stays a cheap existsSync per entry.
+function expandRepoPatterns(path: string, patterns: string[]): string[] {
+  const isGlob = (s: string) => /[*?[\]]/.test(s);
+  const children = patterns.some(isGlob) ? childGitRepos(path) : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string) => {
+    if (!seen.has(name)) {
+      seen.add(name);
+      out.push(name);
+    }
+  };
+  for (const pat of patterns) {
+    if (isGlob(pat)) {
+      const glob = new Bun.Glob(pat);
+      for (const name of children) if (glob.match(name)) add(name);
+    } else if (existsSync(`${path}/${pat}/.git`)) {
+      add(pat);
+    }
+  }
+  return out;
+}
+
 // Member repos for a workspace directory (non-git parent or explicit list).
 async function resolveMemberRepos(path: string, explicit: string[] | null): Promise<RepoCtx[]> {
   let keys: string[] = explicit ? [...explicit] : [];
@@ -117,21 +161,15 @@ async function resolveMemberRepos(path: string, explicit: string[] | null): Prom
     } catch { }
   }
   if (!keys.length) keys = ["app", "web"];
-  let resolved = await Promise.all(
-    keys
-      .filter((k) => existsSync(`${path}/${k}/.git`))
-      .map((k) => resolveRepoOrLocal(k, `${path}/${k}`)),
-  );
+  // Exact names and globs alike resolve through expandRepoPatterns (so member lists,
+  // $DIFFSHUB_REPOS, and .diffshub.json all get glob support for free).
+  const members = expandRepoPatterns(path, keys);
+  let resolved = await Promise.all(members.map((k) => resolveRepoOrLocal(k, `${path}/${k}`)));
   if (!resolved.length) {
     // Fall back to every immediate child that is a git repo.
-    let children: string[] = [];
-    try {
-      children = readdirSync(path, { withFileTypes: true })
-        .filter((e) => e.isDirectory() && existsSync(`${path}/${e.name}/.git`))
-        .map((e) => e.name)
-        .sort();
-    } catch { }
-    resolved = await Promise.all(children.map((k) => resolveRepoOrLocal(k, `${path}/${k}`)));
+    resolved = await Promise.all(
+      childGitRepos(path).map((k) => resolveRepoOrLocal(k, `${path}/${k}`)),
+    );
   }
   return resolved;
 }
