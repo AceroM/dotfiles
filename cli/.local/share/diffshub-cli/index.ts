@@ -2948,6 +2948,33 @@ const page = `<!DOCTYPE html>
     margin-left: auto; font-size: 11px; font-weight: 600;
     color: var(--accent-dim); background: var(--accent-bg); border-radius: 999px; padding: 1px 8px;
   }
+
+  /* Mobile commit pager — a bar at the top of the diff with newer/older buttons
+     and a position readout, giving phones the ↑/↓ commit-walking the keyboard
+     gives desktop (the list there is a hidden drawer). Only rendered on mobile
+     (gated by !isDesktop in client.tsx), so no media query needed here. The
+     message sits centered between the two edge-pinned buttons. */
+  .commit-pager {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px; padding: 6px 8px;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .commit-pager-btn {
+    flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+    width: 40px; height: 34px; cursor: pointer; color: var(--text-2);
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 8px;
+  }
+  .commit-pager-btn:hover { color: var(--text); border-color: var(--accent); }
+  .commit-pager-btn:active { background: var(--bg-hover); }
+  .commit-pager-mid {
+    flex: 1; min-width: 0; display: flex; flex-direction: column;
+    align-items: center; gap: 1px; text-align: center;
+  }
+  .commit-pager-msg {
+    max-width: 100%; font-size: 13px; font-weight: 600; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .commit-pager-pos { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
   .group-label {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 14px 4px; font-size: 11px; font-weight: 600;
