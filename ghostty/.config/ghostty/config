@@ -5,6 +5,22 @@
 # when closing a surface/tab/window that has a running process.
 confirm-close-surface = false
 
+# Font size in points. Ghostty's default is 13; bump it up by 2.
+font-size = 14
+
+# Keep the macOS titlebar (so the close/minimize/zoom buttons stay), but
+# blend it into the terminal background instead of removing it.
+macos-titlebar-style = transparent
+
+# Pin a static, blank window title so the titlebar doesn't show the cwd/path.
+# (Without this, Ghostty reports the shell's current directory up top.)
+title = " "
+
+# Hide the macOS document "proxy icon" (the little folder/file icon in the
+# titlebar that represents the cwd and can be dragged). "title" hides the text;
+# this hides the icon next to it.
+macos-titlebar-proxy-icon = hidden
+
 # Block cursor instead of the default "bar" (the Microsoft-Word-looking beam)
 cursor-style = block
 
