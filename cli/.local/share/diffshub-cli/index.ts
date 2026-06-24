@@ -70,7 +70,7 @@ async function resolveRepo(key: string, dir: string): Promise<RepoCtx | null> {
   let branch = "";
   try {
     branch = (await $`git branch --show-current`.cwd(dir).quiet().text()).trim();
-  } catch {}
+  } catch { }
   return { key, dir, nameWithOwner, branch };
 }
 
@@ -82,7 +82,7 @@ async function resolveRepoOrLocal(key: string, dir: string): Promise<RepoCtx> {
   let branch = "";
   try {
     branch = (await $`git -C ${dir} branch --show-current`.quiet().text()).trim();
-  } catch {}
+  } catch { }
   return { key, dir, nameWithOwner: "", branch };
 }
 
@@ -98,7 +98,7 @@ function parseRepos(repos: string | null): string[] | null {
         .filter(Boolean);
       return list.length ? list : null;
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -114,7 +114,7 @@ async function resolveMemberRepos(path: string, explicit: string[] | null): Prom
       const cfg = await Bun.file(`${path}/.diffshub.json`).json();
       const list = Array.isArray(cfg) ? cfg : cfg?.repos;
       if (Array.isArray(list)) keys = list.filter((x: unknown): x is string => typeof x === "string");
-    } catch {}
+    } catch { }
   }
   if (!keys.length) keys = ["app", "web"];
   let resolved = await Promise.all(
@@ -130,7 +130,7 @@ async function resolveMemberRepos(path: string, explicit: string[] | null): Prom
         .filter((e) => e.isDirectory() && existsSync(`${path}/${e.name}/.git`))
         .map((e) => e.name)
         .sort();
-    } catch {}
+    } catch { }
     resolved = await Promise.all(children.map((k) => resolveRepoOrLocal(k, `${path}/${k}`)));
   }
   return resolved;
@@ -152,7 +152,7 @@ async function resolveMembers(
     let branch = "";
     try {
       branch = (await $`git -C ${path} branch --show-current`.quiet().text()).trim();
-    } catch {}
+    } catch { }
     return {
       repos: [{ key: path.split("/").pop() || "repo", dir: path, nameWithOwner: "", branch }],
       isWorkspace: false,
@@ -216,7 +216,7 @@ db.run(`CREATE TABLE IF NOT EXISTS push_subscriptions (
 )`);
 const upsertSubStmt = db.query(
   "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?) " +
-    "ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
+  "ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
 );
 const listSubsStmt = db.query<PushSub, []>("SELECT endpoint, p256dh, auth FROM push_subscriptions");
 const deleteSubStmt = db.query("DELETE FROM push_subscriptions WHERE endpoint = ?");
@@ -289,7 +289,7 @@ db.run(`CREATE TABLE IF NOT EXISTS shares (
 // "Undo" delete the artifact's uploaded image objects too). Dupe-column throws.
 try {
   db.run("ALTER TABLE shares ADD COLUMN asset_keys TEXT");
-} catch {}
+} catch { }
 interface ShareRow {
   abs_path: string;
   share_id: string;
@@ -302,9 +302,9 @@ interface ShareRow {
 const getShareStmt = db.query<ShareRow, [string]>("SELECT * FROM shares WHERE abs_path = ?");
 const upsertShareStmt = db.query(
   "INSERT INTO shares (abs_path, share_id, url, content_hash, asset_keys, created_at, updated_at) " +
-    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(abs_path) DO UPDATE SET " +
-    "url = excluded.url, content_hash = excluded.content_hash, asset_keys = excluded.asset_keys, " +
-    "updated_at = excluded.updated_at",
+  "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(abs_path) DO UPDATE SET " +
+  "url = excluded.url, content_hash = excluded.content_hash, asset_keys = excluded.asset_keys, " +
+  "updated_at = excluded.updated_at",
 );
 const deleteShareStmt = db.query("DELETE FROM shares WHERE abs_path = ?");
 
@@ -342,7 +342,7 @@ async function r2Put(key: string, body: Buffer | string, contentType: string): P
   } finally {
     try {
       unlinkSync(tmp);
-    } catch {}
+    } catch { }
   }
 }
 
@@ -589,8 +589,8 @@ async function wsFromReq(url: URL): Promise<Workspace> {
 // Warm the default directory's resolution + file index (best-effort; the cwd is
 // exempt from the too-many-files refusal so the server always has a usable default).
 getWorkspace(defaultDirId)
-  .then((ws) => indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => {}))
-  .catch(() => {});
+  .then((ws) => indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => { }))
+  .catch(() => { });
 
 // Permissive CORS so the Chrome extension's content scripts can call the API
 // from any origin (the server is localhost-only and personal). The
@@ -619,26 +619,47 @@ function errText(e: any): string {
 // Single-quote a string for safe interpolation into a /bin/sh command line
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
-// Resolve the user's editor ($VISUAL/$EDITOR, default zed) and build an argv
-// that jumps to a line for the editors that understand it.
+// Known terminal (TUI) editors. Spawned headless by the server they have no
+// controlling terminal, so editorArgv launches them inside a fresh terminal
+// window instead of letting them render nowhere.
+const TERMINAL_EDITOR_RE =
+  /^(vim|nvim|vi|view|nano|micro|emacs|emacsclient|kak|hx|helix)$/;
+
+// Resolve the user's editor ($EDITOR, then $VISUAL, default zed) and build an
+// argv that jumps to a line for the editors that understand it. $EDITOR wins
+// over $VISUAL on purpose: $VISUAL is often a GUI editor (here `zed`), but
+// "open in editor" should follow the terminal editor you actually live in.
 function editorTokens(): string[] {
-  const raw = (process.env.VISUAL || process.env.EDITOR || "zed").trim();
-  return raw ? raw.split(/\s+/) : ["zed"];
+  const raw = (process.env.EDITOR || process.env.VISUAL || "nvim").trim();
+  return raw ? raw.split(/\s+/) : ["nvim"];
 }
 function editorName(): string {
   const bin = editorTokens()[0];
   return bin.split("/").pop() || bin;
 }
-function editorArgv(fileAbs: string, line: number | null): string[] {
+function editorArgv(fileAbs: string, line: number | null, cwd?: string): string[] {
   const tokens = editorTokens();
-  if (line == null) return [...tokens, fileAbs];
   const name = editorName();
-  if (/^(code|codium|code-insiders|vscodium|cursor|windsurf)$/.test(name))
-    return [...tokens, "--goto", `${fileAbs}:${line}`];
-  if (/^(vim|nvim|vi|view|nano|micro|emacs|emacsclient|kak|hx|helix)$/.test(name))
-    return [...tokens, `+${line}`, fileAbs];
-  // zed, subl, JetBrains and unknown GUI editors take a `path:line` argument
-  return [...tokens, `${fileAbs}:${line}`];
+  let argv: string[];
+  if (line == null) {
+    argv = [...tokens, fileAbs];
+  } else if (/^(code|codium|code-insiders|vscodium|cursor|windsurf)$/.test(name)) {
+    argv = [...tokens, "--goto", `${fileAbs}:${line}`];
+  } else if (TERMINAL_EDITOR_RE.test(name)) {
+    argv = [...tokens, `+${line}`, fileAbs];
+  } else {
+    // zed, subl, JetBrains and unknown GUI editors take a `path:line` argument
+    argv = [...tokens, `${fileAbs}:${line}`];
+  }
+  // A TUI editor spawned headless renders nowhere, so open it in a new ghostty
+  // window. ghostty runs everything after `-e` as the command, so window
+  // options (--working-directory) must precede it.
+  if (TERMINAL_EDITOR_RE.test(name)) {
+    const win = ["open", "-na", "Ghostty", "--args"];
+    if (cwd) win.push(`--working-directory=${cwd}`);
+    return [...win, "-e", ...argv];
+  }
+  return argv;
 }
 
 // ---- New Claude session (mirrors the `p` shell function) ----
@@ -671,7 +692,7 @@ async function pickClaudeSessionName(): Promise<string> {
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
-  } catch {}
+  } catch { }
   const existing = new Set(sessions);
   const usedLetters = new Set<string>();
   await Promise.all(
@@ -681,7 +702,7 @@ async function pickClaudeSessionName(): Promise<string> {
           await $`tmux -L default display-message -p -t ${`${s}:0.0`} ${"#{pane_current_command}"}`.quiet().text()
         ).trim();
         if (/claude|node/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd)) usedLetters.add(s[0]);
-      } catch {}
+      } catch { }
     }),
   );
   let name = "";
@@ -1104,7 +1125,7 @@ async function newClaudeSession(
   const chromeArg = chrome ? " --chrome" : "";
   const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${effortArg}${chromeArg}${promptArg}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
-  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
+  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => { });
   return name;
 }
 
@@ -1117,7 +1138,7 @@ async function resumeClaudeSession(dir: string, sid: string): Promise<string> {
   const name = await pickClaudeSessionName();
   const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --resume ${sid}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
-  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => {});
+  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => { });
   return name;
 }
 
@@ -1230,7 +1251,7 @@ async function tailAiTitle(path: string): Promise<string> {
       try {
         const d = JSON.parse(line);
         if (d?.type === "ai-title" && typeof d.aiTitle === "string") title = d.aiTitle;
-      } catch {}
+      } catch { }
     }
     return title;
   } catch {
@@ -1262,7 +1283,7 @@ async function headFirstPrompt(path: string): Promise<string> {
       // <…> tags) that aren't a real first prompt; keep scanning for one that is.
       if (s && !s.startsWith("<")) return s.slice(0, 140);
     }
-  } catch {}
+  } catch { }
   return "";
 }
 
@@ -1282,7 +1303,7 @@ async function dirCandidates(cwd: string): Promise<Candidate[]> {
       let mtime = 0;
       try {
         mtime = statSync(path).mtimeMs;
-      } catch {}
+      } catch { }
       return { path, mtime };
     })
     .sort((a, b) => b.mtime - a.mtime)
@@ -1309,7 +1330,7 @@ async function resumableSessions(cwd: string): Promise<ResumableSession[]> {
   try {
     const raw = await $`tmux -L default list-sessions -F ${"#{@claude_session}"}`.quiet().text();
     for (const s of raw.split("\n")) if (s.trim()) live.add(s.trim());
-  } catch {}
+  } catch { }
   const dir = `${claudeProjectsRoot}/${mungeDir(cwd)}`;
   let files: string[] = [];
   try {
@@ -1323,7 +1344,7 @@ async function resumableSessions(cwd: string): Promise<ResumableSession[]> {
       let mtime = 0;
       try {
         mtime = statSync(`${dir}/${f}`).mtimeMs;
-      } catch {}
+      } catch { }
       return { sid, path: `${dir}/${f}`, mtime };
     })
     .filter((c) => /^[0-9a-fA-F-]{8,}$/.test(c.sid) && !live.has(c.sid))
@@ -1432,7 +1453,7 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
     if (path) {
       try {
         mtime = statSync(path).mtimeMs;
-      } catch {}
+      } catch { }
     }
     out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid ?? "", hasTranscript: !!path, mtime });
   }
@@ -1938,7 +1959,7 @@ async function getChanges(ws: Workspace): Promise<RepoChanges[]> {
   for (const rc of all) ws.worktreeDirs.add(rc.dir);
   // Keep the file index fresh on every Changes refresh — never fatal to the view
   // (a directory that has grown past the limit just keeps its existing rows).
-  void indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => {});
+  void indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => { });
   return all;
 }
 
@@ -4703,7 +4724,7 @@ const server = Bun.serve({
         let assetKeys: string[] = [];
         try {
           assetKeys = JSON.parse(existing.asset_keys || "[]");
-        } catch {}
+        } catch { }
         // HTML first, then its assets — deleting a missing key is a no-op.
         for (const key of [`${R2_PREFIX}/${existing.share_id}.html`, ...assetKeys]) {
           await r2Delete(key);
@@ -4851,7 +4872,7 @@ const server = Bun.serve({
       try {
         // Fire-and-forget: GUI editors fork and return; we don't await so a
         // terminal editor (vim/etc) wouldn't hang the request.
-        Bun.spawn(editorArgv(`${dir}/${body.path}`, line), {
+        Bun.spawn(editorArgv(`${dir}/${body.path}`, line, dir), {
           cwd: dir,
           stdin: "ignore",
           stdout: "ignore",
