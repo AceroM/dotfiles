@@ -42,6 +42,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   EllipsisVertical,
   Sparkles,
   Image as ImageIcon,
@@ -4249,6 +4250,30 @@ function App() {
     [navUrl],
   );
 
+  // Move the commit selection one row and scroll it into view — the shared engine
+  // behind both the ↑/↓ arrow keys and the mobile pager buttons. delta +1 steps to
+  // the next (older) commit, -1 to the previous (newer) one, wrapping at the ends.
+  // Callers pass the list/view they're working against (live values for the
+  // buttons, the keyCtx snapshot for the keyboard handler).
+  const stepCommit = useCallback(
+    (delta: 1 | -1, list: Commit[], cur: View) => {
+      if (!list.length) return;
+      const idx = cur.kind === "commit" ? list.findIndex((c) => c.sha === cur.sha) : -1;
+      const next =
+        delta === 1
+          ? idx + 1 >= list.length
+            ? 0
+            : idx + 1
+          : idx <= 0
+            ? list.length - 1
+            : idx - 1;
+      const c = list[next];
+      selectCommit(c.sha, c.repo);
+      document.getElementById(`row-commit-${c.sha}`)?.scrollIntoView({ block: "nearest" });
+    },
+    [selectCommit],
+  );
+
   const selectPr = useCallback(
     (number: number, repo?: string) => {
       setView({ kind: "pr", number, repo });
@@ -5138,6 +5163,10 @@ function App() {
     view.kind === "commit"
       ? commits.find((c) => c.sha === view.sha && (view.repo === undefined || c.repo === view.repo))
       : null;
+  // Position of the open commit within the filtered list — drives the mobile
+  // pager's "n / total" readout. -1 when nothing matches the current filter.
+  const activeCommitIndex =
+    view.kind === "commit" ? visibleCommits.findIndex((c) => c.sha === view.sha) : -1;
   const activePr =
     view.kind === "pr"
       ? prs?.find(
@@ -5686,19 +5715,7 @@ function App() {
       if (!down && !up) return;
       if (tab === "commits" && visibleCommits.length) {
         e.preventDefault();
-        const idx =
-          view.kind === "commit" ? visibleCommits.findIndex((c) => c.sha === view.sha) : -1;
-        const next = down
-          ? idx + 1 >= visibleCommits.length
-            ? 0
-            : idx + 1
-          : idx <= 0
-            ? visibleCommits.length - 1
-            : idx - 1;
-        selectCommit(visibleCommits[next].sha, visibleCommits[next].repo);
-        document
-          .getElementById(`row-commit-${visibleCommits[next].sha}`)
-          ?.scrollIntoView({ block: "nearest" });
+        stepCommit(down ? 1 : -1, visibleCommits, view);
       } else if (tab === "prs" && visiblePrs?.length) {
         e.preventDefault();
         const idx =
@@ -5841,7 +5858,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [selectCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
+  }, [stepCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -7192,6 +7209,47 @@ function App() {
               </div>
             </div>,
             document.body,
+          )}
+        {/* Mobile commit pager: on phones the commit list is an off-canvas drawer,
+            so once a commit is open there's no on-screen way to reach the
+            next/previous one (desktop walks the list with ↑/↓). This bar sits at the
+            top of the diff and mirrors that arrow-key nav — newer (↑) / older (↓) —
+            and shows where you are in the list. Hidden on desktop (the list is
+            always visible there) and when a lone commit makes paging pointless. */}
+        {!isDesktop &&
+          tab === "commits" &&
+          view.kind === "commit" &&
+          visibleCommits.length > 1 && (
+            <div className="commit-pager">
+              <button
+                type="button"
+                className="commit-pager-btn"
+                title="Newer commit"
+                aria-label="Newer commit"
+                onClick={() => stepCommit(-1, visibleCommits, view)}
+              >
+                <ChevronUp size={18} />
+              </button>
+              <div className="commit-pager-mid">
+                <span className="commit-pager-msg">
+                  {activeCommit ? activeCommit.message.split("\n")[0] : "—"}
+                </span>
+                {activeCommitIndex >= 0 && (
+                  <span className="commit-pager-pos">
+                    {activeCommitIndex + 1} / {visibleCommits.length}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="commit-pager-btn"
+                title="Older commit"
+                aria-label="Older commit"
+                onClick={() => stepCommit(1, visibleCommits, view)}
+              >
+                <ChevronDown size={18} />
+              </button>
+            </div>
           )}
         {/* Diff-column skeleton: shown while git computes a commit/PR/changes/manual
             diff in the background, and on the commits tab during the brief moment
