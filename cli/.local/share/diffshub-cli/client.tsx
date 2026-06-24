@@ -8149,7 +8149,7 @@ function App() {
               <label>Member repos</label>
               <input
                 value={dirForm.repos}
-                placeholder="app, web (optional)"
+                placeholder="e.g. tax-holiday, tax-holiday.[2-6]  ·  app, web"
                 onChange={(e) => setDirForm((f) => ({ ...f, repos: e.target.value }))}
                 onKeyDown={(e) => {
                   e.stopPropagation();
@@ -8159,7 +8159,11 @@ function App() {
                   }
                 }}
               />
-              <div className="dir-form-hint">Leave empty to auto-detect git subdirectories.</div>
+              <div className="dir-form-hint">
+                Which sub-repos to index. Names or globs (<code>*</code> <code>?</code>{" "}
+                <code>[2-6]</code>) of immediate git subdirs/worktrees. Empty = auto-detect
+                every child git repo.
+              </div>
             </div>
             <div className="push-sep" />
             <PushToggle />
