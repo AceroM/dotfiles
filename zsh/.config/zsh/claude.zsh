@@ -100,6 +100,53 @@ function p() {
   tmux attach -t "$name"
 }
 
+# like p, but async: spins up the session in the background without attaching
+function pa() {
+  local input=""
+  if [[ ! -t 0 ]]; then
+    input=$(cat)
+  fi
+
+  local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
+  local -a nouns=("${SESSION_NAME_NOUNS[@]}")
+
+  typeset -A used_letters
+  local existing cmd
+  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+    if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
+      used_letters[${existing:0:1}]=1
+    fi
+  done
+
+  local name first_letter attempts=0
+  while true; do
+    name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
+    first_letter="${name:0:1}"
+    if ! tmux has-session -t "$name" 2>/dev/null; then
+      if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
+        break
+      fi
+    fi
+    ((attempts++))
+  done
+  local sid=$(_cl_sid)
+  local claude_cmd="CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid"
+  local arg
+  for arg in "$@"; do
+    claude_cmd+=" ${(q)arg}"
+  done
+  tmux new-session -ds "$name" -c "$PWD" "$claude_cmd"
+  _cl_tag "$name" "$sid"
+  if [[ -n "$input" ]]; then
+    sleep 1
+    printf '%s' "$input" | tmux load-buffer -
+    tmux paste-buffer -t "$name:0.0"
+    tmux send-keys -t "$name:0.0" Enter
+  fi
+  echo "$name"
+}
+
 # spawn a new claude session in <dir> (default $PWD) and switch the attached
 # client to it. used by the M-n binding in .tmux.conf
 function _claude_new_here() {
