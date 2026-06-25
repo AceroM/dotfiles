@@ -45,6 +45,25 @@ return {
       file_panel = scroll_maps,
       file_history_panel = scroll_maps,
     }
+    -- On open, diffview puts the cursor in the file-panel sidebar. Move it to the
+    -- editable diff window instead — `get_main_win()` is the `b` window in every
+    -- layout: the working-tree (right) column of a 2-way diff and the RESULT
+    -- (middle) column of a 3-way merge. Counting the sidebar as column 1, that's
+    -- the "third column". Scheduled so it runs after diffview finishes loading
+    -- files into the layout windows (file loading is async).
+    opts.hooks = {
+      view_opened = function(view)
+        vim.schedule(function()
+          local layout = view.cur_layout
+          local ok, win = pcall(function()
+            return layout and layout:get_main_win()
+          end)
+          if ok and win and win.id and vim.api.nvim_win_is_valid(win.id) then
+            vim.api.nvim_set_current_win(win.id)
+          end
+        end)
+      end,
+    }
   end,
   keys = {
     { "<leader>gd", "<cmd>DiffviewOpen<cr>", desc = "Diffview: open (merge/diff)" },
