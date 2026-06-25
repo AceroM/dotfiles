@@ -23,6 +23,16 @@ vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
   end,
 })
 
+-- Show quotation marks in JSON. LazyVim sets conceallevel=2, and treesitter's
+-- JSON parser conceals the quotes, so they only appear on the cursor's line.
+-- Set conceallevel=0 for JSON to always show them.
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = { "json", "jsonc", "json5" },
+  callback = function()
+    vim.opt_local.conceallevel = 0
+  end,
+})
+
 -- Follow the terminal's light/dark appearance. Neovim queries the terminal
 -- (OSC 11) at startup and updates `background` once the response arrives, which
 -- is after the colorscheme has been applied. It also fires if you toggle your
