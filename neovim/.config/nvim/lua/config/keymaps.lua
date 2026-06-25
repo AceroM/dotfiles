@@ -23,7 +23,8 @@ end, { desc = "Find files" })
 vim.keymap.set("n", "<C-g>", function()
   Snacks.picker.resume()
 end, { desc = "Resume last picker" })
-vim.keymap.set("n", "'", ":bd<CR>", { desc = "Close current buffer" })
+-- `'` opens the diffshub prompt modal (normal + visual). Owned by the diffshub
+-- plugin (lua/plugins/diffshub.lua); set there so this VeryLazy file can't clobber it.
 vim.keymap.set({ "n", "v" }, "<c-/>", function()
   vim.cmd("normal gcc+")
 end, { silent = true, noremap = true })
