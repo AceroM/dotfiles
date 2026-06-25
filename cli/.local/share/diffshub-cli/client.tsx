@@ -185,10 +185,30 @@ interface TmuxSession {
 // real session automatically once connectivity returns — see the offline queue in
 // index.ts.
 interface QueuedSession {
-  id: number;
+  // Server-queued rows carry their SQLite row id (number); client-side optimistic
+  // rows — still sitting in the localStorage outbox (see OutboxEntry) waiting to
+  // POST — carry their string localId and set `optimistic`, so the queue list can
+  // render both kinds as one and route Cancel to the right place.
+  id: number | string;
   prompt: string;
   createdAt: number;
   cwd: string;
+  optimistic?: boolean;
+}
+
+// A new-session prompt written to the localStorage outbox so it survives reloads
+// and shows instantly as a Queued row, then POSTed to /api/claude by drainOutbox
+// once the browser is back online — the client-side mirror of the server's
+// queued_sessions table (index.ts). Kept until the POST succeeds (at-least-once),
+// so a prompt is never lost; a dupe is only possible if the tab dies mid-POST.
+interface OutboxEntry {
+  localId: string; // uuid — the optimistic row's key and the drain single-flight key
+  prompt: string;
+  effort?: string;
+  chrome?: boolean;
+  cwd: string; // active dir root at submit time — dir-scopes the row like server rows
+  dir: number | null; // active dir id at submit time — drainer targets the original dir
+  createdAt: number;
 }
 
 // One rendered line of a session's transcript.
@@ -1738,6 +1758,47 @@ function saveCaret(key: string, caret: { start: number; end: number } | null) {
   }
 }
 
+// ---- New-session outbox (localStorage) ----
+// New Claude sessions are queued optimistically: every `'` submit lands here
+// first (instant Queued row that survives reloads), then drainOutbox POSTs each
+// one to /api/claude once the browser is online. Like the reply-history helper —
+// one JSON array under a single key, every access guarded.
+const NEW_SESSION_OUTBOX_KEY = "newSessionOutbox";
+function loadOutbox(): OutboxEntry[] {
+  try {
+    const raw = localStorage.getItem(NEW_SESSION_OUTBOX_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr)
+      ? arr.filter(
+          (x): x is OutboxEntry =>
+            !!x && typeof x.localId === "string" && typeof x.prompt === "string",
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+function saveOutbox(entries: OutboxEntry[]) {
+  try {
+    if (entries.length) localStorage.setItem(NEW_SESSION_OUTBOX_KEY, JSON.stringify(entries));
+    else localStorage.removeItem(NEW_SESSION_OUTBOX_KEY); // empty queue → no stale key
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
+// crypto.randomUUID needs a secure context, but diffshub is routinely opened over
+// http://<lan-ip>:3433 from a phone, where it's undefined — so fall back to a
+// timestamp+random id. Uniqueness only has to hold within one device's own queue.
+function makeLocalId(): string {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch {
+    // fall through to the manual id
+  }
+  return `o-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 // ---- Numeric prefs (localStorage) ----
 // Small helpers for the resizable-sidebar widths; fall back to the default when
 // the key is missing or corrupt.
@@ -2076,7 +2137,7 @@ function HomeView({
   onOpen: (name: string) => void;
   onDelete: (name: string) => void;
   onMarkRead: (name: string) => void;
-  onCancelQueued: (id: number) => void;
+  onCancelQueued: (row: QueuedSession) => void;
   onTogglePick: (name: string) => void;
 }) {
   if (loading) return <ContentSpinner label="Loading sessions…" />;
@@ -2160,7 +2221,7 @@ function HomeView({
                   title="Cancel queued prompt"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onCancelQueued(q.id);
+                    onCancelQueued(q);
                   }}
                 >
                   ✕
@@ -2644,6 +2705,112 @@ function App() {
   // Whether the machine can reach the API (so launches run vs. queue). Defaults to
   // online until the first poll; other tabs keep the last polled value.
   const serverOnline = tmuxQuery.data?.online ?? true;
+
+  // ---- Optimistic new-session outbox (client side) ----
+  // serverOnline above is whether the *server box* can reach Anthropic; this is
+  // whether *this browser* has a network at all. New-session prompts are written
+  // to localStorage and shown instantly as Queued rows (see submitClaude), then
+  // drainOutbox POSTs them to /api/claude once we're online — the client-side
+  // half of the offline queue that pairs with the server's queued_sessions table.
+  const [outbox, setOutbox] = useState<OutboxEntry[]>(loadOutbox);
+  // Latest queue, readable from listeners/intervals without re-creating drainOutbox.
+  const outboxRef = useRef(outbox);
+  outboxRef.current = outbox;
+  // Persist on every change so a reload — or a crash mid-flight — keeps the queue.
+  useEffect(() => saveOutbox(outbox), [outbox]);
+  // The browser's own connectivity (navigator.onLine + window events), distinct
+  // from serverOnline. Gates draining and feeds the offline banner.
+  const [clientOnline, setClientOnline] = useState(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
+
+  const removeFromOutbox = useCallback((localId: string) => {
+    setOutbox((prev) => prev.filter((e) => e.localId !== localId));
+  }, []);
+
+  // Only one drain runs at a time: each POST launches a real session, so a
+  // re-entrant drain must never re-POST an entry that's already in flight.
+  const drainingRef = useRef(false);
+  const drainOutbox = useCallback(async () => {
+    if (drainingRef.current) return;
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+    drainingRef.current = true;
+    try {
+      // Oldest first, like the server's drainQueue. Snapshot so removals during the
+      // loop don't reshuffle what we're iterating.
+      const pending = [...outboxRef.current].sort((a, b) => a.createdAt - b.createdAt);
+      let launched = false;
+      for (const entry of pending) {
+        const url = entry.dir == null ? "/api/claude" : `/api/claude?dir=${entry.dir}`;
+        let res: Response;
+        try {
+          res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              prompt: entry.prompt,
+              effort: entry.effort || undefined,
+              chrome: entry.chrome || undefined,
+            }),
+          });
+        } catch {
+          // Network error — we're offline after all. Keep this entry (and the rest)
+          // and stop; the online listener / retry tick will try again. At-least-once.
+          break;
+        }
+        if (res.ok) {
+          // Launched live, or server-side queued (box offline) — either way it now
+          // shows via the tmux poll, so drop our optimistic copy.
+          removeFromOutbox(entry.localId);
+          launched = true;
+          continue;
+        }
+        // 4xx = permanent reject (e.g. the prompt was somehow empty) — drop it so it
+        // can't wedge the queue. 5xx = transient — keep it and stop, like an offline.
+        if (res.status >= 400 && res.status < 500) {
+          const body = await res.json().catch(() => ({}) as any);
+          removeFromOutbox(entry.localId);
+          alert(`Queued session dropped: ${body.error ?? res.statusText}`);
+          continue;
+        }
+        break;
+      }
+      if (launched) {
+        // Nudge the list now and shortly after so the real (or server-queued) row
+        // pops in and the optimistic one drops out — same dance as submitClaude.
+        queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+        setTimeout(() => queryClient.refetchQueries({ queryKey: ["tmux-sessions"] }), 900);
+      }
+    } finally {
+      drainingRef.current = false;
+    }
+  }, [queryClient, removeFromOutbox]);
+
+  // Track connectivity; flip clientOnline so the banner + the drain effect react.
+  useEffect(() => {
+    const onOnline = () => setClientOnline(true);
+    const onOffline = () => setClientOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+  // Drain whenever we're online and the queue is non-empty. Covers mount (left-over
+  // entries from a previous load), reconnect (clientOnline flips), and fresh
+  // enqueues (outbox grows) — the single-flight ref keeps overlaps out.
+  useEffect(() => {
+    if (clientOnline && outbox.length) void drainOutbox();
+  }, [clientOnline, outbox, drainOutbox]);
+  // Safety net: navigator.onLine can read "online" while requests still fail, and a
+  // 5xx leaves entries in place without changing state. Retry on a slow tick while
+  // anything is queued (same cadence the server-queue poll uses).
+  useEffect(() => {
+    if (outbox.length === 0) return;
+    const t = setInterval(() => void drainOutbox(), TMUX_QUEUE_POLL_MS);
+    return () => clearInterval(t);
+  }, [outbox.length, drainOutbox]);
   // The session whose chat is on screen. On the Tmux tab that's the tab's
   // selection; on the Home dashboard it's the card whose chat side-panel is open
   // (homeChat). Tab wins over view.kind so a stray Tmux `view` left behind by a
@@ -2830,7 +2997,6 @@ function App() {
   const [claudeOpen, setClaudeOpen] = useState(false);
   // Loaded per-directory by the effect below once `meta` (the active dir) is known.
   const [claudePrompt, setClaudePrompt] = useState("");
-  const [launching, setLaunching] = useState(false);
   // Reasoning effort for the new session, passed as `claude --effort <level>`.
   // "" means inherit the global settings.json `effortLevel`. Persisted across
   // sessions (a single global key — effort is a preference, not a per-repo draft).
@@ -3763,45 +3929,36 @@ function App() {
     [handleImagePaste, insertIntoReply],
   );
 
-  // Launch a new interactive claude session in the active directory (detached).
-  const submitClaude = useCallback(async () => {
+  // Queue a new interactive claude session in the active directory. Optimistic: the
+  // prompt is written to the localStorage outbox and shown immediately as a Queued
+  // row, then drainOutbox (the effect above) POSTs it to /api/claude the moment
+  // we're online — so a dead or flaky network never loses the prompt or blocks the
+  // dialog. The captured dir means it still launches in the right place even if you
+  // switch directories before it drains.
+  const submitClaude = useCallback(() => {
     const prompt = claudePrompt.trim();
     if (!prompt) return;
-    setLaunching(true);
-    try {
-      const res = await fetch(qd("/api/claude"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, effort: claudeEffort || undefined, chrome: claudeChrome || undefined }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}) as any);
-        alert(`launch failed: ${body.error ?? res.statusText}`);
-        return;
-      }
-      const body = await res.json().catch(() => ({}) as any);
-      setClaudeOpen(false);
-      setClaudePrompt("");
-      // Launched: the draft is consumed, so drop its saved caret too (the empty
-      // prompt already clears the draft key via the save effect).
-      claudeCaretRef.current = null;
-      if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), null);
-      if (body.queued) {
-        // Offline: the prompt was enqueued, not launched. It shows in the Tmux
-        // sidebar as a queued row and fires automatically once we're back online.
-        setQueuedNote(true);
-      } else {
-        setLaunchedSession(typeof body.session === "string" ? body.session : null);
-      }
-      // The new tmux session (or queued row) needs a beat to register before it
-      // shows up in the list, so nudge a refresh now and again shortly after rather
-      // than waiting for the next poll — otherwise it never pops in.
-      queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
-      setTimeout(() => queryClient.refetchQueries({ queryKey: ["tmux-sessions"] }), 900);
-    } finally {
-      setLaunching(false);
-    }
-  }, [claudePrompt, claudeEffort, claudeChrome, qd, queryClient]);
+    setOutbox((prev) => [
+      ...prev,
+      {
+        localId: makeLocalId(),
+        prompt,
+        effort: claudeEffort || undefined,
+        chrome: claudeChrome || undefined,
+        cwd: meta?.path ?? "",
+        dir: activeDirRef.current,
+        createdAt: Date.now(),
+      },
+    ]);
+    setClaudeOpen(false);
+    setClaudePrompt("");
+    // Draft consumed: drop its saved caret too (the empty prompt already clears the
+    // draft key via the save effect).
+    claudeCaretRef.current = null;
+    if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), null);
+    // A Queued row is already on screen; the toast confirms it'll launch on its own.
+    setQueuedNote(true);
+  }, [claudePrompt, claudeEffort, claudeChrome, meta?.path]);
 
   // Relaunch a closed session: the server starts `claude --resume <sid>` detached
   // in the active directory. Mirrors submitClaude's refresh dance so the resumed
@@ -4223,6 +4380,17 @@ function App() {
       tmuxQuery.refetch();
     },
     [tmuxQuery],
+  );
+
+  // Cancel either kind of queued row from the one ✕ button: an optimistic outbox
+  // row is just dropped from localStorage before it ever POSTs; a server-side
+  // queued row goes through cancelQueued (/api/queue/cancel).
+  const cancelQueuedRow = useCallback(
+    (row: QueuedSession) => {
+      if (row.optimistic) removeFromOutbox(String(row.id));
+      else void cancelQueued(row.id as number);
+    },
+    [cancelQueued, removeFromOutbox],
   );
 
   // On the Tmux tab, auto-select the first session once the list loads (or when
@@ -5129,17 +5297,29 @@ function App() {
     }
   }, [visibleTmux, tmuxQuery]);
 
-  // Queued (offline) prompts scoped to the directory in view, then narrowed by the
-  // sidebar filter against the prompt text — same shape as visibleTmux above.
-  const visibleQueued = useMemo(() => {
-    if (!queuedSessions) return null;
+  // Queued prompts scoped to the directory in view, then narrowed by the sidebar
+  // filter against the prompt text — same shape as visibleTmux above. Two sources,
+  // rendered as one list: the client's optimistic outbox rows (still waiting to
+  // POST, newest first — you just created them) ahead of the server's queued rows
+  // (the box is offline to Anthropic). An outbox row drops out the moment
+  // drainOutbox lands it, replaced by the real session or the server's queued row.
+  const visibleQueued = useMemo<QueuedSession[]>(() => {
     const root = meta?.path;
-    let list = root
-      ? queuedSessions.filter((x) => x.cwd === root || x.cwd.startsWith(`${root}/`))
-      : queuedSessions;
+    const inScope = (cwd: string) => !root || cwd === root || cwd.startsWith(`${root}/`);
+    const optimistic: QueuedSession[] = outbox
+      .filter((e) => inScope(e.cwd))
+      .map((e) => ({
+        id: e.localId,
+        prompt: e.prompt,
+        createdAt: e.createdAt,
+        cwd: e.cwd,
+        optimistic: true,
+      }))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    let list = [...optimistic, ...(queuedSessions ?? []).filter((x) => inScope(x.cwd))];
     if (q) list = list.filter((x) => x.prompt.toLowerCase().includes(q));
     return list;
-  }, [queuedSessions, meta?.path, q]);
+  }, [outbox, queuedSessions, meta?.path, q]);
   // File count per patch for the sidebar (parsePatchFiles is cached by key).
   const manualFileCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -6876,10 +7056,12 @@ function App() {
             {tmuxQuery.isError && (
               <div className="side-note error">{errMessage(tmuxQuery.error)}</div>
             )}
-            {!serverOnline && (
+            {(!clientOnline || !serverOnline) && (
               <div className="offline-note">
                 <span className="offline-dot" />
-                Offline — new sessions are queued and launch when you reconnect.
+                {!clientOnline
+                  ? "Offline — new sessions are saved on this device and send when you reconnect."
+                  : "Offline — new sessions are queued and launch when you reconnect."}
               </div>
             )}
             {visibleQueued?.map((qs) => (
@@ -6895,7 +7077,7 @@ function App() {
                   title="Remove from queue"
                   onClick={(e) => {
                     e.stopPropagation();
-                    void cancelQueued(qs.id);
+                    void cancelQueuedRow(qs);
                   }}
                 >
                   ✕
@@ -7041,7 +7223,7 @@ function App() {
             onOpen={openHomeChat}
             onDelete={deleteHomeCard}
             onMarkRead={markHomeRead}
-            onCancelQueued={cancelQueued}
+            onCancelQueued={cancelQueuedRow}
             onTogglePick={toggleContextPick}
           />
         )}
@@ -7713,7 +7895,7 @@ function App() {
       )}
 
       {claudeOpen && (
-        <div className="modal-overlay claude-overlay" onClick={() => !launching && setClaudeOpen(false)}>
+        <div className="modal-overlay claude-overlay" onClick={() => setClaudeOpen(false)}>
           <div className="modal claude" onClick={(e) => e.stopPropagation()}>
             <h3>
               New Claude session
@@ -7837,11 +8019,12 @@ function App() {
                 />
               </label>
             </div>
-            {!serverOnline && (
+            {(!clientOnline || !serverOnline) && (
               <div className="modal-offline">
                 <span className="offline-dot" />
-                You're offline — this prompt will be queued and launch automatically
-                once you're back online.
+                {!clientOnline
+                  ? "You're offline — this prompt is saved on this device and sends automatically once you reconnect."
+                  : "You're offline — this prompt will be queued and launch automatically once you're back online."}
               </div>
             )}
             <div className="modal-actions">
@@ -7851,21 +8034,15 @@ function App() {
                   onPick={(e) => handleImageFile(e, insertIntoPrompt, setImgUploading)}
                 />
               )}
-              <button className="act" disabled={launching} onClick={() => setClaudeOpen(false)}>
+              <button className="act" onClick={() => setClaudeOpen(false)}>
                 Cancel
               </button>
               <button
                 className="act primary"
-                disabled={launching || !claudePrompt.trim()}
+                disabled={!claudePrompt.trim()}
                 onClick={submitClaude}
               >
-                {launching
-                  ? serverOnline
-                    ? "Launching…"
-                    : "Queuing…"
-                  : serverOnline
-                    ? "Launch"
-                    : "Queue"}
+                {clientOnline && serverOnline ? "Launch" : "Queue"}
               </button>
             </div>
           </div>
@@ -8078,7 +8255,9 @@ function App() {
       {queuedNote && (
         <div className="sel-bar">
           <span className="sel-info">
-            Queued — Claude will start it automatically once you're back online.
+            {clientOnline && serverOnline
+              ? "Queued — launching…"
+              : "Queued — it'll launch automatically once you're back online."}
           </span>
           <button className="sel-x" title="Dismiss" onClick={() => setQueuedNote(false)}>
             ✕
