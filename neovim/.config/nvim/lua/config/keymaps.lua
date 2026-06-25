@@ -51,6 +51,18 @@ vim.keymap.set("n", "<A-/>", function()
   vim.notify("Copied relative path: " .. file_path)
 end, { desc = "Copy current file's relative path" })
 
+-- Copy current file's relative path with line number
+vim.keymap.set("n", "<leader>P", function()
+  local file_path = vim.fn.expand("%:p")
+  local git_root = vim.fn.systemlist("git rev-parse --show-toplevel")[1]
+  if git_root and file_path:find(git_root, 1, true) then
+    file_path = file_path:sub(#git_root + 2) -- +2 to skip the trailing slash
+  end
+  file_path = file_path .. ":" .. vim.fn.line(".")
+  vim.fn.setreg("+", file_path)
+  vim.notify("Copied relative path: " .. file_path)
+end, { desc = "Copy current file's relative path with line number" })
+
 -- Copy current filename only
 vim.keymap.set("n", "<leader>cn", function()
   local filename = vim.fn.expand("%:t")

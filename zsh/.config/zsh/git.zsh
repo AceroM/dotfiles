@@ -56,10 +56,13 @@ function gx() {
   gh pr diff "$1"
   gh pr view "$1"
 }
-# cn <body> [event] — submit ONE batched PR review. Reads a JSON array of inline
-# comments from stdin; auto-fills commit_id (head SHA) and event (default COMMENT,
-# override with arg 2 or $CN_EVENT: COMMENT | APPROVE | REQUEST_CHANGES).
-# With no stdin it just posts the summary body as a plain review.
+# cn [pr] — build & submit a PR review interactively (tiered prompts: pick a
+# file:line, type a comment, repeat, then submit via gh). Launches the
+# pr-review TUI when run on a terminal.
+#
+# For automation, pipe a JSON array of inline comments on stdin to get the old
+# batched-review behavior instead:
+#   cn <body> [event]   (event: COMMENT | APPROVE | REQUEST_CHANGES, or $CN_EVENT)
 #   cn 'Looks good, a few notes' <<'JSON'
 #   [
 #     { "path": "src/foo.ts", "line": 42, "side": "RIGHT", "body": "wrong var" },
@@ -67,11 +70,18 @@ function gx() {
 #   ]
 #   JSON
 function cn() {
+  # Interactive terminal + nothing piped in -> tiered TUI builder.
+  if [ -t 0 ]; then
+    pr-review "$@"
+    return
+  fi
+
+  # Piped stdin -> legacy batched JSON review (for scripts/agents).
   local body="${1:-}"
   local event="${2:-${CN_EVENT:-COMMENT}}"
   local comments pr sha
 
-  if [ -t 0 ]; then comments='[]'; else comments="$(cat)"; fi
+  comments="$(cat)"
 
   pr=$(gh pr view --json number      -q .number)      || return 1
   sha=$(gh pr view --json headRefOid -q .headRefOid)  || return 1
