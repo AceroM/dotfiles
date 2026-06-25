@@ -36,11 +36,3 @@ shell-integration-features = no-cursor
 # Tradeoff: you lose Option-based accent composition (é, ñ ...). Switch to
 # "right" if you want to keep the LEFT Option key for typing accents.
 macos-option-as-alt = true
-
-# Cmd+Opt+Up/Down: switch between tmux sessions (prev/next claude session).
-# The csi: action sends "ESC [" + the given data, reproducing the custom
-# escape sequences my tmux user-keys listen for (99 is a sentinel modifier).
-#   .tmux.conf: user-keys[1]="\e[1;99A" -> User1 -> switch-client -p (Up)
-#               user-keys[0]="\e[1;99B" -> User0 -> switch-client -n (Down)
-keybind = cmd+opt+up=csi:1;99A
-keybind = cmd+opt+down=csi:1;99B

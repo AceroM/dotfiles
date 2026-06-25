@@ -31,6 +31,23 @@ function pl() {
   git pull origin $(sc)
 }
 function gd() { gh pr diff "$@"; }
+# gn [pr] — open a PR's full diff in nvim with real per-file syntax highlighting
+# (via diffview). Fetches the PR head into a local pr-<n> ref; does NOT switch
+# your working branch. Defaults to the current branch's PR.
+function gn() {
+  local pr base
+  pr="${1:-$(gh pr view --json number -q .number)}" || return 1
+  base="$(gh pr view "$pr" --json baseRefName -q .baseRefName)" || return 1
+  git fetch -q origin "$base" "pull/$pr/head:pr-$pr" || return 1
+  nvim -c "DiffviewOpen origin/$base...pr-$pr"
+}
+# gnv [pr] — raw piped diff in nvim (single buffer; diff-structure highlighting only)
+function gnv() { gh pr diff "$@" | nvim; }
+# gnw [git-rev] [-- paths...] — open your uncommitted changes in nvim via diffview
+# with real per-file syntax highlighting. No args = working tree vs index (same
+# scope as `git diff`/`dg`): unstaged files under "Changes", staged ones under
+# "Staged changes". Pass a rev (e.g. HEAD, main) to diff against something else.
+function gnw() { nvim -c "DiffviewOpen $*"; }
 function gb() { gh browse "$@" }
 function gu() {
   git remote get-url origin | sed -E 's#git@github\.com:#https://github.com/#; s#\.git$##'
@@ -38,6 +55,35 @@ function gu() {
 function gx() {
   gh pr diff "$1"
   gh pr view "$1"
+}
+# cn <body> [event] — submit ONE batched PR review. Reads a JSON array of inline
+# comments from stdin; auto-fills commit_id (head SHA) and event (default COMMENT,
+# override with arg 2 or $CN_EVENT: COMMENT | APPROVE | REQUEST_CHANGES).
+# With no stdin it just posts the summary body as a plain review.
+#   cn 'Looks good, a few notes' <<'JSON'
+#   [
+#     { "path": "src/foo.ts", "line": 42, "side": "RIGHT", "body": "wrong var" },
+#     { "path": "src/bar.ts", "start_line": 10, "line": 15, "side": "RIGHT", "body": "extract" }
+#   ]
+#   JSON
+function cn() {
+  local body="${1:-}"
+  local event="${2:-${CN_EVENT:-COMMENT}}"
+  local comments pr sha
+
+  if [ -t 0 ]; then comments='[]'; else comments="$(cat)"; fi
+
+  pr=$(gh pr view --json number      -q .number)      || return 1
+  sha=$(gh pr view --json headRefOid -q .headRefOid)  || return 1
+
+  jq -n \
+    --arg     body "$body" \
+    --arg     sha "$sha" \
+    --arg     event "$event" \
+    --argjson comments "$comments" \
+    '{commit_id:$sha, event:$event, comments:$comments}
+     + (if $body == "" then {} else {body:$body} end)' \
+  | gh api --method POST "repos/{owner}/{repo}/pulls/$pr/reviews" --input -
 }
 function gl() {
   local n=""
