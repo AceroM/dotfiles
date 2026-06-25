@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Testing OAuth apps with agent-browser</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #1c1917;
+    --muted: #57534e;
+    --accent: #7c3aed;
+    --accent-soft: #ede9fe;
+    --border: #e7e5e4;
+    --code-bg: #1e1e2e;
+    --code-fg: #cdd6f4;
+    --ok: #15803d;
+    --ok-bg: #dcfce7;
+    --warn: #b45309;
+    --warn-bg: #fef3c7;
+    --danger: #b91c1c;
+    --danger-bg: #fee2e2;
+    --info-bg: #e0f2fe;
+    --info: #0369a1;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.page {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 24px;
+    margin-bottom: 8px;
+  }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent);
+    margin: 0 0 8px;
+  }
+  h1 { font-size: 32px; line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.02em; }
+  .lede { font-size: 18px; color: var(--muted); margin: 0; }
+  h2 {
+    font-size: 22px;
+    margin: 48px 0 12px;
+    padding-top: 8px;
+    letter-spacing: -0.01em;
+  }
+  h3 { font-size: 17px; margin: 28px 0 8px; }
+  p { margin: 12px 0; }
+  a { color: var(--accent); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: #f0eef2;
+    color: #6d28d9;
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 16px 18px;
+    border-radius: 10px;
+    overflow-x: auto;
+    font-size: 13.5px;
+    line-height: 1.6;
+    margin: 16px 0;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+  pre .c { color: #6c7086; } /* comment */
+  pre .o { color: #a6e3a1; } /* output / arrow */
+  .callout {
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 18px 0;
+    border: 1px solid transparent;
+  }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  .key   { background: var(--accent-soft); border-color: #ddd6fe; }
+  .key .tag { color: var(--accent); }
+  .ok    { background: var(--ok-bg); border-color: #bbf7d0; }
+  .ok .tag { color: var(--ok); }
+  .warn  { background: var(--warn-bg); border-color: #fde68a; }
+  .warn .tag { color: var(--warn); }
+  .danger{ background: var(--danger-bg); border-color: #fecaca; }
+  .danger .tag { color: var(--danger); }
+  .info  { background: var(--info-bg); border-color: #bae6fd; }
+  .info .tag { color: var(--info); }
+  ul, ol { padding-left: 22px; }
+  li { margin: 6px 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 18px 0;
+    font-size: 14.5px;
+  }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: #f5f5f4; font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
+  .toc {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px 16px;
+    margin: 24px 0 8px;
+  }
+  .toc strong { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .toc ol { margin: 8px 0 0; }
+  .toc a { text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px; height: 22px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: 700;
+    margin-right: 6px;
+    flex: none;
+  }
+  footer.page {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 13px;
+  }
+  footer.page code { font-size: 12px; }
+  .pill { display:inline-block; background:#f0eef2; color:var(--muted); border-radius:999px; padding:2px 10px; font-size:12px; margin-right:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page">
+  <p class="eyebrow">Dotfiles &middot; agent-browser &middot; tailscale</p>
+  <h1>Testing OAuth-protected apps with agent-browser</h1>
+  <p class="lede">Why the real blocker is authentication (not reachability), the session-reuse fix that skips login entirely, when the Telegram link-handoff works, and where Tailscale actually fits.</p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#reframe">The reframe: auth, not reachability</a></li>
+    <li><a href="#reuse">Best fix: session reuse (no OAuth dance)</a></li>
+    <li><a href="#handoff">The Telegram link-handoff (your idea)</a></li>
+    <li><a href="#tailscale">Where Tailscale actually fits</a></li>
+    <li><a href="#reco">Recommendation</a></li>
+  </ol>
+</nav>
+
+<h2 id="reframe">1. The reframe: your blocker is authentication, not reachability</h2>
+<p>OAuth has two hard parts for an agent, and they're worth separating:</p>
+<ol>
+  <li><strong>The human login step</strong> &mdash; password, 2FA, and getting past anti-bot detection (reCAPTCHA, &ldquo;this browser may not be secure&rdquo;). Providers <em>actively</em> fight automation here. This is ~95% of the pain.</li>
+  <li><strong>The redirect</strong> &mdash; the provider bounces the browser to <code>http://localhost:PORT/callback?code=...</code>, and the app swaps that code for a session.</li>
+</ol>
+
+<div class="callout key">
+  <span class="tag">Key insight</span>
+  <p>Tailscale only ever helps with <strong>reachability</strong> (making some URL resolve to your local app). Your problem is <strong>#1, authentication</strong>. So the real fix is to never make the agent log in at all &mdash; reuse a session you already established as a human.</p>
+</div>
+
+<p>The good news: <code>agent-browser</code> is built for exactly this.</p>
+
+<h2 id="reuse">2. The actual best fix: session reuse (no OAuth dance at all)</h2>
+<p>From <code>agent-browser --help</code>, you have these auth primitives:</p>
+<pre><code>--auto-connect       Connect to a running Chrome to reuse its auth state
+                     Tip: agent-browser --auto-connect state save ./auth.json
+--state &lt;path&gt;        Load saved auth state (cookies + storage) from JSON
+--profile &lt;path&gt;      Persist login sessions across restarts (cookies, IndexedDB, cache)
+--session-name &lt;n&gt;    Auto-save/restore cookies + localStorage by name</code></pre>
+
+<p>Two clean patterns, in order of preference:</p>
+
+<h3>A. Borrow your already-logged-in Chrome</h3>
+<p>You're already authenticated to Google in your daily browser. Capture that session once and replay it:</p>
+<pre><code><span class="c"># grab live session from a running Chrome</span>
+agent-browser --auto-connect state save ./auth.json
+
+<span class="c"># launch pre-authenticated &mdash; no login page ever appears</span>
+agent-browser --state ./auth.json open https://yourapp.localhost</code></pre>
+<div class="callout ok">
+  <span class="tag">Why this wins</span>
+  <p>The agent inherits a <em>session token</em>, never sees a login page, and never touches your password. The exact thing that makes Google login painful (anti-bot) is the thing you skip entirely.</p>
+</div>
+
+<h3>B. Persistent profile &mdash; log in once, manually</h3>
+<p>Run headed, do the OAuth login yourself in that window the first time; the profile keeps you logged in forever after:</p>
+<pre><code>agent-browser --profile ~/.cache/agent-browser/myapp --headed open https://yourapp.localhost
+<span class="c"># complete Google login in that same window once; later runs reuse it</span></code></pre>
+<p>Because it's the <em>same</em> browser that started and finished the flow, the callback completes naturally &mdash; nothing to copy. For both A and B, plain <code>localhost</code> is fine and <strong>no Tailscale is needed</strong>.</p>
+
+<h2 id="handoff">3. The Telegram link-handoff (your idea) &mdash; it works</h2>
+<p>Your instinct is correct, and it's a legitimate fallback for when you genuinely need a <em>fresh</em> interactive login each run. The precise mechanism:</p>
+
+<ol>
+  <li>The <strong>agent's</strong> browser starts the flow (so it holds the <code>state</code>/PKCE binding and the app session cookie); you grab the auth URL.</li>
+  <li>Agent sends you the <code>accounts.google.com/...</code> URL &mdash; this is literally your <code>/ts</code> Telegram skill (&ldquo;send the link to me&rdquo;).</li>
+  <li>You open it on your phone and authenticate (where Google trusts you). Google redirects to <code>http://localhost:PORT/callback?code=...</code>.</li>
+  <li>Your phone has nothing on <code>localhost:PORT</code> &rarr; connection refused &rarr; the URL with a fresh, <em>unconsumed</em> code just sits in your address bar. You copy it and reply.</li>
+  <li>The <strong>agent navigates its own local browser</strong> to that exact callback URL. Right session cookie + matching state + unconsumed code &rarr; the app completes the exchange &rarr; agent is authenticated. &#9989;</li>
+</ol>
+
+<div class="callout key">
+  <span class="tag">The non-obvious key</span>
+  <p>The redirect <em>failing</em> on your phone is the feature &mdash; it leaves the one-time code unspent for the agent to replay.</p>
+</div>
+
+<div class="callout danger">
+  <span class="tag">Counterintuitive: don't use tailscale serve here</span>
+  <p>If you used <code>tailscale serve</code> for the redirect URI instead of <code>localhost</code>, the handoff would <strong>break</strong>. The redirect to <code>https://your-mac.ts.net/callback</code> would actually resolve and complete <em>on your Mac</em> &mdash; but carrying your <em>phone's</em> session (no app cookie/state) &mdash; consuming the one-time code with the wrong session. For the handoff pattern, <code>localhost</code> beats <code>serve</code>.</p>
+</div>
+
+<h3>Gotchas</h3>
+<ul>
+  <li><strong>Codes are single-use and short-lived</strong> (seconds&ndash;minutes). Be quick.</li>
+  <li>The <strong>agent</strong> &mdash; not your phone &mdash; must be the one to hit the callback.</li>
+  <li>Only works cleanly when agent-browser is <strong>local</strong> (so its <code>localhost</code> is where the app runs).</li>
+</ul>
+<p>This is more fiddly than session reuse, so treat it as the &ldquo;I really need a human-fresh login each time&rdquo; path.</p>
+
+<h2 id="tailscale">4. Where Tailscale actually fits</h2>
+<p>Your <code>ts</code> function (<code>tailscale serve</code>, in <code>zsh/.config/zsh/tailscale.zsh</code>) is the right tool for <strong>reachability</strong>, in three cases:</p>
+<table>
+  <thead>
+    <tr><th>Situation</th><th>Tool</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Provider refuses <code>http://localhost</code> and demands HTTPS</td>
+      <td><code>tailscale serve</code></td>
+      <td>Register <code>https://your-mac.ts.net/callback</code>, point <code>ts 3000</code> at the app, and do <em>session reuse</em> (not handoff) against it. Google itself allows loopback; many others don't.</td>
+    </tr>
+    <tr>
+      <td>A remote agent-browser <em>on your tailnet</em> must reach your local dev app</td>
+      <td><code>tailscale serve</code></td>
+      <td>Gives it a stable HTTPS hostname.</td>
+    </tr>
+    <tr>
+      <td>A cloud-provider browser (<code>-p browserbase/kernel/...</code>) <em>not</em> on your tailnet</td>
+      <td><code>tailscale funnel</code></td>
+      <td>Public internet exposure. Use dedicated test data and a hard-to-guess path.</td>
+    </tr>
+  </tbody>
+</table>
+<div class="callout info">
+  <span class="tag">Bottom line</span>
+  <p>Tailscale solves &ldquo;how does this browser reach my app over a real URL,&rdquo; never &ldquo;how does the agent get past Google's login.&rdquo;</p>
+</div>
+
+<h2 id="reco">5. Recommendation</h2>
+<p>For local agent-browser testing of OAuth apps, in order:</p>
+<ol>
+  <li><strong><code>--auto-connect state save</code> &rarr; <code>--state auth.json</code></strong> (or <code>--profile</code>). Robust, repeatable, no password exposure, no copying. This is what I'd set up.</li>
+  <li><strong>Headed local takeover</strong> when a session expires &mdash; type creds in the same window, agent resumes.</li>
+  <li><strong>The Telegram handoff</strong> as the escape hatch for mandatory-fresh-login flows, with a <code>localhost</code> redirect.</li>
+  <li><strong>Tailscale</strong> only when a provider forces HTTPS redirects or a remote/tailnet browser must reach your local app.</li>
+</ol>
+<div class="callout warn">
+  <span class="tag">Security</span>
+  <p>Prefer a <strong>dedicated test Google account</strong> over your primary, regardless of approach. Session reuse hands the agent a token, not your password &mdash; that's strictly better than feeding credentials into an automated login.</p>
+</div>
+
+<footer class="page">
+  <p>
+    <span class="pill">reference</span>
+    Referenced files: <code>zsh/.config/zsh/tailscale.zsh</code> (<code>ts</code> &rarr; tailscale serve), <code>/ts</code> Telegram skill, <code>~/.claude/skills/agent-browser/SKILL.md</code>.
+  </p>
+  <p>Open with <code>open agent-browser-oauth.html</code>. Generated as a working note &mdash; not stow-managed.</p>
+</footer>
+
+</div>
+</body>
+</html>

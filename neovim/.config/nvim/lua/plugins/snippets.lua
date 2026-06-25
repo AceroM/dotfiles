@@ -23,6 +23,7 @@ return {
     })
 
     -- require("luasnip.loaders.from_vscode").lazy_load()
+    require("luasnip.loaders.from_lua").lazy_load({ paths = { "./lua/snippets" } })
 
     -- Load snippets only for JS/TS filetypes
     local js_ts_filetypes = { "javascript", "typescript", "javascriptreact", "typescriptreact" }
@@ -31,17 +32,16 @@ return {
     local all_snippets = require("snippets.all")
 
     for _, ft in ipairs(js_ts_filetypes) do
-      -- NOTE: `key` must be unique per add_snippets call. Reusing the same key
-      -- across filetypes makes each call remove the previously-added batch,
-      -- leaving zero registered snippets (so autosnippets never expand).
       ls.add_snippets(ft, init_snippets, {
+        autotrigger = true,
         type = "autosnippets",
-        key = "init_" .. ft,
+        key = "init",
         priority = 9999,
       })
       ls.add_snippets(ft, all_snippets, {
+        autotrigger = true,
         type = "autosnippets",
-        key = "all_" .. ft,
+        key = "all",
         priority = 9999,
       })
     end
