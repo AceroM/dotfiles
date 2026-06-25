@@ -211,6 +211,19 @@ interface OutboxEntry {
   createdAt: number;
 }
 
+// A reply written to the localStorage outbox so the composer clears instantly and
+// the turn shows immediately as a pending bubble, then drainReplyOutbox POSTs it to
+// /api/tmux/send as soon as we're online. The per-session twin of OutboxEntry: new
+// sessions queue to /api/claude, replies queue into an already-running pane. Kept
+// until the POST succeeds (at-least-once), so a flaky network never drops a reply;
+// a dupe is only possible if the tab dies mid-POST.
+interface ReplyOutboxEntry {
+  localId: string; // uuid — the optimistic turn's key and the drain single-flight key
+  session: string; // target tmux session — the reply is pasted into its pane
+  text: string;
+  createdAt: number;
+}
+
 // One rendered line of a session's transcript.
 interface TranscriptMsg {
   role: "user" | "assistant" | "tool";
@@ -1555,6 +1568,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
   msgs,
   session,
   theme,
+  pending,
   onAnswerPlan,
   onAnswerQuestion,
 }: {
@@ -1562,12 +1576,13 @@ const TranscriptTurn = memo(function TranscriptTurn({
   msgs: TranscriptMsg[];
   session: string;
   theme: Theme;
+  pending?: boolean;
   onAnswerPlan?: (choice: number) => Promise<void> | void;
   onAnswerQuestion?: (questionIndex: number, optionIndex: number) => Promise<void> | void;
 }) {
   if (role === "user") {
     return (
-      <div className="turn user">
+      <div className={`turn user${pending ? " pending" : ""}`}>
         {msgs.map((m, i) =>
           m.kind === "image" ? (
             <ImageBlock key={i} session={session} imgRef={m.imgRef || ""} tool={m.tool} path={m.path} />
@@ -1626,6 +1641,9 @@ function isEditMsg(m: TranscriptMsg): boolean {
 interface Turn {
   role: "user" | "assistant";
   msgs: TranscriptMsg[];
+  // A queued reply that hasn't POSTed/echoed back yet (see the reply outbox). Only
+  // ever set on user turns; renders the bubble dimmed so it reads as "sending".
+  pending?: boolean;
 }
 // Flatten a transcript into one searchable, lowercased blob for the ephemeral
 // "Search html…" index. Pulls every bit of text a message carries — message
@@ -1797,6 +1815,40 @@ function makeLocalId(): string {
     // fall through to the manual id
   }
   return `o-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// ---- Reply outbox (localStorage) ----
+// Replies queue optimistically too: submitReply writes here and clears the composer
+// instantly (the turn shows as a pending bubble), then drainReplyOutbox POSTs each
+// one to /api/tmux/send once online. Same single-key JSON-array shape as the
+// new-session outbox; entries carry their target session so one queue serves every
+// open chat.
+const REPLY_OUTBOX_KEY = "replyOutbox";
+function loadReplyOutbox(): ReplyOutboxEntry[] {
+  try {
+    const raw = localStorage.getItem(REPLY_OUTBOX_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr)
+      ? arr.filter(
+          (x): x is ReplyOutboxEntry =>
+            !!x &&
+            typeof x.localId === "string" &&
+            typeof x.session === "string" &&
+            typeof x.text === "string",
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+function saveReplyOutbox(entries: ReplyOutboxEntry[]) {
+  try {
+    if (entries.length) localStorage.setItem(REPLY_OUTBOX_KEY, JSON.stringify(entries));
+    else localStorage.removeItem(REPLY_OUTBOX_KEY); // empty queue → no stale key
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
 }
 
 // ---- Numeric prefs (localStorage) ----
@@ -2811,6 +2863,93 @@ function App() {
     const t = setInterval(() => void drainOutbox(), TMUX_QUEUE_POLL_MS);
     return () => clearInterval(t);
   }, [outbox.length, drainOutbox]);
+
+  // ---- Optimistic reply outbox (client side) ----
+  // The reply twin of the new-session outbox above: submitReply enqueues here and
+  // clears the composer instantly, drainReplyOutbox POSTs each entry to
+  // /api/tmux/send once online. Pending entries render as dimmed user bubbles in the
+  // open transcript (see the turns memo) until the real turn echoes back. Shares the
+  // clientOnline signal with the new-session outbox.
+  const [replyOutbox, setReplyOutbox] = useState<ReplyOutboxEntry[]>(loadReplyOutbox);
+  // Latest queue, readable from listeners/intervals without re-creating the drainer.
+  const replyOutboxRef = useRef(replyOutbox);
+  replyOutboxRef.current = replyOutbox;
+  // Persist on every change so a reload — or a crash mid-flight — keeps the queue.
+  useEffect(() => saveReplyOutbox(replyOutbox), [replyOutbox]);
+  const removeFromReplyOutbox = useCallback((localId: string) => {
+    setReplyOutbox((prev) => prev.filter((e) => e.localId !== localId));
+  }, []);
+
+  // One drain at a time so re-entrancy never double-pastes a reply, and oldest first
+  // so a session's replies land in the order you sent them.
+  const drainingReplyRef = useRef(false);
+  const drainReplyOutbox = useCallback(async () => {
+    if (drainingReplyRef.current) return;
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+    drainingReplyRef.current = true;
+    try {
+      // Oldest first; snapshot so removals during the loop don't reshuffle iteration.
+      const pending = [...replyOutboxRef.current].sort((a, b) => a.createdAt - b.createdAt);
+      const touched = new Set<string>();
+      for (const entry of pending) {
+        let res: Response;
+        try {
+          res = await fetch("/api/tmux/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session: entry.session, text: entry.text }),
+          });
+        } catch {
+          // Network error — we're offline after all. Keep this entry (and the rest)
+          // and stop; the online listener / retry tick will try again. At-least-once.
+          break;
+        }
+        if (res.ok) {
+          // Pasted into the pane — it'll echo into the transcript on the next poll, so
+          // drop our optimistic copy.
+          removeFromReplyOutbox(entry.localId);
+          touched.add(entry.session);
+          continue;
+        }
+        // 4xx = permanent reject (e.g. the session was killed) — drop it so it can't
+        // wedge the queue. 5xx = transient — keep it and stop, like an offline.
+        if (res.status >= 400 && res.status < 500) {
+          const body = await res.json().catch(() => ({}) as any);
+          removeFromReplyOutbox(entry.localId);
+          alert(`Reply dropped: ${body.error ?? res.statusText}`);
+          continue;
+        }
+        break;
+      }
+      if (touched.size) {
+        // Nudge the affected transcript(s) + the session list now and shortly after so
+        // the echoed turn and the busy dot replace the pending bubble — the reply twin
+        // of submitClaude's refresh dance.
+        const refetch = () => {
+          for (const session of touched)
+            queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
+          queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
+        };
+        refetch();
+        setTimeout(refetch, 500);
+      }
+    } finally {
+      drainingReplyRef.current = false;
+    }
+  }, [queryClient, removeFromReplyOutbox]);
+
+  // Drain on mount/reconnect/enqueue, plus a slow retry tick while anything is
+  // queued — the same triple coverage (and single-flight guard) as the new-session
+  // outbox.
+  useEffect(() => {
+    if (clientOnline && replyOutbox.length) void drainReplyOutbox();
+  }, [clientOnline, replyOutbox, drainReplyOutbox]);
+  useEffect(() => {
+    if (replyOutbox.length === 0) return;
+    const t = setInterval(() => void drainReplyOutbox(), TMUX_QUEUE_POLL_MS);
+    return () => clearInterval(t);
+  }, [replyOutbox.length, drainReplyOutbox]);
+
   // The session whose chat is on screen. On the Tmux tab that's the tab's
   // selection; on the Home dashboard it's the card whose chat side-panel is open
   // (homeChat). Tab wins over view.kind so a stray Tmux `view` left behind by a
@@ -3045,7 +3184,6 @@ function App() {
 
   // Reply composer (Tmux tab) — types a reply into the selected session's pane.
   const [replyText, setReplyText] = useState("");
-  const [replySending, setReplySending] = useState(false);
   const [replyStopping, setReplyStopping] = useState(false);
   const [replyImgUploading, setReplyImgUploading] = useState(false);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -3483,8 +3621,35 @@ function App() {
   const turns = useMemo(() => {
     const msgs = transcriptData?.messages ?? [];
     const filtered = editsOnly ? msgs.filter(isEditMsg) : msgs;
-    return groupTurns(filtered);
-  }, [transcriptData, editsOnly]);
+    const base = groupTurns(filtered);
+    // Append still-queued replies for this session as pending user turns so the
+    // message shows the instant you hit send, before the paste echoes back into the
+    // transcript. Skip one whose text already is the trailing user turn — the real
+    // turn has landed, so the optimistic dupe would just flicker. (Edits-only view
+    // is a tool-call filter, so pending prose has no place there.)
+    if (!editsOnly && selectedSession) {
+      const tail = base[base.length - 1];
+      const echoed =
+        tail?.role === "user" ? new Set(tail.msgs.map((m) => m.text.trim())) : new Set<string>();
+      for (const entry of replyOutbox) {
+        if (entry.session !== selectedSession) continue;
+        if (echoed.has(entry.text.trim())) continue;
+        base.push({
+          role: "user",
+          pending: true,
+          msgs: [{ role: "user", kind: "text", text: entry.text }],
+        });
+      }
+    }
+    return base;
+  }, [transcriptData, editsOnly, replyOutbox, selectedSession]);
+  // The last non-pending turn — where an inline plan/question card can still be
+  // answered. Appended pending reply bubbles sit after it but never carry a prompt,
+  // so the answer handlers must target the last real turn, not the last turn.
+  const lastAnswerableIdx = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) if (!turns[i].pending) return i;
+    return -1;
+  }, [turns]);
   // Detect an HTML artifact the session has been building (the "agents folder"
   // pattern: an agent writes/appends one .html file across many tool calls). We
   // pick the most-recently-touched .html path from the transcript's Write/Edit/
@@ -3990,43 +4155,30 @@ function App() {
     [qd, queryClient, resuming],
   );
 
-  // Send a reply into the selected session's claude pane (server pastes the text
-  // + Enter), then refresh the transcript + session list once so the new turn and
-  // the busy dot show up.
-  const submitReply = useCallback(async () => {
+  // Queue a reply into the selected session's pane. Optimistic: the text is written
+  // to the localStorage outbox and shown instantly as a pending bubble + cleared from
+  // the composer, then drainReplyOutbox (the effect above) POSTs it to /api/tmux/send
+  // the moment we're online — so a flaky network never loses the reply or freezes the
+  // box behind the server's paste round-trip. The captured session means it still
+  // lands in the right pane even if you switch chats before it drains.
+  const submitReply = useCallback(() => {
     const text = replyText.trim();
     const session = selectedSessionRef.current;
     if (!text || !session) return;
-    setReplySending(true);
-    try {
-      const res = await fetch("/api/tmux/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session, text }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}) as any);
-        alert(`reply failed: ${body.error ?? res.statusText}`);
-        return;
-      }
-      pushHistory(replyHistoryKey(session), text); // remember it for ArrowUp recall
-      replyHistoryIndexRef.current = null; // sending ends any history browse
-      setReplyText("");
-      setFileToken(null); // drop any open @-mention popup along with the sent text
-      saveDraft(replyDraftKey(session), ""); // sent → drop this tab's saved draft
-      // Drop focus once the reply is on its way — keeps the transcript (not a
-      // blinking caret) the focus after you fire off a message, and on mobile lets
-      // the on-screen keyboard retract so the conversation is fully visible.
-      replyTextareaRef.current?.blur();
-      // Give claude a beat to accept the keys before reading the transcript back.
-      setTimeout(() => {
-        queryClient.refetchQueries({ queryKey: ["tmux-transcript", session] });
-        queryClient.refetchQueries({ queryKey: ["tmux-sessions"] });
-      }, 500);
-    } finally {
-      setReplySending(false);
-    }
-  }, [replyText, queryClient]);
+    setReplyOutbox((prev) => [
+      ...prev,
+      { localId: makeLocalId(), session, text, createdAt: Date.now() },
+    ]);
+    pushHistory(replyHistoryKey(session), text); // remember it for ArrowUp recall
+    replyHistoryIndexRef.current = null; // sending ends any history browse
+    setReplyText("");
+    setFileToken(null); // drop any open @-mention popup along with the sent text
+    saveDraft(replyDraftKey(session), ""); // queued → drop this tab's saved draft
+    // Drop focus once the reply is queued — keeps the transcript (not a blinking
+    // caret) the focus after you fire off a message, and on mobile lets the on-screen
+    // keyboard retract so the conversation is fully visible.
+    replyTextareaRef.current?.blur();
+  }, [replyText]);
 
   // Drop a recalled history entry into the composer and park the caret at the end
   // so it's ready to edit or fire off. setReplyText is programmatic, so no onChange
@@ -6185,7 +6337,7 @@ function App() {
               Edits only
             </button>
           </div>
-          {transcriptData.messages.length === 0 ? (
+          {transcriptData.messages.length === 0 && turns.length === 0 ? (
             <div className="transcript-empty">
               {transcriptData.path
                 ? "No conversation yet — press space to refresh"
@@ -6201,8 +6353,9 @@ function App() {
                 msgs={t.msgs}
                 session={selectedSession}
                 theme={theme}
-                onAnswerPlan={i === turns.length - 1 ? answerPlan : undefined}
-                onAnswerQuestion={i === turns.length - 1 ? answerQuestion : undefined}
+                pending={t.pending}
+                onAnswerPlan={i === lastAnswerableIdx ? answerPlan : undefined}
+                onAnswerQuestion={i === lastAnswerableIdx ? answerQuestion : undefined}
               />
             ))
           )}
@@ -6466,10 +6619,10 @@ function App() {
                 </button>
                 <button
                   className="act primary"
-                  disabled={replySending || !replyText.trim()}
+                  disabled={!replyText.trim()}
                   onClick={submitReply}
                 >
-                  {replySending ? "Sending…" : "Send"}
+                  Send
                 </button>
               </>
             ) : (
@@ -6485,10 +6638,10 @@ function App() {
                 <IconButton
                   className="primary"
                   title="Send reply"
-                  disabled={replySending || !replyText.trim()}
+                  disabled={!replyText.trim()}
                   onClick={submitReply}
                 >
-                  {replySending ? <span className="icon-spin">…</span> : <Send />}
+                  <Send />
                 </IconButton>
               </>
             )}
