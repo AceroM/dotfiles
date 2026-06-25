@@ -2458,6 +2458,9 @@ const page = `<!DOCTYPE html>
     border-radius: 18px; padding: 10px 15px; text-align: left;
     white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.55;
   }
+  /* A queued reply still draining to the pane (see the reply outbox): dimmed so it
+     reads as "sending", then solidifies the instant the real turn echoes back. */
+  .turn.user.pending .bubble { opacity: .55; }
   .turn.assistant .content {
     flex: 1; min-width: 0; padding-top: 2px;
     display: flex; flex-direction: column; gap: 10px;
