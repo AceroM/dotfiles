@@ -3987,8 +3987,8 @@ function App() {
     claudeDraftDirRef.current = id;
     setClaudePrompt(loadDraft(claudeDraftKey(id)));
     claudeCaretRef.current = loadCaret(claudeCaretKey(id));
-    // Switching directories with the composer open (⌥1-9) swaps in that dir's
-    // own draft without stealing focus, so you can juggle a prompt per directory.
+    // Switching directories with the composer open swaps in that dir's own draft
+    // without stealing focus, so you can juggle a prompt per directory.
     // Re-focus and drop the caret into the freshly-loaded draft on the next frame.
     if (claudeOpenRef.current) {
       requestAnimationFrame(() => {
@@ -7015,7 +7015,7 @@ function App() {
       }
     };
     // Esc closes whichever dialog/dropdown is open. Registered in the *capture*
-    // phase (like ⌥-digit below) so it fires before the event reaches any modal
+    // phase (like ⌥T below) so it fires before the event reaches any modal
     // input that calls e.stopPropagation() in its bubble-phase onKeyDown — those
     // would otherwise eat Esc and leave the dialog open. This is the single
     // source of truth, so every dialog closes on the first Esc, instantly.
@@ -7082,21 +7082,15 @@ function App() {
       setDirsOpen(false);
       setDirMenuOpen(false);
     };
-    // ⌥1–⌥9 jump straight to the Nth registered directory (top-left dropdown),
-    // 1-indexed. Registered in the *capture* phase on its own listener so it
-    // fires before the event reaches any element — including modal textareas
-    // that call e.stopPropagation() in their bubble-phase onKeyDown. This makes
-    // directory switching supersede everything else: even mid-typing in a
-    // commit box or filter field, ⌥+digit wins. Match on e.code, not e.key,
-    // since ⌥+digit yields a special glyph for e.key on macOS but e.code stays
-    // "Digit1"…"Digit9".
+    // ⌥T toggles back to the last directory (the "Go to last directory" button),
+    // falling back to flipping between the first two dirs before you've switched
+    // once. Registered in the *capture* phase on its own listener so it fires
+    // before the event reaches any element — including modal textareas that call
+    // e.stopPropagation() in their bubble-phase onKeyDown. This makes directory
+    // switching supersede everything else: even mid-typing in a commit box or
+    // filter field, ⌥T wins.
     const onDirHotkey = (e: KeyboardEvent) => {
-      // ⌥T toggles back to the last directory (the "Go to last directory" button),
-      // falling back to flipping between the first two dirs before you've switched
-      // once. Same capture-phase precedence as ⌥+digit so it wins mid-typing.
-      const lastDir = e.altKey && e.code === "KeyT";
-      if (!lastDir && !/^Digit[1-9]$/.test(e.code)) return;
-      if (!e.altKey) return;
+      if (!e.altKey || e.code !== "KeyT") return;
       e.preventDefault();
       e.stopPropagation();
       // Keep focus in the Claude composer when switching dirs mid-prompt so you can
@@ -7106,12 +7100,7 @@ function App() {
         const active = document.activeElement;
         if (active instanceof HTMLElement) active.blur();
       }
-      if (lastDir) {
-        keyCtx.current.goToLastDir();
-        return;
-      }
-      const d = keyCtx.current.dirs[Number(e.code.slice(5)) - 1];
-      if (d) selectDir(d.id);
+      keyCtx.current.goToLastDir();
     };
     document.addEventListener("keydown", onEscClose, true);
     document.addEventListener("keydown", onDirHotkey, true);
@@ -7121,7 +7110,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [stepCommit, selectPr, selectManual, selectHtml, selectPrompt, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, openTemplatePrompt, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient, confirmWorktreeDelete]);
+  }, [stepCommit, selectPr, selectManual, selectHtml, selectPrompt, selectTab, selectTmux, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, openTemplatePrompt, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient, confirmWorktreeDelete]);
 
   // Keys typed inside a report iframe can't reach the parent's keydown handler
   // (separate document), so the injected vim layer postMessages the app-level
@@ -7831,8 +7820,6 @@ function App() {
                 />
                 <div className="dir-list">
                   {visibleDirs.map((d, i) => {
-                    // Shortcut index off the full list so ⌥N stays right when filtered.
-                    const kbIndex = dirs.indexOf(d);
                     return (
                       <button
                         key={d.id}
@@ -7850,9 +7837,6 @@ function App() {
                           </span>
                           <span className="dir-item-path">{d.path}</span>
                         </span>
-                        {kbIndex >= 0 && kbIndex < 9 && (
-                          <span className="dir-item-key">⌥{kbIndex + 1}</span>
-                        )}
                       </button>
                     );
                   })}
@@ -8489,9 +8473,6 @@ function App() {
               keyboard shortcuts themselves still work; only the legend is gone.
           <span>
             <kbd>1-5</kbd>/<kbd>←/→</kbd> tabs
-          </span>
-          <span>
-            <kbd>⌥1-9</kbd> dir
           </span>
           <span>
             <kbd>↑/↓</kbd> list

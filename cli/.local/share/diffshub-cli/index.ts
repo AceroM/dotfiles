@@ -3015,7 +3015,6 @@ const page = `<!DOCTYPE html>
     --accent-choice-bg: #ffffff;
     --accent-head: #f1edfb;
     --accent-foot: #f7f5fe;
-    --accent-key-bg: #e4ddf7;
     --accent-border: #d9d2f4;
     --accent-border-2: #e6e0f7;
     --accent-border-3: #ece8f8;
@@ -3072,7 +3071,6 @@ const page = `<!DOCTYPE html>
     --accent-choice-bg: #262236;
     --accent-head: #262138;
     --accent-foot: #211d31;
-    --accent-key-bg: #3a3360;
     --accent-border: #3f3866;
     --accent-border-2: #352e54;
     --accent-border-3: #2e2845;
@@ -4601,11 +4599,6 @@ const page = `<!DOCTYPE html>
   .dir-item .dir-item-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
   .dir-item .dir-item-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dir-item .dir-item-path { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dir-item .dir-item-key {
-    flex-shrink: 0; font-size: 10px; color: var(--text-faint); font-variant-numeric: tabular-nums;
-    background: var(--bg-hover); border-radius: 4px; padding: 1px 5px;
-  }
-  .dir-item.on .dir-item-key, .dir-item.active .dir-item-key { background: var(--accent-key-bg); color: var(--accent); }
   .dir-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
   .dir-menu-act {
     display: block; width: 100%; text-align: left; cursor: pointer;
