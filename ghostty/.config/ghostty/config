@@ -39,8 +39,3 @@ macos-option-as-alt = true
 
 # Emit a distinct Shift+Enter sequence so TUIs can bind it separately from Enter.
 keybind = shift+enter=csi:13;2u
-
-# Don't dim inactive splits. Ghostty's default (0.7) darkens the unfocused
-# pane, which makes a transparent Neovim split look like it doesn't match the
-# focused pane's background. Keep every split at full brightness instead.
-unfocused-split-opacity = 1
