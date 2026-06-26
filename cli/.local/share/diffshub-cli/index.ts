@@ -700,6 +700,77 @@ function editorArgv(fileAbs: string, line: number | null, cwd?: string): string[
   return argv;
 }
 
+// nvim opens inside a dedicated tmux session ("edit") on the default socket —
+// the same socket your interactive sessions live on — rather than a standalone
+// Ghostty window. macOS can't add a window to the running Ghostty from the CLI,
+// so a standalone window is always a *separate* Ghostty process that Cmd+` can't
+// reach; routing through tmux instead means the editor is reachable with your
+// normal tmux keys and never triggers Ghostty's "-e" allow-prompt (we don't use
+// `open -e` at all). nvim keeps a --listen server so repeated opens land as new
+// TABS in the one session via --remote-tab.
+const NVIM_TMUX_SOCK = "/tmp/diffshub-nvim.sock";
+const NVIM_TMUX_SESSION = "edit";
+// Is something actually listening on the socket? A stale socket FILE survives an
+// nvim crash/quit, and `nvim --remote-tab` to a dead socket silently falls back
+// to opening a foreground editor (which would hang our spawn), so we must probe
+// a real connection before deciding the server is reusable.
+async function nvimAlive(sock: string): Promise<boolean> {
+  if (!existsSync(sock)) return false;
+  try {
+    const s = await Bun.connect({ unix: sock, socket: { data() {}, error() {} } });
+    s.end();
+    return true;
+  } catch {
+    return false;
+  }
+}
+// Pull every attached client on the default socket over to `session` so pressing
+// shift+v actually brings the editor to the foreground. No-op if nothing's
+// attached (the session still exists to attach to later).
+async function focusTmuxSession(session: string): Promise<void> {
+  let clients: string[] = [];
+  try {
+    clients = (await $`tmux -L default list-clients -F ${"#{client_tty}"}`.quiet().text())
+      .split("\n").map((s) => s.trim()).filter(Boolean);
+  } catch { }
+  await Promise.all(
+    clients.map((tty) =>
+      $`tmux -L default switch-client -c ${tty} -t ${session}`.quiet().catch(() => { })),
+  );
+}
+const NVIM_SPAWN = { stdin: "ignore", stdout: "ignore", stderr: "ignore" } as const;
+// Open fileAbs in the user's editor, jumping to `line`. nvim goes into the shared
+// "edit" tmux session (new tab if it's already running); every other editor falls
+// back to editorArgv's one-window-per-open behavior.
+async function launchEditor(fileAbs: string, line: number | null, dir: string): Promise<void> {
+  if (editorName() !== "nvim") {
+    Bun.spawn(editorArgv(fileAbs, line, dir), { cwd: dir, ...NVIM_SPAWN });
+    return;
+  }
+  const tokens = editorTokens(); // honor EDITOR="nvim -u …"
+  const nvimBin = tokens[0];
+  if (await nvimAlive(NVIM_TMUX_SOCK)) {
+    // Live server: drop the file in a new tab, then move the cursor. Two steps
+    // because `--remote-tab +<line>` would treat the `+<line>` as a filename.
+    await Bun.spawn([nvimBin, "--server", NVIM_TMUX_SOCK, "--remote-tab", fileAbs], NVIM_SPAWN).exited;
+    if (line != null)
+      await Bun.spawn([nvimBin, "--server", NVIM_TMUX_SOCK, "--remote-expr", `cursor(${line},1)`], NVIM_SPAWN).exited;
+  } else {
+    // No live server: clear any dead session/socket, then start nvim --listen in
+    // a fresh detached "edit" session so the NEXT open reuses it as a tab.
+    await $`tmux -L default kill-session -t ${NVIM_TMUX_SESSION}`.quiet().catch(() => { });
+    try { if (existsSync(NVIM_TMUX_SOCK)) unlinkSync(NVIM_TMUX_SOCK); } catch { }
+    const cmd = [...tokens, "--listen", NVIM_TMUX_SOCK];
+    if (line != null) cmd.push(`+${line}`);
+    cmd.push(fileAbs);
+    // Single shell-string command (mirrors newClaudeSession) so tmux runs it via
+    // sh; shq keeps `$`/spaces in the path literal (e.g. demos.$id.tsx).
+    const nvimCmd = cmd.map(shq).join(" ");
+    await $`tmux -L default new-session -ds ${NVIM_TMUX_SESSION} -c ${dir} ${nvimCmd}`.quiet();
+  }
+  await focusTmuxSession(NVIM_TMUX_SESSION);
+}
+
 // ---- New Claude session (mirrors the `p` shell function) ----
 // The `p` zsh function reads these pools (exported as zsh arrays, not env vars,
 // so we mirror them here) to pick an adjective-noun session name, then launches
@@ -4911,14 +4982,9 @@ const server = Bun.serve({
           : null;
       const dir = dirForWorktree(ws, body.worktree, body.repo);
       try {
-        // Fire-and-forget: GUI editors fork and return; we don't await so a
-        // terminal editor (vim/etc) wouldn't hang the request.
-        Bun.spawn(editorArgv(`${dir}/${body.path}`, line, dir), {
-          cwd: dir,
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-        });
+        // All spawns here either fork-and-return (GUI editors, `open`) or are
+        // quick nvim remote calls — none block on a live TUI, so awaiting is safe.
+        await launchEditor(`${dir}/${body.path}`, line, dir);
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
