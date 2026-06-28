@@ -69,6 +69,8 @@ import {
   MailOpen,
   ExternalLink,
   FileCode,
+  Images,
+  Pencil,
   Share2,
   Link2,
   Copy,
@@ -158,27 +160,28 @@ interface DiffSelection {
   range: SelectedLineRange;
 }
 
-type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux";
+type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux" | "html";
 
-// Order drives the 1–6 / ←→ shortcuts and the tab strip. The first entry is the
+// Order drives the 1–7 / ←→ shortcuts and the tab strip. The first entry is the
 // landing tab for the default route (see initialView) — Home, the session monitor.
-const TAB_ORDER: Tab[] = ["home", "tmux", "changes", "commits", "prs", "manual"];
+const TAB_ORDER: Tab[] = ["home", "tmux", "changes", "commits", "prs", "manual", "html"];
 
 interface ManualPatch {
   name: string;
   contents: string;
 }
 
-// A claude session running in a tmux session (Tmux tab).
+// An agent (claude or codex) running in a tmux session (Tmux tab).
 interface TmuxSession {
   name: string;
   cwd: string;
-  task: string; // what claude is doing (cleaned pane title), "" if not meaningful
-  busy: boolean; // claude is actively working
+  task: string; // what the agent is doing (cleaned pane title), "" if not meaningful
+  busy: boolean; // agent is actively working
   waiting: boolean; // idle but blocked on an interactive prompt (waiting for input)
   sessionId: string;
   hasTranscript: boolean;
   mtime: number;
+  agent?: "claude" | "codex"; // which CLI — drives the row badge (claude when absent)
 }
 
 // A prompt enqueued while the machine was offline (Tmux tab). It launches into a
@@ -194,6 +197,7 @@ interface QueuedSession {
   createdAt: number;
   cwd: string;
   optimistic?: boolean;
+  agent?: "claude" | "codex"; // which CLI it'll launch as (claude when absent)
 }
 
 // A new-session prompt written to the localStorage outbox so it survives reloads
@@ -206,6 +210,7 @@ interface OutboxEntry {
   prompt: string;
   effort?: string;
   chrome?: boolean;
+  agent?: "claude" | "codex"; // which CLI to launch (claude when absent)
   cwd: string; // active dir root at submit time — dir-scopes the row like server rows
   dir: number | null; // active dir id at submit time — drainer targets the original dir
   createdAt: number;
@@ -236,6 +241,7 @@ interface TranscriptMsg {
   lang?: string; // language id for a Read tool result's code block
   imgRef?: string; // "<lineIdx>:<imgOrdinal>" — locates the bytes for /api/tmux/image
   mediaType?: string; // image media type for an image message
+  reasoning?: boolean; // a codex reasoning summary — rendered dimmed/italic
 }
 
 interface Transcript {
@@ -284,6 +290,7 @@ type View =
   | { kind: "changes" }
   | { kind: "manual"; name: string }
   | { kind: "tmux"; session: string }
+  | { kind: "html"; path: string }
   | { kind: "none" };
 
 type GitAction = "stage" | "unstage" | "stash";
@@ -1626,6 +1633,12 @@ const TranscriptTurn = memo(function TranscriptTurn({
             return <ReadBlock key={i} path={m.path || ""} lang={m.lang || "text"} code={m.text} />;
           if (m.kind === "tool_result")
             return <ToolResult key={i} text={m.text} tool={m.tool} label={m.path} />;
+          if (m.reasoning)
+            return (
+              <div key={i} className="reasoning">
+                <Markdown text={m.text} />
+              </div>
+            );
           return <Markdown key={i} text={m.text} />;
         })}
       </div>
@@ -1687,6 +1700,8 @@ function initialView(): { tab: Tab; view: View; dir: number | null; homeChat?: s
     return { tab: "tmux", view: { kind: "tmux", session: tmuxSession }, dir };
   const manual = params.get("manual");
   if (manual) return { tab: "manual", view: { kind: "manual", name: manual }, dir };
+  const htmlPath = params.get("html");
+  if (htmlPath !== null) return { tab: "html", view: { kind: "html", path: htmlPath }, dir };
   const sha = params.get("sha");
   if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
   // Home deep-link (?home=<session>): land on the Home tab with that session's chat
@@ -1920,6 +1935,8 @@ function tabDefaults(t: Tab): { view: View; param: string } {
       return { view: { kind: "manual", name: "" }, param: "manual=" };
     case "tmux":
       return { view: { kind: "tmux", session: "" }, param: "tmux=" };
+    case "html":
+      return { view: { kind: "html", path: "" }, param: "html=" };
     default:
       return { view: { kind: "none" }, param: "" };
   }
@@ -2115,6 +2132,7 @@ function HomeCard({
           <span className="home-dot" />
         )}
         <span className="home-card-name">{session.name}</span>
+        {session.agent === "codex" && <span className="home-card-agent">codex</span>}
       </div>
       {session.task && <div className="home-card-task">{session.task}</div>}
       <div className="home-card-foot">
@@ -2265,6 +2283,7 @@ function HomeView({
                 <div className="home-card-top">
                   <span className="home-dot" />
                   <span className="home-card-name">Queued prompt</span>
+                  {q.agent === "codex" && <span className="home-card-agent">codex</span>}
                 </div>
                 <div className="home-card-task">{q.prompt}</div>
                 <div className="home-card-cwd">{q.cwd.replace(/^.*\//, "") || q.cwd}</div>
@@ -2659,6 +2678,24 @@ function App() {
   const manualPatches = manualQuery.data ?? null;
   const manualError = errMessage(manualQuery.error);
 
+  // HTML reports tab: agents/**/*.html under the active dir, newest first. Polls
+  // while open so a freshly-written report pops into the list. dirId comes back
+  // resolved so raw URLs work even when the active dir is the (unparametrised)
+  // default.
+  const htmlListQuery = useQuery({
+    queryKey: ["html-list", activeDir],
+    queryFn: ({ signal }) =>
+      fetchJSON<{ dirId: number; files: { path: string; mtime: number }[] }>(
+        qd("/api/html/list"),
+        signal,
+      ),
+    enabled: tab === "html",
+    refetchInterval: tab === "html" ? 4000 : false,
+  });
+  const htmlFiles = htmlListQuery.data?.files ?? null;
+  const htmlDirId = htmlListQuery.data?.dirId ?? null;
+  const htmlError = errMessage(htmlListQuery.error);
+
   const changesQuery = useQuery({
     queryKey: ["changes", activeDir],
     queryFn: ({ signal }) => fetchJSON<RepoChanges[]>(qd("/api/changes"), signal),
@@ -2803,6 +2840,7 @@ function App() {
               prompt: entry.prompt,
               effort: entry.effort || undefined,
               chrome: entry.chrome || undefined,
+              agent: entry.agent || undefined,
             }),
           });
         } catch {
@@ -3163,6 +3201,18 @@ function App() {
     if (claudeChrome) localStorage.setItem("claudeChrome", "1");
     else localStorage.removeItem("claudeChrome");
   }, [claudeChrome]);
+  // Which agent the New Session composer launches — claude (default) or codex.
+  // Persisted globally like effort/chrome (a preference, not a per-repo draft).
+  const [claudeAgent, setClaudeAgent] = useState<"claude" | "codex">(() => {
+    try {
+      return localStorage.getItem("claudeAgent") === "codex" ? "codex" : "claude";
+    } catch {
+      return "claude";
+    }
+  });
+  useEffect(() => {
+    localStorage.setItem("claudeAgent", claudeAgent);
+  }, [claudeAgent]);
   const [launchedSession, setLaunchedSession] = useState<string | null>(null);
   // Brief confirmation shown after an offline prompt is queued (auto-dismissed).
   const [queuedNote, setQueuedNote] = useState(false);
@@ -3838,6 +3888,14 @@ function App() {
     setView((v) => (v.kind === "manual" && !v.name ? { kind: "manual", name: first.name } : v));
   }, [manualPatches]);
 
+  // ---- HTML reports (agents/**/*.html in the cwd) ----
+  // Auto-select the newest report when the HTML tab is open with none chosen.
+  useEffect(() => {
+    const first = htmlFiles?.[0];
+    if (!first) return;
+    setView((v) => (v.kind === "html" && !v.path ? { kind: "html", path: first.path } : v));
+  }, [htmlFiles]);
+
   const runGit = useCallback(
     async (action: GitAction, path?: string, repo?: string, worktree?: string) => {
       setBusyPath(path ?? worktree ?? (repo ? `*${repo}` : "*"));
@@ -4108,8 +4166,9 @@ function App() {
       {
         localId: makeLocalId(),
         prompt,
-        effort: claudeEffort || undefined,
-        chrome: claudeChrome || undefined,
+        effort: claudeAgent === "codex" ? undefined : claudeEffort || undefined,
+        chrome: claudeAgent === "codex" ? undefined : claudeChrome || undefined,
+        agent: claudeAgent === "codex" ? "codex" : undefined,
         cwd: meta?.path ?? "",
         dir: activeDirRef.current,
         createdAt: Date.now(),
@@ -4123,7 +4182,7 @@ function App() {
     if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), null);
     // A Queued row is already on screen; the toast confirms it'll launch on its own.
     setQueuedNote(true);
-  }, [claudePrompt, claudeEffort, claudeChrome, meta?.path]);
+  }, [claudePrompt, claudeEffort, claudeChrome, claudeAgent, meta?.path]);
 
   // Relaunch a closed session: the server starts `claude --resume <sid>` detached
   // in the active directory. Mirrors submitClaude's refresh dance so the resumed
@@ -4412,7 +4471,9 @@ function App() {
           ? ["prs"]
           : tab === "changes"
             ? ["changes"]
-            : ["manual"];
+            : tab === "html"
+              ? ["html-list"]
+              : ["manual"];
     queryClient.resetQueries({ queryKey: listKey });
     if (view.kind === "commit" || view.kind === "pr") {
       queryClient.resetQueries({ queryKey: diffKeyRef.current });
@@ -4612,6 +4673,85 @@ function App() {
       history.replaceState(null, "", navUrl(`manual=${encodeURIComponent(name)}`));
     },
     [navUrl],
+  );
+
+  const selectHtml = useCallback(
+    (path: string) => {
+      setView({ kind: "html", path });
+      history.replaceState(null, "", navUrl(`html=${encodeURIComponent(path)}`));
+    },
+    [navUrl],
+  );
+
+  // ---- HTML reports tab: iframe ref, reload nonce, raw-URL builder, row menu ----
+  const htmlFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const [htmlReloadKey, setHtmlReloadKey] = useState(0);
+  // Kebab menu anchored to a row, and the rename dialog (null = closed).
+  const [htmlMenu, setHtmlMenu] = useState<{ path: string; left: number; top: number } | null>(null);
+  const [htmlRename, setHtmlRename] = useState<{ from: string; value: string } | null>(null);
+
+  // Build the /api/html/raw/<dir>/<path> URL (each segment encoded, slashes kept)
+  // so the iframe loads same-origin and the report's relative asset refs resolve.
+  const htmlRawUrl = useCallback(
+    (path: string) =>
+      htmlDirId == null
+        ? ""
+        : `/api/html/raw/${htmlDirId}/${path.split("/").map(encodeURIComponent).join("/")}`,
+    [htmlDirId],
+  );
+  const copyHtmlPath = useCallback((path: string) => {
+    if (path) navigator.clipboard?.writeText(path).catch(() => {});
+  }, []);
+  const openHtmlNewTab = useCallback(
+    (path: string) => {
+      const u = htmlRawUrl(path);
+      if (u) window.open(u, "_blank", "noopener");
+    },
+    [htmlRawUrl],
+  );
+
+  // mv a report. On success refresh the list and follow the file if it was open.
+  const renameHtml = useCallback(
+    async (from: string, to: string) => {
+      if (!to.trim() || to === from || htmlDirId == null) return;
+      const res = await fetch("/api/html/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir: htmlDirId, from, to }),
+      });
+      const data = await res.json().catch(() => ({}) as { error?: string });
+      if (!res.ok) {
+        alert(`Rename failed: ${data.error ?? res.statusText}`);
+        return;
+      }
+      setHtmlRename(null);
+      queryClient.invalidateQueries({ queryKey: ["html-list"] });
+      const v = keyCtx.current.view;
+      if (v.kind === "html" && v.path === from) selectHtml(to);
+    },
+    [htmlDirId, queryClient, selectHtml],
+  );
+
+  // rm a report (after a confirm). Drops the center pane if it was the open one.
+  const deleteHtml = useCallback(
+    async (path: string) => {
+      if (htmlDirId == null) return;
+      if (!confirm(`Delete ${path}?`)) return;
+      const res = await fetch("/api/html/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir: htmlDirId, path }),
+      });
+      const data = await res.json().catch(() => ({}) as { error?: string });
+      if (!res.ok) {
+        alert(`Delete failed: ${data.error ?? res.statusText}`);
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ["html-list"] });
+      const v = keyCtx.current.view;
+      if (v.kind === "html" && v.path === path) setView({ kind: "html", path: "" });
+    },
+    [htmlDirId, queryClient],
   );
 
   // Switch the active directory: restore the tab you were last on (defaults to
@@ -5160,6 +5300,10 @@ function App() {
         : manualPatches,
     [manualPatches, q],
   );
+  const visibleHtml = useMemo(
+    () => (q && htmlFiles ? htmlFiles.filter((f) => f.path.toLowerCase().includes(q)) : htmlFiles),
+    [htmlFiles, q],
+  );
   // A session is "unread" once it's idle (finished its turn — not busy, not
   // blocked on a prompt) with transcript output newer than you last saw. Drives
   // the sidebar dots and the "next unread" jump. Waiting rows are excluded: they
@@ -5466,6 +5610,7 @@ function App() {
         createdAt: e.createdAt,
         cwd: e.cwd,
         optimistic: true,
+        agent: e.agent,
       }))
       .sort((a, b) => b.createdAt - a.createdAt);
     let list = [...optimistic, ...(queuedSessions ?? []).filter((x) => inScope(x.cwd))];
@@ -5518,6 +5663,7 @@ function App() {
     visiblePrs,
     visibleManual,
     visibleTmux,
+    visibleHtml,
     selectedTmux: selectedSession,
     selection,
     orderedKeys,
@@ -5536,6 +5682,8 @@ function App() {
     homeNav,
     homeSel,
     contextMode,
+    toggleContextMode,
+    promptWithContext,
     homeChatOpen: !!homeChat,
     htmlViewOpen: !!htmlView,
     shareOpen,
@@ -5545,6 +5693,8 @@ function App() {
     activeWorktree,
     wtMenuOpen,
     wtDeleteOpen: !!wtToDelete,
+    htmlMenuOpen: !!htmlMenu,
+    htmlRenameOpen: !!htmlRename,
   });
   keyCtx.current = {
     tab,
@@ -5553,6 +5703,7 @@ function App() {
     visiblePrs,
     visibleManual,
     visibleTmux,
+    visibleHtml,
     selectedTmux: selectedSession,
     selection,
     orderedKeys,
@@ -5571,6 +5722,8 @@ function App() {
     homeNav,
     homeSel,
     contextMode,
+    toggleContextMode,
+    promptWithContext,
     homeChatOpen: !!homeChat,
     htmlViewOpen: !!htmlView,
     shareOpen,
@@ -5580,6 +5733,8 @@ function App() {
     activeWorktree,
     wtMenuOpen,
     wtDeleteOpen: !!wtToDelete,
+    htmlMenuOpen: !!htmlMenu,
+    htmlRenameOpen: !!htmlRename,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5631,7 +5786,7 @@ function App() {
       // meta or ctrl modifier is held, the event belongs to the browser/OS (⌘N new
       // window, ⌘T, ⌘L, ⌘A, ⌘D…); bail so we never shadow the native shortcut.
       if (e.metaKey || e.ctrlKey) return;
-      const { tab, view, visibleCommits, visiblePrs, visibleManual, visibleTmux, selectedTmux } =
+      const { tab, view, visibleCommits, visiblePrs, visibleManual, visibleTmux, visibleHtml, selectedTmux } =
         keyCtx.current;
       const target = (e.composedPath()[0] ?? e.target) as HTMLElement;
       const typing =
@@ -5683,8 +5838,9 @@ function App() {
         return;
       }
       if (typing) return;
-      // "Prompt with context" selection mode owns Esc (cancel) and Enter (toggle the
-      // focused card's checkbox, instead of opening its chat) while it's active.
+      // "Prompt with context" selection mode owns Esc (cancel), Enter (toggle the
+      // focused card's checkbox, instead of opening its chat) and `'` (confirm)
+      // while it's active.
       if (keyCtx.current.tab === "home" && keyCtx.current.contextMode) {
         if (e.key === "Escape") {
           e.preventDefault();
@@ -5703,6 +5859,24 @@ function App() {
           });
           return;
         }
+        // `'` confirms the pick — opens a new session seeded with the ticked
+        // sessions' refs (the desktop twin of the bottom bar's "Prompt with
+        // context" button), overriding `'`'s usual blank new session. No-op when
+        // nothing's ticked, mirroring that button's disabled state.
+        if (e.key === "'") {
+          e.preventDefault();
+          keyCtx.current.promptWithContext();
+          return;
+        }
+      }
+      // `s` toggles "Prompt with context" selection mode on the Home dashboard —
+      // the desktop key for the top bar's ☑ button (that bar is hidden at desktop
+      // width, so this was previously mobile-only). Enter ticks the focused card,
+      // `'` confirms, Esc cancels.
+      if (e.key === "s" && tab === "home") {
+        e.preventDefault();
+        keyCtx.current.toggleContextMode();
+        return;
       }
       // On the Home dashboard, Esc closes the open chat side-panel. (Esc inside
       // the composer is handled by the textarea — it stops propagation — so this
@@ -5839,6 +6013,36 @@ function App() {
         e.preventDefault();
         if (visibleTmux?.length) setKillAllOpen(true);
         return;
+      }
+      // HTML reports tab: the open report scrolls and link-hints itself inside the
+      // iframe (the injected vim layer), so the parent only walks the file list —
+      // j/k and ↑/↓ step it; d/u/g/G/h/l are swallowed so they don't tug the
+      // unscrollable iframe wrapper. (J/K typed inside the iframe arrive via the
+      // postMessage listener below, which calls the same selectHtml.)
+      if (tab === "html") {
+        const list = visibleHtml;
+        const stepHtml = (delta: number) => {
+          if (!list || !list.length) return;
+          const cur = view.kind === "html" ? view.path : "";
+          const i = list.findIndex((f) => f.path === cur);
+          const n = delta > 0 ? (i + 1 >= list.length ? 0 : i + 1) : i <= 0 ? list.length - 1 : i - 1;
+          selectHtml(list[n].path);
+          document
+            .querySelector(`[data-html-row="${CSS.escape(list[n].path)}"]`)
+            ?.scrollIntoView({ block: "nearest" });
+        };
+        if (e.key === "j" || e.key === "ArrowDown") {
+          e.preventDefault();
+          stepHtml(1);
+          return;
+        }
+        if (e.key === "k" || e.key === "ArrowUp") {
+          e.preventDefault();
+          stepHtml(-1);
+          return;
+        }
+        if (e.key === "d" || e.key === "u" || e.key === "g" || e.key === "G" || e.key === "h" || e.key === "l")
+          return;
       }
       // Vimium-style scrolling of the diff column. We recreate j/k/d/u here so
       // they work even where Vimium is disabled and so they target the diff pane
@@ -6104,6 +6308,19 @@ function App() {
     const onEscClose = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const k = keyCtx.current;
+      // Report rename dialog / row menu layer above the html tab — peel them first.
+      if (k.htmlRenameOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setHtmlRename(null);
+        return;
+      }
+      if (k.htmlMenuOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setHtmlMenu(null);
+        return;
+      }
       // The share dialog layers above the HTML preview, which layers above the
       // Home chat panel — so Esc peels them off one at a time, innermost first.
       if (k.shareOpen) {
@@ -6190,7 +6407,62 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [stepCommit, selectPr, selectManual, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
+  }, [stepCommit, selectPr, selectManual, selectHtml, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
+
+  // Keys typed inside a report iframe can't reach the parent's keydown handler
+  // (separate document), so the injected vim layer postMessages the app-level
+  // actions up here — the same selectHtml / search / copy / open / reload the
+  // parent shortcuts use, plus 1-9 to switch tabs from inside a report.
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const d = e.data as { source?: string; action?: string } | null;
+      if (!d || d.source !== "diffshub-report") return;
+      const k = keyCtx.current;
+      if (k.tab !== "html") return;
+      const list = k.visibleHtml;
+      const cur = k.view.kind === "html" ? k.view.path : "";
+      const step = (delta: number) => {
+        if (!list || !list.length) return;
+        const i = list.findIndex((f) => f.path === cur);
+        const n = delta > 0 ? (i + 1 >= list.length ? 0 : i + 1) : i <= 0 ? list.length - 1 : i - 1;
+        selectHtml(list[n].path);
+        document
+          .querySelector(`[data-html-row="${CSS.escape(list[n].path)}"]`)
+          ?.scrollIntoView({ block: "nearest" });
+      };
+      switch (d.action) {
+        case "next":
+          step(1);
+          break;
+        case "prev":
+          step(-1);
+          break;
+        case "search":
+          searchEl.current?.focus();
+          break;
+        case "copy":
+          copyHtmlPath(cur);
+          break;
+        case "open":
+          openHtmlNewTab(cur);
+          break;
+        case "reload":
+          setHtmlReloadKey((n) => n + 1);
+          break;
+        case "blur":
+          window.focus();
+          (document.activeElement as HTMLElement | null)?.blur?.();
+          break;
+        default:
+          if (d.action?.startsWith("tab:")) {
+            const n = parseInt(d.action.slice(4), 10);
+            if (n >= 1 && n <= TAB_ORDER.length) selectTab(TAB_ORDER[n - 1]);
+          }
+      }
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, [selectHtml, selectTab, copyHtmlPath, openHtmlNewTab]);
 
   const scrollToKey = (key: string) => {
     fileEls.current.get(key)?.scrollIntoView({ block: "start" });
@@ -6947,6 +7219,14 @@ function App() {
             >
               <FileStack />
             </button>
+            <button
+              className={tab === "html" ? "on" : ""}
+              data-tip="HTML reports"
+              aria-label="HTML reports"
+              onClick={() => selectTab("html")}
+            >
+              <Images />
+            </button>
           </div>
           {tab !== "changes" && (
             <input
@@ -6959,7 +7239,9 @@ function App() {
                     ? "Filter PRs…"
                     : tab === "tmux" || tab === "home"
                       ? "Filter sessions…"
-                      : "Filter patches…"
+                      : tab === "html"
+                        ? "Filter reports…"
+                        : "Filter patches…"
               }
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -7251,6 +7533,7 @@ function App() {
                     className={`sess-busy${s.busy ? " on" : s.waiting ? " waiting" : ""}`}
                   />
                   <span className="sess-name">{s.name}</span>
+                  {s.agent === "codex" && <span className="home-card-agent">codex</span>}
                   {s.waiting && !s.busy && <span className="waiting-badge">Waiting</span>}
                   {isUnread(s) && (
                     <span className="unread-dot" title="Finished — unread" />
@@ -7279,6 +7562,47 @@ function App() {
                     : "No claude tmux sessions"}
                 </div>
               )}
+          </div>
+        )}
+
+        {tab === "html" && (
+          <div className="commit-list">
+            {htmlFiles === null && !htmlError && <SkeletonList />}
+            {htmlError && <div className="side-note error">{htmlError}</div>}
+            {visibleHtml?.map((f) => (
+              <div
+                key={f.path}
+                data-html-row={f.path}
+                className={`commit html-row${view.kind === "html" && f.path === view.path ? " active" : ""}`}
+                onClick={() => selectHtml(f.path)}
+              >
+                <span className="commit-msg">{f.path.replace(/^agents\//, "")}</span>
+                <span className="commit-meta">
+                  <span className="commit-ago">{timeAgo(f.mtime)}</span>
+                </span>
+                <button
+                  className="html-kebab"
+                  title="Actions"
+                  aria-label="Report actions"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setHtmlMenu((m) =>
+                      m && m.path === f.path
+                        ? null
+                        : { path: f.path, left: Math.max(8, r.right - 150), top: r.bottom + 4 },
+                    );
+                  }}
+                >
+                  <EllipsisVertical size={15} />
+                </button>
+              </div>
+            ))}
+            {htmlFiles !== null && !htmlError && htmlFiles.length === 0 && (
+              <div className="side-note">
+                No <code>agents/**/*.html</code> in this directory
+              </div>
+            )}
           </div>
         )}
 
@@ -7358,7 +7682,7 @@ function App() {
       <div className="resizer rz-left" onPointerDown={startResize("left")} />
 
       <main
-        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : ""}${
+        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : tab === "html" ? " report-main" : ""}${
           tab === "home" && homeChat ? " chat-open" : ""
         }`}
         ref={mainEl}
@@ -7381,6 +7705,51 @@ function App() {
           />
         )}
         {tab === "tmux" && <div className="transcript">{renderChat()}</div>}
+        {tab === "html" && (
+          <div className="report-pane">
+            {view.kind === "html" && view.path ? (
+              <>
+                <div className="report-bar">
+                  <FileCode size={15} className="report-bar-icon" />
+                  <span className="report-title">{view.path.split("/").pop()}</span>
+                  <span className="report-path" title={view.path}>
+                    {view.path}
+                  </span>
+                  <span className="spacer" />
+                  <IconButton title="Reload (r)" onClick={() => setHtmlReloadKey((n) => n + 1)}>
+                    <RefreshCw size={15} />
+                  </IconButton>
+                  <IconButton title="Open in new tab (o)" onClick={() => openHtmlNewTab(view.path)}>
+                    <ExternalLink size={15} />
+                  </IconButton>
+                  <IconButton title="Copy path (;)" onClick={() => copyHtmlPath(view.path)}>
+                    <Copy size={15} />
+                  </IconButton>
+                </div>
+                <iframe
+                  key={`${view.path}:${htmlReloadKey}`}
+                  ref={htmlFrameRef}
+                  className="report-frame"
+                  title="HTML report"
+                  src={htmlRawUrl(view.path)}
+                  onLoad={() => {
+                    try {
+                      htmlFrameRef.current?.contentWindow?.focus();
+                    } catch {
+                      // cross-frame focus can throw under odd sandboxing — ignore
+                    }
+                  }}
+                />
+              </>
+            ) : (
+              <div className="empty">
+                {htmlFiles && htmlFiles.length
+                  ? "Select a report on the left"
+                  : "No HTML reports in this directory's agents/ folder"}
+              </div>
+            )}
+          </div>
+        )}
         {/* Home dashboard: clicking a card opens its chat here instead of leaving
             the dashboard — a docked right sidebar on desktop, a full-screen sheet
             on mobile (see .home-chat-panel). Portaled to <body> so the fixed panel
@@ -7541,6 +7910,83 @@ function App() {
                     </div>
                   </>
                 ) : null}
+              </div>
+            </div>,
+            document.body,
+          )}
+        {/* Report row action menu (rename / delete), anchored to the kebab. A click
+            anywhere else (the backdrop) or Esc closes it; portaled so it isn't
+            clipped by the scrolling sidebar. */}
+        {htmlMenu &&
+          createPortal(
+            <>
+              <div className="menu-backdrop" onClick={() => setHtmlMenu(null)} />
+              <div className="html-menu" style={{ left: htmlMenu.left, top: htmlMenu.top }}>
+                <button
+                  onClick={() => {
+                    setHtmlRename({ from: htmlMenu.path, value: htmlMenu.path });
+                    setHtmlMenu(null);
+                  }}
+                >
+                  <Pencil size={13} /> Rename
+                </button>
+                <button
+                  className="danger"
+                  onClick={() => {
+                    const p = htmlMenu.path;
+                    setHtmlMenu(null);
+                    void deleteHtml(p);
+                  }}
+                >
+                  <Trash2 size={13} /> Delete
+                </button>
+              </div>
+            </>,
+            document.body,
+          )}
+        {/* Rename dialog — edit the report's path; submit runs mv server-side. */}
+        {htmlRename &&
+          createPortal(
+            <div
+              className="share-overlay"
+              role="dialog"
+              aria-modal="true"
+              onClick={() => setHtmlRename(null)}
+            >
+              <div className="share-card" onClick={(e) => e.stopPropagation()}>
+                <div className="share-head">
+                  <Pencil size={16} />
+                  <span className="share-title">Rename report</span>
+                  <span className="spacer" />
+                  <IconButton title="Close (Esc)" onClick={() => setHtmlRename(null)}>
+                    <X size={16} />
+                  </IconButton>
+                </div>
+                <form
+                  className="rename-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void renameHtml(htmlRename.from, htmlRename.value.trim());
+                  }}
+                >
+                  <input
+                    autoFocus
+                    className="rename-input"
+                    value={htmlRename.value}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      setHtmlRename((r) => (r ? { ...r, value: e.target.value } : r))
+                    }
+                  />
+                  <div className="rename-actions">
+                    <button type="button" onClick={() => setHtmlRename(null)}>
+                      Cancel
+                    </button>
+                    <button type="submit" className="primary">
+                      Rename
+                    </button>
+                  </div>
+                </form>
               </div>
             </div>,
             document.body,
@@ -8148,29 +8594,45 @@ function App() {
             </div>
             <div className="claude-opts">
               <label className="claude-opt">
-                <span>Effort</span>
+                <span>Agent</span>
                 <select
-                  value={claudeEffort}
-                  onChange={(e) => setClaudeEffort(e.target.value)}
+                  value={claudeAgent}
+                  onChange={(e) => setClaudeAgent(e.target.value === "codex" ? "codex" : "claude")}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
-                  <option value="">Default</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="xhigh">Extra high</option>
-                  <option value="max">Max</option>
+                  <option value="claude">claude</option>
+                  <option value="codex">codex</option>
                 </select>
               </label>
-              <label className="claude-opt">
-                <span>Chrome</span>
-                <input
-                  type="checkbox"
-                  checked={claudeChrome}
-                  onChange={(e) => setClaudeChrome(e.target.checked)}
-                  onKeyDown={(e) => e.stopPropagation()}
-                />
-              </label>
+              {/* effort + chrome are claude-only flags; hide them for codex */}
+              {claudeAgent === "claude" && (
+                <>
+                  <label className="claude-opt">
+                    <span>Effort</span>
+                    <select
+                      value={claudeEffort}
+                      onChange={(e) => setClaudeEffort(e.target.value)}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      <option value="">Default</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="xhigh">Extra high</option>
+                      <option value="max">Max</option>
+                    </select>
+                  </label>
+                  <label className="claude-opt">
+                    <span>Chrome</span>
+                    <input
+                      type="checkbox"
+                      checked={claudeChrome}
+                      onChange={(e) => setClaudeChrome(e.target.checked)}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    />
+                  </label>
+                </>
+              )}
             </div>
             {(!clientOnline || !serverOnline) && (
               <div className="modal-offline">

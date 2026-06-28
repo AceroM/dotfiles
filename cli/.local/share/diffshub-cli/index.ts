@@ -276,24 +276,30 @@ const listFilesStmt = db.query<{ path: string }, [number]>(
   "SELECT path FROM files WHERE dir_id = ? ORDER BY path",
 );
 
-// Prompts enqueued while the machine was offline (claude can't reach the Anthropic
-// API, so launching a session would do nothing). Each row is drained — launched as
-// a real claude session — automatically once connectivity returns. See checkOnline
+// Prompts enqueued while the machine was offline (the agent can't reach its API, so
+// launching a session would do nothing). Each row is drained — launched as a real
+// session of its `agent` — automatically once connectivity returns. See checkOnline
 // / drainQueue.
 db.run(`CREATE TABLE IF NOT EXISTS queued_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   dir_id INTEGER NOT NULL,
   prompt TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  agent TEXT NOT NULL DEFAULT 'claude'
 )`);
+// Migrate DBs created before the agent column existed (no-op once applied).
+try {
+  db.run("ALTER TABLE queued_sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'");
+} catch { }
 interface QueuedRow {
   id: number;
   dir_id: number;
   prompt: string;
   created_at: number;
+  agent: string;
 }
-const insertQueuedStmt = db.query<{ id: number }, [number, string, number]>(
-  "INSERT INTO queued_sessions (dir_id, prompt, created_at) VALUES (?, ?, ?) RETURNING id",
+const insertQueuedStmt = db.query<{ id: number }, [number, string, number, string]>(
+  "INSERT INTO queued_sessions (dir_id, prompt, created_at, agent) VALUES (?, ?, ?, ?) RETURNING id",
 );
 const listQueuedStmt = db.query<QueuedRow, []>(
   "SELECT * FROM queued_sessions ORDER BY created_at, id",
@@ -528,6 +534,107 @@ function rewriteLocalAssets(html: string, htmlDir: string, cwd: string, session:
     );
   }
   return applyRefMap(html, map);
+}
+
+// ---- HTML reports viewer (the standalone agents-cli, folded in) ----
+// Lists and serves agents/**/*.html under a workspace so one diffshub server
+// covers what the separate agents-cli viewer did. Unlike the tmux/html preview
+// (srcDoc + rewritten assets), reports load by URL under /api/html/raw/<dir>/…,
+// so a report's relative sibling refs (images, css, fonts) resolve to the same
+// prefix and get served as-is — no rewriting needed.
+function listAgentHtml(root: string): { path: string; mtime: number }[] {
+  if (!existsSync(`${root}/agents`)) return [];
+  const out: { path: string; mtime: number }[] = [];
+  for (const rel of new Bun.Glob("agents/**/*.html").scanSync({ cwd: root, onlyFiles: true })) {
+    try {
+      out.push({ path: rel, mtime: statSync(`${root}/${rel}`).mtimeMs });
+    } catch {
+      // file vanished between scan and stat — skip it
+    }
+  }
+  return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+// Resolve a client-supplied dir id to its workspace root path (sync — no gh).
+function htmlRootFromDir(dir: unknown): string | null {
+  const id = typeof dir === "number" ? dir : typeof dir === "string" ? parseInt(dir, 10) : NaN;
+  if (!Number.isInteger(id)) return null;
+  return getDirStmt.get(id)?.path ?? null;
+}
+
+// Resolve a relative report path under root, requiring it to stay inside agents/
+// and end in .html — so rename/delete can't escape the tree or touch other files.
+function htmlSafePath(root: string, p: unknown): string | null {
+  if (typeof p !== "string" || !p.trim()) return null;
+  const abs = resolve(root, p);
+  const agentsDir = `${root}/agents`;
+  if (abs !== agentsDir && !abs.startsWith(agentsDir + sep)) return null;
+  if (!/\.html?$/i.test(abs)) return null;
+  return abs;
+}
+
+// Vimium-style keyboard layer injected into every served report. Runs inside the
+// (same-origin) iframe: j/k/d/u/g/G/h/l scroll, f/F are link hints, and the app
+// keys (J/K next/prev report, / search, ; copy, o open, r reload, 1-9 tab switch)
+// post up to the diffshub parent. Skips when typing in the report's own fields.
+const REPORT_SHORTCUTS_JS = `<script>/* diffshub report keys */(function(){
+  if (window.__diffshubReportKeys) return; window.__diffshubReportKeys = true;
+  var d = document, w = window, lastG = 0;
+  function typing(el){ return !!el && (el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.tagName==='SELECT'||el.isContentEditable); }
+  function send(a){ try { w.parent.postMessage({source:'diffshub-report', action:a}, '*'); } catch(e){} }
+  var CH = 'sadfjklewcmpgh', hints = [], hintBuf = '', hintMode = false, hintNew = false;
+  function labels(n){ var o=[],i; if(n<=CH.length){ for(i=0;i<n;i++) o.push(CH[i]); } else { for(i=0;i<n;i++) o.push(CH[Math.floor(i/CH.length)%CH.length]+CH[i%CH.length]); } return o; }
+  function clearHints(){ for(var i=0;i<hints.length;i++){ var tp=hints[i].tip; if(tp&&tp.parentNode) tp.parentNode.removeChild(tp); } hints=[]; hintBuf=''; hintMode=false; }
+  function showHints(nt){ clearHints(); hintMode=true; hintNew=nt;
+    var nodes=d.querySelectorAll('a[href],button,[onclick],[role=button],input:not([type=hidden]),select,textarea,summary,label[for]'), vis=[], i;
+    for(i=0;i<nodes.length;i++){ var el=nodes[i], r=el.getBoundingClientRect(); if(r.width>0&&r.height>0&&r.bottom>0&&r.top<w.innerHeight&&r.right>0&&r.left<w.innerWidth) vis.push(el); }
+    if(!vis.length){ hintMode=false; return; }
+    var labs=labels(vis.length);
+    for(i=0;i<vis.length;i++){ var e2=vis[i], rr=e2.getBoundingClientRect(), tip=d.createElement('div'); tip.textContent=labs[i];
+      tip.style.cssText='position:fixed;z-index:2147483647;left:'+Math.max(1,rr.left)+'px;top:'+Math.max(1,rr.top)+'px;background:#fde047;color:#1e293b;font:bold 11px ui-monospace,Menlo,monospace;padding:1px 4px;border:1px solid #a16207;border-radius:3px;box-shadow:0 1px 2px rgba(0,0,0,.3);text-transform:uppercase;pointer-events:none;line-height:1.3;';
+      d.body.appendChild(tip); hints.push({el:e2, tip:tip, label:labs[i]}); }
+  }
+  function matchHints(){ var exact=null, pre=0;
+    for(var i=0;i<hints.length;i++){ var h=hints[i], ok=h.label.indexOf(hintBuf)===0; h.tip.style.opacity=ok?'1':'0.2'; if(ok) pre++; if(h.label===hintBuf) exact=h; }
+    if(exact){ var el=exact.el, nt=hintNew; clearHints(); if(nt&&el.href){ w.open(el.href,'_blank'); } else { try{el.focus();}catch(e){} if(el.click) el.click(); } return; }
+    if(pre===0) clearHints();
+  }
+  d.addEventListener('keydown', function(e){
+    if(e.metaKey||e.ctrlKey||e.altKey) return;
+    var t=(e.composedPath&&e.composedPath()[0])||e.target;
+    if(hintMode){ e.preventDefault();
+      if(e.key==='Escape') clearHints();
+      else if(e.key==='Backspace'){ hintBuf=hintBuf.slice(0,-1); matchHints(); }
+      else if(/^[a-z]$/i.test(e.key)){ hintBuf+=e.key.toLowerCase(); matchHints(); }
+      return; }
+    if(typing(t)) return;
+    var k=e.key, se=d.scrollingElement||d.documentElement, H=w.innerHeight;
+    if(k==='j'){ e.preventDefault(); w.scrollBy(0,90); }
+    else if(k==='k'){ e.preventDefault(); w.scrollBy(0,-90); }
+    else if(k==='d'){ e.preventDefault(); w.scrollBy(0,H/2); }
+    else if(k==='u'){ e.preventDefault(); w.scrollBy(0,-H/2); }
+    else if(k==='h'){ e.preventDefault(); w.scrollBy(-90,0); }
+    else if(k==='l'){ e.preventDefault(); w.scrollBy(90,0); }
+    else if(k==='G'){ e.preventDefault(); w.scrollTo(0,se.scrollHeight); lastG=0; }
+    else if(k==='g'){ e.preventDefault(); var n=Date.now(); if(n-lastG<500){ w.scrollTo(0,0); lastG=0; } else lastG=n; }
+    else if(k==='f'){ e.preventDefault(); showHints(false); }
+    else if(k==='F'){ e.preventDefault(); showHints(true); }
+    else if(k==='J'||k===']'){ e.preventDefault(); send('next'); }
+    else if(k==='K'||k==='['){ e.preventDefault(); send('prev'); }
+    else if(k==='/'){ e.preventDefault(); send('search'); }
+    else if(k===';'||k==='y'){ e.preventDefault(); send('copy'); }
+    else if(k==='o'){ e.preventDefault(); send('open'); }
+    else if(k==='r'){ e.preventDefault(); send('reload'); }
+    else if(k==='Escape') send('blur');
+    else if(/^[1-9]$/.test(k)){ e.preventDefault(); send('tab:'+k); }
+  }, true);
+  w.addEventListener('scroll', function(){ if(hintMode) clearHints(); }, {passive:true});
+})();</script>`;
+
+function injectReportShortcuts(html: string): string {
+  if (html.includes("__diffshubReportKeys")) return html;
+  const i = html.toLowerCase().lastIndexOf("</body>");
+  return i === -1 ? html + REPORT_SHORTCUTS_JS : html.slice(0, i) + REPORT_SHORTCUTS_JS + html.slice(i);
 }
 
 // ---- Resolved-workspace cache (gh calls are slow) ----
@@ -810,7 +917,7 @@ async function pickClaudeSessionName(): Promise<string> {
         const cmd = (
           await $`tmux -L default display-message -p -t ${`${s}:0.0`} ${"#{pane_current_command}"}`.quiet().text()
         ).trim();
-        if (/claude|node/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd)) usedLetters.add(s[0]);
+        if (/claude|node|codex/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd)) usedLetters.add(s[0]);
       } catch { }
     }),
   );
@@ -1282,6 +1389,7 @@ function listQueuedSessions() {
     prompt: row.prompt,
     createdAt: row.created_at,
     cwd: getDirStmt.get(row.dir_id)?.path ?? "",
+    agent: (row.agent ?? "claude") as "claude" | "codex",
   }));
 }
 
@@ -1297,7 +1405,8 @@ async function drainQueue(): Promise<void> {
       continue;
     }
     try {
-      await newClaudeSession(dir.path, row.prompt);
+      if (row.agent === "codex") await newCodexSession(dir.path, row.prompt);
+      else await newClaudeSession(dir.path, row.prompt);
       deleteQueuedStmt.run(row.id);
     } catch {
       break;
@@ -1335,6 +1444,146 @@ function findTranscriptBySid(sid: string): string | null {
     if (existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+// ---- Codex sessions <-> ~/.codex rollouts ----
+// codex mints its OWN session uuid and writes the transcript ("rollout") to
+//   ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+// (the uuid is also in the file's first `session_meta` line). codex.zsh stamps that
+// uuid onto the tmux session as @codex_session — the analogue of @claude_session.
+// Unlike claude's sid-addressable path, the rollout is date-bucketed, so we glob the
+// tree to find it (cached: the file is append-only, so its path never moves).
+const codexSessionsRoot = `${process.env.HOME}/.codex/sessions`;
+const rolloutPathCache = new Map<string, string>();
+
+// Find a rollout by its session uuid (date-bucketed → glob the tree, first match).
+function findRolloutByUuid(uuid: string): string | null {
+  if (!/^[0-9a-fA-F-]{8,}$/.test(uuid)) return null;
+  const cached = rolloutPathCache.get(uuid);
+  if (cached && existsSync(cached)) return cached;
+  try {
+    const glob = new Bun.Glob(`**/rollout-*-${uuid}.jsonl`);
+    for (const rel of glob.scanSync(codexSessionsRoot)) {
+      const full = `${codexSessionsRoot}/${rel}`;
+      rolloutPathCache.set(uuid, full);
+      return full;
+    }
+  } catch { }
+  return null;
+}
+
+// The cwd a rollout was recorded in (its session_meta, line 1). Only the file head
+// is read. Used to resolve untagged codex sessions by directory.
+async function rolloutCwd(path: string): Promise<string> {
+  try {
+    const head = await Bun.file(path).slice(0, 8192).text();
+    const line1 = head.split("\n", 1)[0] ?? "";
+    const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(line1);
+    return m ? (JSON.parse(`"${m[1]}"`) as string) : "";
+  } catch {
+    return "";
+  }
+}
+
+// Resolve a codex tmux session to its rollout: by @codex_session uuid when tagged,
+// else the newest rollout recorded in this cwd (covers the brief window before the
+// tag lands, and codex sessions started outside codex.zsh). The cwd scan is bounded
+// to the most recent rollouts so the sidebar poll stays cheap.
+async function resolveCodexTranscript(cwd: string, uuid: string): Promise<string | null> {
+  if (uuid) return findRolloutByUuid(uuid); // null until codex writes the first turn
+  if (!cwd) return null;
+  const recent: { path: string; mtime: number }[] = [];
+  try {
+    const glob = new Bun.Glob("**/rollout-*.jsonl");
+    for (const rel of glob.scanSync(codexSessionsRoot)) {
+      const p = `${codexSessionsRoot}/${rel}`;
+      try {
+        recent.push({ path: p, mtime: statSync(p).mtimeMs });
+      } catch { }
+    }
+  } catch {
+    return null;
+  }
+  recent.sort((a, b) => b.mtime - a.mtime);
+  for (const r of recent.slice(0, 60)) {
+    if ((await rolloutCwd(r.path)) === cwd) return r.path;
+  }
+  return null;
+}
+
+// Which agent (if any) a tmux session is running, from its pane command + tags.
+// claude's pane command is "claude", "node", or a version string (e.g. 2.1.177);
+// codex's is "codex". The @codex_session tag is a secondary signal (e.g. while codex
+// is still booting and the command hasn't settled).
+function agentOf(cmd: string, codexSid: string): "claude" | "codex" | null {
+  if (/codex/.test(cmd) || codexSid) return "codex";
+  if (/claude|node/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd)) return "claude";
+  return null;
+}
+
+// Every rollout uuid that exists right now (a launch snapshot). codex only writes a
+// rollout once its first turn starts, so the new session is the uuid absent here.
+function codexRolloutUuids(): Set<string> {
+  const out = new Set<string>();
+  try {
+    const glob = new Bun.Glob("**/rollout-*.jsonl");
+    for (const rel of glob.scanSync(codexSessionsRoot)) {
+      const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(rel);
+      if (m) out.add(m[1]);
+    }
+  } catch { }
+  return out;
+}
+
+// Discover the rollout a freshly-launched codex session wrote and stamp its uuid onto
+// the tmux session as @codex_session — the server-side port of codex.zsh's _cx_tag.
+// codex mints its own uuid (no --session-id) and only writes the rollout once the
+// first turn starts, so we poll: the new rollout is the one absent from `before`
+// whose session_meta cwd is ours and that no other live session has already claimed.
+async function tagCodexSession(name: string, cwd: string, before: Set<string>): Promise<void> {
+  for (let i = 0; i < 120; i++) {
+    const claimed = new Set<string>();
+    try {
+      const raw = await $`tmux -L default list-sessions -F ${"#{@codex_session}"}`.quiet().text();
+      for (const u of raw.split("\n")) if (u.trim()) claimed.add(u.trim());
+    } catch { }
+    const fresh: { uuid: string; path: string; mtime: number }[] = [];
+    try {
+      const glob = new Bun.Glob("**/rollout-*.jsonl");
+      for (const rel of glob.scanSync(codexSessionsRoot)) {
+        const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(rel);
+        if (!m || before.has(m[1]) || claimed.has(m[1])) continue;
+        const path = `${codexSessionsRoot}/${rel}`;
+        try { fresh.push({ uuid: m[1], path, mtime: statSync(path).mtimeMs }); } catch { }
+      }
+    } catch { }
+    fresh.sort((a, b) => b.mtime - a.mtime); // newest first wins a same-cwd race
+    for (const f of fresh) {
+      if ((await rolloutCwd(f.path)) === cwd) {
+        await $`tmux -L default set-option -t ${name} @codex_session ${f.uuid}`.quiet().catch(() => { });
+        return;
+      }
+    }
+    // Give up if the session closed before ever writing a rollout (never prompted).
+    const alive = await $`tmux -L default has-session -t ${name}`.quiet().then(() => true).catch(() => false);
+    if (!alive) return;
+    await Bun.sleep(i < 20 ? 250 : 1000);
+  }
+}
+
+// Launch codex from diffshub — the server-side twin of codex.zsh's `xe`. Detached and
+// autonomous (approvals + sandbox bypassed, since nobody is attached to approve), with
+// the prompt as codex's positional arg so codex submits it itself on boot (the same
+// zero-timing trick newClaudeSession uses — a send-keys Enter would race codex's paste
+// debounce). The @codex_session tag is discovered + stamped asynchronously.
+async function newCodexSession(dir: string, prompt: string): Promise<string> {
+  const name = await pickClaudeSessionName();
+  const before = codexRolloutUuids();
+  const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
+  const codexCmd = `direnv exec ${shq(dir)} codex --dangerously-bypass-approvals-and-sandbox${promptArg}`;
+  await $`tmux -L default new-session -ds ${name} -c ${dir} ${codexCmd}`.quiet();
+  void tagCodexSession(name, dir, before);
+  return name;
 }
 
 // For untagged (legacy) sessions we can't go straight from session id to file, so
@@ -1525,12 +1774,13 @@ function cleanTitle(title: string, name: string, cmd: string): string {
 interface TmuxSession {
   name: string;
   cwd: string;
-  task: string; // what claude is doing (cleaned pane title), "" if not meaningful
-  busy: boolean; // claude is actively working (braille-spinner pane title)
+  task: string; // what the agent is doing (cleaned pane title), "" if not meaningful
+  busy: boolean; // agent is actively working (braille-spinner pane title)
   waiting: boolean; // idle but blocked on an interactive prompt in the live pane
-  sessionId: string; // @claude_session if tagged, else ""
+  sessionId: string; // @claude_session / @codex_session if tagged, else ""
   hasTranscript: boolean;
   mtime: number; // transcript mtime (ms), 0 if none — used for sorting
+  agent: "claude" | "codex"; // which CLI is running — drives transcript resolution + a badge
 }
 
 // List tmux sessions on the default socket that are running claude, each resolved
@@ -1538,7 +1788,7 @@ interface TmuxSession {
 // "2.1.177") once it's running, so we match that, "claude", or "node".
 async function listClaudeSessions(): Promise<TmuxSession[]> {
   const SEP = "\x1f";
-  const fmt = ["#{session_name}", "#{pane_current_path}", "#{pane_current_command}", "#{pane_title}", "#{@claude_session}"].join(SEP);
+  const fmt = ["#{session_name}", "#{pane_current_path}", "#{pane_current_command}", "#{pane_title}", "#{@claude_session}", "#{@codex_session}"].join(SEP);
   let raw = "";
   try {
     raw = await $`tmux -L default list-sessions -F ${fmt}`.quiet().text();
@@ -1549,22 +1799,34 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
   const out: TmuxSession[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
-    const [name, cwd, cmd, title, sid] = line.split(SEP);
+    const [name, cwd, cmd, title, claudeSid, codexSid] = line.split(SEP);
     if (!name) continue;
-    const isClaude = /claude|node/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd);
-    if (!isClaude) continue;
-    // Pane title is claude's status: a leading braille glyph (U+2800–U+28FF)
-    // means it's actively working; "✳" (and other leading glyphs) mean idle.
+    const agent = agentOf(cmd ?? "", codexSid ?? "");
+    if (!agent) continue;
+    // Pane title is the agent's status: a leading braille glyph (U+2800–U+28FF)
+    // means it's actively working; "✳" (and other leading glyphs) mean idle. codex
+    // uses the same braille spinner convention, so this works for both.
     const busy = /^[⠀-⣿]/u.test(title ?? "");
-    const task = cleanTitle(title ?? "", name, cmd ?? "");
-    const path = await resolveTranscript(cwd ?? "", sid ?? "", task, cache);
+    let task = cleanTitle(title ?? "", name, cmd ?? "");
+    let sid: string;
+    let path: string | null;
+    if (agent === "codex") {
+      sid = codexSid ?? "";
+      // codex's pane title is just the cwd basename (+ spinner), not a task summary,
+      // so drop it when it's only the directory — the row already shows the cwd.
+      if (task && task === (cwd ?? "").replace(/^.*\//, "")) task = "";
+      path = await resolveCodexTranscript(cwd ?? "", sid);
+    } else {
+      sid = claudeSid ?? "";
+      path = await resolveTranscript(cwd ?? "", sid, task, cache);
+    }
     let mtime = 0;
     if (path) {
       try {
         mtime = statSync(path).mtimeMs;
       } catch { }
     }
-    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid ?? "", hasTranscript: !!path, mtime });
+    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid, hasTranscript: !!path, mtime, agent });
   }
   // An idle session may actually be blocked on an interactive prompt (the same
   // case capturePendingPrompt handles for the open transcript). Flag those so the
@@ -1574,7 +1836,9 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
   // capturePendingPrompt so the sidebar and transcript views never disagree.
   await Promise.all(
     out.map(async (s) => {
-      if (!s.busy) s.waiting = !!(await capturePendingPrompt(s.name));
+      // capturePendingPrompt parses claude's TUI prompt layout; codex's differs, so
+      // we don't flag waiting for codex (it runs autonomously under xe anyway).
+      if (s.agent === "claude" && !s.busy) s.waiting = !!(await capturePendingPrompt(s.name));
     }),
   );
   // Most recently active first.
@@ -1593,6 +1857,7 @@ interface TranscriptMsg {
   lang?: string; // language id for a Read tool result's code block
   imgRef?: string; // "<lineIdx>:<imgOrdinal>" — locates an image block for /api/tmux/image
   mediaType?: string; // image media type (e.g. image/png) for an image message
+  reasoning?: boolean; // a codex reasoning summary (agent_reasoning) — rendered dimmed
 }
 
 // Map a file path to a language id the diffs highlighter understands. Falls back
@@ -1841,6 +2106,180 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
   }
   // `total` is the full message count so the client can tell when older history
   // is still on disk above the returned window (drives the scroll-up paging).
+  return { messages: msgs.slice(-limit), model, title, total: msgs.length };
+}
+
+// ---- Codex rollout parsing ----
+// Concatenate the text of a codex message's content blocks (input_text / output_text
+// / text — the OpenAI Responses item shape).
+function codexText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  let out = "";
+  for (const c of content) {
+    if (c && typeof c === "object") {
+      const b = c as any;
+      out += b.text || b.input_text || b.output_text || "";
+    }
+  }
+  return out;
+}
+
+// Map a codex function_call to (tool label, one-line summary, file path if any) — we
+// reuse claude's tool vocabulary ("Bash") where it lines up so the client renders
+// codex tool calls with the same cards.
+function codexCall(name: unknown, argsJson: unknown): { tool: string; summary: string; path: string } {
+  let args: any = {};
+  if (typeof argsJson === "string") {
+    try { args = JSON.parse(argsJson); } catch { }
+  } else if (argsJson && typeof argsJson === "object") {
+    args = argsJson;
+  }
+  if (name === "exec_command" || name === "shell_command" || name === "shell") {
+    const cmd =
+      typeof args.cmd === "string" ? args.cmd
+        : typeof args.command === "string" ? args.command
+          : Array.isArray(args.command) ? args.command.join(" ") : "";
+    return { tool: "Bash", summary: cmd, path: "" };
+  }
+  if (name === "write_stdin") {
+    const chars = typeof args.chars === "string" ? args.chars : "";
+    return { tool: "write_stdin", summary: chars || "(enter)", path: "" };
+  }
+  if (name === "update_plan") {
+    const plan = Array.isArray(args.plan) ? args.plan : [];
+    const mark = (s: string) => (s === "completed" ? "✔" : s === "in_progress" ? "▶" : "○");
+    const steps = plan.map((s: any) => `${mark(s?.status)} ${s?.step ?? ""}`).join("\n");
+    const head = typeof args.explanation === "string" && args.explanation ? args.explanation + "\n" : "";
+    return { tool: "update_plan", summary: head + steps, path: "" };
+  }
+  return { tool: typeof name === "string" ? name : "tool", summary: typeof argsJson === "string" ? argsJson : JSON.stringify(args), path: "" };
+}
+
+// Pull the human-readable part out of a codex tool output. exec_command wraps stdout
+// in a header ("Command: …\n…\nOutput:\n<stdout>"); apply_patch outputs a JSON blob
+// {"output":"…","metadata":{…}}. Show the stdout / message, not the wrapper.
+function codexOutput(output: unknown): string {
+  let s = typeof output === "string" ? output : output == null ? "" : JSON.stringify(output);
+  if (s.startsWith("{")) {
+    try {
+      const j = JSON.parse(s);
+      if (typeof j.output === "string") s = j.output;
+    } catch { }
+  }
+  const i = s.indexOf("\nOutput:\n");
+  if (i !== -1) s = s.slice(i + "\nOutput:\n".length);
+  return s;
+}
+
+// Parse a codex apply_patch payload into per-file changes with diff hunks, shaped
+// like claude's Edit/Write edits so the client's EditDiff renders them inline.
+function parseApplyPatch(input: string): { tool: string; path: string; edits: { old: string; new: string }[] }[] {
+  const files: { tool: string; path: string; edits: { old: string; new: string }[] }[] = [];
+  let cur: { tool: string; path: string; edits: { old: string; new: string }[] } | null = null;
+  let hunk: { old: string; new: string } | null = null;
+  for (const raw of input.split("\n")) {
+    let m: RegExpExecArray | null;
+    if ((m = /^\*\*\* Add File: (.+)$/.exec(raw))) { cur = { tool: "Write", path: m[1], edits: [{ old: "", new: "" }] }; files.push(cur); hunk = null; continue; }
+    if ((m = /^\*\*\* Update File: (.+)$/.exec(raw))) { cur = { tool: "Edit", path: m[1], edits: [] }; files.push(cur); hunk = null; continue; }
+    if ((m = /^\*\*\* Delete File: (.+)$/.exec(raw))) { cur = { tool: "Delete", path: m[1], edits: [{ old: "", new: "" }] }; files.push(cur); hunk = null; continue; }
+    if (/^\*\*\* (Begin|End) Patch/.test(raw)) continue;
+    if (!cur) continue;
+    if (cur.tool === "Write") {
+      if (raw.startsWith("+")) cur.edits[0].new += raw.slice(1) + "\n";
+      continue;
+    }
+    if (cur.tool === "Edit") {
+      if (raw.startsWith("@@")) { hunk = { old: "", new: "" }; cur.edits.push(hunk); continue; }
+      if (!hunk) { hunk = { old: "", new: "" }; cur.edits.push(hunk); }
+      if (raw.startsWith("+")) hunk.new += raw.slice(1) + "\n";
+      else if (raw.startsWith("-")) hunk.old += raw.slice(1) + "\n";
+      else { const c = raw.startsWith(" ") ? raw.slice(1) : raw; hunk.old += c + "\n"; hunk.new += c + "\n"; }
+    }
+  }
+  // Cap each hunk so a giant patch doesn't bloat the transcript payload (mirrors extractEdits).
+  const cap = (s: string) => (s.length > 4000 ? s.slice(0, 4000) + "\n… (truncated)" : s);
+  for (const f of files) f.edits = f.edits.map((e) => ({ old: cap(e.old), new: cap(e.new) }));
+  return files;
+}
+
+// Parse a codex rollout into the SAME TranscriptMsg shape parseTranscript emits, so
+// the client renders codex and claude chats with one code path. codex's schema is a
+// stream of {type, payload} events; we pull:
+//   - user turns from event_msg.user_message (the clean typed text — the response_item
+//     user messages are AGENTS.md / environment-context injections + duplicates)
+//   - assistant text from response_item.message(role=assistant)
+//   - reasoning from event_msg.agent_reasoning (response_item.reasoning is encrypted)
+//   - tool calls from response_item.function_call / custom_tool_call (+ their outputs)
+// model comes from turn_context; codex writes no ai-title, so the title is the first
+// user message.
+function parseCodexTranscript(text: string, limit: number): { messages: TranscriptMsg[]; model: string; title: string; total: number } {
+  const msgs: TranscriptMsg[] = [];
+  let model = "";
+  let title = "";
+  const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
+  // call_id -> tool meta, so a *_output line can label its result with the tool/path.
+  const toolById = new Map<string, { tool: string; path: string }>();
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let d: any;
+    try { d = JSON.parse(line); } catch { continue; }
+    const p = d?.payload;
+    if (!p || typeof p !== "object") continue;
+    const ts = typeof d.timestamp === "string" ? d.timestamp : undefined;
+    const type = d.type;
+
+    if (type === "turn_context") {
+      if (typeof p.model === "string" && p.model) model = p.model;
+      continue;
+    }
+    if (type === "event_msg") {
+      if (p.type === "user_message") {
+        const txt = typeof p.message === "string" ? p.message : "";
+        if (txt.trim()) {
+          if (!title) title = txt.replace(/\s+/g, " ").trim().slice(0, 80);
+          msgs.push({ role: "user", kind: "text", text: trunc(txt, 8000), ts });
+        }
+      } else if (p.type === "agent_reasoning") {
+        const txt = typeof p.text === "string" ? p.text : "";
+        if (txt.trim()) msgs.push({ role: "assistant", kind: "text", text: trunc(txt, 4000), reasoning: true, ts });
+      }
+      continue;
+    }
+    if (type !== "response_item") continue;
+    const pt = p.type;
+    if (pt === "message") {
+      if (p.role !== "assistant") continue; // skip developer/user (injected context + dupes)
+      const txt = codexText(p.content);
+      if (txt.trim()) msgs.push({ role: "assistant", kind: "text", text: trunc(txt, 8000), ts });
+    } else if (pt === "function_call") {
+      const { tool, summary, path } = codexCall(p.name, p.arguments);
+      if (typeof p.call_id === "string") toolById.set(p.call_id, { tool, path });
+      msgs.push({ role: "assistant", kind: "tool_use", tool, text: trunc(summary, 2000), path: path || undefined, ts });
+    } else if (pt === "custom_tool_call") {
+      if (p.name === "apply_patch" && typeof p.input === "string") {
+        const files = parseApplyPatch(p.input);
+        if (files.length) {
+          // one Edit/Write/Delete card per file the patch touches
+          for (const f of files) msgs.push({ role: "assistant", kind: "tool_use", tool: f.tool, path: f.path, edits: f.edits, text: "", ts });
+        } else {
+          msgs.push({ role: "assistant", kind: "tool_use", tool: "apply_patch", text: trunc(p.input, 2000), ts });
+        }
+      } else {
+        const input = typeof p.input === "string" ? p.input : JSON.stringify(p.input ?? "");
+        msgs.push({ role: "assistant", kind: "tool_use", tool: typeof p.name === "string" ? p.name : "tool", text: trunc(input, 2000), ts });
+      }
+    } else if (pt === "function_call_output" || pt === "custom_tool_call_output") {
+      const src = typeof p.call_id === "string" ? toolById.get(p.call_id) : undefined;
+      const out = codexOutput(p.output);
+      if (out.trim()) msgs.push({ role: "tool", kind: "tool_result", tool: src?.tool, path: src?.path || undefined, text: trunc(out, 2000), ts });
+    } else if (pt === "web_search_call") {
+      const a = (p.action && typeof p.action === "object" ? p.action : {}) as any;
+      const summary = typeof a.query === "string" ? a.query : typeof a.url === "string" ? a.url : "";
+      msgs.push({ role: "assistant", kind: "tool_use", tool: "WebSearch", text: trunc(summary, 500), ts });
+    }
+    // response_item.reasoning is encrypted — skipped; we show event_msg.agent_reasoning instead
+  }
   return { messages: msgs.slice(-limit), model, title, total: msgs.length };
 }
 
@@ -2546,6 +2985,9 @@ const page = `<!DOCTYPE html>
   }
   .tool-use .tool-name { color: var(--accent); font-weight: 600; }
   .tool-use .tool-name::before { content: "⚒ "; opacity: .8; }
+  /* codex reasoning summaries (agent_reasoning) — quiet, set apart from answers. */
+  .reasoning { color: var(--text-muted); font-style: italic; opacity: .9; font-size: 12.5px; border-left: 2px solid var(--border); padding-left: 9px; margin: 2px 0; }
+  .reasoning p { margin: 2px 0; }
   .tool-use .tool-arg { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   /* Generic tool output. Long results collapse to a preview with a "show more"
      toggle that expands the FULL content inline — no inner scrollbar to trap it. */
@@ -3155,6 +3597,60 @@ const page = `<!DOCTYPE html>
      sidebar's status-dot language (purple = working, amber = waiting/queued). "In
      progress" and "Needs action" always show; the rest appear when populated. */
   .diffs.home-main { padding: 18px 20px 60vh; }
+
+  /* ---- HTML reports tab: a full-bleed iframe under a thin toolbar ---- */
+  .diffs.report-main { padding: 0; overflow: hidden; display: flex; }
+  .report-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .report-bar {
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    background: var(--bg-soft); font-size: 12px;
+  }
+  .report-bar-icon { color: var(--text-faint); flex-shrink: 0; }
+  .report-title { font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+  .report-path {
+    color: var(--text-faint); font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .report-bar .spacer { flex: 1; }
+  .report-frame { flex: 1; width: 100%; border: 0; background: #fff; min-height: 0; }
+  /* report list rows reuse .commit; the kebab mirrors .kill-btn but stays neutral */
+  .html-kebab {
+    position: absolute; top: 7px; right: 8px; width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+    background: none; border: none; border-radius: 4px;
+    color: var(--text-faint); cursor: pointer; opacity: 0;
+  }
+  .commit:hover .html-kebab { opacity: 1; }
+  .html-kebab:hover { background: var(--bg-hover); color: var(--text); }
+  .html-menu {
+    position: fixed; z-index: 60; min-width: 140px; padding: 4px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: 13px;
+  }
+  .html-menu button {
+    display: flex; align-items: center; gap: 7px; width: 100%; text-align: left; padding: 6px 10px;
+    background: none; border: none; border-radius: 5px; color: var(--text); cursor: pointer;
+  }
+  .html-menu button:hover { background: var(--bg-hover); }
+  .html-menu button.danger { color: var(--red); }
+  .html-menu button.danger:hover { background: var(--red-bg); }
+  /* invisible full-screen catcher so a click outside the row menu closes it */
+  .menu-backdrop { position: fixed; inset: 0; z-index: 59; }
+  /* rename dialog reuses .share-overlay / .share-card; just style its form */
+  .rename-form { padding: 14px 16px 16px; }
+  .rename-input {
+    width: 100%; box-sizing: border-box; padding: 7px 9px; font-size: 13px;
+    font-family: ui-monospace, Menlo, monospace; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 6px;
+  }
+  .rename-input:focus { outline: none; border-color: var(--accent); }
+  .rename-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .rename-actions button {
+    padding: 6px 12px; font-size: 13px; border-radius: 6px; cursor: pointer;
+    background: var(--bg-soft); border: 1px solid var(--border); color: var(--text);
+  }
+  .rename-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent-bg); }
   .home { display: flex; flex-direction: column; gap: 22px; max-width: 1100px; }
   .home-group { display: flex; flex-direction: column; gap: 10px; }
   .home-group-head { display: flex; align-items: center; gap: 8px; }
@@ -3178,6 +3674,7 @@ const page = `<!DOCTYPE html>
   .home-card-top { display: flex; align-items: center; gap: 7px; padding-right: 22px; }
   .home-card-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-card.unread .home-card-name { font-weight: 700; }
+  .home-card-agent { flex: none; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; line-height: 15px; }
   .home-card-task { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-card.queued .home-card-task { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .home-card-cwd { font-size: 11px; color: var(--text-muted); opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3416,7 +3913,9 @@ const page = `<!DOCTYPE html>
   .tree-body > * { flex: 1; min-height: 0; }
 
   .modal-overlay {
-    position: fixed; inset: 0; z-index: 50;
+    /* Above the docked Home chat panel (.home-chat-panel, z-index 60) so dialogs
+       like "New Claude session" open over the right sheet, not behind it. */
+    position: fixed; inset: 0; z-index: 65;
     background: rgba(0, 0, 0, .35);
     display: flex; align-items: center; justify-content: center;
   }
@@ -3608,7 +4107,9 @@ const page = `<!DOCTYPE html>
      the textarea's rect) so the modal's overflow never clips it. */
   .file-menu-wrap { position: relative; }
   .file-menu {
-    position: fixed; z-index: 60;
+    /* Stay above the dialog it belongs to (.modal-overlay, z-index 65) so the
+       @-file autocomplete is never clipped behind the New Claude session modal. */
+    position: fixed; z-index: 90;
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 10px 34px rgba(0, 0, 0, .18); padding: 4px;
     overflow-y: auto;
@@ -4506,7 +5007,7 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-      let body: { prompt?: unknown; effort?: unknown; chrome?: unknown };
+      let body: { prompt?: unknown; effort?: unknown; chrome?: unknown; agent?: unknown };
       try {
         body = await req.json();
       } catch {
@@ -4515,21 +5016,26 @@ const server = Bun.serve({
       if (typeof body.prompt !== "string" || !body.prompt.trim()) {
         return json({ error: "Empty prompt" }, 400);
       }
+      const agent: "claude" | "codex" = body.agent === "codex" ? "codex" : "claude";
       // Allowlisted so it's safe to splice straight into the shell command, and so a
       // bad value falls back to the global default rather than erroring the launch.
+      // effort/chrome are claude-only — ignored for codex.
       const effort =
         typeof body.effort === "string" && CLAUDE_EFFORTS.has(body.effort)
           ? body.effort
           : undefined;
       const chrome = body.chrome === true;
       // Offline → enqueue instead of launching a session that couldn't reach the
-      // API. drainQueue() launches it automatically once we're back online.
+      // API. drainQueue() launches it (as its agent) automatically once we're online.
       if (!(await checkOnline(true))) {
-        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now())!.id;
+        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now(), agent)!.id;
         return json({ ok: true, queued: true, id });
       }
       try {
-        const session = await newClaudeSession(ws.path, body.prompt, effort, chrome);
+        const session =
+          agent === "codex"
+            ? await newCodexSession(ws.path, body.prompt)
+            : await newClaudeSession(ws.path, body.prompt, effort, chrome);
         return json({ ok: true, session });
       } catch (e) {
         return json({ error: errText(e) }, 500);
@@ -4615,9 +5121,23 @@ const server = Bun.serve({
       try {
         const SEP = "\x1f";
         const info = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}"].join(SEP)}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}", "#{@codex_session}"].join(SEP)}`.quiet().text()
         ).trim();
-        const [cwd, sid, cmd, paneTitle] = info.split(SEP);
+        const [cwd, claudeSid, cmd, paneTitle, codexSid] = info.split(SEP);
+        const agent = agentOf(cmd ?? "", codexSid ?? "");
+        // codex: resolve to its rollout and parse codex's schema. It runs
+        // autonomously (no claude-style interactive prompts), so there's no pending
+        // prompt to capture.
+        if (agent === "codex") {
+          const path = await resolveCodexTranscript(cwd ?? "", codexSid ?? "");
+          if (!path || !existsSync(path)) {
+            return json({ session: name, cwd, sessionId: codexSid ?? "", path: null, messages: [], model: "", title: "", total: 0, pendingPane: null, pendingPrompt: null });
+          }
+          const text = await Bun.file(path).text();
+          const { messages, model, title, total } = parseCodexTranscript(text, limit);
+          return json({ session: name, cwd, sessionId: codexSid ?? "", path, messages, model, title, total, pendingPane: null, pendingPrompt: null });
+        }
+        const sid = claudeSid;
         const task = cleanTitle(paneTitle ?? "", name, cmd ?? "");
         // An idle pane (no braille spinner) may be blocked on an interactive
         // prompt that isn't in the transcript yet — capture it from the live pane
@@ -4749,6 +5269,101 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
+    }
+
+    // ---- HTML reports (agents/**/*.html under the active workspace) ----
+    // List reports for the sidebar. Returns the resolved dir id so the client can
+    // build /api/html/raw/<dir>/… URLs even when no ?dir= was supplied.
+    if (req.method === "GET" && url.pathname === "/api/html/list") {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json({ dirId: ws.id, files: listAgentHtml(ws.path) });
+    }
+
+    // Serve a report (HTML, with the vim-key layer injected) or one of its sibling
+    // assets (image/css/font/…) by URL, so the report's relative refs resolve under
+    // the same /api/html/raw/<dir>/ prefix. The path is validated to stay in the dir.
+    const htmlRawMatch = url.pathname.match(/^\/api\/html\/raw\/(\d+)\/(.+)$/);
+    if (req.method === "GET" && htmlRawMatch) {
+      const row = getDirStmt.get(parseInt(htmlRawMatch[1], 10));
+      if (!row) return new Response("Unknown directory", { status: 404 });
+      const root = row.path;
+      let rel: string;
+      try {
+        rel = decodeURIComponent(htmlRawMatch[2]);
+      } catch {
+        return new Response("Bad path", { status: 400 });
+      }
+      // Confine serving to agents/ — reports and their sibling assets live there,
+      // and this keeps the route from handing out .git/, .env, source, etc. even
+      // though they sit under the same workspace root.
+      const abs = resolve(root, rel);
+      const agentsDir = `${root}/agents`;
+      if (abs !== agentsDir && !abs.startsWith(agentsDir + sep))
+        return new Response("Forbidden", { status: 403 });
+      if (!existsSync(abs) || !statSync(abs).isFile()) return new Response("Not found", { status: 404 });
+      if (/\.html?$/i.test(abs)) {
+        return new Response(injectReportShortcuts(await Bun.file(abs).text()), {
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+        });
+      }
+      const file = Bun.file(abs);
+      return new Response(file, {
+        headers: {
+          "Content-Type": file.type || "application/octet-stream",
+          "Cache-Control": "no-store",
+          ...CORS,
+        },
+      });
+    }
+
+    // Rename a report (mv) within agents/ under the active dir — { dir, from, to }.
+    if (req.method === "POST" && url.pathname === "/api/html/rename") {
+      let body: { dir?: unknown; from?: unknown; to?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const root = htmlRootFromDir(body.dir);
+      if (!root) return json({ error: "Unknown directory" }, 404);
+      const from = htmlSafePath(root, body.from);
+      const to = htmlSafePath(root, body.to);
+      if (!from || !to) return json({ error: "Invalid path" }, 400);
+      if (!existsSync(from)) return json({ error: "Source not found" }, 404);
+      if (existsSync(to)) return json({ error: "Target already exists" }, 409);
+      try {
+        await $`mkdir -p ${dirname(to)}`.quiet();
+        await $`mv ${from} ${to}`.quiet();
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json({ ok: true });
+    }
+
+    // Delete a report — { dir, path }, restricted to agents/ under the active dir.
+    if (req.method === "POST" && url.pathname === "/api/html/delete") {
+      let body: { dir?: unknown; path?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const root = htmlRootFromDir(body.dir);
+      if (!root) return json({ error: "Unknown directory" }, 404);
+      const abs = htmlSafePath(root, body.path);
+      if (!abs) return json({ error: "Invalid path" }, 400);
+      if (!existsSync(abs)) return json({ error: "Not found" }, 404);
+      try {
+        unlinkSync(abs);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json({ ok: true });
     }
 
     // Publish an HTML artifact to the public R2 bucket and return a cdn link.
