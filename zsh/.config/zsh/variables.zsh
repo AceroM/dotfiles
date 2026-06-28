@@ -1,5 +1,5 @@
 PATH="$PATH:/Applications/WezTerm.app/Contents/MacOS"
-EDITOR=nvim
+EDITOR="zed --wait"
 DROP_TABLES_SQL="DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
 # Shared adjective/noun pools for tmux/Claude session names.
