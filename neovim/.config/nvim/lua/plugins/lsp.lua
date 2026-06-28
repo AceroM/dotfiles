@@ -4,21 +4,20 @@ return {
     opts = {
       servers = {
         lua_ls = {
-          -- Avoid lua_ls loading with $HOME as root
-          root_dir = function(fname)
-            local util = require("lspconfig.util")
-            local root = util.root_pattern(
+          -- nvim 0.11 native LSP: root_dir is (bufnr, on_dir); call on_dir(root)
+          -- to start the server. Skip when root resolves to $HOME so lua_ls
+          -- doesn't load with the home dir as workspace.
+          root_dir = function(bufnr, on_dir)
+            local root = vim.fs.root(bufnr, {
               ".luarc.json",
               ".luarc.jsonc",
               ".stylua.toml",
               "stylua.toml",
-              ".git"
-            )(fname)
-            local home = vim.loop.os_homedir()
-            if root == home then
-              return nil
+              ".git",
+            })
+            if root and root ~= vim.loop.os_homedir() then
+              on_dir(root)
             end
-            return root
           end,
           settings = {
             Lua = {
@@ -30,23 +29,18 @@ return {
           },
         },
         prismals = {
-          -- Start Prisma LS only in real project roots
-          root_dir = function(fname)
-            local util = require("lspconfig.util")
-            local root = util.root_pattern(
-              -- common locations of the Prisma schema
+          -- Start Prisma LS only in real project roots (schema.prisma, a
+          -- prisma/ dir, or a git repo), and never with $HOME as the root.
+          root_dir = function(bufnr, on_dir)
+            local root = vim.fs.root(bufnr, {
               "schema.prisma",
-              "prisma/schema.prisma",
-              ".git"
-            )(fname)
-            local home = vim.loop.os_homedir()
-            if root == home then
-              return nil
+              "prisma",
+              ".git",
+            })
+            if root and root ~= vim.loop.os_homedir() then
+              on_dir(root)
             end
-            return root
           end,
-          -- Avoid starting for loose single files without a project
-          single_file_support = false,
         },
       },
     },
