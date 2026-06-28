@@ -130,8 +130,8 @@ wezterm.on("window-config-reloaded", function(window, pane)
 end)
 
 config.set_environment_variables = {
-	EDITOR = "nvim",
-	VISUAL = "nvim",
+	EDITOR = "zed --wait",
+	VISUAL = "zed --wait",
 }
 
 config.enable_tab_bar = false
