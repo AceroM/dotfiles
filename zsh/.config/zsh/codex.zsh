@@ -128,7 +128,7 @@ function xc() {
 
   local name="$(_cx_pick_name)"
   local before="$(_cx_uuids)"
-  tmux new-session -ds "$name" -c "$PWD" "$(_cx_cmd "$input" "$@")"
+  tmux new-session -ds "$name" -c "$PWD" "$(_cx_cmd "$input" --dangerously-bypass-approvals-and-sandbox "$@")"
   _cx_tag_async "$name" "$PWD" "$before"
   tmux attach -t "$name"
 }
