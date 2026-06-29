@@ -181,6 +181,7 @@ interface TmuxSession {
   sessionId: string;
   hasTranscript: boolean;
   mtime: number;
+  endedAt?: number; // when the session's Stop hook last fired (ms); see finishedTs
   agent?: "claude" | "codex"; // which CLI — drives the row badge (claude when absent)
 }
 
@@ -328,6 +329,12 @@ function timeAgo(iso: string | number): string {
   if (months < 12) return `${months}mo ago`;
   return `${Math.floor(days / 365)}y ago`;
 }
+
+// The timestamp the session grids sort and label by: when a non-busy session last
+// finished a turn (its Stop hook, surfaced by the server as endedAt), falling back to
+// the transcript mtime when that's unrecorded. A busy session is mid-turn, so it uses
+// live mtime — matching the server's own finishedTs in index.ts.
+const finishedTs = (s: TmuxSession) => (s.busy ? s.mtime : s.endedAt || s.mtime);
 
 // ~/.claude/rate-limits.json, surfaced verbatim by /api/usage. Each window is
 // null until Claude Code's statusline hook has written at least once. `resets_at`
@@ -2138,9 +2145,9 @@ function HomeCard({
       <div className="home-card-foot">
         <span className="home-card-cwd">{session.cwd.replace(/^.*\//, "") || session.cwd}</span>
         {session.sessionId && <CopyIdButton sessionId={session.sessionId} className="home-card-id" compact iconSize={11} />}
-        {session.mtime > 0 && (
-          <span className="home-card-time" title="Last message">
-            {timeAgo(session.mtime)}
+        {finishedTs(session) > 0 && (
+          <span className="home-card-time" title={session.busy ? "Last message" : "Finished"}>
+            {timeAgo(finishedTs(session))}
           </span>
         )}
       </div>
@@ -5350,7 +5357,7 @@ function App() {
         const ub = isUnseen(b) ? 1 : 0;
         if (ua !== ub) return ub - ua;
       }
-      return b.mtime - a.mtime;
+      return finishedTs(b) - finishedTs(a);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirScopedTmux, q, cq, contentVersion, isUnread, isUnseen]);
@@ -5422,17 +5429,17 @@ function App() {
   // exactly one of these buckets; queued (offline) prompts come from scopedQueued.
   const homeGroups = useMemo(() => {
     const list = visibleTmux ?? [];
-    // Order each group by recency (most recently updated chat first) — a property
-    // that only changes when a session actually does something, so the grid holds
+    // Order each group by recency (most recently finished chat first — see finishedTs)
+    // — a property that only changes when a session finishes a turn, so the grid holds
     // still while you arrow around it. Read/unread doesn't enter the sort for the
     // passive states (In progress / Idle); only Needs-action floats the prompts you
     // haven't looked at yet above the ones you've already acknowledged. .filter()
     // returns fresh arrays, so the in-place .sort is safe.
-    const byRecency = (a: TmuxSession, b: TmuxSession) => b.mtime - a.mtime;
+    const byRecency = (a: TmuxSession, b: TmuxSession) => finishedTs(b) - finishedTs(a);
     const unseenFirst = (a: TmuxSession, b: TmuxSession) => {
       const ua = isUnseen(a) ? 1 : 0;
       const ub = isUnseen(b) ? 1 : 0;
-      return ua !== ub ? ub - ua : b.mtime - a.mtime;
+      return ua !== ub ? ub - ua : finishedTs(b) - finishedTs(a);
     };
     return {
       inProgress: list.filter((s) => s.busy).sort(byRecency),

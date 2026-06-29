@@ -306,6 +306,25 @@ const listQueuedStmt = db.query<QueuedRow, []>(
 );
 const deleteQueuedStmt = db.query("DELETE FROM queued_sessions WHERE id = ?");
 
+// When each Claude session last finished a turn — written by its Stop hook (POST
+// /api/session-ended), keyed by session_id (which is the transcript file's UUID).
+// The Home and sidebar lists order idle sessions by this "most recently ended" time
+// instead of the transcript file's mtime, which also advances mid-turn and so made
+// the ordering jump around. Rows are tiny; we prune ones older than 60 days on write.
+db.run(`CREATE TABLE IF NOT EXISTS session_ends (
+  session_id TEXT PRIMARY KEY,
+  cwd TEXT,
+  ended_at INTEGER NOT NULL
+)`);
+const upsertSessionEndStmt = db.query(
+  "INSERT INTO session_ends (session_id, cwd, ended_at) VALUES (?, ?, ?) " +
+  "ON CONFLICT(session_id) DO UPDATE SET ended_at = excluded.ended_at, cwd = excluded.cwd",
+);
+const getSessionEndStmt = db.query<{ ended_at: number }, [string]>(
+  "SELECT ended_at FROM session_ends WHERE session_id = ?",
+);
+const pruneSessionEndsStmt = db.query("DELETE FROM session_ends WHERE ended_at < ?");
+
 // ---- Public sharing (R2 via the wrangler CLI) ----
 // The "Share" button in the HTML preview uploads an artifact's .html (plus any
 // local, non-base64 image assets it references) to a public R2 bucket and hands
@@ -1779,8 +1798,17 @@ interface TmuxSession {
   waiting: boolean; // idle but blocked on an interactive prompt in the live pane
   sessionId: string; // @claude_session / @codex_session if tagged, else ""
   hasTranscript: boolean;
-  mtime: number; // transcript mtime (ms), 0 if none — used for sorting
+  mtime: number; // transcript mtime (ms), 0 if none — last write, advances mid-turn
+  endedAt: number; // when its Stop hook last fired (ms), 0 if never — see session_ends
   agent: "claude" | "codex"; // which CLI is running — drives transcript resolution + a badge
+}
+
+// The timestamp the session lists sort and label by: when a non-busy session last
+// finished a turn (its Stop hook, recorded in session_ends), falling back to the
+// transcript mtime when that's unrecorded. A busy session is mid-turn — its last
+// recorded end is a stale prior turn — so it sorts on live mtime instead.
+function finishedTs(s: TmuxSession): number {
+  return s.busy ? s.mtime : s.endedAt || s.mtime;
 }
 
 // List tmux sessions on the default socket that are running claude, each resolved
@@ -1826,7 +1854,14 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
         mtime = statSync(path).mtimeMs;
       } catch { }
     }
-    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid, hasTranscript: !!path, mtime, agent });
+    // The Stop hook records "finished a turn" keyed by session_id, which is the
+    // transcript's basename UUID. Prefer that (authoritative); fall back to the tmux
+    // @claude_session tag when no transcript resolved. 0 = never recorded (e.g. codex,
+    // which doesn't run Claude hooks) — finishedTs then falls back to mtime.
+    const uuid = path ? (path.split("/").pop() ?? "").replace(/\.jsonl$/, "") : sid;
+    let endedAt = 0;
+    if (uuid) endedAt = getSessionEndStmt.get(uuid)?.ended_at ?? 0;
+    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid, hasTranscript: !!path, mtime, endedAt, agent });
   }
   // An idle session may actually be blocked on an interactive prompt (the same
   // case capturePendingPrompt handles for the open transcript). Flag those so the
@@ -1841,8 +1876,8 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
       if (s.agent === "claude" && !s.busy) s.waiting = !!(await capturePendingPrompt(s.name));
     }),
   );
-  // Most recently active first.
-  out.sort((a, b) => b.mtime - a.mtime);
+  // Most recently finished first — see finishedTs (idle: Stop time; busy: live mtime).
+  out.sort((a, b) => finishedTs(b) - finishedTs(a));
   return out;
 }
 
@@ -4511,6 +4546,32 @@ const server = Bun.serve({
       }
       const r = await notifyAll(payload);
       return json({ ...r, subscribers: countSubsStmt.get()?.n ?? 0 });
+    }
+
+    // The Stop hook posts here when a Claude session finishes a turn, forwarding the
+    // raw hook JSON. We stamp session_ends[session_id] = now so the Home/sidebar lists
+    // order idle sessions by when they most recently ended (steadier than transcript
+    // mtime, which also moves mid-turn). session_id is the transcript's UUID, which is
+    // how listClaudeSessions joins it back. Best-effort: always 200, even on no id.
+    if (url.pathname === "/api/session-ended" && req.method === "POST") {
+      let b: any;
+      try {
+        b = await req.json();
+      } catch {
+        b = {};
+      }
+      const sid =
+        typeof b?.session_id === "string" && b.session_id.trim()
+          ? b.session_id.trim()
+          : typeof b?.transcript_path === "string"
+            ? (b.transcript_path.split("/").pop() ?? "").replace(/\.jsonl$/, "")
+            : "";
+      if (sid) {
+        const now = Date.now();
+        upsertSessionEndStmt.run(sid, typeof b?.cwd === "string" ? b.cwd : "", now);
+        pruneSessionEndsStmt.run(now - 60 * 86_400_000); // drop ends older than 60d
+      }
+      return json({ ok: !!sid });
     }
 
     // ---- Directory registry (top-left dropdown + settings dialog) ----
