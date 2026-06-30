@@ -1,2 +1,5 @@
 [tui]
 notification_condition = "always"
+
+[tui.keymap.editor]
+insert_newline = "shift-enter"
