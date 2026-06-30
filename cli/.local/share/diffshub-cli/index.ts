@@ -306,6 +306,46 @@ const listQueuedStmt = db.query<QueuedRow, []>(
 );
 const deleteQueuedStmt = db.query("DELETE FROM queued_sessions WHERE id = ?");
 
+// Template prompts shown in the Prompts tab. Scoped to a registered directory so
+// project-specific runbooks stay beside the work they belong to.
+db.run(`CREATE TABLE IF NOT EXISTS template_prompts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dir_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)`);
+// Migrate rows created by the earlier draft table name. Kept best-effort so fresh
+// DBs (where saved_prompts never existed) continue without branching on schema.
+try {
+  db.run(
+    "INSERT OR IGNORE INTO template_prompts (id, dir_id, title, body, created_at, updated_at) " +
+    "SELECT id, dir_id, title, body, created_at, updated_at FROM saved_prompts",
+  );
+} catch { }
+interface TemplatePromptRow {
+  id: number;
+  dir_id: number;
+  title: string;
+  body: string;
+  created_at: number;
+  updated_at: number;
+}
+const listTemplatePromptsStmt = db.query<TemplatePromptRow, [number]>(
+  "SELECT * FROM template_prompts WHERE dir_id = ? ORDER BY updated_at DESC, id DESC",
+);
+const getTemplatePromptStmt = db.query<TemplatePromptRow, [number, number]>(
+  "SELECT * FROM template_prompts WHERE id = ? AND dir_id = ?",
+);
+const insertTemplatePromptStmt = db.query<{ id: number }, [number, string, string, number, number]>(
+  "INSERT INTO template_prompts (dir_id, title, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+);
+const updateTemplatePromptStmt = db.query<unknown, [string, string, number, number, number]>(
+  "UPDATE template_prompts SET title = ?, body = ?, updated_at = ? WHERE id = ? AND dir_id = ?",
+);
+const deleteTemplatePromptStmt = db.query("DELETE FROM template_prompts WHERE id = ? AND dir_id = ?");
+
 // When each Claude session last finished a turn — written by its Stop hook (POST
 // /api/session-ended), keyed by session_id (which is the transcript file's UUID).
 // The Home and sidebar lists order idle sessions by this "most recently ended" time
@@ -2868,9 +2908,13 @@ const page = `<!DOCTYPE html>
   .commits-header input:focus { border-color: var(--accent); }
   .commits-header input.content-search { margin-top: 6px; }
 
-  .tabs { display: flex; gap: 2px; margin-bottom: 10px; background: var(--bg-tabs); border: 1px solid var(--border); border-radius: 7px; padding: 2px; }
+  .tabs {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px;
+    margin-bottom: 10px; background: var(--bg-tabs); border: 1px solid var(--border);
+    border-radius: 7px; padding: 2px;
+  }
   .tabs button {
-    flex: 1; height: 30px; cursor: pointer; position: relative;
+    width: 100%; height: 30px; cursor: pointer; position: relative;
     display: flex; align-items: center; justify-content: center;
     background: none; border: none; border-radius: 5px; color: var(--text-muted);
   }
@@ -3620,6 +3664,8 @@ const page = `<!DOCTYPE html>
   }
   .act:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
   .act:disabled { opacity: .5; cursor: default; }
+  .act.primary { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent-bg); }
+  .act.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--text-on-accent-bg); }
   .hdr-acts { display: inline-flex; gap: 5px; margin-left: 10px; }
 
   .diffs { flex: 1; overflow-y: auto; padding: 16px 20px 60vh; }
@@ -3842,6 +3888,95 @@ const page = `<!DOCTYPE html>
   .html-body { flex: 1 1 auto; min-height: 0; background: #fff; }
   .html-frame { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
   .spin { animation: spin .8s linear infinite; }
+
+  /* ---- Template prompts tab ---- */
+  .diffs.prompts-main { padding: 0; background: var(--bg); }
+  .prompt-pane {
+    min-height: 100%; padding: 18px 20px 60vh;
+    display: flex; align-items: stretch;
+  }
+  .prompt-board, .prompt-editor {
+    width: min(100%, 1040px); display: flex; flex-direction: column; gap: 14px;
+  }
+  .prompt-board-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--border);
+  }
+  .prompt-board-head h2 { margin: 0 0 3px; font-size: 18px; line-height: 1.25; }
+  .prompt-board-head p { margin: 0; color: var(--text-muted); font-size: 12px; }
+  .prompt-board-head .act {
+    min-height: 32px; display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 7px;
+  }
+  .prompt-cards {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px;
+  }
+  .prompt-card {
+    position: relative; min-height: 150px; display: flex; flex-direction: column; gap: 10px;
+    padding: 12px 13px; border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 8px; background: var(--bg-raised); color: var(--text); cursor: pointer;
+    transition: background .12s, border-color .12s, box-shadow .12s;
+  }
+  .prompt-card:hover, .prompt-card:focus-visible { background: var(--bg-hover); border-color: var(--accent); outline: none; }
+  .prompt-card.selected { background: var(--accent-bg); box-shadow: 0 0 0 1px var(--accent); }
+  .prompt-card-top { display: flex; align-items: center; gap: 8px; min-width: 0; padding-right: 24px; }
+  .prompt-card-icon {
+    flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 7px; background: var(--accent-bg); color: var(--accent);
+  }
+  .prompt-card h3 {
+    flex: 1 1 auto; min-width: 0; margin: 0; font-size: 13px; line-height: 1.35;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .prompt-card p {
+    margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .prompt-card-edit {
+    position: absolute; top: 10px; right: 10px; width: 22px; height: 22px;
+    display: inline-flex; align-items: center; justify-content: center; padding: 0;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg);
+    color: var(--text-faint); cursor: pointer; opacity: 0;
+  }
+  .prompt-card:hover .prompt-card-edit, .prompt-card:focus-within .prompt-card-edit { opacity: 1; }
+  .prompt-card-edit:hover { color: var(--text); border-color: var(--accent); background: var(--accent-bg); }
+  .prompt-card-foot {
+    margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+  .prompt-card-cursor {
+    display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border: 1px solid var(--border-soft); border-radius: 6px; color: var(--accent); background: var(--bg);
+  }
+  @media (hover: none) { .prompt-card-edit { opacity: 1; } }
+  @media (max-width: 640px) {
+    .prompt-pane { padding: 14px 14px 60vh; }
+    .prompt-board-head, .prompt-editor-head { flex-direction: column; align-items: stretch; }
+    .prompt-cards { grid-template-columns: 1fr; }
+  }
+  .prompt-editor-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--border);
+  }
+  .prompt-editor-head h2 { margin: 0 0 3px; font-size: 18px; line-height: 1.25; }
+  .prompt-editor-head p { margin: 0; color: var(--text-muted); font-size: 12px; }
+  .prompt-editor-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+  .prompt-editor-actions .act { min-height: 30px; padding: 5px 12px; border-radius: 7px; }
+  .prompt-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .prompt-field.grow { flex: 1 1 auto; min-height: 380px; }
+  .prompt-field span {
+    color: var(--text-muted); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em;
+  }
+  .prompt-field input, .prompt-field textarea {
+    width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: 8px; outline: none; font: inherit;
+  }
+  .prompt-field input { height: 36px; padding: 7px 10px; }
+  .prompt-field textarea {
+    flex: 1 1 auto; min-height: 360px; resize: vertical; padding: 10px 12px;
+    line-height: 1.55; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .prompt-field input:focus, .prompt-field textarea:focus { border-color: var(--accent); }
   /* Share dialog: a centered modal layered above the .html-overlay preview. */
   .share-overlay {
     position: fixed; inset: 0; z-index: 80;
@@ -4371,6 +4506,7 @@ function vapidAuthHeader(endpoint: string): string {
 
 async function sendPush(sub: PushSub, payload: object): Promise<{ ok: boolean; gone: boolean }> {
   try {
+    const encrypted = encryptPayload(sub, Buffer.from(JSON.stringify(payload)));
     const res = await fetch(sub.endpoint, {
       method: "POST",
       headers: {
@@ -4379,7 +4515,10 @@ async function sendPush(sub: PushSub, payload: object): Promise<{ ok: boolean; g
         "Content-Type": "application/octet-stream",
         TTL: "86400",
       },
-      body: encryptPayload(sub, Buffer.from(JSON.stringify(payload))),
+      body: encrypted.buffer.slice(
+        encrypted.byteOffset,
+        encrypted.byteOffset + encrypted.byteLength,
+      ) as ArrayBuffer,
     });
     return { ok: res.ok, gone: res.status === 404 || res.status === 410 };
   } catch {
@@ -5059,6 +5198,90 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/template-prompts") {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      return json(
+        listTemplatePromptsStmt.all(ws.id).map((p) => ({
+          id: p.id,
+          title: p.title,
+          body: p.body,
+          createdAt: p.created_at,
+          updatedAt: p.updated_at,
+        })),
+      );
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/template-prompts") {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      let body: { title?: unknown; body?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const promptBody = typeof body.body === "string" ? body.body.trim() : "";
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      if (!promptBody) return json({ error: "Empty prompt" }, 400);
+      if (!title) return json({ error: "Empty title" }, 400);
+      const now = Date.now();
+      const id = insertTemplatePromptStmt.get(ws.id, title, promptBody, now, now)!.id;
+      const row = getTemplatePromptStmt.get(id, ws.id)!;
+      return json({
+        id: row.id,
+        title: row.title,
+        body: row.body,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
+    }
+
+    const promptMatch = url.pathname.match(/^\/api\/template-prompts\/(\d+)$/);
+    if (promptMatch && (req.method === "PUT" || req.method === "DELETE")) {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      const id = Number(promptMatch[1]);
+      if (!Number.isInteger(id) || id < 1) return json({ error: "Invalid id" }, 400);
+      const existing = getTemplatePromptStmt.get(id, ws.id);
+      if (!existing) return json({ error: "Prompt not found" }, 404);
+      if (req.method === "DELETE") {
+        deleteTemplatePromptStmt.run(id, ws.id);
+        return json({ ok: true });
+      }
+      let body: { title?: unknown; body?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      const promptBody = typeof body.body === "string" ? body.body.trim() : "";
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      if (!promptBody) return json({ error: "Empty prompt" }, 400);
+      if (!title) return json({ error: "Empty title" }, 400);
+      updateTemplatePromptStmt.run(title, promptBody, Date.now(), id, ws.id);
+      const row = getTemplatePromptStmt.get(id, ws.id)!;
+      return json({
+        id: row.id,
+        title: row.title,
+        body: row.body,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
     }
 
     if (req.method === "POST" && url.pathname === "/api/claude") {

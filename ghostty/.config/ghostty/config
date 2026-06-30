@@ -36,3 +36,6 @@ shell-integration-features = no-cursor
 # Tradeoff: you lose Option-based accent composition (é, ñ ...). Switch to
 # "right" if you want to keep the LEFT Option key for typing accents.
 macos-option-as-alt = true
+
+# Emit a distinct Shift+Enter sequence so TUIs can bind it separately from Enter.
+keybind = shift+enter=csi:13;2u

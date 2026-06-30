@@ -75,6 +75,8 @@ import {
   Link2,
   Copy,
   X,
+  Bookmark,
+  TextCursor,
 } from "lucide-react";
 
 type Theme = "light" | "dark";
@@ -160,15 +162,23 @@ interface DiffSelection {
   range: SelectedLineRange;
 }
 
-type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux" | "html";
+type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux" | "html" | "prompts";
 
-// Order drives the 1–7 / ←→ shortcuts and the tab strip. The first entry is the
+// Order drives the 1–8 shortcuts and the tab strip. The first entry is the
 // landing tab for the default route (see initialView) — Home, the session monitor.
-const TAB_ORDER: Tab[] = ["home", "tmux", "changes", "commits", "prs", "manual", "html"];
+const TAB_ORDER: Tab[] = ["home", "tmux", "prompts", "changes", "commits", "prs", "manual", "html"];
 
 interface ManualPatch {
   name: string;
   contents: string;
+}
+
+interface TemplatePrompt {
+  id: number;
+  title: string;
+  body: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 // An agent (claude or codex) running in a tmux session (Tmux tab).
@@ -292,6 +302,7 @@ type View =
   | { kind: "manual"; name: string }
   | { kind: "tmux"; session: string }
   | { kind: "html"; path: string }
+  | { kind: "prompt"; id: number | null }
   | { kind: "none" };
 
 type GitAction = "stage" | "unstage" | "stash";
@@ -516,6 +527,19 @@ function CopyButton({ label, text, title }: { label: string; text: string; title
 // Copy-ID buttons and "Prompt with context" so a pasted (or seeded) id always
 // reads as an instruction the next session can act on.
 const sessionRef = (sessionId: string) => `Look at Claude session ID ${sessionId}`;
+
+const TEMPLATE_CURSOR_RE = /\{\{\s*(?:cursor|caret)\s*\}\}|\[\[\s*(?:cursor|caret)\s*\]\]|<\s*(?:cursor|caret)\s*>/i;
+
+function materializeTemplatePrompt(body: string): { text: string; caret: number; hasCursor: boolean } {
+  const match = TEMPLATE_CURSOR_RE.exec(body);
+  if (!match) return { text: body, caret: body.length, hasCursor: false };
+  const text = body.slice(0, match.index) + body.slice(match.index + match[0].length);
+  return { text, caret: match.index, hasCursor: true };
+}
+
+function templatePromptPreview(body: string): string {
+  return materializeTemplatePrompt(body).text.replace(/\s+/g, " ").trim();
+}
 
 // Copies a reference to a claude session id — "Look at Claude session ID <uuid>" —
 // to the clipboard, flashing a check for a beat after. The "Look at…" prefix means
@@ -1709,6 +1733,11 @@ function initialView(): { tab: Tab; view: View; dir: number | null; homeChat?: s
   if (manual) return { tab: "manual", view: { kind: "manual", name: manual }, dir };
   const htmlPath = params.get("html");
   if (htmlPath !== null) return { tab: "html", view: { kind: "html", path: htmlPath }, dir };
+  const prompt = params.get("prompt");
+  if (prompt !== null) {
+    const id = /^\d+$/.test(prompt) ? parseInt(prompt, 10) : null;
+    return { tab: "prompts", view: { kind: "prompt", id }, dir };
+  }
   const sha = params.get("sha");
   if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
   // Home deep-link (?home=<session>): land on the Home tab with that session's chat
@@ -1944,6 +1973,8 @@ function tabDefaults(t: Tab): { view: View; param: string } {
       return { view: { kind: "tmux", session: "" }, param: "tmux=" };
     case "html":
       return { view: { kind: "html", path: "" }, param: "html=" };
+    case "prompts":
+      return { view: { kind: "prompt", id: null }, param: "prompt=" };
     default:
       return { view: { kind: "none" }, param: "" };
   }
@@ -1994,9 +2025,10 @@ function PushToggle() {
       }
       const reg = await navigator.serviceWorker.ready;
       const { publicKey } = await fetch("/api/push/vapid").then((r) => r.json());
+      const key = urlB64ToUint8Array(publicKey);
       const s = await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlB64ToUint8Array(publicKey),
+        applicationServerKey: key.buffer as ArrayBuffer,
       });
       await fetch("/api/push/subscribe", {
         method: "POST",
@@ -2446,6 +2478,14 @@ function App() {
   // the public cdn link) is open. Layers above the HTML preview; the share
   // request's state lives on shareMut below.
   const [shareOpen, setShareOpen] = useState(false);
+  // ---- Template prompts tab ----
+  // The sidebar selects a reusable template; the main pane edits its title/body.
+  // A null id means "new template" and does not hit the server until saved.
+  const [promptTitle, setPromptTitle] = useState("");
+  const [promptBody, setPromptBody] = useState("");
+  const [promptDirty, setPromptDirty] = useState(false);
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptEditorOpen, setPromptEditorOpen] = useState(false);
 
   // ---- Light / dark theme ----
   // Toggle with the `t` shortcut or the theme action; no system mode. Defaults to
@@ -2684,6 +2724,14 @@ function App() {
   });
   const manualPatches = manualQuery.data ?? null;
   const manualError = errMessage(manualQuery.error);
+
+  const templatePromptsQuery = useQuery({
+    queryKey: ["template-prompts", activeDir],
+    queryFn: ({ signal }) => fetchJSON<TemplatePrompt[]>(qd("/api/template-prompts"), signal),
+    enabled: tab === "prompts",
+  });
+  const templatePrompts = templatePromptsQuery.data ?? null;
+  const templatePromptsError = errMessage(templatePromptsQuery.error);
 
   // HTML reports tab: agents/**/*.html under the active dir, newest first. Polls
   // while open so a freshly-written report pops into the list. dirId comes back
@@ -4480,7 +4528,9 @@ function App() {
             ? ["changes"]
             : tab === "html"
               ? ["html-list"]
-              : ["manual"];
+              : tab === "prompts"
+                ? ["template-prompts"]
+                : ["manual"];
     queryClient.resetQueries({ queryKey: listKey });
     if (view.kind === "commit" || view.kind === "pr") {
       queryClient.resetQueries({ queryKey: diffKeyRef.current });
@@ -4686,6 +4736,14 @@ function App() {
     (path: string) => {
       setView({ kind: "html", path });
       history.replaceState(null, "", navUrl(`html=${encodeURIComponent(path)}`));
+    },
+    [navUrl],
+  );
+
+  const selectPrompt = useCallback(
+    (id: number | null) => {
+      setView({ kind: "prompt", id });
+      history.replaceState(null, "", navUrl(id == null ? "prompt=" : `prompt=${id}`));
     },
     [navUrl],
   );
@@ -5311,6 +5369,107 @@ function App() {
     () => (q && htmlFiles ? htmlFiles.filter((f) => f.path.toLowerCase().includes(q)) : htmlFiles),
     [htmlFiles, q],
   );
+  const visiblePrompts = useMemo(
+    () =>
+      q && templatePrompts
+        ? templatePrompts.filter(
+            (p) => p.title.toLowerCase().includes(q) || p.body.toLowerCase().includes(q),
+          )
+        : templatePrompts,
+    [templatePrompts, q],
+  );
+  const selectedPrompt =
+    view.kind === "prompt" && view.id != null
+      ? (templatePrompts ?? []).find((p) => p.id === view.id) ?? null
+      : null;
+
+  useEffect(() => {
+    if (tab !== "prompts" || view.kind !== "prompt") return;
+    if (view.id == null) {
+      setPromptTitle("");
+      setPromptBody("");
+      setPromptDirty(false);
+      return;
+    }
+    const p = (templatePrompts ?? []).find((x) => x.id === view.id);
+    if (!p) return;
+    setPromptTitle(p.title);
+    setPromptBody(p.body);
+    setPromptDirty(false);
+  }, [tab, view, templatePrompts]);
+
+  const newPrompt = useCallback(() => {
+    selectPrompt(null);
+    setPromptTitle("");
+    setPromptBody("");
+    setPromptDirty(false);
+    setPromptEditorOpen(true);
+  }, [selectPrompt]);
+
+  const editPrompt = useCallback(
+    (id: number) => {
+      selectPrompt(id);
+      setPromptEditorOpen(true);
+    },
+    [selectPrompt],
+  );
+
+  const openTemplatePrompt = useCallback((body: string) => {
+    const { text, caret } = materializeTemplatePrompt(body);
+    const pos = { start: caret, end: caret };
+    setClaudeAgent("claude");
+    setClaudePrompt(text);
+    claudeCaretRef.current = pos;
+    if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), pos);
+    setClaudeOpen(true);
+  }, []);
+
+  const savePrompt = useCallback(async () => {
+    const title = promptTitle.trim();
+    const body = promptBody.trim();
+    if (!title || !body || promptSaving) return;
+    const id = view.kind === "prompt" ? view.id : null;
+    setPromptSaving(true);
+    try {
+      const res = await fetch(qd(id == null ? "/api/template-prompts" : `/api/template-prompts/${id}`), {
+        method: id == null ? "POST" : "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, body }),
+      });
+      const saved = await res.json().catch(() => ({}) as any);
+      if (!res.ok) {
+        alert(`save template prompt failed: ${saved.error ?? res.statusText}`);
+        return;
+      }
+      setPromptDirty(false);
+      queryClient.invalidateQueries({ queryKey: ["template-prompts"] });
+      if (typeof saved.id === "number") selectPrompt(saved.id);
+    } finally {
+      setPromptSaving(false);
+    }
+  }, [promptTitle, promptBody, promptSaving, view, qd, queryClient, selectPrompt]);
+
+  const deletePrompt = useCallback(async () => {
+    if (view.kind !== "prompt" || view.id == null) return;
+    if (!confirm(`Delete "${promptTitle.trim() || "template prompt"}"?`)) return;
+    setPromptSaving(true);
+    try {
+      const res = await fetch(qd(`/api/template-prompts/${view.id}`), { method: "DELETE" });
+      const body = await res.json().catch(() => ({}) as any);
+      if (!res.ok) {
+        alert(`delete template prompt failed: ${body.error ?? res.statusText}`);
+        return;
+      }
+      selectPrompt(null);
+      setPromptTitle("");
+      setPromptBody("");
+      setPromptDirty(false);
+      setPromptEditorOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["template-prompts"] });
+    } finally {
+      setPromptSaving(false);
+    }
+  }, [view, promptTitle, qd, queryClient, selectPrompt]);
   // A session is "unread" once it's idle (finished its turn — not busy, not
   // blocked on a prompt) with transcript output newer than you last saw. Drives
   // the sidebar dots and the "next unread" jump. Waiting rows are excluded: they
@@ -5671,6 +5830,7 @@ function App() {
     visibleManual,
     visibleTmux,
     visibleHtml,
+    visiblePrompts,
     selectedTmux: selectedSession,
     selection,
     orderedKeys,
@@ -5711,6 +5871,7 @@ function App() {
     visibleManual,
     visibleTmux,
     visibleHtml,
+    visiblePrompts,
     selectedTmux: selectedSession,
     selection,
     orderedKeys,
@@ -5793,8 +5954,17 @@ function App() {
       // meta or ctrl modifier is held, the event belongs to the browser/OS (⌘N new
       // window, ⌘T, ⌘L, ⌘A, ⌘D…); bail so we never shadow the native shortcut.
       if (e.metaKey || e.ctrlKey) return;
-      const { tab, view, visibleCommits, visiblePrs, visibleManual, visibleTmux, visibleHtml, selectedTmux } =
-        keyCtx.current;
+      const {
+        tab,
+        view,
+        visibleCommits,
+        visiblePrs,
+        visibleManual,
+        visibleTmux,
+        visibleHtml,
+        visiblePrompts,
+        selectedTmux,
+      } = keyCtx.current;
       const target = (e.composedPath()[0] ?? e.target) as HTMLElement;
       const typing =
         target instanceof HTMLInputElement ||
@@ -5986,6 +6156,17 @@ function App() {
       if (tab === "home" && e.key === "r" && keyCtx.current.homeSel) {
         e.preventDefault();
         markHomeRead(keyCtx.current.homeSel);
+        return;
+      }
+      if (tab === "prompts" && e.key === "Enter") {
+        const p =
+          view.kind === "prompt" && view.id != null
+            ? visiblePrompts?.find((x) => x.id === view.id)
+            : visiblePrompts?.[0];
+        if (p) {
+          e.preventDefault();
+          openTemplatePrompt(p.body);
+        }
         return;
       }
       // Tmux tab: `r` toggles the open session between read and unread — the manual
@@ -6291,6 +6472,23 @@ function App() {
         document
           .getElementById(`row-manual-${visibleManual[next].name}`)
           ?.scrollIntoView({ block: "nearest" });
+      } else if (tab === "prompts" && visiblePrompts?.length) {
+        e.preventDefault();
+        const idx =
+          view.kind === "prompt" && view.id != null
+            ? visiblePrompts.findIndex((p) => p.id === view.id)
+            : -1;
+        const next = down
+          ? idx + 1 >= visiblePrompts.length
+            ? 0
+            : idx + 1
+          : idx <= 0
+            ? visiblePrompts.length - 1
+            : idx - 1;
+        selectPrompt(visiblePrompts[next].id);
+        document
+          .getElementById(`row-prompt-${visiblePrompts[next].id}`)
+          ?.scrollIntoView({ block: "nearest" });
       } else if (tab === "tmux" && visibleTmux?.length) {
         e.preventDefault();
         const idx = visibleTmux.findIndex((s) => s.name === selectedTmux);
@@ -6414,7 +6612,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [stepCommit, selectPr, selectManual, selectHtml, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
+  }, [stepCommit, selectPr, selectManual, selectHtml, selectPrompt, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, openTemplatePrompt, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
 
   // Keys typed inside a report iframe can't reach the parent's keydown handler
   // (separate document), so the injected vim layer postMessages the app-level
@@ -6511,7 +6709,7 @@ function App() {
   // not the Tmux tab or an empty pane. It drives the desktop column, the mobile
   // right-drawer opener, and the minimize chevron. On desktop it hides when
   // minimized; on mobile it's always mounted (as a drawer) so its opener works.
-  const hasRightSidebar = tab !== "tmux" && view.kind !== "none";
+  const hasRightSidebar = tab !== "tmux" && tab !== "prompts" && view.kind !== "none";
   const showRight = hasRightSidebar && (isDesktop ? !rightMinimized : true);
 
   // Mobile "Actions" menu (top bar) — the tab-relevant things you'd otherwise
@@ -7194,6 +7392,14 @@ function App() {
               {runningTmux > 0 && <span className="tab-badge">{runningTmux}</span>}
             </button>
             <button
+              className={tab === "prompts" ? "on" : ""}
+              data-tip="Template prompts"
+              aria-label="Template prompts"
+              onClick={() => selectTab("prompts")}
+            >
+              <Bookmark />
+            </button>
+            <button
               className={tab === "changes" ? "on" : ""}
               data-tip="Changes"
               aria-label="Changes"
@@ -7248,7 +7454,9 @@ function App() {
                       ? "Filter sessions…"
                       : tab === "html"
                         ? "Filter reports…"
-                        : "Filter patches…"
+                        : tab === "prompts"
+                          ? "Filter prompts…"
+                          : "Filter patches…"
               }
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -7362,6 +7570,39 @@ function App() {
             {manualPatches !== null && !manualError && manualPatches.length === 0 && (
               <div className="side-note">
                 No <code>.patch</code> files in <code>./diffs</code>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "prompts" && (
+          <div className="commit-list">
+            <div className="bulk-actions">
+              <button onClick={newPrompt}>
+                <Plus size={13} /> New template
+              </button>
+            </div>
+            {templatePromptsQuery.isPending && <SkeletonList />}
+            {templatePromptsQuery.isError && (
+              <div className="side-note error">{templatePromptsError}</div>
+            )}
+            {visiblePrompts?.map((p) => (
+              <button
+                key={p.id}
+                id={`row-prompt-${p.id}`}
+                className={`commit${view.kind === "prompt" && view.id === p.id ? " active" : ""}`}
+                onClick={() => editPrompt(p.id)}
+              >
+                <span className="commit-msg">{p.title}</span>
+                <span className="commit-meta">
+                  <span className="commit-author">{templatePromptPreview(p.body).split(/\s+/).slice(0, 8).join(" ")}</span>
+                  <span className="commit-ago">{timeAgo(p.updatedAt)}</span>
+                </span>
+              </button>
+            ))}
+            {visiblePrompts !== null && visiblePrompts.length === 0 && (
+              <div className="side-note">
+                {filter ? "No matching templates" : "No template prompts yet"}
               </div>
             )}
           </div>
@@ -7689,7 +7930,7 @@ function App() {
       <div className="resizer rz-left" onPointerDown={startResize("left")} />
 
       <main
-        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : tab === "html" ? " report-main" : ""}${
+        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : tab === "html" ? " report-main" : tab === "prompts" ? " prompts-main" : ""}${
           tab === "home" && homeChat ? " chat-open" : ""
         }`}
         ref={mainEl}
@@ -7710,6 +7951,150 @@ function App() {
             onCancelQueued={cancelQueuedRow}
             onTogglePick={toggleContextPick}
           />
+        )}
+        {tab === "prompts" && (
+          <div className="prompt-pane">
+            {!promptEditorOpen ? (
+              <div className="prompt-board">
+                <div className="prompt-board-head">
+                  <div>
+                    <h2>Template prompts</h2>
+                    <p>{meta?.name ? meta.name : "Current directory"}</p>
+                  </div>
+                  <button className="act primary" onClick={newPrompt}>
+                    <Plus size={14} /> New template
+                  </button>
+                </div>
+                {templatePromptsQuery.isPending && <SkeletonList />}
+                {templatePromptsQuery.isError && (
+                  <div className="empty error">{templatePromptsError}</div>
+                )}
+                {visiblePrompts !== null && visiblePrompts.length > 0 && (
+                  <div className="prompt-cards">
+                    {visiblePrompts.map((p) => {
+                      const preview = templatePromptPreview(p.body);
+                      const hasCursor = materializeTemplatePrompt(p.body).hasCursor;
+                      return (
+                        <div
+                          key={p.id}
+                          className={`prompt-card${view.kind === "prompt" && view.id === p.id ? " selected" : ""}`}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openTemplatePrompt(p.body)}
+                          onKeyDown={(e) => {
+                            if (e.key !== "Enter" && e.key !== " ") return;
+                            e.preventDefault();
+                            openTemplatePrompt(p.body);
+                          }}
+                        >
+                          <div className="prompt-card-top">
+                            <span className="prompt-card-icon">
+                              <Bookmark size={15} />
+                            </span>
+                            <h3>{p.title}</h3>
+                            <button
+                              type="button"
+                              className="prompt-card-edit"
+                              title="Edit template"
+                              aria-label="Edit template"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                editPrompt(p.id);
+                              }}
+                            >
+                              <Pencil size={13} />
+                            </button>
+                          </div>
+                          <p>{preview || "Empty template"}</p>
+                          <div className="prompt-card-foot">
+                            {hasCursor && (
+                              <span className="prompt-card-cursor" title="Cursor marker">
+                                <TextCursor size={12} />
+                              </span>
+                            )}
+                            <span>{timeAgo(p.updatedAt)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {visiblePrompts !== null && visiblePrompts.length === 0 && (
+                  <div className="empty">
+                    {filter ? "No matching templates" : "No template prompts yet"}
+                  </div>
+                )}
+              </div>
+            ) : (
+            <div className="prompt-editor">
+              <div className="prompt-editor-head">
+                <div>
+                  <h2>{view.kind === "prompt" && view.id != null ? "Template prompt" : "New template"}</h2>
+                  <p>
+                    {selectedPrompt
+                      ? `Updated ${timeAgo(selectedPrompt.updatedAt)}`
+                      : meta?.name || "Current directory"}
+                  </p>
+                </div>
+                <div className="prompt-editor-actions">
+                  <IconButton
+                    title="Close editor"
+                    disabled={promptSaving}
+                    onClick={() => setPromptEditorOpen(false)}
+                  >
+                    <X size={15} />
+                  </IconButton>
+                  {view.kind === "prompt" && view.id != null && (
+                    <IconButton
+                      title="Delete template"
+                      disabled={promptSaving}
+                      onClick={() => void deletePrompt()}
+                    >
+                      <Trash2 size={15} />
+                    </IconButton>
+                  )}
+                  <button
+                    className="act"
+                    disabled={!promptBody.trim()}
+                    onClick={() => openTemplatePrompt(promptBody)}
+                  >
+                    Open
+                  </button>
+                  <button
+                    className="act primary"
+                    disabled={!promptTitle.trim() || !promptBody.trim() || promptSaving || !promptDirty}
+                    onClick={() => void savePrompt()}
+                  >
+                    {promptSaving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </div>
+              <label className="prompt-field">
+                <span>Title</span>
+                <input
+                  value={promptTitle}
+                  onChange={(e) => {
+                    setPromptTitle(e.target.value);
+                    setPromptDirty(true);
+                  }}
+                  placeholder="Name this template"
+                />
+              </label>
+              <label className="prompt-field grow">
+                <span>Template</span>
+                <textarea
+                  value={promptBody}
+                  onChange={(e) => {
+                    setPromptBody(e.target.value);
+                    setPromptDirty(true);
+                  }}
+                  placeholder="Write the prompt template…"
+                  spellCheck={true}
+                />
+              </label>
+            </div>
+            )}
+          </div>
         )}
         {tab === "tmux" && <div className="transcript">{renderChat()}</div>}
         {tab === "html" && (
