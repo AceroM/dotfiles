@@ -36,6 +36,9 @@ interface TmuxClient {
   tty: string;
   session: string;
   activity: number;
+  // Whether this client's terminal pane currently has keyboard focus (requires
+  // `focus-events on`, which reports focus in/out from the terminal emulator).
+  focused: boolean;
 }
 
 interface Snapshot {
@@ -381,15 +384,20 @@ function listSessions(socket: string): TmuxSession[] {
 }
 
 function listClients(socket: string): TmuxClient[] {
-  const format = ["#{client_tty}", "#{client_session}", "#{client_activity}"].join(SEP);
+  const format = ["#{client_tty}", "#{client_session}", "#{client_activity}", "#{client_flags}"].join(SEP);
   try {
     const raw = tmux(socket, ["list-clients", "-F", format]);
     return raw
       .split("\n")
       .filter(Boolean)
       .map((line) => {
-        const [tty, session, activity] = line.split(SEP);
-        return { tty, session, activity: Number(activity) || 0 };
+        const [tty, session, activity, flags] = line.split(SEP);
+        return {
+          tty,
+          session,
+          activity: Number(activity) || 0,
+          focused: (flags || "").split(",").includes("focused"),
+        };
       })
       .sort((a, b) => b.activity - a.activity);
   } catch {
@@ -570,7 +578,7 @@ function App({ args }: { args: Args }) {
   const [filter, setFilter] = useState("");
   const [filtering, setFiltering] = useState(false);
   const [countPrefix, setCountPrefix] = useState("");
-  const [autoSwitch, setAutoSwitch] = useState(false);
+  const [autoSwitch, setAutoSwitch] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -598,6 +606,7 @@ function App({ args }: { args: Args }) {
   }, [args.refreshMs, refresh]);
 
   const activeSession = snapshot.targetClient?.session || "";
+  const targetFocused = snapshot.targetClient?.focused ?? false;
   const sessions = useMemo(
     () => snapshot.sessions.filter((session) => matchesFilter(session, filter)),
     [filter, snapshot.sessions],
@@ -608,10 +617,16 @@ function App({ args }: { args: Args }) {
     if (sessions.length === 0) {
       setSelectedName("");
     } else if (!sessions.some((session) => session.name === selectedName)) {
-      setSelectedName(selectionAfterRefresh(previousSessionsRef.current, sessions, selectedName));
+      // On first open (no prior selection) land on the focused/attached session
+      // so it reads as selected+focused (green) right away; otherwise keep the
+      // cursor's position across refreshes/removals.
+      const preferActive = selectedName === "" && sessions.some((s) => s.name === activeSession);
+      setSelectedName(
+        preferActive ? activeSession : selectionAfterRefresh(previousSessionsRef.current, sessions, selectedName),
+      );
     }
     previousSessionsRef.current = sessions;
-  }, [selectedName, sessions]);
+  }, [activeSession, selectedName, sessions]);
 
   const selectedIndex = Math.max(0, sessions.findIndex((session) => session.name === selectedName));
   const selected = sessions[selectedIndex] || null;
@@ -712,10 +727,18 @@ function App({ args }: { args: Args }) {
       if (autoSwitch && nextName) switchToName(nextName);
     } else if (input === "g") {
       setCountPrefix("");
-      if (sessions[0]) setSelectedName(sessions[0].name);
+      const first = sessions[0];
+      if (first) {
+        setSelectedName(first.name);
+        if (autoSwitch) switchToName(first.name);
+      }
     } else if (input === "G") {
       setCountPrefix("");
-      if (sessions[sessions.length - 1]) setSelectedName(sessions[sessions.length - 1].name);
+      const last = sessions[sessions.length - 1];
+      if (last) {
+        setSelectedName(last.name);
+        if (autoSwitch) switchToName(last.name);
+      }
     } else if ((key.return || key.rightArrow || input === "l") && selected) {
       setCountPrefix("");
       switchToName(selected.name);
@@ -770,10 +793,15 @@ function App({ args }: { args: Args }) {
           visible.map((session) => {
             const active = session.name === activeSession;
             const selectedRow = session.name === selectedName;
+            const width = Math.max(1, listWidth - 1);
+            // Chevron shows only when the terminal pane actually has keyboard focus
+            // AND is on this session. The cursor is a plain full-width inverse bar.
+            const marker = active && targetFocused ? "❯ " : "  ";
+            const line = truncate((marker + rowFor(session, width - marker.length)).padEnd(width, " "), width);
 
             return (
-              <Text key={session.name} inverse={selectedRow} color={active ? "cyan" : undefined}>
-                {rowFor(session, listWidth - 1)}
+              <Text key={session.name} inverse={selectedRow}>
+                {line}
               </Text>
             );
           })
