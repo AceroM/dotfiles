@@ -285,11 +285,19 @@ db.run(`CREATE TABLE IF NOT EXISTS queued_sessions (
   dir_id INTEGER NOT NULL,
   prompt TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  agent TEXT NOT NULL DEFAULT 'claude'
+  agent TEXT NOT NULL DEFAULT 'claude',
+  effort TEXT,
+  chrome INTEGER NOT NULL DEFAULT 0
 )`);
 // Migrate DBs created before the agent column existed (no-op once applied).
 try {
   db.run("ALTER TABLE queued_sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'");
+} catch { }
+try {
+  db.run("ALTER TABLE queued_sessions ADD COLUMN effort TEXT");
+} catch { }
+try {
+  db.run("ALTER TABLE queued_sessions ADD COLUMN chrome INTEGER NOT NULL DEFAULT 0");
 } catch { }
 interface QueuedRow {
   id: number;
@@ -297,9 +305,11 @@ interface QueuedRow {
   prompt: string;
   created_at: number;
   agent: string;
+  effort: string | null;
+  chrome: number;
 }
-const insertQueuedStmt = db.query<{ id: number }, [number, string, number, string]>(
-  "INSERT INTO queued_sessions (dir_id, prompt, created_at, agent) VALUES (?, ?, ?, ?) RETURNING id",
+const insertQueuedStmt = db.query<{ id: number }, [number, string, number, string, string | null, number]>(
+  "INSERT INTO queued_sessions (dir_id, prompt, created_at, agent, effort, chrome) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
 );
 const listQueuedStmt = db.query<QueuedRow, []>(
   "SELECT * FROM queued_sessions ORDER BY created_at, id",
@@ -364,6 +374,26 @@ const getSessionEndStmt = db.query<{ ended_at: number }, [string]>(
   "SELECT ended_at FROM session_ends WHERE session_id = ?",
 );
 const pruneSessionEndsStmt = db.query("DELETE FROM session_ends WHERE ended_at < ?");
+
+// Subway "Keep" dismissals: keep the live tmux chat, but remove it from future
+// Subway review snapshots for the selected directory.
+db.run(`CREATE TABLE IF NOT EXISTS subway_kept (
+  dir_id INTEGER NOT NULL,
+  session_id TEXT NOT NULL,
+  session_name TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  kept_at INTEGER NOT NULL,
+  PRIMARY KEY (dir_id, session_id)
+)`);
+const upsertSubwayKeptStmt = db.query(
+  "INSERT INTO subway_kept (dir_id, session_id, session_name, cwd, agent, kept_at) VALUES (?, ?, ?, ?, ?, ?) " +
+  "ON CONFLICT(dir_id, session_id) DO UPDATE SET session_name = excluded.session_name, cwd = excluded.cwd, agent = excluded.agent, kept_at = excluded.kept_at",
+);
+const listSubwayKeptStmt = db.query<{ session_id: string }, [number]>(
+  "SELECT session_id FROM subway_kept WHERE dir_id = ?",
+);
+const pruneSubwayKeptStmt = db.query("DELETE FROM subway_kept WHERE kept_at < ?");
 
 // ---- Public sharing (R2 via the wrangler CLI) ----
 // The "Share" button in the HTML preview uploads an artifact's .html (plus any
@@ -937,7 +967,7 @@ async function launchEditor(fileAbs: string, line: number | null, dir: string): 
   await focusTmuxSession(NVIM_TMUX_SESSION);
 }
 
-// ---- New Claude session (mirrors the `p` shell function) ----
+// ---- New session (mirrors the `p` shell function) ----
 // The `p` zsh function reads these pools (exported as zsh arrays, not env vars,
 // so we mirror them here) to pick an adjective-noun session name, then launches
 // claude in a detached tmux session and pastes the first prompt. We can't call
@@ -1380,9 +1410,10 @@ async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok
 // positional arg has zero timing: claude reads it on boot and submits it itself.
 // Images still work because the upload route embeds /tmp/images/<id> paths as text
 // in the prompt, and claude's Read tool resolves those paths.
-// Reasoning effort levels accepted by `claude --effort`. Anything outside this set
-// is dropped so the session inherits the global settings.json `effortLevel`.
+// Reasoning effort levels accepted by each CLI. Anything outside these sets is
+// dropped so the session inherits that tool's global default.
 const CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const CODEX_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 
 async function newClaudeSession(
   dir: string,
@@ -1464,8 +1495,8 @@ async function drainQueue(): Promise<void> {
       continue;
     }
     try {
-      if (row.agent === "codex") await newCodexSession(dir.path, row.prompt);
-      else await newClaudeSession(dir.path, row.prompt);
+      if (row.agent === "codex") await newCodexSession(dir.path, row.prompt, row.effort ?? undefined);
+      else await newClaudeSession(dir.path, row.prompt, row.effort ?? undefined, row.chrome === 1);
       deleteQueuedStmt.run(row.id);
     } catch {
       break;
@@ -1635,11 +1666,15 @@ async function tagCodexSession(name: string, cwd: string, before: Set<string>): 
 // the prompt as codex's positional arg so codex submits it itself on boot (the same
 // zero-timing trick newClaudeSession uses — a send-keys Enter would race codex's paste
 // debounce). The @codex_session tag is discovered + stamped asynchronously.
-async function newCodexSession(dir: string, prompt: string): Promise<string> {
+async function newCodexSession(dir: string, prompt: string, effort?: string): Promise<string> {
   const name = await pickClaudeSessionName();
   const before = codexRolloutUuids();
   const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
-  const codexCmd = `direnv exec ${shq(dir)} codex --dangerously-bypass-approvals-and-sandbox${promptArg}`;
+  const effortArg =
+    effort && CODEX_EFFORTS.has(effort)
+      ? ` -c ${shq(`model_reasoning_effort="${effort}"`)}`
+      : "";
+  const codexCmd = `direnv exec ${shq(dir)} codex --dangerously-bypass-approvals-and-sandbox${effortArg}${promptArg}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${codexCmd}`.quiet();
   void tagCodexSession(name, dir, before);
   return name;
@@ -1841,6 +1876,7 @@ interface TmuxSession {
   mtime: number; // transcript mtime (ms), 0 if none — last write, advances mid-turn
   endedAt: number; // when its Stop hook last fired (ms), 0 if never — see session_ends
   agent: "claude" | "codex"; // which CLI is running — drives transcript resolution + a badge
+  transcriptPath?: string; // server-only: lets Subway snapshot exact resolved files
 }
 
 // The timestamp the session lists sort and label by: when a non-busy session last
@@ -1901,7 +1937,7 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
     const uuid = path ? (path.split("/").pop() ?? "").replace(/\.jsonl$/, "") : sid;
     let endedAt = 0;
     if (uuid) endedAt = getSessionEndStmt.get(uuid)?.ended_at ?? 0;
-    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid, hasTranscript: !!path, mtime, endedAt, agent });
+    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid, hasTranscript: !!path, mtime, endedAt, agent, transcriptPath: path ?? undefined });
   }
   // An idle session may actually be blocked on an interactive prompt (the same
   // case capturePendingPrompt handles for the open transcript). Flag those so the
@@ -2356,6 +2392,223 @@ function parseCodexTranscript(text: string, limit: number): { messages: Transcri
     // response_item.reasoning is encrypted — skipped; we show event_msg.agent_reasoning instead
   }
   return { messages: msgs.slice(-limit), model, title, total: msgs.length };
+}
+
+// ---- Subway tab snapshot ----
+// One-shot offline cache for reviewing backlog on a train: only idle/waiting/done
+// sessions in the selected directory, capped separately by agent so one tool cannot
+// starve the other.
+const SUBWAY_AGENT_LIMIT = 10;
+const SUBWAY_MESSAGE_LIMIT = 16;
+const SUBWAY_TEXT_LIMIT = 2200;
+
+interface SubwaySessionSnapshot {
+  name: string;
+  cwd: string;
+  task: string;
+  waiting: boolean;
+  sessionId: string;
+  mtime: number;
+  endedAt: number;
+  agent: "claude" | "codex";
+  title: string;
+  model: string;
+  total: number;
+  messages: TranscriptMsg[];
+}
+
+function publicTmuxSession(s: TmuxSession): Omit<TmuxSession, "transcriptPath"> {
+  const { transcriptPath: _transcriptPath, ...pub } = s;
+  return pub;
+}
+
+function compactSubwayMessages(messages: TranscriptMsg[]): TranscriptMsg[] {
+  return messages.map((m) => ({
+    ...m,
+    text:
+      m.text.length > SUBWAY_TEXT_LIMIT
+        ? `${m.text.slice(0, SUBWAY_TEXT_LIMIT)}\n... (truncated for Subway cache)`
+        : m.text,
+    edits: undefined,
+  }));
+}
+
+function transcriptIdFromPath(path?: string): string {
+  return path ? (path.split("/").pop() ?? "").replace(/\.jsonl$/, "") : "";
+}
+
+function subwayKeepIds(s: Pick<TmuxSession, "sessionId" | "name" | "transcriptPath">): string[] {
+  return [transcriptIdFromPath(s.transcriptPath), s.sessionId, s.name].filter(Boolean);
+}
+
+async function subwaySessionSnapshot(s: TmuxSession): Promise<SubwaySessionSnapshot> {
+  let title = "";
+  let model = "";
+  let total = 0;
+  let messages: TranscriptMsg[] = [];
+  const path = s.transcriptPath;
+  if (path && existsSync(path)) {
+    try {
+      const parsed =
+        s.agent === "codex"
+          ? parseCodexTranscript(await Bun.file(path).text(), SUBWAY_MESSAGE_LIMIT)
+          : parseTranscript(await Bun.file(path).text(), SUBWAY_MESSAGE_LIMIT);
+      title = parsed.title;
+      model = parsed.model;
+      total = parsed.total;
+      messages = compactSubwayMessages(parsed.messages);
+    } catch { }
+  }
+  return {
+    name: s.name,
+    cwd: s.cwd,
+    task: s.task,
+    waiting: s.waiting,
+    sessionId: s.sessionId,
+    mtime: s.mtime,
+    endedAt: s.endedAt,
+    agent: s.agent,
+    title,
+    model,
+    total,
+    messages,
+  };
+}
+
+async function subwaySnapshot(ws: Workspace) {
+  const inScope = (dir: string) => dir === ws.path || dir.startsWith(`${ws.path}${sep}`);
+  const kept = new Set(listSubwayKeptStmt.all(ws.id).map((r) => r.session_id));
+  const idle = (await listClaudeSessions()).filter(
+    (s) => !s.busy && inScope(s.cwd) && !subwayKeepIds(s).some((id) => kept.has(id)),
+  );
+  const picked = [
+    ...idle.filter((s) => s.agent === "claude").slice(0, SUBWAY_AGENT_LIMIT),
+    ...idle.filter((s) => s.agent === "codex").slice(0, SUBWAY_AGENT_LIMIT),
+  ].sort((a, b) => finishedTs(b) - finishedTs(a));
+  return {
+    dir: ws.id,
+    cwd: ws.path,
+    fetchedAt: Date.now(),
+    sessions: await Promise.all(picked.map(subwaySessionSnapshot)),
+  };
+}
+
+interface UsageWindow {
+  used_percentage: number;
+  resets_at: number;
+}
+
+interface TokenUsage {
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+  total_tokens: number;
+}
+
+interface AgentUsage {
+  five_hour: UsageWindow | null;
+  seven_day: UsageWindow | null;
+  updated_at: number | null;
+  total_token_usage?: TokenUsage | null;
+  last_token_usage?: TokenUsage | null;
+  model_context_window?: number | null;
+  plan_type?: string | null;
+}
+
+const emptyAgentUsage = (): AgentUsage => ({
+  five_hour: null,
+  seven_day: null,
+  updated_at: null,
+});
+
+const finiteNumber = (x: unknown): number | null => {
+  const n = typeof x === "number" ? x : typeof x === "string" ? Number(x) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+function normalizeUsageWindow(win: unknown): UsageWindow | null {
+  if (!win || typeof win !== "object") return null;
+  const o = win as Record<string, unknown>;
+  const used = finiteNumber(o.used_percentage ?? o.used_percent);
+  const resets = finiteNumber(o.resets_at);
+  if (used == null || resets == null) return null;
+  return { used_percentage: used, resets_at: resets };
+}
+
+function normalizeTokenUsage(usage: unknown): TokenUsage | null {
+  if (!usage || typeof usage !== "object") return null;
+  const o = usage as Record<string, unknown>;
+  const input = finiteNumber(o.input_tokens);
+  const cached = finiteNumber(o.cached_input_tokens);
+  const output = finiteNumber(o.output_tokens);
+  const reasoning = finiteNumber(o.reasoning_output_tokens);
+  const total = finiteNumber(o.total_tokens);
+  if (input == null || cached == null || output == null || reasoning == null || total == null) {
+    return null;
+  }
+  return {
+    input_tokens: input,
+    cached_input_tokens: cached,
+    output_tokens: output,
+    reasoning_output_tokens: reasoning,
+    total_tokens: total,
+  };
+}
+
+async function readClaudeUsage(): Promise<AgentUsage> {
+  const f = Bun.file(`${process.env.HOME}/.claude/rate-limits.json`);
+  if (!(await f.exists())) return emptyAgentUsage();
+  const raw = await f.json();
+  return {
+    five_hour: normalizeUsageWindow(raw?.five_hour),
+    seven_day: normalizeUsageWindow(raw?.seven_day),
+    updated_at: finiteNumber(raw?.updated_at),
+  };
+}
+
+async function readCodexUsage(): Promise<AgentUsage> {
+  let files: { path: string; mtime: number }[] = [];
+  try {
+    const glob = new Bun.Glob("**/rollout-*.jsonl");
+    for (const rel of glob.scanSync(codexSessionsRoot)) {
+      const path = `${codexSessionsRoot}/${rel}`;
+      try {
+        files.push({ path, mtime: statSync(path).mtimeMs });
+      } catch { }
+    }
+  } catch {
+    return emptyAgentUsage();
+  }
+  files = files.sort((a, b) => b.mtime - a.mtime);
+
+  for (const { path, mtime } of files.slice(0, 120)) {
+    try {
+      const file = Bun.file(path);
+      const start = Math.max(0, file.size - 512 * 1024);
+      const tail = await file.slice(start).text();
+      for (const line of tail.trimEnd().split("\n").reverse()) {
+        if (!line.includes('"rate_limits"')) continue;
+        let d: any;
+        try { d = JSON.parse(line); } catch { continue; }
+        const p = d?.payload;
+        const limits = p?.rate_limits;
+        if (p?.type !== "token_count" || !limits) continue;
+        const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) / 1000 : mtime / 1000;
+        return {
+          five_hour: normalizeUsageWindow(limits.primary),
+          seven_day: normalizeUsageWindow(limits.secondary),
+          updated_at: Number.isFinite(ts) ? ts : mtime / 1000,
+          total_token_usage: normalizeTokenUsage(p.info?.total_token_usage),
+          last_token_usage: normalizeTokenUsage(p.info?.last_token_usage),
+          model_context_window: finiteNumber(p.info?.model_context_window),
+          plan_type: typeof limits.plan_type === "string" ? limits.plan_type : null,
+        };
+      }
+    } catch { }
+  }
+
+  return emptyAgentUsage();
 }
 
 interface CommitSummary {
@@ -2980,6 +3233,8 @@ const page = `<!DOCTYPE html>
   }
   .commit:hover .kill-btn { opacity: 1; }
   .kill-btn:hover { background: var(--red-bg); border-color: var(--red-border); color: var(--red); }
+  .kill-btn.keep-btn { right: 34px; }
+  .kill-btn.keep-btn:hover { background: var(--green-bg); border-color: var(--green-border); color: var(--green); }
 
   /* ---- Tmux tab: queued (offline) sessions ---- */
   /* A prompt enqueued while offline — it launches once the box is back online.
@@ -3013,6 +3268,100 @@ const page = `<!DOCTYPE html>
     font-size: 12px; color: var(--amber);
     background: var(--bg-soft); border: 1px solid var(--amber); border-radius: 8px;
   }
+
+  /* ---- Subway tab: one-shot offline review cache ---- */
+  .subway-status {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin: 8px 14px 4px; color: var(--text-muted); font-size: 11px;
+  }
+  .subway-status button {
+    display: inline-flex; align-items: center; gap: 5px; min-height: 24px;
+    padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 6px;
+    background: var(--bg); color: var(--text-2); cursor: pointer;
+  }
+  .subway-status button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+  .subway-status button:disabled { opacity: .5; cursor: default; }
+  .subway-queue-note {
+    margin: 7px 14px 2px; padding: 6px 9px;
+    font-size: 11px; color: var(--amber);
+    background: var(--bg-soft); border: 1px solid var(--amber); border-radius: 7px;
+  }
+  .commit.subway-row { border-left-color: var(--border); }
+  .commit.subway-row.waiting { border-left-color: var(--amber); }
+  .commit.subway-row .sess-task, .commit.subway-row .sess-cwd { padding-right: 48px; }
+  .diffs.subway-main { padding: 0; background: var(--bg); }
+  .subway-pane {
+    min-height: 100%; width: min(100%, 980px); margin: 0 auto; padding: 0 20px 120px;
+    display: flex; flex-direction: column;
+  }
+  .subway-head {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+    padding: 15px 0 12px; border-bottom: 1px solid var(--border); background: var(--bg);
+  }
+  .subway-head h2 { margin: 0 0 3px; font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }
+  .subway-head p { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+  .subway-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .subway-head .act {
+    min-height: 30px; display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 7px; flex-shrink: 0;
+  }
+  .act.keep { color: var(--green); border-color: var(--green-border); }
+  .act.keep:hover:not(:disabled) { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+  .act.delete { color: var(--red); border-color: var(--red-border); }
+  .act.delete:hover:not(:disabled) { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+  .subway-messages {
+    display: flex; flex-direction: column; gap: 12px; padding: 18px 0 14px;
+  }
+  .subway-msg {
+    max-width: min(760px, 92%); padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--bg-raised); color: var(--text-md);
+    line-height: 1.55; overflow-wrap: anywhere;
+  }
+  .subway-msg.user {
+    align-self: flex-end; background: var(--accent-bg); border-color: var(--accent-border);
+    color: var(--text-q);
+  }
+  .subway-msg.assistant { align-self: flex-start; }
+  .subway-msg.pending { opacity: .72; border-style: dashed; }
+  .subway-pending {
+    display: inline-flex; margin-top: 7px; font-size: 10px; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase; color: var(--amber);
+  }
+  .subway-tool, .subway-tool-head {
+    display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
+    color: var(--text-muted); font-size: 12px;
+  }
+  .subway-tool .tool-path, .subway-tool-head .tool-path {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--text-faint);
+  }
+  .subway-tool-result pre {
+    margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace; color: var(--text-muted);
+  }
+  .subway-image-note { color: var(--text-muted); font-size: 12px; }
+  .subway-composer {
+    position: sticky; bottom: 0; z-index: 4;
+    display: flex; align-items: flex-end; gap: 8px;
+    margin-top: auto; padding: 10px 0 14px;
+    background: linear-gradient(to top, var(--bg) 84%, transparent);
+  }
+  .subway-composer textarea {
+    flex: 1 1 auto; min-height: 42px; max-height: 180px; resize: none;
+    padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; line-height: 1.45; outline: none;
+  }
+  .subway-composer textarea:focus { border-color: var(--accent); }
+  .subway-composer .act {
+    min-height: 38px; display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 12px; border-radius: 8px; flex-shrink: 0;
+  }
+  .subway-empty {
+    min-height: 360px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; color: var(--text-muted); text-align: center; padding: 20px;
+  }
+  .subway-empty h2 { margin: 0; color: var(--text); font-size: 18px; }
+  .subway-empty p { margin: 0; max-width: 420px; }
 
   /* ---- Tmux tab: transcript (ChatGPT-style chat) ---- */
   .transcript { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
@@ -3373,7 +3722,7 @@ const page = `<!DOCTYPE html>
   .transcript-empty { color: var(--text-muted); padding: 40px 0; text-align: center; }
 
   /* Reply composer pinned to the bottom of the transcript column. Mirrors the
-     New Claude session textarea: multi-line, ⌃V image paste, ↵ to send. */
+     New session textarea: multi-line, ⌃V image paste, ↵ to send. */
   .reply-box {
     position: sticky; bottom: 0; z-index: 4;
     margin-top: 6px; padding: 10px 0 14px;
@@ -3588,6 +3937,14 @@ const page = `<!DOCTYPE html>
   }
   .wt-item:hover .wt-item-del, .wt-item-del:focus-visible { opacity: 1; }
   .wt-item-del:hover { color: var(--red); background: var(--red-bg); opacity: 1; }
+  .wt-bulk-del {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    margin-top: 4px; padding: 7px 9px; width: 100%;
+    border: 0; border-top: 1px solid var(--border); border-radius: 0 0 6px 6px;
+    background: none; color: var(--red); cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .wt-bulk-del:hover { background: var(--red-bg); }
+  .wt-bulk-del svg { width: 12px; height: 12px; flex-shrink: 0; }
 
   /* "Which worktree" banner at the top of the diff column. Not sticky — the
      per-file headers (stickyHeader) own top:0 as you scroll. */
@@ -4084,7 +4441,7 @@ const page = `<!DOCTYPE html>
 
   .modal-overlay {
     /* Above the docked Home chat panel (.home-chat-panel, z-index 60) so dialogs
-       like "New Claude session" open over the right sheet, not behind it. */
+       like "New session" open over the right sheet, not behind it. */
     position: fixed; inset: 0; z-index: 65;
     background: rgba(0, 0, 0, .35);
     display: flex; align-items: center; justify-content: center;
@@ -4098,12 +4455,20 @@ const page = `<!DOCTYPE html>
   .modal h3 { margin: 0 0 10px; font-size: 14px; }
   .modal-body { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-muted); }
   .modal-body code { color: var(--text); }
+  .modal-list {
+    display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0;
+    font-size: 11px; color: var(--text-muted);
+  }
+  .modal-list code {
+    padding: 2px 6px; border: 1px solid var(--border); border-radius: 5px;
+    background: var(--bg-soft); color: var(--text); font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
   .commit-input {
     width: 100%; min-height: 92px; max-height: 60vh; resize: vertical; overflow-y: auto;
     background: var(--bg); color: inherit; font: inherit; line-height: 1.5;
     border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px 10px; outline: none;
   }
-  /* The New Claude session composer grows to fit its content via JS (autosizeClaude),
+  /* The New session composer grows to fit its content via JS (autosizeClaude),
      so manual drag-resize is off; it scrolls internally once it hits max-height. */
   .commit-input.auto { resize: none; }
   .commit-input:focus { border-color: var(--accent); }
@@ -4123,7 +4488,7 @@ const page = `<!DOCTYPE html>
   .modal-hint { margin-top: 10px; font-size: 11px; color: var(--text-faint); display: flex; gap: 8px; flex-wrap: wrap; }
   .modal-hint kbd { background: var(--border); border-radius: 3px; padding: 1px 4px; }
   .modal-hint code { color: var(--text-muted); }
-  /* Options row in the New Claude session composer (effort picker, etc.). */
+  /* Options row in the New session composer (effort picker, etc.). */
   .claude-opts { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
   .claude-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
   .claude-opt select {
@@ -4133,11 +4498,16 @@ const page = `<!DOCTYPE html>
   .claude-opt select:hover, .claude-opt select:focus { color: var(--text); border-color: var(--accent); }
   .claude-opt input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; margin: 0; }
 
-  /* Claude usage dialog (⇧U) — one row per rate-limit window: label, percent,
+  /* Agent usage dialog (⇧U) — one row per rate-limit window: label, percent,
      a fill bar, and the reset countdown. */
   .usage-note { padding: 8px 2px 4px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
   .usage-note.error { color: var(--red); white-space: pre-wrap; }
   .usage-grid { display: flex; flex-direction: column; gap: 16px; padding: 4px 0 2px; }
+  .usage-panel { display: flex; flex-direction: column; gap: 12px; }
+  .usage-panel + .usage-panel { border-top: 1px solid var(--border); padding-top: 14px; }
+  .usage-panel-head { display: flex; align-items: baseline; gap: 8px; }
+  .usage-source { font-size: 13px; font-weight: 700; }
+  .usage-source-sub { font-size: 11px; color: var(--text-faint); }
   .usage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
   .usage-label { font-size: 13px; font-weight: 600; }
   .usage-sub { font-weight: 400; font-size: 11px; color: var(--text-faint); }
@@ -4272,13 +4642,13 @@ const page = `<!DOCTYPE html>
   .push-actions { display: flex; gap: 8px; }
   .push-msg { font-size: 11.5px; color: var(--text-muted); }
 
-  /* @-file autocomplete popup in the New Claude session dialog. Portaled to
+  /* @-file autocomplete popup in the New session dialog. Portaled to
      <body> with fixed coords (left/top|bottom/width/max-height set inline from
      the textarea's rect) so the modal's overflow never clips it. */
   .file-menu-wrap { position: relative; }
   .file-menu {
     /* Stay above the dialog it belongs to (.modal-overlay, z-index 65) so the
-       @-file autocomplete is never clipped behind the New Claude session modal. */
+       @-file autocomplete is never clipped behind the New session modal. */
     position: fixed; z-index: 90;
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 10px 34px rgba(0, 0, 0, .18); padding: 4px;
@@ -4324,7 +4694,7 @@ const page = `<!DOCTYPE html>
 
     .scrim { position: fixed; top: 51px; inset: 51px 0 0; z-index: 44; background: rgba(0,0,0,.35); }
 
-    /* New Claude session dialog on mobile: a centered dialog gets covered by the
+    /* New session dialog on mobile: a centered dialog gets covered by the
        on-screen keyboard, so pin it to the top and give the composer more room
        by default (it still auto-grows + scrolls past this floor). */
     .claude-overlay { align-items: flex-start; padding-top: 12px; }
@@ -5017,9 +5387,9 @@ const server = Bun.serve({
       return json({ ok: true });
     }
 
-    // Remove a linked worktree (`git worktree remove`). The main working tree is
-    // refused both here and in the UI. `--force` so a tree with pending/untracked
-    // changes still goes — the client confirms (and warns) before calling.
+    // Remove one or more linked worktrees (`git worktree remove`). The main
+    // working tree is refused both here and in the UI. `--force` so trees with
+    // pending/untracked changes still go — the client confirms before calling.
     if (req.method === "POST" && url.pathname === "/api/worktree/remove") {
       let ws: Workspace;
       try {
@@ -5027,26 +5397,40 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-      let body: { worktree?: unknown };
+      let body: { worktree?: unknown; worktrees?: unknown };
       try {
         body = await req.json();
       } catch {
         return json({ error: "Invalid JSON" }, 400);
       }
-      const dir = body.worktree;
-      if (typeof dir !== "string" || !ws.worktreeDirs.has(dir)) {
-        return json({ error: "Unknown worktree" }, 400);
+      const dirs =
+        Array.isArray(body.worktrees)
+          ? [...new Set(body.worktrees.filter((d): d is string => typeof d === "string"))]
+          : typeof body.worktree === "string"
+            ? [body.worktree]
+            : [];
+      if (!dirs.length) return json({ error: "Missing worktree" }, 400);
+      const unknown = dirs.find((dir) => !ws.worktreeDirs.has(dir));
+      if (unknown) return json({ error: `Unknown worktree: ${unknown}` }, 400);
+
+      const targets: { dir: string; repoDir: string }[] = [];
+      for (const dir of dirs) {
+        const info = await repoOfWorktree(ws, dir);
+        if (!info) return json({ error: `Worktree not found: ${dir}` }, 404);
+        if (info.isMain) return json({ error: `Can't remove the main worktree: ${dir}` }, 400);
+        targets.push({ dir, repoDir: info.repoDir });
       }
-      const info = await repoOfWorktree(ws, dir);
-      if (!info) return json({ error: "Worktree not found" }, 404);
-      if (info.isMain) return json({ error: "Can't remove the main worktree" }, 400);
+      const removed: string[] = [];
       try {
-        await $`git -C ${info.repoDir} worktree remove --force ${dir}`.quiet();
+        for (const target of targets) {
+          await $`git -C ${target.repoDir} worktree remove --force ${target.dir}`.quiet();
+          removed.push(target.dir);
+          ws.worktreeDirs.delete(target.dir);
+        }
       } catch (e) {
-        return json({ error: errText(e) }, 500);
+        return json({ error: errText(e), removed }, 500);
       }
-      ws.worktreeDirs.delete(dir);
-      return json({ ok: true });
+      return json({ ok: true, removed });
     }
 
     if (req.method === "POST" && url.pathname === "/api/commit") {
@@ -5136,26 +5520,24 @@ const server = Bun.serve({
       return json({ ok: true });
     }
 
-    // Claude usage windows. The statusline hook (~/.claude/statusline-ratelimit.sh)
-    // writes the latest five-hour and seven-day rate-limit state to
-    // ~/.claude/rate-limits.json on every render; we just surface that file so the
-    // Usage dialog (`⇧U`) can show how much of each window is spent and when it
-    // resets. No file yet (statusline never ran) → null windows, so the dialog can
-    // say "no data yet" instead of erroring.
+    // Agent usage windows. Claude comes from the statusline hook's
+    // ~/.claude/rate-limits.json; Codex comes from the newest rollout token_count
+    // event with rate_limits metadata.
     if (req.method === "GET" && url.pathname === "/api/usage") {
       try {
-        const f = Bun.file(`${process.env.HOME}/.claude/rate-limits.json`);
-        if (!(await f.exists())) {
-          return json({ five_hour: null, seven_day: null, updated_at: null });
-        }
-        return json(await f.json());
+        const [claude, codex] = await Promise.all([readClaudeUsage(), readCodexUsage()]);
+        return json({
+          ...claude,
+          claude,
+          codex,
+        });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
     }
 
     // Save a pasted image (base64 data URL or bare base64) to /tmp/images/<random>
-    // and return its absolute path, so the New Claude session prompt can reference
+    // and return its absolute path, so the New session prompt can reference
     // it. claude's Read tool reads absolute paths (incl. /tmp) with no permission
     // prompt and renders images visually, so the detached session can see it.
     if (req.method === "POST" && url.pathname === "/api/upload-image") {
@@ -5303,22 +5685,22 @@ const server = Bun.serve({
       const agent: "claude" | "codex" = body.agent === "codex" ? "codex" : "claude";
       // Allowlisted so it's safe to splice straight into the shell command, and so a
       // bad value falls back to the global default rather than erroring the launch.
-      // effort/chrome are claude-only — ignored for codex.
       const effort =
-        typeof body.effort === "string" && CLAUDE_EFFORTS.has(body.effort)
+        typeof body.effort === "string" &&
+        (agent === "codex" ? CODEX_EFFORTS : CLAUDE_EFFORTS).has(body.effort)
           ? body.effort
           : undefined;
-      const chrome = body.chrome === true;
+      const chrome = agent === "claude" && body.chrome === true;
       // Offline → enqueue instead of launching a session that couldn't reach the
       // API. drainQueue() launches it (as its agent) automatically once we're online.
       if (!(await checkOnline(true))) {
-        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now(), agent)!.id;
+        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now(), agent, effort ?? null, chrome ? 1 : 0)!.id;
         return json({ ok: true, queued: true, id });
       }
       try {
         const session =
           agent === "codex"
-            ? await newCodexSession(ws.path, body.prompt)
+            ? await newCodexSession(ws.path, body.prompt, effort)
             : await newClaudeSession(ws.path, body.prompt, effort, chrome);
         return json({ ok: true, session });
       } catch (e) {
@@ -5373,14 +5755,95 @@ const server = Bun.serve({
     // List claude tmux sessions (global, not dir-scoped) with transcript status.
     if (req.method === "GET" && url.pathname === "/api/tmux/sessions") {
       try {
+        const sessions = (await listClaudeSessions()).map(publicTmuxSession);
         return json({
-          sessions: await listClaudeSessions(),
+          sessions,
           queued: listQueuedSessions(),
           online: onlineState.online,
         });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
+    }
+
+    // ---- Subway tab ----
+    // One-shot pseudo-offline snapshot: latest messages for up to 10 non-busy
+    // Claude sessions and 10 non-busy Codex sessions in the selected directory.
+    if (req.method === "GET" && url.pathname === "/api/subway/snapshot") {
+      let ws: Workspace;
+      try {
+        ws = await wsFromReq(url);
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+      try {
+        return json(await subwaySnapshot(ws));
+      } catch (e) {
+        return json({ error: errText(e) }, 500);
+      }
+    }
+
+    // Execute one Subway queued action. Deletes are idempotent so an already-gone
+    // session drains cleanly; Keep persists a Subway dismissal without touching
+    // tmux; replies still fail if the target pane disappeared.
+    if (req.method === "POST" && url.pathname === "/api/subway/action") {
+      let body: { kind?: unknown; session?: unknown; sessionId?: unknown; agent?: unknown; cwd?: unknown; text?: unknown };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      if (typeof body.session !== "string" || !body.session) {
+        return json({ error: "Missing session" }, 400);
+      }
+      if (body.kind === "keep") {
+        let ws: Workspace;
+        try {
+          ws = await wsFromReq(url);
+        } catch (e) {
+          return json({ error: errText(e) }, 500);
+        }
+        const now = Date.now();
+        const sid =
+          typeof body.sessionId === "string" && body.sessionId.trim()
+            ? body.sessionId.trim()
+            : body.session;
+        upsertSubwayKeptStmt.run(
+          ws.id,
+          sid,
+          body.session,
+          typeof body.cwd === "string" ? body.cwd : "",
+          body.agent === "codex" ? "codex" : "claude",
+          now,
+        );
+        pruneSubwayKeptStmt.run(now - 60 * 86_400_000);
+        return json({ ok: true });
+      }
+      if (body.kind === "delete") {
+        try {
+          await $`tmux -L default has-session -t ${body.session}`.quiet();
+        } catch {
+          return json({ ok: true, gone: true });
+        }
+        try {
+          await $`tmux -L default kill-session -t ${body.session}`.quiet();
+          return json({ ok: true });
+        } catch (e) {
+          return json({ error: errText(e) }, 500);
+        }
+      }
+      if (body.kind === "reply") {
+        if (typeof body.text !== "string" || !body.text.trim()) {
+          return json({ error: "Empty reply" }, 400);
+        }
+        try {
+          await pasteAndSubmit(body.session, body.text);
+          return json({ ok: true });
+        } catch (e) {
+          return json({ error: errText(e) }, 500);
+        }
+      }
+      return json({ error: "Invalid action" }, 400);
     }
 
     // Drop a queued (offline) prompt before it launches.
