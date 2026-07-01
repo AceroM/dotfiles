@@ -85,6 +85,7 @@ Usage:
 
 Keys:
   j/down, k/up  Move selection (supports counts: 5j, 7k)
+  a             Toggle auto-switch after j/k navigation
   Enter         Switch the target tmux client to the selected session
   right         Switch the target tmux client to the selected session
   l             Switch the target tmux client to the selected session
@@ -155,8 +156,11 @@ function isWaitingForClaudeInput(socket: string, name: string): boolean {
 }
 
 const codexSessionsRoot = `${process.env.HOME}/.codex/sessions`;
+const claudeProjectsRoot = `${process.env.HOME}/.claude/projects`;
 const rolloutPathCache = new Map<string, string>();
 const rolloutTitleCache = new Map<string, { mtime: number; title: string }>();
+const claudeTranscriptPathCache = new Map<string, string>();
+const claudeTranscriptTitleCache = new Map<string, { mtime: number; title: string }>();
 let recentRolloutsCache: { expires: number; rows: { path: string; mtime: number }[] } | null = null;
 
 function readHead(path: string, bytes: number): string {
@@ -255,6 +259,78 @@ function readCodexTitle(path: string | null): string {
   }
 }
 
+function findClaudeTranscriptByUuid(uuid: string): string | null {
+  if (!/^[0-9a-fA-F-]{8,}$/.test(uuid)) return null;
+  const cached = claudeTranscriptPathCache.get(uuid);
+  if (cached && existsSync(cached)) return cached;
+
+  try {
+    const glob = new Bun.Glob(`**/${uuid}.jsonl`);
+    for (const rel of glob.scanSync(claudeProjectsRoot)) {
+      const full = `${claudeProjectsRoot}/${rel}`;
+      claudeTranscriptPathCache.set(uuid, full);
+      return full;
+    }
+  } catch {}
+
+  return null;
+}
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .map((part) => {
+      if (part && typeof part === "object" && "text" in part && typeof part.text === "string") {
+        return part.text;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function cleanTranscriptTitle(value: string): string {
+  const commandArgs = /<command-args>([\s\S]*?)<\/command-args>/i.exec(value)?.[1] || "";
+  return (commandArgs || value)
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/gi, " ")
+    .replace(/<local-command-[^>]+>[\s\S]*?<\/local-command-[^>]+>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
+
+function readClaudeTitle(path: string | null): string {
+  if (!path) return "";
+
+  try {
+    const mtime = statSync(path).mtimeMs;
+    const cached = claudeTranscriptTitleCache.get(path);
+    if (cached && cached.mtime === mtime) return cached.title;
+
+    let title = "";
+    for (const line of readHead(path, 256 * 1024).split("\n")) {
+      if (!line.includes('"type":"user"')) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d?.type !== "user" || d?.isMeta || d?.isSidechain) continue;
+        const text = cleanTranscriptTitle(messageText(d?.message?.content));
+        if (text) {
+          title = text;
+          break;
+        }
+      } catch {}
+    }
+
+    claudeTranscriptTitleCache.set(path, { mtime, title });
+    return title;
+  } catch {
+    return "";
+  }
+}
+
 function listSessions(socket: string): TmuxSession[] {
   const format = [
     "#{session_name}",
@@ -291,7 +367,11 @@ function listSessions(socket: string): TmuxSession[] {
         waiting: agent === "claude" && !busy && isWaitingForClaudeInput(socket, name),
         agent,
         transcriptTitle:
-          agent === "codex" ? readCodexTitle(resolveCodexTranscript(cwd || "", codexSession || "")) : "",
+          agent === "codex"
+            ? readCodexTitle(resolveCodexTranscript(cwd || "", codexSession || ""))
+            : agent === "claude"
+              ? readClaudeTitle(findClaudeTranscriptByUuid(claudeSession || ""))
+              : "",
       };
     });
 
@@ -416,13 +496,10 @@ function statusFor(session: TmuxSession): string {
 function rowFor(session: TmuxSession, width: number): string {
   const title = detailFor(session);
   const cwd = session.cwdBase || session.cwd || "-";
-  const age = timeAgo(session.activity);
   const bits = [statusFor(session), title];
   if (cwd && cwd !== title) bits.push(cwd);
-  if (age) bits.push(age);
   if (session.busy) bits.push("running");
   else if (session.waiting) bits.push("waiting");
-  else if (session.attached > 0) bits.push("attached");
   const line = bits.join(" ");
   return truncate(line, Math.max(1, width));
 }
@@ -446,6 +523,7 @@ function App({ args }: { args: Args }) {
   const [filter, setFilter] = useState("");
   const [filtering, setFiltering] = useState(false);
   const [countPrefix, setCountPrefix] = useState("");
+  const [autoSwitch, setAutoSwitch] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -510,12 +588,14 @@ function App({ args }: { args: Args }) {
   );
 
   const move = useCallback(
-    (delta: number) => {
-      if (!sessions.length) return;
+    (delta: number): string | null => {
+      if (!sessions.length) return null;
       const idx = sessions.findIndex((session) => session.name === selectedName);
       const currentIdx = idx < 0 ? 0 : idx;
       const nextIdx = ((currentIdx + delta) % sessions.length + sessions.length) % sessions.length;
-      setSelectedName(sessions[nextIdx].name);
+      const nextName = sessions[nextIdx].name;
+      setSelectedName(nextName);
+      return nextName;
     },
     [selectedName, sessions],
   );
@@ -551,17 +631,22 @@ function App({ args }: { args: Args }) {
     } else if (input === "r") {
       setCountPrefix("");
       refresh();
+    } else if (input === "a") {
+      setCountPrefix("");
+      setAutoSwitch((value) => !value);
     } else if (input === "/" || input === "f") {
       setCountPrefix("");
       setFiltering(true);
     } else if (input === "j" || key.downArrow) {
       const count = Number(countPrefix) || 1;
       setCountPrefix("");
-      move(count);
+      const nextName = move(count);
+      if (autoSwitch && nextName) switchToName(nextName);
     } else if (input === "k" || key.upArrow) {
       const count = Number(countPrefix) || 1;
       setCountPrefix("");
-      move(-count);
+      const nextName = move(-count);
+      if (autoSwitch && nextName) switchToName(nextName);
     } else if (input === "g") {
       setCountPrefix("");
       if (sessions[0]) setSelectedName(sessions[0].name);
@@ -594,13 +679,13 @@ function App({ args }: { args: Args }) {
   });
 
   const listWidth = Math.max(24, columns);
-  const help = "j/k move  enter switch  x kill  / filter  q";
+  const help = `j/k move${autoSwitch ? "+switch" : ""}  a auto  enter switch  x kill  / filter  q`;
 
   return (
     <Box flexDirection="column">
       <Box flexDirection="column">
         <Text bold color="cyan">
-          {activeSession || selectedName || "tmux-nav"}
+          {activeSession || selectedName || "tmux-nav"}{autoSwitch ? " [auto]" : ""}
         </Text>
         {(filtering || filter) && (
           <Text color={filtering ? "yellow" : "gray"}>
