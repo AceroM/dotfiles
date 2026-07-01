@@ -366,7 +366,7 @@ try {
 } catch {}
 try {
   db.run("ALTER TABLE queued_sessions ADD COLUMN model TEXT");
-} catch { }
+} catch {}
 try {
   db.run("ALTER TABLE queued_sessions ADD COLUMN effort TEXT");
 } catch {}
@@ -385,19 +385,11 @@ interface QueuedRow {
   effort: string | null;
   chrome: number;
 }
-<<<<<<< HEAD
 const insertQueuedStmt = db.query<
   { id: number },
-  [number, string, number, string, string | null, number]
+  [number, string, number, string, string | null, string | null, number]
 >(
-  "INSERT INTO queued_sessions (dir_id, prompt, created_at, agent, effort, chrome) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-||||||| parent of 170604d (changes)
-const insertQueuedStmt = db.query<{ id: number }, [number, string, number, string, string | null, number]>(
-  "INSERT INTO queued_sessions (dir_id, prompt, created_at, agent, effort, chrome) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-=======
-const insertQueuedStmt = db.query<{ id: number }, [number, string, number, string, string | null, string | null, number]>(
   "INSERT INTO queued_sessions (dir_id, prompt, created_at, agent, model, effort, chrome) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
->>>>>>> 170604d (changes)
 );
 const listQueuedStmt = db.query<QueuedRow, []>(
   "SELECT * FROM queued_sessions ORDER BY created_at, id",
@@ -1736,15 +1728,10 @@ async function newClaudeSession(
   const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
   // effort is validated against CLAUDE_EFFORTS before it reaches here, so it's a
   // plain word — safe unquoted in the command.
-<<<<<<< HEAD
+  const modelArg =
+    model && CLAUDE_MODELS.has(model) ? ` --model ${shq(model)}` : "";
   const effortArg =
     effort && CLAUDE_EFFORTS.has(effort) ? ` --effort ${effort}` : "";
-||||||| parent of 170604d (changes)
-  const effortArg = effort && CLAUDE_EFFORTS.has(effort) ? ` --effort ${effort}` : "";
-=======
-  const modelArg = model && CLAUDE_MODELS.has(model) ? ` --model ${shq(model)}` : "";
-  const effortArg = effort && CLAUDE_EFFORTS.has(effort) ? ` --effort ${effort}` : "";
->>>>>>> 170604d (changes)
   // --chrome enables the Claude-in-Chrome integration for this session.
   const chromeArg = chrome ? " --chrome" : "";
   const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${modelArg}${effortArg}${chromeArg}${promptArg}`;
@@ -1831,25 +1818,21 @@ async function drainQueue(): Promise<void> {
         continue;
       }
       try {
-<<<<<<< HEAD
         if (row.agent === "codex")
-          await newCodexSession(dir.path, row.prompt, row.effort ?? undefined);
+          await newCodexSession(
+            dir.path,
+            row.prompt,
+            row.model ?? undefined,
+            row.effort ?? undefined,
+          );
         else
           await newClaudeSession(
             dir.path,
             row.prompt,
+            row.model ?? undefined,
             row.effort ?? undefined,
             row.chrome === 1,
           );
-||||||| parent of 170604d (changes)
-        if (row.agent === "codex") await newCodexSession(dir.path, row.prompt, row.effort ?? undefined);
-        else await newClaudeSession(dir.path, row.prompt, row.effort ?? undefined, row.chrome === 1);
-=======
-        if (row.agent === "codex")
-          await newCodexSession(dir.path, row.prompt, row.model ?? undefined, row.effort ?? undefined);
-        else
-          await newClaudeSession(dir.path, row.prompt, row.model ?? undefined, row.effort ?? undefined, row.chrome === 1);
->>>>>>> 170604d (changes)
         deleteQueuedStmt.run(row.id);
       } catch {
         break;
@@ -2045,17 +2028,12 @@ async function tagCodexSession(
 // the prompt as codex's positional arg so codex submits it itself on boot (the same
 // zero-timing trick newClaudeSession uses — a send-keys Enter would race codex's paste
 // debounce). The @codex_session tag is discovered + stamped asynchronously.
-<<<<<<< HEAD
 async function newCodexSession(
   dir: string,
   prompt: string,
+  model?: string,
   effort?: string,
 ): Promise<string> {
-||||||| parent of 170604d (changes)
-async function newCodexSession(dir: string, prompt: string, effort?: string): Promise<string> {
-=======
-async function newCodexSession(dir: string, prompt: string, model?: string, effort?: string): Promise<string> {
->>>>>>> 170604d (changes)
   const name = await pickClaudeSessionName();
   const before = codexRolloutUuids();
   const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
@@ -6549,18 +6527,13 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-<<<<<<< HEAD
       let body: {
         prompt?: unknown;
+        model?: unknown;
         effort?: unknown;
         chrome?: unknown;
         agent?: unknown;
       };
-||||||| parent of 170604d (changes)
-      let body: { prompt?: unknown; effort?: unknown; chrome?: unknown; agent?: unknown };
-=======
-      let body: { prompt?: unknown; model?: unknown; effort?: unknown; chrome?: unknown; agent?: unknown };
->>>>>>> 170604d (changes)
       try {
         body = await req.json();
       } catch {
@@ -6569,13 +6542,8 @@ const server = Bun.serve({
       if (typeof body.prompt !== "string" || !body.prompt.trim()) {
         return json({ error: "Empty prompt" }, 400);
       }
-<<<<<<< HEAD
       const agent: "claude" | "codex" =
         body.agent === "codex" ? "codex" : "claude";
-||||||| parent of 170604d (changes)
-      const agent: "claude" | "codex" = body.agent === "codex" ? "codex" : "claude";
-=======
-      const agent: "claude" | "codex" = body.agent === "codex" ? "codex" : "claude";
       // Model names come from the dialog's dropdown. Unknown values are ignored so
       // stale clients fall back to the CLI/settings default instead of failing.
       const model =
@@ -6583,7 +6551,6 @@ const server = Bun.serve({
         (agent === "codex" ? CODEX_MODELS : CLAUDE_MODELS).has(body.model)
           ? body.model
           : undefined;
->>>>>>> 170604d (changes)
       // Allowlisted so it's safe to splice straight into the shell command, and so a
       // bad value falls back to the global default rather than erroring the launch.
       const effort =
@@ -6595,20 +6562,15 @@ const server = Bun.serve({
       // Offline → enqueue instead of launching a session that couldn't reach the
       // API. drainQueue() launches it (as its agent) automatically once we're online.
       if (!(await checkOnline(true))) {
-<<<<<<< HEAD
         const id = insertQueuedStmt.get(
           ws.id,
           body.prompt,
           Date.now(),
           agent,
+          model ?? null,
           effort ?? null,
           chrome ? 1 : 0,
         )!.id;
-||||||| parent of 170604d (changes)
-        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now(), agent, effort ?? null, chrome ? 1 : 0)!.id;
-=======
-        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now(), agent, model ?? null, effort ?? null, chrome ? 1 : 0)!.id;
->>>>>>> 170604d (changes)
         return json({ ok: true, queued: true, id });
       }
       try {
