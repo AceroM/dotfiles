@@ -337,17 +337,25 @@ function readClaudeTitle(path: string | null): string {
 
 // ---- Agent usage footer -----------------------------------------------------
 // Per agent: rate-limit windows when on a subscription, else an estimated dollar
-// spend for today (local day) from local token usage. Neither agent records a
-// dollar figure — only token counts — so the cost is an estimate against a
-// static price table, labelled "est" in the UI.
+// spend over trailing day / week / month windows from local token usage. Neither
+// agent records a dollar figure — only token counts — so the cost is an estimate
+// against a static price table. To keep it cheap despite a month of transcripts,
+// each file's per-date cost is cached by mtime, so only files that grew since the
+// last scan are re-parsed (see estimateClaudeCost / estimateCodexCost).
 
 interface UsageWindow {
   used_percentage: number;
 }
+interface CostWindows {
+  day: number;
+  week: number;
+  month: number;
+}
 interface AgentUsage {
   five_hour: UsageWindow | null;
   seven_day: UsageWindow | null;
-  costToday: number | null;
+  // Estimated spend; null when the agent is on a subscription (windows shown).
+  cost: CostWindows | null;
 }
 interface UsageSummary {
   claude: AgentUsage;
@@ -383,10 +391,37 @@ function normWindow(win: unknown): UsageWindow | null {
   return used == null ? null : { used_percentage: used };
 }
 
-function startOfTodayMs(): number {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+// Local calendar date (YYYY-MM-DD) for a unix-ms timestamp. ISO date strings
+// compare lexicographically, so window membership is a string comparison.
+function localDateStr(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// Inclusive start dates for the day (today), week (last 7 days) and month
+// (last 30 days) windows.
+function windowStartDates(): { today: string; weekStart: string; monthStart: string } {
+  const now = Date.now();
+  return {
+    today: localDateStr(now),
+    weekStart: localDateStr(now - 6 * 864e5),
+    monthStart: localDateStr(now - 29 * 864e5),
+  };
+}
+
+function sumWindows(daily: Map<string, number>): CostWindows {
+  const { today, weekStart, monthStart } = windowStartDates();
+  const cost: CostWindows = { day: 0, week: 0, month: 0 };
+  for (const [date, c] of daily) {
+    if (date < monthStart) continue;
+    cost.month += c;
+    if (date >= weekStart) cost.week += c;
+    if (date === today) cost.day += c;
+  }
+  return cost;
 }
 
 function readTail(path: string, bytes: number): string {
@@ -443,104 +478,125 @@ function readCodexWindows(): { five: UsageWindow | null; seven: UsageWindow | nu
   return { five: null, seven: null };
 }
 
-function estimateClaudeCostToday(): number {
-  const since = startOfTodayMs();
-  let cost = 0;
+// Per-file cost bucketed by local date, keyed by mtime so only files that grew
+// since the last scan are re-parsed. Keyed by absolute path; entries are cheap
+// (a few dates each) and never invalidated — a changed mtime just replaces one.
+const claudeDailyCache = new Map<string, { mtime: number; daily: Map<string, number> }>();
+const codexDailyCache = new Map<string, { mtime: number; daily: Map<string, number> }>();
+
+function parseClaudeDaily(path: string): Map<string, number> {
+  const daily = new Map<string, number>();
+  let text: string;
   try {
-    const glob = new Bun.Glob("**/*.jsonl");
-    for (const rel of glob.scanSync(claudeProjectsRoot)) {
-      const path = `${claudeProjectsRoot}/${rel}`;
-      let mtime = 0;
-      try {
-        mtime = statSync(path).mtimeMs;
-      } catch {
-        continue;
-      }
-      if (mtime < since) continue; // untouched today ⇒ no today lines
-      let text: string;
-      try {
-        text = readFileSync(path, "utf8");
-      } catch {
-        continue;
-      }
-      for (const line of text.split("\n")) {
-        if (!line.includes('"assistant"') || !line.includes('"usage"')) continue;
-        let d: any;
-        try {
-          d = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (d?.type !== "assistant") continue;
-        const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : NaN;
-        if (!Number.isFinite(ts) || ts < since) continue;
-        const u = d.message?.usage;
-        if (!u) continue;
-        const p = claudePrice(d.message?.model ?? "");
-        const inp = finiteNum(u.input_tokens) ?? 0;
-        const out = finiteNum(u.output_tokens) ?? 0;
-        const cr = finiteNum(u.cache_read_input_tokens) ?? 0;
-        const cc = finiteNum(u.cache_creation_input_tokens) ?? 0;
-        cost += (inp * p.input + out * p.output + cr * p.cacheRead + cc * p.cacheCreate) / 1e6;
-      }
+    text = readFileSync(path, "utf8");
+  } catch {
+    return daily;
+  }
+  for (const line of text.split("\n")) {
+    if (!line.includes('"assistant"') || !line.includes('"usage"')) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
     }
-  } catch {}
-  return cost;
+    if (d?.type !== "assistant") continue;
+    const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : NaN;
+    if (!Number.isFinite(ts)) continue;
+    const u = d.message?.usage;
+    if (!u) continue;
+    const p = claudePrice(d.message?.model ?? "");
+    const inp = finiteNum(u.input_tokens) ?? 0;
+    const out = finiteNum(u.output_tokens) ?? 0;
+    const cr = finiteNum(u.cache_read_input_tokens) ?? 0;
+    const cc = finiteNum(u.cache_creation_input_tokens) ?? 0;
+    const c = (inp * p.input + out * p.output + cr * p.cacheRead + cc * p.cacheCreate) / 1e6;
+    const date = localDateStr(ts);
+    daily.set(date, (daily.get(date) ?? 0) + c);
+  }
+  return daily;
 }
 
-function estimateCodexCostToday(): number {
-  const since = startOfTodayMs();
-  let cost = 0;
+function parseCodexDaily(path: string): Map<string, number> {
+  const daily = new Map<string, number>();
+  let text: string;
   try {
-    const glob = new Bun.Glob("**/rollout-*.jsonl");
-    for (const rel of glob.scanSync(codexSessionsRoot)) {
-      const path = `${codexSessionsRoot}/${rel}`;
+    text = readFileSync(path, "utf8");
+  } catch {
+    return daily;
+  }
+  for (const line of text.split("\n")) {
+    if (!line.includes('"token_count"')) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (d?.payload?.type !== "token_count") continue;
+    const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : NaN;
+    if (!Number.isFinite(ts)) continue;
+    // last_token_usage is that turn's delta; summing deltas per date ≈ per-day spend.
+    const last = d.payload?.info?.last_token_usage;
+    if (!last) continue;
+    const input = finiteNum(last.input_tokens) ?? 0;
+    const cached = finiteNum(last.cached_input_tokens) ?? 0;
+    const output = finiteNum(last.output_tokens) ?? 0;
+    const uncached = Math.max(0, input - cached);
+    const c = (uncached * CODEX_PRICE.input + cached * CODEX_PRICE.cacheRead + output * CODEX_PRICE.output) / 1e6;
+    const date = localDateStr(ts);
+    daily.set(date, (daily.get(date) ?? 0) + c);
+  }
+  return daily;
+}
+
+// Walk the transcripts once (cold), then only re-parse files whose mtime changed.
+// Files whose newest byte predates the month window are skipped outright.
+function estimateCost(
+  root: string,
+  pattern: string,
+  cache: Map<string, { mtime: number; daily: Map<string, number> }>,
+  parse: (path: string) => Map<string, number>,
+): CostWindows {
+  const monthStart = windowStartDates().monthStart;
+  const total: CostWindows = { day: 0, week: 0, month: 0 };
+  try {
+    for (const rel of new Bun.Glob(pattern).scanSync(root)) {
+      const path = `${root}/${rel}`;
       let mtime = 0;
       try {
         mtime = statSync(path).mtimeMs;
       } catch {
         continue;
       }
-      if (mtime < since) continue;
-      let text: string;
-      try {
-        text = readFileSync(path, "utf8");
-      } catch {
-        continue;
+      if (localDateStr(mtime) < monthStart) continue; // last touched before the window
+      let entry = cache.get(path);
+      if (!entry || entry.mtime !== mtime) {
+        entry = { mtime, daily: parse(path) };
+        cache.set(path, entry);
       }
-      for (const line of text.split("\n")) {
-        if (!line.includes('"token_count"')) continue;
-        let d: any;
-        try {
-          d = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (d?.payload?.type !== "token_count") continue;
-        const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : NaN;
-        if (!Number.isFinite(ts) || ts < since) continue;
-        // last_token_usage is that turn's delta; summing today's deltas ≈ today.
-        const last = d.payload?.info?.last_token_usage;
-        if (!last) continue;
-        const input = finiteNum(last.input_tokens) ?? 0;
-        const cached = finiteNum(last.cached_input_tokens) ?? 0;
-        const output = finiteNum(last.output_tokens) ?? 0;
-        const uncached = Math.max(0, input - cached);
-        cost += (uncached * CODEX_PRICE.input + cached * CODEX_PRICE.cacheRead + output * CODEX_PRICE.output) / 1e6;
-      }
+      const w = sumWindows(entry.daily);
+      total.day += w.day;
+      total.week += w.week;
+      total.month += w.month;
     }
   } catch {}
-  return cost;
+  return total;
 }
+
+const estimateClaudeCost = (): CostWindows =>
+  estimateCost(claudeProjectsRoot, "**/*.jsonl", claudeDailyCache, parseClaudeDaily);
+const estimateCodexCost = (): CostWindows =>
+  estimateCost(codexSessionsRoot, "**/rollout-*.jsonl", codexDailyCache, parseCodexDaily);
 
 let usageCache: { at: number; data: UsageSummary } | null = null;
 
-// Cached for 60s: estimating today's cost scans transcripts, too heavy to run on
-// every refresh tick. Cost is only computed for an agent with no subscription
-// windows (i.e. API-billed), so subscription users never pay the scan.
+// Recomputed at most every 15s. Cost is only estimated for an agent with no
+// subscription windows (API-billed); the per-file cache keeps recomputes cheap
+// after the one-time cold scan, so subscription users never pay it at all.
 function loadUsage(): UsageSummary {
   const now = Date.now();
-  if (usageCache && now - usageCache.at < 60_000) return usageCache.data;
+  if (usageCache && now - usageCache.at < 15_000) return usageCache.data;
 
   const claudeWin = readClaudeWindows();
   const codexWin = readCodexWindows();
@@ -548,12 +604,12 @@ function loadUsage(): UsageSummary {
     claude: {
       five_hour: claudeWin.five,
       seven_day: claudeWin.seven,
-      costToday: claudeWin.five || claudeWin.seven ? null : estimateClaudeCostToday(),
+      cost: claudeWin.five || claudeWin.seven ? null : estimateClaudeCost(),
     },
     codex: {
       five_hour: codexWin.five,
       seven_day: codexWin.seven,
-      costToday: codexWin.five || codexWin.seven ? null : estimateCodexCostToday(),
+      cost: codexWin.five || codexWin.seven ? null : estimateCodexCost(),
     },
   };
   usageCache = { at: now, data };
@@ -567,8 +623,9 @@ function formatUsageLine(name: string, u: AgentUsage): string | null {
     if (u.seven_day) parts.push(`1w ${Math.round(u.seven_day.used_percentage)}%`);
     return `${name}: ${parts.join(" | ")}`;
   }
-  if (typeof u.costToday === "number") {
-    return `${name}: $${u.costToday.toFixed(2)} est`;
+  if (u.cost) {
+    const c = u.cost;
+    return `${name}: 1d $${c.day.toFixed(2)} | 1w $${c.week.toFixed(2)} | 1m $${c.month.toFixed(2)}`;
   }
   return null;
 }
