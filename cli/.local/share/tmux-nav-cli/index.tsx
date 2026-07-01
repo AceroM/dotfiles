@@ -90,9 +90,9 @@ Keys:
   j/down, k/up  Move selection (supports counts: 5j, 7k)
   J/K           Jump to next/previous busy or waiting session
   a             Toggle auto-switch after j/k navigation
-  Enter         Switch the target tmux client to the selected session
-  right         Switch the target tmux client to the selected session
-  l             Switch the target tmux client to the selected session
+  Enter         Switch the target tmux client to the selected session (and focus its split)
+  right         Switch the target tmux client to the selected session (and focus its split)
+  l             Switch the target tmux client to the selected session (and focus its split)
   x             Kill the selected session
   /             Filter sessions
   Esc           Clear filter
@@ -823,6 +823,27 @@ function killSession(socket: string, sessionName: string) {
   tmux(socket, ["kill-session", "-t", sessionName]);
 }
 
+// Move keyboard focus from this (tmux-nav) split to the terminal split after a
+// commit action (Enter / spawn). tmux-nav runs as a plain process in its own
+// Ghostty split, so switch-client only re-points what the *other* split is
+// attached to — focus stays here. Ghostty 1.3.x exposes no IPC to trigger
+// goto_split from a child, and tmux can't move focus across Ghostty splits
+// (separate PTYs), so we synthesize its default `super+]` (goto_split:next)
+// keybind via macOS System Events. Requires granting Ghostty Accessibility
+// permission (first use prompts). Opt out with TMUX_NAV_NO_FOCUS=1; change the
+// key with TMUX_NAV_FOCUS_KEY (default "]", e.g. "[" for goto_split:previous).
+function focusOtherSplit() {
+  if (process.platform !== "darwin" || process.env.TMUX_NAV_NO_FOCUS) return;
+  const key = process.env.TMUX_NAV_FOCUS_KEY || "]";
+  try {
+    spawnSync(
+      "osascript",
+      ["-e", `tell application "System Events" to keystroke "${key}" using command down`],
+      { stdio: "ignore" },
+    );
+  } catch {}
+}
+
 function spawnAgentSession(
   agent: "claude" | "codex",
   socket: string,
@@ -1065,6 +1086,7 @@ function App({ args }: { args: Args }) {
         setSnapshot(next);
         setSelectedName(next.targetClient?.session || session.name);
         setError(null);
+        focusOtherSplit();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -1195,6 +1217,7 @@ function App({ args }: { args: Args }) {
       setCountPrefix("");
       setFilter("");
       switchToName(selected.name);
+      focusOtherSplit();
     } else if (input === "c" && selected) {
       setCountPrefix("");
       setFilter("");
