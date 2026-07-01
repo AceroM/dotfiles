@@ -630,6 +630,94 @@ function formatUsageLine(name: string, u: AgentUsage): string | null {
   return null;
 }
 
+// ---- Admin API (org usage, cross-machine) -----------------------------------
+// When ANTHROPIC_ADMIN_API_KEY is set, prefer the org Usage Report over local
+// transcript scanning for Claude: it aggregates this user's key usage across all
+// machines. The Cost Report returns real USD but only groups by workspace /
+// description (no per-user breakdown), so on a shared org it can't isolate one
+// person — instead we price the authoritative per-key token counts ourselves
+// (same approach as the `ms` shell helper). Filtered to the user's keys by name.
+
+const ADMIN_BASE = "https://api.anthropic.com/v1";
+
+// Which person's keys to sum. Keys are named `claude_code_key_<who>_<rand>`.
+function adminWho(): string {
+  return (process.env.TMUX_NAV_USAGE_WHO || "miguel").toLowerCase();
+}
+function keyGroupName(name: string): string {
+  return name.match(/^claude_code_key_(.+)_[a-z]{4}$/)?.[1] ?? name;
+}
+
+async function adminApiKeyNames(key: string): Promise<Map<string, string>> {
+  const headers = { "x-api-key": key, "anthropic-version": "2023-06-01" };
+  const map = new Map<string, string>();
+  let after: string | null = null;
+  for (let guard = 0; guard < 50; guard++) {
+    const params = new URLSearchParams({ limit: "100" });
+    if (after) params.set("after_id", after);
+    const res = await fetch(`${ADMIN_BASE}/organizations/api_keys?${params}`, { headers });
+    if (!res.ok) throw new Error(`api_keys ${res.status}`);
+    const j: any = await res.json();
+    for (const k of j.data ?? []) map.set(k.id, k.name ?? k.id);
+    if (!j.has_more || !j.last_id) break;
+    after = j.last_id;
+  }
+  return map;
+}
+
+// Fetch this user's Claude token usage for the trailing 30 days and price it into
+// day/week/month windows. Returns null when no admin key is configured.
+async function fetchAdminClaudeCost(): Promise<CostWindows | null> {
+  const key = process.env.ANTHROPIC_ADMIN_API_KEY;
+  if (!key) return null;
+  const headers = { "x-api-key": key, "anthropic-version": "2023-06-01" };
+
+  const now = new Date();
+  const start = new Date(now);
+  start.setUTCDate(start.getUTCDate() - 29);
+  start.setUTCHours(0, 0, 0, 0);
+  const params = new URLSearchParams({
+    bucket_width: "1d",
+    starting_at: start.toISOString(),
+    ending_at: now.toISOString(),
+    limit: "31",
+  });
+  params.append("group_by[]", "api_key_id");
+  params.append("group_by[]", "model");
+
+  const nameMap = await adminApiKeyNames(key);
+  const who = adminWho();
+
+  const daily = new Map<string, number>();
+  let page: string | null = null;
+  for (let guard = 0; guard < 50; guard++) {
+    const url = `${ADMIN_BASE}/organizations/usage_report/messages?${params}${page ? `&page=${page}` : ""}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(`usage_report ${res.status}`);
+    const j: any = await res.json();
+    for (const bucket of j.data ?? []) {
+      const date = typeof bucket.starting_at === "string" ? bucket.starting_at.slice(0, 10) : "";
+      if (!date) continue;
+      for (const r of bucket.results ?? []) {
+        const name = r.api_key_id ? nameMap.get(r.api_key_id) ?? "" : "";
+        if (!keyGroupName(name).toLowerCase().includes(who)) continue;
+        const p = claudePrice(r.model ?? "");
+        const inp = finiteNum(r.uncached_input_tokens) ?? 0;
+        const out = finiteNum(r.output_tokens) ?? 0;
+        const cr = finiteNum(r.cache_read_input_tokens) ?? 0;
+        const cc =
+          (finiteNum(r.cache_creation?.ephemeral_1h_input_tokens) ?? 0) +
+          (finiteNum(r.cache_creation?.ephemeral_5m_input_tokens) ?? 0);
+        const c = (inp * p.input + out * p.output + cr * p.cacheRead + cc * p.cacheCreate) / 1e6;
+        daily.set(date, (daily.get(date) ?? 0) + c);
+      }
+    }
+    if (!j.has_more || !j.next_page) break;
+    page = j.next_page;
+  }
+  return sumWindows(daily);
+}
+
 function listSessions(socket: string): TmuxSession[] {
   const format = [
     "#{session_name}",
@@ -877,6 +965,7 @@ function App({ args }: { args: Args }) {
   const [autoSwitch, setAutoSwitch] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [adminCost, setAdminCost] = useState<CostWindows | null>(null);
 
   const refresh = useCallback(() => {
     try {
@@ -902,6 +991,27 @@ function App({ args }: { args: Args }) {
     const timer = setInterval(refresh, args.refreshMs);
     return () => clearInterval(timer);
   }, [args.refreshMs, refresh]);
+
+  // Poll the Admin API for authoritative Claude spend (across machines) when a
+  // key is configured; it overrides the local estimate in the footer. Network,
+  // so it runs off the render loop on a slow cadence and fails quietly.
+  useEffect(() => {
+    if (!process.env.ANTHROPIC_ADMIN_API_KEY) return;
+    let cancelled = false;
+    const run = () => {
+      fetchAdminClaudeCost()
+        .then((cost) => {
+          if (!cancelled && cost) setAdminCost(cost);
+        })
+        .catch(() => {});
+    };
+    run();
+    const timer = setInterval(run, 5 * 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   const activeSession = snapshot.targetClient?.session || "";
   const sessions = useMemo(
@@ -995,11 +1105,17 @@ function App({ args }: { args: Args }) {
     [selectedName, sessions],
   );
 
-  const usageLines = usage
-    ? ([formatUsageLine("claude", usage.claude), formatUsageLine("codex", usage.codex)].filter(
-        Boolean,
-      ) as string[])
-    : [];
+  // Admin-API spend supersedes the local estimate for API-billed Claude.
+  const claudeAgent =
+    usage && adminCost && !(usage.claude.five_hour || usage.claude.seven_day)
+      ? { ...usage.claude, cost: adminCost }
+      : usage?.claude ?? null;
+  const usageLines =
+    usage && claudeAgent
+      ? ([formatUsageLine("claude", claudeAgent), formatUsageLine("codex", usage.codex)].filter(
+          Boolean,
+        ) as string[])
+      : [];
   const headerLines = filtering || filter ? 3 : 2;
   const footerLines = (error || !snapshot.targetClient ? 2 : 1) + usageLines.length;
   const maxVisible = Math.max(1, rows - headerLines - footerLines);
