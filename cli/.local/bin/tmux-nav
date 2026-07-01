@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="${HOME}/.local/share/tmux-nav-cli"
+if [ ! -f "${script_dir}/index.tsx" ]; then
+  script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../share/tmux-nav-cli" && pwd)"
+fi
+
+# bun resolves symlinks, so node_modules must be next to the real index.tsx
+real_dir="$(cd -P "$(dirname "${script_dir}/index.tsx")" && pwd)"
+
+if [ ! -d "${real_dir}/node_modules" ]; then
+  echo "Installing dependencies..." >&2
+  (cd "${real_dir}" && bun install)
+fi
+
+exec bun run "${script_dir}/index.tsx" "$@"
