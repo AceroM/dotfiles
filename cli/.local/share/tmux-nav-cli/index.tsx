@@ -92,8 +92,8 @@ Keys:
   J/K           Jump to next/previous busy or waiting session
   a             Toggle auto-switch after j/k navigation
   Enter         Switch the target tmux client to the selected session (and focus its split)
-  right         Switch the target tmux client to the selected session (and focus its split)
-  l             Switch the target tmux client to the selected session (and focus its split)
+  right/left    Switch the target tmux client to the selected session (and focus its split)
+  l/h           Switch the target tmux client to the selected session (and focus its split)
   c             Spawn a new claude session in the selected session's directory
   C             Spawn a new codex session in the selected session's directory
   b             Branch: new claude prefilled to look at the selected claude session's transcript
@@ -1228,7 +1228,7 @@ function App({ args }: { args: Args }) {
         setSelectedName(last.name);
         if (autoSwitch) switchToName(last.name);
       }
-    } else if ((key.return || key.rightArrow || input === "l") && selected) {
+    } else if ((key.return || key.rightArrow || key.leftArrow || input === "l" || input === "h") && selected) {
       setCountPrefix("");
       setFilter("");
       switchToName(selected.name);
