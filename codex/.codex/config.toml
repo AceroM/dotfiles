@@ -3,3 +3,9 @@ notification_condition = "always"
 
 [tui.keymap.editor]
 insert_newline = "shift-enter"
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+
+[projects."/Users/miguel/.dotfiles"]
+trust_level = "trusted"

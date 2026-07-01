@@ -8,13 +8,10 @@ import { basename } from "node:path";
 
 const SEP = "\x1f";
 
-type SortMode = "activity" | "name";
-
 interface Args {
   socket: string;
   client: string | null;
   refreshMs: number;
-  sort: SortMode;
 }
 
 interface TmuxSession {
@@ -23,12 +20,14 @@ interface TmuxSession {
   // Last active window output/activity. This stays stable when merely switching
   // clients, unlike session_activity, which jumps on navigation.
   activity: number;
+  created: number;
   cwd: string;
   cwdBase: string;
   command: string;
   title: string;
   task: string;
   busy: boolean;
+  waiting: boolean;
   agent: string;
   transcriptTitle: string;
 }
@@ -50,7 +49,6 @@ function parseArgs(argv: string[]): Args {
     socket: process.env.TMUX_NAV_SOCKET || "default",
     client: process.env.TMUX_NAV_CLIENT || null,
     refreshMs: 1500,
-    sort: "activity",
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -67,8 +65,7 @@ function parseArgs(argv: string[]): Args {
       const n = Number(argv[++i]);
       if (Number.isFinite(n) && n >= 250) args.refreshMs = n;
     } else if (arg === "--sort") {
-      const sort = argv[++i];
-      if (sort === "activity" || sort === "name") args.sort = sort;
+      i++;
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -84,11 +81,12 @@ function printHelp() {
 Arc-style tmux session navigator for a narrow terminal pane.
 
 Usage:
-  tmux-nav [--socket default] [--client /dev/ttys001] [--sort activity|name]
+  tmux-nav [--socket default] [--client /dev/ttys001]
 
 Keys:
-  j/down, k/up  Move selection
+  j/down, k/up  Move selection (supports counts: 5j, 7k)
   Enter         Switch the target tmux client to the selected session
+  right         Switch the target tmux client to the selected session
   l             Switch the target tmux client to the selected session
   x             Kill the selected session
   /             Filter sessions
@@ -142,6 +140,18 @@ function agentFor(command: string, claudeSession: string, codexSession: string):
   if (codexSession || command === "codex") return "codex";
   if (claudeSession || command === "claude" || /^\d+\.\d+\.\d+$/.test(command)) return "claude";
   return command || "shell";
+}
+
+const PROMPT_CURSOR = /❯\s*\d+\.\s/u;
+const PROMPT_FOOTER = /(?:to select|↑\/↓|to navigate|Do you want to proceed|Would you like to proceed)/iu;
+
+function isWaitingForClaudeInput(socket: string, name: string): boolean {
+  try {
+    const pane = tmux(socket, ["capture-pane", "-p", "-S", "-120", "-t", `${name}:0.0`]);
+    return PROMPT_CURSOR.test(pane) || PROMPT_FOOTER.test(pane);
+  } catch {
+    return false;
+  }
 }
 
 const codexSessionsRoot = `${process.env.HOME}/.codex/sessions`;
@@ -245,11 +255,12 @@ function readCodexTitle(path: string | null): string {
   }
 }
 
-function listSessions(socket: string, sort: SortMode): TmuxSession[] {
+function listSessions(socket: string): TmuxSession[] {
   const format = [
     "#{session_name}",
     "#{session_attached}",
     "#{window_activity}",
+    "#{session_created}",
     "#{pane_current_path}",
     "#{pane_current_command}",
     "#{pane_title}",
@@ -262,29 +273,29 @@ function listSessions(socket: string, sort: SortMode): TmuxSession[] {
     .split("\n")
     .filter(Boolean)
     .map((line) => {
-      const [name, attached, activity, cwd, command, title, claudeSession, codexSession] = line.split(SEP);
+      const [name, attached, activity, created, cwd, command, title, claudeSession, codexSession] = line.split(SEP);
       const cwdBase = basename(cwd || "") || cwd || "";
       const agent = agentFor(command || "", claudeSession || "", codexSession || "");
+      const busy = /^[\u2800-\u28ff]/u.test(title || "");
       return {
         name,
         attached: Number(attached) || 0,
         activity: Number(activity) || 0,
+        created: Number(created) || 0,
         cwd: cwd || "",
         cwdBase,
         command: command || "",
         title: title || "",
         task: cleanTitle(title || "", name, command || "", cwdBase),
-        busy: /^[\u2800-\u28ff]/u.test(title || ""),
+        busy,
+        waiting: agent === "claude" && !busy && isWaitingForClaudeInput(socket, name),
         agent,
         transcriptTitle:
           agent === "codex" ? readCodexTitle(resolveCodexTranscript(cwd || "", codexSession || "")) : "",
       };
     });
 
-  sessions.sort((a, b) => {
-    if (sort === "name") return a.name.localeCompare(b.name);
-    return b.activity - a.activity || a.name.localeCompare(b.name);
-  });
+  sessions.sort((a, b) => a.created - b.created || a.name.localeCompare(b.name));
 
   return sessions;
 }
@@ -320,7 +331,7 @@ function resolveTargetClient(clients: TmuxClient[], wanted: string | null): Tmux
 }
 
 function loadSnapshot(args: Args, targetClient: string | null = args.client): Snapshot {
-  const sessions = listSessions(args.socket, args.sort);
+  const sessions = listSessions(args.socket);
   const clients = listClients(args.socket);
   return {
     sessions,
@@ -366,6 +377,25 @@ function matchesFilter(session: TmuxSession, filter: string): boolean {
     .includes(q);
 }
 
+function selectionAfterRemoval(sessions: TmuxSession[], removedName: string): string {
+  const idx = sessions.findIndex((session) => session.name === removedName);
+  if (idx < 0) return sessions[0]?.name || "";
+
+  const remaining = sessions.filter((session) => session.name !== removedName);
+  if (remaining.length === 0) return "";
+
+  return remaining[Math.min(idx, remaining.length - 1)].name;
+}
+
+function selectionAfterRefresh(previous: TmuxSession[], current: TmuxSession[], removedName: string): string {
+  if (current.length === 0) return "";
+
+  const idx = previous.findIndex((session) => session.name === removedName);
+  if (idx < 0) return current[0].name;
+
+  return current[Math.min(idx, current.length - 1)].name;
+}
+
 function detailFor(session: TmuxSession): string {
   if (session.task) return session.task;
   if (session.transcriptTitle) return session.transcriptTitle;
@@ -376,15 +406,22 @@ function detailFor(session: TmuxSession): string {
   return session.command || "untitled";
 }
 
-function rowFor(session: TmuxSession, active: boolean, width: number): string {
+function statusFor(session: TmuxSession): string {
+  if (session.busy) return "*";
+  if (session.waiting) return "!";
+  if (session.agent === "claude") return ".";
+  return "-";
+}
+
+function rowFor(session: TmuxSession, width: number): string {
   const title = detailFor(session);
   const cwd = session.cwdBase || session.cwd || "-";
   const age = timeAgo(session.activity);
-  const bits = [title];
+  const bits = [statusFor(session), title];
   if (cwd && cwd !== title) bits.push(cwd);
   if (age) bits.push(age);
   if (session.busy) bits.push("running");
-  else if (active) bits.push("active");
+  else if (session.waiting) bits.push("waiting");
   else if (session.attached > 0) bits.push("attached");
   const line = bits.join(" ");
   return truncate(line, Math.max(1, width));
@@ -408,6 +445,7 @@ function App({ args }: { args: Args }) {
   const [selectedName, setSelectedName] = useState<string>("");
   const [filter, setFilter] = useState("");
   const [filtering, setFiltering] = useState(false);
+  const [countPrefix, setCountPrefix] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -439,27 +477,57 @@ function App({ args }: { args: Args }) {
     () => snapshot.sessions.filter((session) => matchesFilter(session, filter)),
     [filter, snapshot.sessions],
   );
+  const previousSessionsRef = useRef<TmuxSession[]>(sessions);
 
   useEffect(() => {
     if (sessions.length === 0) {
       setSelectedName("");
     } else if (!sessions.some((session) => session.name === selectedName)) {
-      setSelectedName(sessions[0].name);
+      setSelectedName(selectionAfterRefresh(previousSessionsRef.current, sessions, selectedName));
     }
+    previousSessionsRef.current = sessions;
   }, [selectedName, sessions]);
 
   const selectedIndex = Math.max(0, sessions.findIndex((session) => session.name === selectedName));
   const selected = sessions[selectedIndex] || null;
 
+  const switchToName = useCallback(
+    (sessionName: string) => {
+      try {
+        switchToSession(args.socket, snapshot.targetClient, sessionName);
+        setSnapshot((current) => ({
+          ...current,
+          targetClient: current.targetClient
+            ? { ...current.targetClient, session: sessionName }
+            : current.targetClient,
+        }));
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [args.socket, snapshot.targetClient],
+  );
+
   const move = useCallback(
     (delta: number) => {
       if (!sessions.length) return;
       const idx = sessions.findIndex((session) => session.name === selectedName);
-      const nextIdx = Math.min(sessions.length - 1, Math.max(0, (idx < 0 ? 0 : idx) + delta));
+      const currentIdx = idx < 0 ? 0 : idx;
+      const nextIdx = ((currentIdx + delta) % sessions.length + sessions.length) % sessions.length;
       setSelectedName(sessions[nextIdx].name);
     },
     [selectedName, sessions],
   );
+
+  const headerLines = filtering || filter ? 3 : 2;
+  const footerLines = error || !snapshot.targetClient ? 2 : 1;
+  const maxVisible = Math.max(1, rows - headerLines - footerLines);
+  const start = Math.min(
+    Math.max(0, selectedIndex - Math.floor(maxVisible / 2)),
+    Math.max(0, sessions.length - maxVisible),
+  );
+  const visible = sessions.slice(start, start + maxVisible);
 
   useInput((input, key) => {
     if (filtering) {
@@ -478,34 +546,46 @@ function App({ args }: { args: Args }) {
 
     if (input === "q" || (input === "c" && key.ctrl)) {
       exit();
+    } else if (/^\d$/.test(input) && !key.ctrl && !key.meta && (countPrefix || input !== "0")) {
+      setCountPrefix((value) => `${value}${input}`.slice(0, 4));
     } else if (input === "r") {
+      setCountPrefix("");
       refresh();
     } else if (input === "/" || input === "f") {
+      setCountPrefix("");
       setFiltering(true);
     } else if (input === "j" || key.downArrow) {
-      move(1);
+      const count = Number(countPrefix) || 1;
+      setCountPrefix("");
+      move(count);
     } else if (input === "k" || key.upArrow) {
-      move(-1);
+      const count = Number(countPrefix) || 1;
+      setCountPrefix("");
+      move(-count);
     } else if (input === "g") {
+      setCountPrefix("");
       if (sessions[0]) setSelectedName(sessions[0].name);
     } else if (input === "G") {
+      setCountPrefix("");
       if (sessions[sessions.length - 1]) setSelectedName(sessions[sessions.length - 1].name);
-    } else if ((key.return || input === "l") && selected) {
-      try {
-        switchToSession(args.socket, snapshot.targetClient, selected.name);
-        setSnapshot((current) => ({
-          ...current,
-          targetClient: current.targetClient
-            ? { ...current.targetClient, session: selected.name }
-            : current.targetClient,
-        }));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+    } else if ((key.return || key.rightArrow || input === "l") && selected) {
+      setCountPrefix("");
+      switchToName(selected.name);
     } else if (input === "x" && selected) {
+      setCountPrefix("");
       try {
+        const nextSelectedName = selectionAfterRemoval(sessions, selected.name);
+        if (selected.name === activeSession && nextSelectedName) {
+          switchToSession(args.socket, snapshot.targetClient, nextSelectedName);
+          setSnapshot((current) => ({
+            ...current,
+            targetClient: current.targetClient
+              ? { ...current.targetClient, session: nextSelectedName }
+              : current.targetClient,
+          }));
+        }
         killSession(args.socket, selected.name);
-        setSelectedName("");
+        setSelectedName(nextSelectedName);
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -513,23 +593,14 @@ function App({ args }: { args: Args }) {
     }
   });
 
-  const headerLines = filtering || filter ? 3 : 2;
-  const footerLines = error || !snapshot.targetClient ? 2 : 1;
-  const maxVisible = Math.max(1, rows - headerLines - footerLines);
-  const start = Math.min(
-    Math.max(0, selectedIndex - Math.floor(maxVisible / 2)),
-    Math.max(0, sessions.length - maxVisible),
-  );
-  const visible = sessions.slice(start, start + maxVisible);
   const listWidth = Math.max(24, columns);
-  const help = "j/k move  enter/l switch  x kill  / filter  r refresh  q";
+  const help = "j/k move  enter switch  x kill  / filter  q";
 
   return (
     <Box flexDirection="column">
       <Box flexDirection="column">
         <Text bold color="cyan">
-          tmux-nav {args.socket} | {snapshot.targetClient?.tty || "none"}{" "}
-          {activeSession ? `(${activeSession})` : ""}
+          {activeSession || selectedName || "tmux-nav"}
         </Text>
         {(filtering || filter) && (
           <Text color={filtering ? "yellow" : "gray"}>
@@ -548,7 +619,7 @@ function App({ args }: { args: Args }) {
 
             return (
               <Text key={session.name} inverse={selectedRow} color={active ? "cyan" : undefined}>
-                {rowFor(session, active, listWidth - 1)}
+                {rowFor(session, listWidth - 1)}
               </Text>
             );
           })
