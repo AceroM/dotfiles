@@ -77,6 +77,7 @@ import {
   X,
   Bookmark,
   TextCursor,
+  TrainFrontTunnel,
 } from "lucide-react";
 
 type Theme = "light" | "dark";
@@ -162,11 +163,11 @@ interface DiffSelection {
   range: SelectedLineRange;
 }
 
-type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux" | "html" | "prompts";
+type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux" | "html" | "prompts" | "subway";
 
-// Order drives the 1–8 shortcuts and the tab strip. The first entry is the
+// Order drives the 1–9 shortcuts and the tab strip. The first entry is the
 // landing tab for the default route (see initialView) — Home, the session monitor.
-const TAB_ORDER: Tab[] = ["home", "tmux", "prompts", "changes", "commits", "prs", "manual", "html"];
+const TAB_ORDER: Tab[] = ["home", "tmux", "prompts", "changes", "commits", "prs", "manual", "html", "subway"];
 
 interface ManualPatch {
   name: string;
@@ -237,6 +238,40 @@ interface ReplyOutboxEntry {
   localId: string; // uuid — the optimistic turn's key and the drain single-flight key
   session: string; // target tmux session — the reply is pasted into its pane
   text: string;
+  createdAt: number;
+}
+
+// Subway is its own pseudo-offline surface: it snapshots recent, not-in-progress
+// agent sessions once, then queues local optimistic actions until Wi-Fi returns.
+interface SubwaySession {
+  name: string;
+  cwd: string;
+  task: string;
+  waiting: boolean;
+  sessionId: string;
+  mtime: number;
+  endedAt: number;
+  agent: "claude" | "codex";
+  title: string;
+  model: string;
+  total: number;
+  messages: TranscriptMsg[];
+}
+interface SubwaySnapshot {
+  dir: number;
+  cwd: string;
+  fetchedAt: number;
+  sessions: SubwaySession[];
+}
+interface SubwayActionEntry {
+  localId: string;
+  kind: "delete" | "reply" | "keep";
+  session: string;
+  sessionId?: string;
+  agent: "claude" | "codex";
+  cwd: string;
+  dir: number | null;
+  text?: string;
   createdAt: number;
 }
 
@@ -347,17 +382,32 @@ function timeAgo(iso: string | number): string {
 // live mtime — matching the server's own finishedTs in index.ts.
 const finishedTs = (s: TmuxSession) => (s.busy ? s.mtime : s.endedAt || s.mtime);
 
-// ~/.claude/rate-limits.json, surfaced verbatim by /api/usage. Each window is
-// null until Claude Code's statusline hook has written at least once. `resets_at`
-// and `updated_at` are unix seconds.
+// Agent usage surfaced by /api/usage. Claude reads ~/.claude/rate-limits.json;
+// Codex reads the newest rollout token_count event. Each window is null until the
+// source has written at least once. `resets_at` and `updated_at` are unix seconds.
 interface UsageWindow {
   used_percentage: number;
   resets_at: number;
 }
-interface UsageData {
+interface TokenUsage {
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+  total_tokens: number;
+}
+interface AgentUsageData {
   five_hour: UsageWindow | null;
   seven_day: UsageWindow | null;
   updated_at: number | null;
+  total_token_usage?: TokenUsage | null;
+  last_token_usage?: TokenUsage | null;
+  model_context_window?: number | null;
+  plan_type?: string | null;
+}
+interface UsageData extends AgentUsageData {
+  claude?: AgentUsageData;
+  codex?: AgentUsageData;
 }
 
 // One past claude transcript the resume dialog (⇧') can relaunch via
@@ -390,6 +440,20 @@ function resetClock(unixSeconds: number): string {
   const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const today = new Date().toDateString() === d.toDateString();
   return today ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+function fmtNumber(n: number | null | undefined): string {
+  return typeof n === "number" && Number.isFinite(n) ? n.toLocaleString() : "—";
+}
+
+function tokenSummary(u: AgentUsageData): string | null {
+  const total = u.total_token_usage?.total_tokens;
+  const last = u.last_token_usage?.total_tokens;
+  if (typeof total !== "number" && typeof last !== "number") return null;
+  const parts: string[] = [];
+  if (typeof last === "number") parts.push(`Last turn ${fmtNumber(last)} tokens`);
+  if (typeof total === "number") parts.push(`Session ${fmtNumber(total)} tokens`);
+  return parts.join(" · ");
 }
 
 const STATUS_FOR_CHANGE: Record<FileDiffMetadata["type"], GitStatusEntry["status"]> = {
@@ -612,7 +676,7 @@ function IconButton({
 // Attach-image icon button: a hidden file <input> (camera / photo library on
 // mobile) fronted by an IconButton. The parent owns the upload + insert via
 // `onPick`; we only hold the input ref so the button can open the picker. Shows
-// an ellipsis while an upload is in flight. Used by the New Claude session
+// an ellipsis while an upload is in flight. Used by the New session
 // composer and the Tmux reply composer.
 function ImageAttachButton({
   uploading,
@@ -1677,6 +1741,54 @@ const TranscriptTurn = memo(function TranscriptTurn({
   );
 });
 
+const SubwayMessage = memo(function SubwayMessage({
+  msg,
+  pending = false,
+}: {
+  msg: TranscriptMsg;
+  pending?: boolean;
+}) {
+  const side = msg.role === "user" ? "user" : "assistant";
+  let body: ReactNode;
+  if (msg.kind === "tool_use") {
+    body = (
+      <div className="subway-tool">
+        <span className="tool-name">{msg.tool || "tool"}</span>
+        {msg.path && <span className="tool-path">{msg.path}</span>}
+        {msg.text && <span className="tool-arg">{msg.text}</span>}
+      </div>
+    );
+  } else if (msg.kind === "tool_result") {
+    body = (
+      <div className="subway-tool-result">
+        {(msg.tool || msg.path) && (
+          <div className="subway-tool-head">
+            {msg.tool && <span className="tool-name">{msg.tool}</span>}
+            {msg.path && <span className="tool-path">{msg.path}</span>}
+          </div>
+        )}
+        <pre>{msg.text}</pre>
+      </div>
+    );
+  } else if (msg.kind === "image") {
+    body = <div className="subway-image-note">Image available when you reconnect to the live session.</div>;
+  } else if (msg.reasoning) {
+    body = (
+      <div className="reasoning">
+        <Markdown text={msg.text} />
+      </div>
+    );
+  } else {
+    body = <Markdown text={msg.text} />;
+  }
+  return (
+    <div className={`subway-msg ${side}${pending ? " pending" : ""}`}>
+      {body}
+      {pending && <span className="subway-pending">Queued</span>}
+    </div>
+  );
+});
+
 // An Edit/Write/MultiEdit tool call — carries diff hunks we render inline.
 function isEditMsg(m: TranscriptMsg): boolean {
   return m.kind === "tool_use" && !!m.edits && m.edits.length > 0;
@@ -1738,6 +1850,7 @@ function initialView(): { tab: Tab; view: View; dir: number | null; homeChat?: s
     const id = /^\d+$/.test(prompt) ? parseInt(prompt, 10) : null;
     return { tab: "prompts", view: { kind: "prompt", id }, dir };
   }
+  if (params.has("subway")) return { tab: "subway", view: { kind: "none" }, dir };
   const sha = params.get("sha");
   if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
   // Home deep-link (?home=<session>): land on the Home tab with that session's chat
@@ -1750,7 +1863,7 @@ function initialView(): { tab: Tab; view: View; dir: number | null; homeChat?: s
 }
 
 // ---- Draft persistence (localStorage) ----
-// The New Claude session prompt and each Tmux tab's half-typed reply survive
+// The New session prompt and each Tmux tab's half-typed reply survive
 // reloads and closing/reopening the dialog. The Claude prompt is keyed by the
 // active directory id so a temp prompt typed in one dir never bleeds into
 // another; reply drafts are keyed by session name (globally unique) so every
@@ -1828,7 +1941,7 @@ function saveCaret(key: string, caret: { start: number; end: number } | null) {
 }
 
 // ---- New-session outbox (localStorage) ----
-// New Claude sessions are queued optimistically: every `'` submit lands here
+// New sessions are queued optimistically: every `'` submit lands here
 // first (instant Queued row that survives reloads), then drainOutbox POSTs each
 // one to /api/claude once the browser is online. Like the reply-history helper —
 // one JSON array under a single key, every access guarded.
@@ -1897,6 +2010,102 @@ function saveReplyOutbox(entries: ReplyOutboxEntry[]) {
   try {
     if (entries.length) localStorage.setItem(REPLY_OUTBOX_KEY, JSON.stringify(entries));
     else localStorage.removeItem(REPLY_OUTBOX_KEY); // empty queue → no stale key
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
+
+// ---- Subway cache + action outbox (localStorage) ----
+// Separate from the Tmux tab queues: Subway takes one review snapshot per
+// directory, then records optimistic reply/delete/keep actions locally until the
+// browser can reach diffshub again.
+const SUBWAY_CACHE_KEY = "subwaySnapshots";
+const SUBWAY_ACTIONS_KEY = "subwayActionOutbox";
+function subwayCacheKey(dir: number | null | undefined): string {
+  return dir == null ? "default" : String(dir);
+}
+function validMsg(x: any): x is TranscriptMsg {
+  return (
+    !!x &&
+    (x.role === "user" || x.role === "assistant" || x.role === "tool") &&
+    (x.kind === "text" || x.kind === "tool_use" || x.kind === "tool_result" || x.kind === "image") &&
+    typeof x.text === "string"
+  );
+}
+function validSubwaySession(x: any): x is SubwaySession {
+  return (
+    !!x &&
+    typeof x.name === "string" &&
+    typeof x.cwd === "string" &&
+    (x.agent === "claude" || x.agent === "codex") &&
+    Array.isArray(x.messages) &&
+    x.messages.every(validMsg)
+  );
+}
+function loadSubwaySnapshots(): Record<string, SubwaySnapshot> {
+  try {
+    const raw = localStorage.getItem(SUBWAY_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, SubwaySnapshot> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, any>)) {
+      if (
+        value &&
+        typeof value.dir === "number" &&
+        typeof value.cwd === "string" &&
+        typeof value.fetchedAt === "number" &&
+        Array.isArray(value.sessions)
+      ) {
+        out[key] = {
+          dir: value.dir,
+          cwd: value.cwd,
+          fetchedAt: value.fetchedAt,
+          sessions: value.sessions.filter(validSubwaySession),
+        };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+function saveSubwaySnapshots(snapshots: Record<string, SubwaySnapshot>) {
+  try {
+    if (Object.keys(snapshots).length) localStorage.setItem(SUBWAY_CACHE_KEY, JSON.stringify(snapshots));
+    else localStorage.removeItem(SUBWAY_CACHE_KEY);
+  } catch {
+    // ignore storage failures (private mode, quota, etc.)
+  }
+}
+function loadSubwayActions(): SubwayActionEntry[] {
+  try {
+    const raw = localStorage.getItem(SUBWAY_ACTIONS_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr)
+      ? arr.filter(
+          (x): x is SubwayActionEntry =>
+            !!x &&
+            typeof x.localId === "string" &&
+            (x.kind === "delete" || x.kind === "reply" || x.kind === "keep") &&
+            typeof x.session === "string" &&
+            (x.sessionId === undefined || typeof x.sessionId === "string") &&
+            (x.agent === "claude" || x.agent === "codex") &&
+            typeof x.cwd === "string" &&
+            (typeof x.dir === "number" || x.dir === null) &&
+            typeof x.createdAt === "number" &&
+            (x.kind !== "reply" || typeof x.text === "string"),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+function saveSubwayActions(entries: SubwayActionEntry[]) {
+  try {
+    if (entries.length) localStorage.setItem(SUBWAY_ACTIONS_KEY, JSON.stringify(entries));
+    else localStorage.removeItem(SUBWAY_ACTIONS_KEY);
   } catch {
     // ignore storage failures (private mode, quota, etc.)
   }
@@ -1975,6 +2184,8 @@ function tabDefaults(t: Tab): { view: View; param: string } {
       return { view: { kind: "html", path: "" }, param: "html=" };
     case "prompts":
       return { view: { kind: "prompt", id: null }, param: "prompt=" };
+    case "subway":
+      return { view: { kind: "none" }, param: "subway=" };
     default:
       return { view: { kind: "none" }, param: "" };
   }
@@ -2466,7 +2677,7 @@ function App() {
   const [homeChat, setHomeChat] = useState<string | null>(initial.homeChat ?? null);
   // ---- "Prompt with context" selection mode ----
   // contextMode turns the Home cards into checkboxes; contextSel holds the tmux
-  // session names you've ticked. Confirming seeds the New Claude session composer
+  // session names you've ticked. Confirming seeds the New session composer
   // with a "Look at Claude session ID …" line for each, ready for you to write the ask.
   const [contextMode, setContextMode] = useState(false);
   const [contextSel, setContextSel] = useState<Set<string>>(new Set());
@@ -2780,8 +2991,8 @@ function App() {
   const [wtMenuOpen, setWtMenuOpen] = useState(false);
   // Worktree to remove once the confirmation dialog is accepted (null = closed).
   const [wtToDelete, setWtToDelete] = useState<{
-    dir: string;
-    label: string;
+    dirs: string[];
+    labels: string[];
     count: number;
   } | null>(null);
   const [deletingWt, setDeletingWt] = useState(false);
@@ -2798,6 +3009,7 @@ function App() {
       })),
     [changes],
   );
+  const removableWorktrees = useMemo(() => allWorktrees.filter((w) => !w.isMain), [allWorktrees]);
   // Just the worktrees with pending changes — drives the "land on a dirty tree"
   // fallback and the "switch to see changes" hint when the active tree is clean.
   const dirtyWorktrees = useMemo(() => allWorktrees.filter((w) => w.count > 0), [allWorktrees]);
@@ -3043,6 +3255,253 @@ function App() {
     return () => clearInterval(t);
   }, [replyOutbox.length, drainReplyOutbox]);
 
+  const [filter, setFilter] = useState("");
+  // Second sidebar box (Tmux/Home): a full-text search over the transcripts you've
+  // already opened. We index whatever the transcript query has fetched into an
+  // ephemeral in-memory map — only viewed sessions are searchable, by design (a
+  // lightweight best-effort search, not a server-side scan of every jsonl). The
+  // ref holds the lowercased blobs; contentVersion just nudges the filter memo to
+  // re-run when the index gains/loses an entry while a search is active.
+  const [contentFilter, setContentFilter] = useState("");
+  const contentIndex = useRef<Map<string, string>>(new Map());
+  const [contentVersion, setContentVersion] = useState(0);
+
+  // ---- Subway pseudo-offline tab ----
+  const [subwaySnapshots, setSubwaySnapshots] = useState<Record<string, SubwaySnapshot>>(loadSubwaySnapshots);
+  const [subwayActions, setSubwayActions] = useState<SubwayActionEntry[]>(loadSubwayActions);
+  const [subwaySelected, setSubwaySelected] = useState<string | null>(null);
+  const [subwayReplyText, setSubwayReplyText] = useState("");
+  const [subwayLoading, setSubwayLoading] = useState(false);
+  const [subwayError, setSubwayError] = useState<string | null>(null);
+  const subwayFetchedRef = useRef<Set<string>>(new Set());
+  const subwayActionsRef = useRef(subwayActions);
+  const subwayReplyEl = useRef<HTMLTextAreaElement | null>(null);
+  subwayActionsRef.current = subwayActions;
+  const subwayKey = subwayCacheKey(meta?.id ?? activeDir);
+  const subwaySnapshot = subwaySnapshots[subwayKey] ?? null;
+
+  useEffect(() => saveSubwaySnapshots(subwaySnapshots), [subwaySnapshots]);
+  useEffect(() => saveSubwayActions(subwayActions), [subwayActions]);
+
+  const loadSubwaySnapshot = useCallback(
+    async (force = false) => {
+      if (!meta) return;
+      const hintKey = subwayCacheKey(meta.id ?? activeDirRef.current);
+      if (!force && subwayFetchedRef.current.has(hintKey)) return;
+      setSubwayLoading(true);
+      setSubwayError(null);
+      try {
+        const res = await fetch(qd("/api/subway/snapshot"));
+        const body = await res.json().catch(() => ({}) as any);
+        if (!res.ok) throw new Error(body.error ?? res.statusText);
+        const snap = body as SubwaySnapshot;
+        const key = subwayCacheKey(snap.dir);
+        setSubwaySnapshots((prev) => ({ ...prev, [key]: snap }));
+        subwayFetchedRef.current.add(key);
+        setSubwaySelected((cur) => cur ?? snap.sessions[0]?.name ?? null);
+      } catch (e) {
+        setSubwayError(errMessage(e));
+      } finally {
+        setSubwayLoading(false);
+      }
+    },
+    [activeDir, meta, qd],
+  );
+
+  useEffect(() => {
+    if (tab !== "subway" || !meta || !clientOnline) return;
+    void loadSubwaySnapshot(false);
+  }, [tab, meta, clientOnline, loadSubwaySnapshot]);
+
+  const removeSubwayAction = useCallback((localId: string) => {
+    setSubwayActions((prev) => prev.filter((e) => e.localId !== localId));
+  }, []);
+
+  const drainingSubwayRef = useRef(false);
+  const drainSubwayActions = useCallback(async () => {
+    if (drainingSubwayRef.current) return;
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+    drainingSubwayRef.current = true;
+    try {
+      const pending = [...subwayActionsRef.current].sort((a, b) => a.createdAt - b.createdAt);
+      for (const entry of pending) {
+        const url = entry.dir == null ? "/api/subway/action" : `/api/subway/action?dir=${entry.dir}`;
+        let res: Response;
+        try {
+          res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              kind: entry.kind,
+              session: entry.session,
+              sessionId: entry.sessionId,
+              agent: entry.agent,
+              cwd: entry.cwd,
+              text: entry.kind === "reply" ? entry.text : undefined,
+            }),
+          });
+        } catch {
+          break;
+        }
+        if (res.ok) {
+          removeSubwayAction(entry.localId);
+          continue;
+        }
+        if (res.status >= 400 && res.status < 500) {
+          const body = await res.json().catch(() => ({}) as any);
+          removeSubwayAction(entry.localId);
+          if (entry.kind === "reply") alert(`Subway reply dropped: ${body.error ?? res.statusText}`);
+          continue;
+        }
+        break;
+      }
+    } finally {
+      drainingSubwayRef.current = false;
+    }
+  }, [removeSubwayAction]);
+
+  useEffect(() => {
+    if (clientOnline && subwayActions.length) void drainSubwayActions();
+  }, [clientOnline, subwayActions, drainSubwayActions]);
+  useEffect(() => {
+    if (subwayActions.length === 0) return;
+    const t = setInterval(() => void drainSubwayActions(), TMUX_QUEUE_POLL_MS);
+    return () => clearInterval(t);
+  }, [subwayActions.length, drainSubwayActions]);
+
+  const subwayDismissQueued = useMemo(
+    () =>
+      new Set(
+        subwayActions
+          .filter((a) => a.kind === "delete" || a.kind === "keep")
+          .map((a) => a.session),
+      ),
+    [subwayActions],
+  );
+  const subwayPendingBySession = useMemo(() => {
+    const m = new Map<string, SubwayActionEntry[]>();
+    for (const a of subwayActions) {
+      const arr = m.get(a.session) ?? [];
+      arr.push(a);
+      m.set(a.session, arr);
+    }
+    return m;
+  }, [subwayActions]);
+  const subwaySessions = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const sessions = (subwaySnapshot?.sessions ?? []).filter((s) => !subwayDismissQueued.has(s.name));
+    if (!q) return sessions;
+    return sessions.filter((s) => {
+      const hay = [
+        s.name,
+        s.cwd,
+        s.task,
+        s.title,
+        s.model,
+        s.agent,
+        ...s.messages.map((m) => `${m.tool ?? ""} ${m.path ?? ""} ${m.text}`),
+      ]
+        .join("\n")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [filter, subwayDismissQueued, subwaySnapshot]);
+  const selectedSubway = useMemo(
+    () => subwaySessions.find((s) => s.name === subwaySelected) ?? subwaySessions[0] ?? null,
+    [subwaySelected, subwaySessions],
+  );
+
+  useEffect(() => {
+    if (tab !== "subway") return;
+    if (!subwaySelected || !subwaySessions.some((s) => s.name === subwaySelected)) {
+      setSubwaySelected(subwaySessions[0]?.name ?? null);
+    }
+  }, [tab, subwaySelected, subwaySessions]);
+  useEffect(() => {
+    autosize(subwayReplyEl.current);
+  }, [subwayReplyText, selectedSubway?.name]);
+
+  const hideSubwaySession = useCallback(
+    (dir: number | null, sessionName: string) => {
+      const key = subwayCacheKey(dir);
+      setSubwaySnapshots((prev) => {
+        const snap = prev[key];
+        if (!snap) return prev;
+        return {
+          ...prev,
+          [key]: { ...snap, sessions: snap.sessions.filter((s) => s.name !== sessionName) },
+        };
+      });
+      if (subwaySelected === sessionName) setSubwaySelected(null);
+    },
+    [subwaySelected],
+  );
+
+  const queueSubwayDelete = useCallback(
+    (session: SubwaySession) => {
+      const dir = meta?.id ?? activeDirRef.current;
+      const entry: SubwayActionEntry = {
+        localId: makeLocalId(),
+        kind: "delete",
+        session: session.name,
+        sessionId: session.sessionId,
+        agent: session.agent,
+        cwd: session.cwd,
+        dir,
+        createdAt: Date.now(),
+      };
+      setSubwayActions((prev) =>
+        prev.some((a) => (a.kind === "delete" || a.kind === "keep") && a.session === session.name)
+          ? prev
+          : [...prev, entry],
+      );
+      hideSubwaySession(dir, session.name);
+    },
+    [hideSubwaySession, meta?.id],
+  );
+
+  const queueSubwayKeep = useCallback(
+    (session: SubwaySession) => {
+      const dir = meta?.id ?? activeDirRef.current;
+      const entry: SubwayActionEntry = {
+        localId: makeLocalId(),
+        kind: "keep",
+        session: session.name,
+        sessionId: session.sessionId,
+        agent: session.agent,
+        cwd: session.cwd,
+        dir,
+        createdAt: Date.now(),
+      };
+      setSubwayActions((prev) =>
+        prev.some((a) => (a.kind === "delete" || a.kind === "keep") && a.session === session.name)
+          ? prev
+          : [...prev, entry],
+      );
+      hideSubwaySession(dir, session.name);
+    },
+    [hideSubwaySession, meta?.id],
+  );
+
+  const queueSubwayReply = useCallback(() => {
+    const session = selectedSubway;
+    const text = subwayReplyText.trim();
+    if (!session || !text) return;
+    const entry: SubwayActionEntry = {
+      localId: makeLocalId(),
+      kind: "reply",
+      session: session.name,
+      sessionId: session.sessionId,
+      agent: session.agent,
+      cwd: session.cwd,
+      dir: meta?.id ?? activeDirRef.current,
+      text,
+      createdAt: Date.now(),
+    };
+    setSubwayActions((prev) => [...prev, entry]);
+    setSubwayReplyText("");
+  }, [meta?.id, selectedSubway, subwayReplyText]);
+
   // The session whose chat is on screen. On the Tmux tab that's the tab's
   // selection; on the Home dashboard it's the card whose chat side-panel is open
   // (homeChat). Tab wins over view.kind so a stray Tmux `view` left behind by a
@@ -3199,7 +3658,7 @@ function App() {
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const [committing, setCommitting] = useState(false);
-  // Same cursor-preservation + auto-grow as the New Claude session composer: the
+  // Same cursor-preservation + auto-grow as the New session composer: the
   // message and caret survive closing/reopening the dialog so an edited multi-line
   // message isn't lost when you pop out to read the diff. In-memory only (the
   // message itself isn't persisted), so there's nothing to restore across reloads.
@@ -3224,8 +3683,8 @@ function App() {
     });
   }, [commitOpen, autosizeCommit]);
 
-  // New Claude session dialog (`'`) — launches an interactive claude tmux
-  // session in the active directory, detached, seeded with the typed prompt.
+  // New session dialog (`'`) — launches an interactive agent tmux session in the
+  // active directory, detached, seeded with the typed prompt.
   const [claudeOpen, setClaudeOpen] = useState(false);
   // Loaded per-directory by the effect below once `meta` (the active dir) is known.
   const [claudePrompt, setClaudePrompt] = useState("");
@@ -3243,6 +3702,19 @@ function App() {
     if (claudeEffort) localStorage.setItem("claudeEffort", claudeEffort);
     else localStorage.removeItem("claudeEffort");
   }, [claudeEffort]);
+  // Codex exposes reasoning effort through `model_reasoning_effort` config. Keep
+  // it separate from Claude so a Claude-only value like `max` never bleeds over.
+  const [codexEffort, setCodexEffort] = useState<string>(() => {
+    try {
+      return localStorage.getItem("codexEffort") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  useEffect(() => {
+    if (codexEffort) localStorage.setItem("codexEffort", codexEffort);
+    else localStorage.removeItem("codexEffort");
+  }, [codexEffort]);
   // Launch the session with `claude --chrome` (Claude in Chrome integration).
   // Persisted across sessions like effort — a global preference, not a per-repo draft.
   const [claudeChrome, setClaudeChrome] = useState<boolean>(() => {
@@ -3274,7 +3746,7 @@ function App() {
   // True while a pasted image is being uploaded to /tmp/images (⌃V in the dialog).
   const [imgUploading, setImgUploading] = useState(false);
 
-  // Claude usage dialog (`⇧U`) — shows how much of the 5-hour and weekly
+  // Agent usage dialog (`⇧U`) — shows how much of the 5-hour and weekly
   // rate-limit windows is spent and when each resets (see usageQuery below).
   const [usageOpen, setUsageOpen] = useState(false);
 
@@ -3329,18 +3801,7 @@ function App() {
     return () => window.clearTimeout(id);
   }, [queuedNote]);
 
-  const [filter, setFilter] = useState("");
-  // Second sidebar box (Tmux/Home): a full-text search over the transcripts you've
-  // already opened. We index whatever the transcript query has fetched into an
-  // ephemeral in-memory map — only viewed sessions are searchable, by design (a
-  // lightweight best-effort search, not a server-side scan of every jsonl). The
-  // ref holds the lowercased blobs; contentVersion just nudges the filter memo to
-  // re-run when the index gains/loses an entry while a search is active.
-  const [contentFilter, setContentFilter] = useState("");
-  const contentIndex = useRef<Map<string, string>>(new Map());
-  const [contentVersion, setContentVersion] = useState(0);
-
-  // ---- @-file autocomplete (New Claude session dialog + reply composer) ----
+  // ---- @-file autocomplete (New session dialog + reply composer) ----
   // The active `@token` being typed: its query text + where the `@` sits + caret,
   // plus which composer (`owner`) it belongs to. Both composers share this state —
   // only the focused one can own a live token at a time — and `owner` decides which
@@ -3352,7 +3813,7 @@ function App() {
     owner: "claude" | "reply";
   } | null>(null);
   const [fileMenuIndex, setFileMenuIndex] = useState(0);
-  // The directory's gitignore-respecting file list. Fetched while the New Claude
+  // The directory's gitignore-respecting file list. Fetched while the New session
   // dialog is open (so the first `@` there is instant) and lazily whenever a
   // mention token goes live in either composer. Typing `@…` filters it into a
   // popup that inserts `@path` references.
@@ -3363,11 +3824,10 @@ function App() {
     staleTime: 30_000,
   });
 
-  // ---- Claude usage (rate-limit windows) ----
-  // Read from ~/.claude/rate-limits.json (written by the statusline hook) only
-  // while the Usage dialog is open. The short staleTime lets a quick reopen reuse
-  // the cache while still refetching the file on its own cadence; opening always
-  // pulls the freshest snapshot the statusline has written.
+  // ---- Agent usage (rate-limit windows) ----
+  // Read only while the Usage dialog is open. The short staleTime lets a quick
+  // reopen reuse the cache while still refetching the source files on their own
+  // cadence; opening always pulls the freshest snapshots available.
   const usageQuery = useQuery({
     queryKey: ["usage"],
     queryFn: ({ signal }) => fetchJSON<UsageData>("/api/usage", signal),
@@ -3375,6 +3835,25 @@ function App() {
     staleTime: 5_000,
     refetchOnWindowFocus: true,
   });
+  const usagePanels = useMemo(() => {
+    const empty: AgentUsageData = { five_hour: null, seven_day: null, updated_at: null };
+    const data = usageQuery.data;
+    const claude =
+      data?.claude ??
+      (data
+        ? { five_hour: data.five_hour, seven_day: data.seven_day, updated_at: data.updated_at }
+        : empty);
+    const codex = data?.codex ?? empty;
+    return [
+      { name: "Claude", sub: "Claude Code", usage: claude },
+      { name: "Codex", sub: codex.plan_type ? `Codex CLI · ${codex.plan_type}` : "Codex CLI", usage: codex },
+    ];
+  }, [usageQuery.data]);
+  const hasUsageData = usagePanels.some((p) => p.usage.five_hour || p.usage.seven_day);
+  const usageUpdatedAt = Math.max(
+    0,
+    ...usagePanels.map((p) => p.usage.updated_at ?? 0),
+  );
 
   // ---- Resume a past Claude session (⇧') ----
   // The closed transcripts in the active directory, fetched only while the dialog
@@ -3999,32 +4478,46 @@ function App() {
     [queryClient, qd],
   );
 
-  // Remove a worktree (`git worktree remove --force`, server-side). The dialog
-  // gates this and the server refuses the main tree, so by here `dir` is a
-  // removable linked tree. Drops the selection if it pointed at the gone tree.
-  const removeWorktree = useCallback(
-    async (dir: string) => {
+  // Remove one or more linked worktrees (`git worktree remove --force`,
+  // server-side). The dialog gates this and the server refuses main trees. Drops
+  // the selection if it pointed at a tree that disappeared.
+  const removeWorktrees = useCallback(
+    async (dirs: string[]) => {
+      if (!dirs.length) return;
       setDeletingWt(true);
       try {
         const res = await fetch(qd("/api/worktree/remove"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ worktree: dir }),
+          body: JSON.stringify(dirs.length === 1 ? { worktree: dirs[0] } : { worktrees: dirs }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}) as any);
-          alert(`remove worktree failed: ${body.error ?? res.statusText}`);
+          alert(`remove ${dirs.length === 1 ? "worktree" : "worktrees"} failed: ${body.error ?? res.statusText}`);
           return;
         }
-        setSelectedWorktree((cur) => (cur === dir ? null : cur));
+        setSelectedWorktree((cur) => (cur && dirs.includes(cur) ? null : cur));
         setWtToDelete(null);
         setWtMenuOpen(false);
-        queryClient.invalidateQueries({ queryKey: ["changes"] });
       } finally {
         setDeletingWt(false);
+        queryClient.invalidateQueries({ queryKey: ["changes"] });
       }
     },
     [queryClient, qd],
+  );
+
+  const confirmWorktreeDelete = useCallback(
+    (targets: { dir: string; label: string; count: number }[]) => {
+      if (!targets.length) return;
+      setWtMenuOpen(false);
+      setWtToDelete({
+        dirs: targets.map((w) => w.dir),
+        labels: targets.map((w) => w.label),
+        count: targets.reduce((sum, w) => sum + w.count, 0),
+      });
+    },
+    [],
   );
 
   // Open a file (optionally at a line) in the default editor, server-side
@@ -4221,7 +4714,7 @@ function App() {
       {
         localId: makeLocalId(),
         prompt,
-        effort: claudeAgent === "codex" ? undefined : claudeEffort || undefined,
+        effort: claudeAgent === "codex" ? codexEffort || undefined : claudeEffort || undefined,
         chrome: claudeAgent === "codex" ? undefined : claudeChrome || undefined,
         agent: claudeAgent === "codex" ? "codex" : undefined,
         cwd: meta?.path ?? "",
@@ -4237,7 +4730,7 @@ function App() {
     if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), null);
     // A Queued row is already on screen; the toast confirms it'll launch on its own.
     setQueuedNote(true);
-  }, [claudePrompt, claudeEffort, claudeChrome, claudeAgent, meta?.path]);
+  }, [claudePrompt, claudeEffort, codexEffort, claudeChrome, claudeAgent, meta?.path]);
 
   // Relaunch a closed session: the server starts `claude --resume <sid>` detached
   // in the active directory. Mirrors submitClaude's refresh dance so the resumed
@@ -5630,7 +6123,7 @@ function App() {
     setHomeChat(name);
   }, []);
   const closeHomeChat = useCallback(() => setHomeChat(null), []);
-  // Confirm "Prompt with context": open the New Claude session composer seeded with
+  // Confirm "Prompt with context": open the New session composer seeded with
   // a "Look at Claude session ID …" line for each ticked card, so a fresh session
   // starts already pointed at the work behind them. Unlike Commit with Claude this
   // launches nothing — it hands you the composer to write the actual ask. Mirrors
@@ -6109,8 +6602,7 @@ function App() {
       ) {
         const w = keyCtx.current.activeWorktree;
         e.preventDefault();
-        setWtMenuOpen(false);
-        setWtToDelete({ dir: w.dir, label: w.label, count: w.count });
+        confirmWorktreeDelete([w]);
         return;
       }
       // `D` opens the directory dropdown and focuses its filter box, so you can
@@ -6169,6 +6661,17 @@ function App() {
         }
         return;
       }
+      // Prompts tab: with a template row/card selected, `'` opens the normal
+      // new-session dialog prefilled from that template. No selected template
+      // falls through to `'`'s global blank-session behavior below.
+      if (tab === "prompts" && e.key === "'" && view.kind === "prompt" && view.id != null) {
+        const p = visiblePrompts?.find((x) => x.id === view.id);
+        if (p) {
+          e.preventDefault();
+          openTemplatePrompt(p.body);
+          return;
+        }
+      }
       // Tmux tab: `r` toggles the open session between read and unread — the manual
       // replacement for the auto-read-on-open we dropped, and the keyboard half of
       // the reply bar's read toggle. Mirrors the Home tab's read toggle; a no-op
@@ -6180,8 +6683,14 @@ function App() {
       }
       // Tabs are switched with the number keys (1–6) below — the ←/→ keys are left
       // free for in-tab navigation (the Home card grid; otherwise unused).
-      // 1–6 jump straight to a tab (plain, not ⌥ — that switches directories).
-      if (!e.altKey && e.key >= "1" && e.key <= String(TAB_ORDER.length)) {
+      // Plain number keys jump straight to a tab (⌥number switches directories).
+      // On Tmux, keep 9 for the existing "last session" shortcut.
+      if (
+        !e.altKey &&
+        e.key >= "1" &&
+        e.key <= String(TAB_ORDER.length) &&
+        !(tab === "tmux" && e.key === "9")
+      ) {
         e.preventDefault();
         selectTab(TAB_ORDER[Number(e.key) - 1]);
         return;
@@ -6367,7 +6876,7 @@ function App() {
         setRestartOpen(true);
         return;
       }
-      // `U` (Shift+U — lowercase `u` is half-page scroll up) opens the Claude
+      // `U` (Shift+U — lowercase `u` is half-page scroll up) opens the agent
       // usage dialog: how much of the 5-hour and weekly windows is spent and when
       // each resets.
       if (e.key === "U") {
@@ -6612,7 +7121,7 @@ function App() {
       document.removeEventListener("keydown", onDirHotkey, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [stepCommit, selectPr, selectManual, selectHtml, selectPrompt, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, openTemplatePrompt, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient]);
+  }, [stepCommit, selectPr, selectManual, selectHtml, selectPrompt, selectTab, selectTmux, selectDir, killSession, markHomeRead, toggleTmuxRead, jumpToTop, jumpToBottom, chatScroll, openTemplatePrompt, toggleReviewed, toggleCollapsed, toggleTheme, runGit, commitWithClaude, refreshServer, queryClient, confirmWorktreeDelete]);
 
   // Keys typed inside a report iframe can't reach the parent's keydown handler
   // (separate document), so the injected vim layer postMessages the app-level
@@ -6713,14 +7222,14 @@ function App() {
   const showRight = hasRightSidebar && (isDesktop ? !rightMinimized : true);
 
   // Mobile "Actions" menu (top bar) — the tab-relevant things you'd otherwise
-  // reach by keyboard on desktop. "New Claude session" works on every tab; the
+  // reach by keyboard on desktop. "New session" works on every tab; the
   // rest depend on the active tab/view. Refresh is always offered, last.
   const actionItems: {
     label: string;
     icon: ReactNode;
     onClick: () => void;
     disabled?: boolean;
-  }[] = [{ label: "New Claude session", icon: <Sparkles />, onClick: () => setClaudeOpen(true) }];
+  }[] = [{ label: "New session", icon: <Sparkles />, onClick: () => setClaudeOpen(true) }];
   if (tab === "tmux") {
     // Mobile mirror of the `_` shortcut: opens the confirmation that kills every
     // session currently listed (dir-scoped + filtered). Disabled when none.
@@ -6746,12 +7255,14 @@ function App() {
       actionItems.push({
         label: "Delete worktree",
         icon: <Trash2 />,
-        onClick: () =>
-          setWtToDelete({
-            dir: activeWorktree.dir,
-            label: activeWorktree.label,
-            count: activeWorktree.count,
-          }),
+        onClick: () => confirmWorktreeDelete([activeWorktree]),
+      });
+    }
+    if (removableWorktrees.length > 1) {
+      actionItems.push({
+        label: "Delete all worktrees",
+        icon: <Trash2 />,
+        onClick: () => confirmWorktreeDelete(removableWorktrees),
       });
     }
   }
@@ -6773,7 +7284,7 @@ function App() {
   }
   // The Tmux tab's "Kill session" lives as a dedicated trash button beside this
   // menu (see the topbar), so it's intentionally not duplicated here.
-  actionItems.push({ label: "Claude usage", icon: <Gauge />, onClick: () => setUsageOpen(true) });
+  actionItems.push({ label: "Agent usage", icon: <Gauge />, onClick: () => setUsageOpen(true) });
   actionItems.push({ label: "Refresh", icon: <RefreshCw />, onClick: refreshTab });
   actionItems.push({ label: "Restart server…", icon: <RotateCw />, onClick: () => setRestartOpen(true) });
   actionItems.push({
@@ -7025,7 +7536,7 @@ function App() {
                   <FolderClock />
                 </IconButton>
                 <IconButton
-                  title="New Claude session"
+                  title="New session"
                   onClick={() => {
                     // Close the Home chat dialog as we open the new-session
                     // modal (no-op on Tmux, where homeChat is already null).
@@ -7213,8 +7724,8 @@ function App() {
         {(tab === "home" || tab === "tmux" || tab === "commits") && (
           <button
             className="topbar-btn topbar-new"
-            title="New Claude session"
-            aria-label="New Claude session"
+            title="New session"
+            aria-label="New session"
             onClick={() => setClaudeOpen(true)}
           >
             <Plus size={18} />
@@ -7440,6 +7951,15 @@ function App() {
             >
               <Images />
             </button>
+            <button
+              className={tab === "subway" ? "on" : ""}
+              data-tip="Subway"
+              aria-label="Subway"
+              onClick={() => selectTab("subway")}
+            >
+              <TrainFrontTunnel />
+              {subwayActions.length > 0 && <span className="tab-badge waiting">{subwayActions.length}</span>}
+            </button>
           </div>
           {tab !== "changes" && (
             <input
@@ -7456,7 +7976,9 @@ function App() {
                         ? "Filter reports…"
                         : tab === "prompts"
                           ? "Filter prompts…"
-                          : "Filter patches…"
+                          : tab === "subway"
+                            ? "Filter subway cache…"
+                            : "Filter patches…"
               }
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -7661,8 +8183,7 @@ function App() {
                             title="Delete worktree"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setWtMenuOpen(false);
-                              setWtToDelete({ dir: w.dir, label: w.label, count: w.count });
+                              confirmWorktreeDelete([w]);
                             }}
                           >
                             ✕
@@ -7670,6 +8191,15 @@ function App() {
                         )}
                       </div>
                     ))}
+                    {removableWorktrees.length > 1 && (
+                      <button
+                        className="wt-bulk-del"
+                        onClick={() => confirmWorktreeDelete(removableWorktrees)}
+                      >
+                        <Trash2 size={12} />
+                        Delete all linked worktrees
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -7813,6 +8343,97 @@ function App() {
           </div>
         )}
 
+        {tab === "subway" && (
+          <div className="commit-list">
+            <div className="subway-status">
+              <span>
+                {subwaySnapshot
+                  ? `Cached ${timeAgo(subwaySnapshot.fetchedAt)}`
+                  : subwayLoading
+                    ? "Syncing cache…"
+                    : "No cache yet"}
+              </span>
+              <button
+                type="button"
+                disabled={subwayLoading || !clientOnline}
+                onClick={() => void loadSubwaySnapshot(true)}
+              >
+                <RefreshCw size={12} className={subwayLoading ? "spin" : ""} />
+                Sync
+              </button>
+            </div>
+            {!clientOnline && (
+              <div className="offline-note">
+                <span className="offline-dot" />
+                Offline — Subway actions stay queued on this device.
+              </div>
+            )}
+            {subwayActions.length > 0 && (
+              <div className="subway-queue-note">
+                {subwayActions.length} queued {subwayActions.length === 1 ? "action" : "actions"}
+              </div>
+            )}
+            {subwayLoading && !subwaySnapshot && <SkeletonList />}
+            {subwayError && <div className="side-note error">{subwayError}</div>}
+            {subwaySessions.map((s) => {
+              const pending = subwayPendingBySession.get(s.name)?.length ?? 0;
+              return (
+                <div
+                  key={s.name}
+                  id={`row-subway-${s.name}`}
+                  className={`commit subway-row${selectedSubway?.name === s.name ? " active" : ""}${
+                    s.waiting ? " waiting" : ""
+                  }`}
+                  onClick={() => setSubwaySelected(s.name)}
+                >
+                  <div className="sess-top">
+                    <span className={`sess-busy${s.waiting ? " waiting" : ""}`} />
+                    <span className="sess-name">{s.name}</span>
+                    <span className="home-card-agent">{s.agent}</span>
+                    {pending > 0 && <span className="queued-badge">{pending}</span>}
+                  </div>
+                  <div className="sess-task">{s.title || s.task || "No title"}</div>
+                  <div className="sess-cwd">
+                    {s.cwd.replace(/^.*\//, "") || s.cwd}
+                    {(s.endedAt || s.mtime) ? ` · ${timeAgo(s.endedAt || s.mtime)}` : ""}
+                  </div>
+                  <button
+                    className="kill-btn keep-btn"
+                    title="Keep chat"
+                    aria-label="Keep chat"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      queueSubwayKeep(s);
+                    }}
+                  >
+                    <Check size={12} />
+                  </button>
+                  <button
+                    className="kill-btn"
+                    title="Delete chat"
+                    aria-label="Delete chat"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      queueSubwayDelete(s);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })}
+            {!subwayLoading && subwaySessions.length === 0 && (
+              <div className="side-note">
+                {filter
+                  ? "No matching cached sessions"
+                  : subwaySnapshot
+                    ? "No idle Claude or Codex sessions in this directory"
+                    : "Open Subway while online to cache idle sessions"}
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === "html" && (
           <div className="commit-list">
             {htmlFiles === null && !htmlError && <SkeletonList />}
@@ -7930,7 +8551,7 @@ function App() {
       <div className="resizer rz-left" onPointerDown={startResize("left")} />
 
       <main
-        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : tab === "html" ? " report-main" : tab === "prompts" ? " prompts-main" : ""}${
+        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : tab === "html" ? " report-main" : tab === "prompts" ? " prompts-main" : tab === "subway" ? " subway-main" : ""}${
           tab === "home" && homeChat ? " chat-open" : ""
         }`}
         ref={mainEl}
@@ -8093,6 +8714,84 @@ function App() {
                 />
               </label>
             </div>
+            )}
+          </div>
+        )}
+        {tab === "subway" && (
+          <div className="subway-pane">
+            {selectedSubway ? (
+              <>
+                <div className="subway-head">
+                  <div>
+                    <h2>{selectedSubway.title || selectedSubway.task || selectedSubway.name}</h2>
+                    <p>
+                      {selectedSubway.agent}
+                      {selectedSubway.model ? ` · ${selectedSubway.model}` : ""}
+                      {selectedSubway.cwd ? ` · ${selectedSubway.cwd}` : ""}
+                    </p>
+                  </div>
+                  <div className="subway-actions">
+                    <button className="act keep" onClick={() => queueSubwayKeep(selectedSubway)}>
+                      <Check size={14} /> Keep
+                    </button>
+                    <button className="act delete" onClick={() => queueSubwayDelete(selectedSubway)}>
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  </div>
+                </div>
+                {selectedSubway.messages.length > 0 ? (
+                  <div className="subway-messages">
+                    {selectedSubway.messages.map((m, i) => (
+                      <SubwayMessage key={`${selectedSubway.name}-${i}`} msg={m} />
+                    ))}
+                    {subwayActions
+                      .filter((a) => a.kind === "reply" && a.session === selectedSubway.name)
+                      .map((a) => (
+                        <SubwayMessage
+                          key={a.localId}
+                          pending
+                          msg={{
+                            role: "user",
+                            kind: "text",
+                            text: a.text ?? "",
+                            ts: new Date(a.createdAt).toISOString(),
+                          }}
+                        />
+                      ))}
+                  </div>
+                ) : (
+                  <div className="empty">No cached messages for this session.</div>
+                )}
+                <div className="subway-composer">
+                  <textarea
+                    ref={subwayReplyEl}
+                    value={subwayReplyText}
+                    placeholder="Queue a reply for when Wi-Fi returns…"
+                    onChange={(e) => setSubwayReplyText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        queueSubwayReply();
+                      }
+                    }}
+                  />
+                  <button className="act primary" disabled={!subwayReplyText.trim()} onClick={queueSubwayReply}>
+                    <Send size={14} /> Queue
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="subway-empty">
+                <TrainFrontTunnel size={28} />
+                <h2>Subway</h2>
+                <p>
+                  {subwayLoading
+                    ? "Caching idle sessions…"
+                    : subwaySnapshot
+                      ? "No cached session selected."
+                      : "Open this tab while online to cache idle Claude and Codex sessions for offline review."}
+                </p>
+              </div>
             )}
           </div>
         )}
@@ -8794,17 +9493,35 @@ function App() {
       {wtToDelete && (
         <div className="modal-overlay" onClick={() => !deletingWt && setWtToDelete(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Delete worktree</h3>
+            <h3>{wtToDelete.dirs.length === 1 ? "Delete worktree" : "Delete worktrees"}</h3>
             <p className="modal-body">
-              Remove the worktree <code>{wtToDelete.label}</code>?
+              {wtToDelete.dirs.length === 1 ? (
+                <>
+                  Remove the worktree <code>{wtToDelete.labels[0]}</code>?
+                </>
+              ) : (
+                <>Remove {wtToDelete.dirs.length} linked worktrees?</>
+              )}
               {wtToDelete.count > 0 ? (
                 <>
-                  {" "}It has {wtToDelete.count} pending{" "}
+                  {" "}
+                  {wtToDelete.dirs.length === 1 ? "It has" : "They have"} {wtToDelete.count} pending{" "}
                   {wtToDelete.count === 1 ? "change" : "changes"} that will be discarded.
                 </>
               ) : null}{" "}
-              This removes the working tree only — the branch stays.
+              This removes the {wtToDelete.dirs.length === 1 ? "working tree" : "working trees"} only —{" "}
+              {wtToDelete.dirs.length === 1 ? "the branch stays" : "branches stay"}.
             </p>
+            {wtToDelete.dirs.length > 1 && (
+              <div className="modal-list">
+                {wtToDelete.labels.slice(0, 8).map((label, i) => (
+                  <code key={`${label}-${i}`}>{label}</code>
+                ))}
+                {wtToDelete.labels.length > 8 && (
+                  <span>+{wtToDelete.labels.length - 8} more</span>
+                )}
+              </div>
+            )}
             <div className="modal-actions">
               <button className="act" disabled={deletingWt} onClick={() => setWtToDelete(null)}>
                 Cancel
@@ -8813,9 +9530,13 @@ function App() {
                 autoFocus
                 className="act primary"
                 disabled={deletingWt}
-                onClick={() => void removeWorktree(wtToDelete.dir)}
+                onClick={() => void removeWorktrees(wtToDelete.dirs)}
               >
-                {deletingWt ? "Deleting…" : "Delete worktree"}
+                {deletingWt
+                  ? "Deleting…"
+                  : wtToDelete.dirs.length === 1
+                    ? "Delete worktree"
+                    : "Delete worktrees"}
               </button>
             </div>
             <div className="modal-hint">
@@ -8889,7 +9610,7 @@ function App() {
         <div className="modal-overlay claude-overlay" onClick={() => setClaudeOpen(false)}>
           <div className="modal claude" onClick={(e) => e.stopPropagation()}>
             <h3>
-              New Claude session
+              New session
               {meta?.repo ? <span className="modal-repos"> · {meta.repo}</span> : ""}
             </h3>
             <div className="file-menu-wrap">
@@ -8897,7 +9618,7 @@ function App() {
                 autoFocus
                 ref={claudeTextareaRef}
                 className="commit-input auto"
-                placeholder="Prompt for a new Claude Code session…  (type @ to reference a file, ⌃V to paste an image)"
+                placeholder="Prompt for a new session…  (type @ to reference a file, ⌃V to paste an image)"
                 value={claudePrompt}
                 onChange={(e) => {
                   setClaudePrompt(e.target.value);
@@ -8996,24 +9717,38 @@ function App() {
                   <option value="codex">codex</option>
                 </select>
               </label>
-              {/* effort + chrome are claude-only flags; hide them for codex */}
+              <label className="claude-opt">
+                <span>Effort</span>
+                {claudeAgent === "codex" ? (
+                  <select
+                    value={codexEffort}
+                    onChange={(e) => setCodexEffort(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  >
+                    <option value="">Default</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="xhigh">Extra high</option>
+                  </select>
+                ) : (
+                  <select
+                    value={claudeEffort}
+                    onChange={(e) => setClaudeEffort(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  >
+                    <option value="">Default</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="xhigh">Extra high</option>
+                    <option value="max">Max</option>
+                  </select>
+                )}
+              </label>
+              {/* Chrome is a Claude-only flag. */}
               {claudeAgent === "claude" && (
                 <>
-                  <label className="claude-opt">
-                    <span>Effort</span>
-                    <select
-                      value={claudeEffort}
-                      onChange={(e) => setClaudeEffort(e.target.value)}
-                      onKeyDown={(e) => e.stopPropagation()}
-                    >
-                      <option value="">Default</option>
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
-                      <option value="xhigh">Extra high</option>
-                      <option value="max">Max</option>
-                    </select>
-                  </label>
                   <label className="claude-opt">
                     <span>Chrome</span>
                     <input
@@ -9059,59 +9794,71 @@ function App() {
       {usageOpen && (
         <div className="modal-overlay" onClick={() => setUsageOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Claude usage</h3>
+            <h3>Agent usage</h3>
             {usageQuery.isLoading && !usageQuery.data ? (
               <div className="usage-note">Loading…</div>
             ) : usageQuery.isError ? (
               <div className="usage-note error">{errMessage(usageQuery.error)}</div>
-            ) : !usageQuery.data?.five_hour && !usageQuery.data?.seven_day ? (
+            ) : !hasUsageData ? (
               <div className="usage-note">
                 No usage data yet — it appears once Claude Code's statusline has
-                rendered at least once.
+                rendered or Codex has written a token-count event.
               </div>
             ) : (
               <div className="usage-grid">
-                {(
-                  [
-                    ["Session", "5-hour window", usageQuery.data?.five_hour ?? null],
-                    ["Weekly", "7-day window", usageQuery.data?.seven_day ?? null],
-                  ] as const
-                ).map(([label, sub, win]) => (
-                  <div className="usage-row" key={label}>
-                    <div className="usage-head">
-                      <span className="usage-label">
-                        {label} <span className="usage-sub">{sub}</span>
-                      </span>
-                      <span className="usage-pct">
-                        {win ? `${Math.round(win.used_percentage)}%` : "—"}
-                      </span>
+                {usagePanels.map((panel) => {
+                  const tokens = tokenSummary(panel.usage);
+                  return (
+                    <div className="usage-panel" key={panel.name}>
+                      <div className="usage-panel-head">
+                        <span className="usage-source">{panel.name}</span>
+                        <span className="usage-source-sub">{panel.sub}</span>
+                      </div>
+                      {(
+                        [
+                          ["Session", "5-hour window", panel.usage.five_hour],
+                          ["Weekly", "7-day window", panel.usage.seven_day],
+                        ] as const
+                      ).map(([label, sub, win]) => (
+                        <div className="usage-row" key={`${panel.name}-${label}`}>
+                          <div className="usage-head">
+                            <span className="usage-label">
+                              {label} <span className="usage-sub">{sub}</span>
+                            </span>
+                            <span className="usage-pct">
+                              {win ? `${Math.round(win.used_percentage)}%` : "—"}
+                            </span>
+                          </div>
+                          {win ? (
+                            <>
+                              <div className="usage-bar">
+                                <div
+                                  className={`usage-fill${
+                                    win.used_percentage >= 90
+                                      ? " hot"
+                                      : win.used_percentage >= 70
+                                        ? " warm"
+                                        : ""
+                                  }`}
+                                  style={{
+                                    width: `${Math.min(100, Math.max(2, win.used_percentage))}%`,
+                                  }}
+                                />
+                              </div>
+                              <div className="usage-reset">
+                                Resets in <strong>{untilReset(win.resets_at)}</strong>
+                                <span className="usage-clock"> · {resetClock(win.resets_at)}</span>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="usage-reset muted">No data for this window</div>
+                          )}
+                        </div>
+                      ))}
+                      {tokens ? <div className="usage-reset muted">{tokens}</div> : null}
                     </div>
-                    {win ? (
-                      <>
-                        <div className="usage-bar">
-                          <div
-                            className={`usage-fill${
-                              win.used_percentage >= 90
-                                ? " hot"
-                                : win.used_percentage >= 70
-                                  ? " warm"
-                                  : ""
-                            }`}
-                            style={{
-                              width: `${Math.min(100, Math.max(2, win.used_percentage))}%`,
-                            }}
-                          />
-                        </div>
-                        <div className="usage-reset">
-                          Resets in <strong>{untilReset(win.resets_at)}</strong>
-                          <span className="usage-clock"> · {resetClock(win.resets_at)}</span>
-                        </div>
-                      </>
-                    ) : (
-                      <div className="usage-reset muted">No data for this window</div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             <div className="modal-actions">
@@ -9127,10 +9874,10 @@ function App() {
               </button>
             </div>
             <div className="modal-hint">
-              {usageQuery.data?.updated_at ? (
+              {usageUpdatedAt ? (
                 <span>
                   Updated{" "}
-                  {timeAgo(new Date(usageQuery.data.updated_at * 1000).toISOString())}
+                  {timeAgo(new Date(usageUpdatedAt * 1000).toISOString())}
                 </span>
               ) : null}
               <span>
