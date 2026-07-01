@@ -2,8 +2,18 @@
 # @claude_session option. Pairing `claude --session-id $(_cl_sid)` on launch with
 # `_cl_tag <tmux-session> <sid>` afterwards lets diffshub's Tmux tab map a session
 # straight to its ~/.claude/projects/<dir>/<sid>.jsonl transcript.
+function _cl_tmux() {
+  local sock="$1"
+  shift
+  if [[ -n "$sock" ]]; then
+    tmux -L "$sock" "$@"
+  else
+    tmux "$@"
+  fi
+}
+
 function _cl_sid() { uuidgen | tr 'A-Z' 'a-z' }
-function _cl_tag() { tmux set-option -t "$1" @claude_session "$2" 2>/dev/null }
+function _cl_tag() { _cl_tmux "${3:-}" set-option -t "$1" @claude_session "$2" 2>/dev/null }
 
 function ce() {
   local s="claude-$(uuidgen | cut -d- -f1)"
@@ -148,16 +158,18 @@ function pa() {
 }
 
 # spawn a new claude session in <dir> (default $PWD) and switch the attached
-# client to it. used by the M-n binding in .tmux.conf
+# client to it. used by the M-n binding in .tmux.conf and tmux-nav's sidebar.
 function _claude_new_here() {
   local dir="${1:-$PWD}"
+  local client="${2:-}"
+  local sock="${3:-}"
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
 
   typeset -A used_letters
   local existing cmd
-  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
-    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+  for existing in $(_cl_tmux "$sock" list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(_cl_tmux "$sock" display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
     if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
       used_letters[${existing:0:1}]=1
     fi
@@ -167,7 +179,7 @@ function _claude_new_here() {
   while true; do
     name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
     first_letter="${name:0:1}"
-    if ! tmux has-session -t "$name" 2>/dev/null; then
+    if ! _cl_tmux "$sock" has-session -t "$name" 2>/dev/null; then
       if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
         break
       fi
@@ -175,9 +187,13 @@ function _claude_new_here() {
     ((attempts++))
   done
   local sid=$(_cl_sid)
-  tmux new-session -ds "$name" -c "$dir" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$dir' claude --session-id $sid"
-  _cl_tag "$name" "$sid"
-  tmux switch-client -t "$name"
+  _cl_tmux "$sock" new-session -ds "$name" -c "$dir" "CLAUDE_CODE_NO_FLICKER=1 direnv exec ${(q)dir} claude --session-id $sid"
+  _cl_tag "$name" "$sid" "$sock"
+  if [[ -n "$client" ]]; then
+    _cl_tmux "$sock" switch-client -c "$client" -t "$name"
+  else
+    _cl_tmux "$sock" switch-client -t "$name"
+  fi
 }
 
 # like p, but fast: default opus 4.8 with 1m context + fast mode

@@ -1486,21 +1486,33 @@ function listQueuedSessions() {
 // Launch every queued prompt, oldest first, dropping each row as its session
 // starts. Stops at the first failure (e.g. a tmux hiccup) and leaves the rest for
 // the next tick. A no-op while offline or when nothing is queued.
+//
+// Only one drain runs at a time: each launch spawns a real tmux session, and a
+// launch can take longer than the 12s interval tick (see the setInterval below),
+// so without this guard a re-entrant call would see the still-undeleted row and
+// launch a second session for the same prompt. Mirrors drainOutbox's drainingRef
+// in client.tsx.
+let draining = false;
 async function drainQueue(): Promise<void> {
-  if (!onlineState.online) return;
-  for (const row of listQueuedStmt.all()) {
-    const dir = getDirStmt.get(row.dir_id);
-    if (!dir) {
-      deleteQueuedStmt.run(row.id); // directory was removed — drop the orphan
-      continue;
+  if (!onlineState.online || draining) return;
+  draining = true;
+  try {
+    for (const row of listQueuedStmt.all()) {
+      const dir = getDirStmt.get(row.dir_id);
+      if (!dir) {
+        deleteQueuedStmt.run(row.id); // directory was removed — drop the orphan
+        continue;
+      }
+      try {
+        if (row.agent === "codex") await newCodexSession(dir.path, row.prompt, row.effort ?? undefined);
+        else await newClaudeSession(dir.path, row.prompt, row.effort ?? undefined, row.chrome === 1);
+        deleteQueuedStmt.run(row.id);
+      } catch {
+        break;
+      }
     }
-    try {
-      if (row.agent === "codex") await newCodexSession(dir.path, row.prompt, row.effort ?? undefined);
-      else await newClaudeSession(dir.path, row.prompt, row.effort ?? undefined, row.chrome === 1);
-      deleteQueuedStmt.run(row.id);
-    } catch {
-      break;
-    }
+  } finally {
+    draining = false;
   }
 }
 
