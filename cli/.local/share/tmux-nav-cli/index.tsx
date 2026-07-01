@@ -606,7 +606,6 @@ function App({ args }: { args: Args }) {
   }, [args.refreshMs, refresh]);
 
   const activeSession = snapshot.targetClient?.session || "";
-  const targetFocused = snapshot.targetClient?.focused ?? false;
   const sessions = useMemo(
     () => snapshot.sessions.filter((session) => matchesFilter(session, filter)),
     [filter, snapshot.sessions],
@@ -791,13 +790,9 @@ function App({ args }: { args: Args }) {
           <Text color="gray">{snapshot.sessions.length === 0 ? "No tmux sessions." : "No matches."}</Text>
         ) : (
           visible.map((session) => {
-            const active = session.name === activeSession;
             const selectedRow = session.name === selectedName;
             const width = Math.max(1, listWidth - 1);
-            // Chevron shows only when the terminal pane actually has keyboard focus
-            // AND is on this session. The cursor is a plain full-width inverse bar.
-            const marker = active && targetFocused ? "❯ " : "  ";
-            const line = truncate((marker + rowFor(session, width - marker.length)).padEnd(width, " "), width);
+            const line = truncate(rowFor(session, width).padEnd(width, " "), width);
 
             return (
               <Text key={session.name} inverse={selectedRow}>
@@ -810,9 +805,6 @@ function App({ args }: { args: Args }) {
 
       <Box flexDirection="column">
         {error && <Text color="red">{truncate(error, Math.max(20, listWidth - 1))}</Text>}
-        {!snapshot.targetClient && (
-          <Text color="yellow">Open a tmux client in another split, or pass --client.</Text>
-        )}
         <Text color="gray">{truncate(help, listWidth - 1)}</Text>
       </Box>
     </Box>
