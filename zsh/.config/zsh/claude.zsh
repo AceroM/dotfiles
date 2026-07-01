@@ -159,10 +159,14 @@ function pa() {
 
 # spawn a new claude session in <dir> (default $PWD) and switch the attached
 # client to it. used by the M-n binding in .tmux.conf and tmux-nav's sidebar.
+# optional 4th arg prefills the new session's input with <prompt> but does NOT
+# submit it (used by tmux-nav's "branch" key to seed a pointer to another
+# session's transcript, leaving the cursor for the user to finish the prompt).
 function _claude_new_here() {
   local dir="${1:-$PWD}"
   local client="${2:-}"
   local sock="${3:-}"
+  local prompt="${4:-}"
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
 
@@ -193,6 +197,11 @@ function _claude_new_here() {
     _cl_tmux "$sock" switch-client -c "$client" -t "$name"
   else
     _cl_tmux "$sock" switch-client -t "$name"
+  fi
+  # Prefill (but don't submit) the prompt once claude has had a moment to boot.
+  # Backgrounded + disowned so the caller (tmux-nav) doesn't block on the wait.
+  if [[ -n "$prompt" ]]; then
+    ( sleep 1.5; _cl_tmux "$sock" send-keys -t "$name:0.0" -l -- "$prompt" ) &!
   fi
 }
 

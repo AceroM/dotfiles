@@ -30,6 +30,7 @@ interface TmuxSession {
   waiting: boolean;
   agent: string;
   transcriptTitle: string;
+  claudeSession: string;
 }
 
 interface TmuxClient {
@@ -93,6 +94,9 @@ Keys:
   Enter         Switch the target tmux client to the selected session (and focus its split)
   right         Switch the target tmux client to the selected session (and focus its split)
   l             Switch the target tmux client to the selected session (and focus its split)
+  c             Spawn a new claude session in the selected session's directory
+  C             Spawn a new codex session in the selected session's directory
+  b             Branch: new claude prefilled to look at the selected claude session's transcript
   x             Kill the selected session
   /             Filter sessions
   Esc           Clear filter
@@ -759,6 +763,7 @@ function listSessions(socket: string): TmuxSession[] {
             : agent === "claude"
               ? readClaudeTitle(findClaudeTranscriptByUuid(claudeSession || ""))
               : "",
+        claudeSession: claudeSession || "",
       };
     });
 
@@ -849,6 +854,9 @@ function spawnAgentSession(
   socket: string,
   targetClient: TmuxClient | null,
   cwd: string,
+  // When set (claude only), the new session's input is prefilled with this text
+  // but NOT submitted, so the user can finish the prompt before sending.
+  prompt: string = "",
 ) {
   if (!cwd) throw new Error("Selected session has no current directory");
 
@@ -863,6 +871,12 @@ function spawnAgentSession(
           fn: "_codex_new_here",
         };
 
+  // Only claude's helper accepts a prefill prompt (4th arg).
+  const call =
+    agent === "claude"
+      ? `${helper.fn} "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET" "$TMUX_NAV_PROMPT"`
+      : `${helper.fn} "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET"`;
+
   const result = spawnSync(
     "zsh",
     [
@@ -870,7 +884,7 @@ function spawnAgentSession(
       [
         "source $HOME/.config/zsh/variables.zsh",
         `source ${helper.source}`,
-        `${helper.fn} "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET"`,
+        call,
       ].join("; "),
     ],
     {
@@ -880,6 +894,7 @@ function spawnAgentSession(
         TMUX_NAV_SELECTED_CWD: cwd,
         TMUX_NAV_TARGET_CLIENT: targetClient?.tty || "",
         TMUX_NAV_SOCKET: socket,
+        TMUX_NAV_PROMPT: prompt,
       },
     },
   );
@@ -1078,9 +1093,9 @@ function App({ args }: { args: Args }) {
   );
 
   const spawnForSelected = useCallback(
-    (agent: "claude" | "codex", session: TmuxSession) => {
+    (agent: "claude" | "codex", session: TmuxSession, prompt: string = "") => {
       try {
-        spawnAgentSession(agent, args.socket, snapshot.targetClient, session.cwd);
+        spawnAgentSession(agent, args.socket, snapshot.targetClient, session.cwd, prompt);
         const next = loadSnapshot(args, targetClientRef.current);
         if (!targetClientRef.current && next.targetClient) targetClientRef.current = next.targetClient.tty;
         setSnapshot(next);
@@ -1226,6 +1241,17 @@ function App({ args }: { args: Args }) {
       setCountPrefix("");
       setFilter("");
       spawnForSelected("codex", selected);
+    } else if (input === "b" && selected) {
+      // Branch: spawn a fresh claude in the same dir, prefilled with a pointer to
+      // the selected session's transcript so it can pick up context on demand
+      // without inheriting the whole (expensive) chat history.
+      setCountPrefix("");
+      setFilter("");
+      if (selected.claudeSession) {
+        spawnForSelected("claude", selected, `Look at claude session id ${selected.claudeSession}, `);
+      } else {
+        setError("Selected session has no claude session to branch from");
+      }
     } else if (input === "x" && selected) {
       setCountPrefix("");
       try {
@@ -1249,7 +1275,7 @@ function App({ args }: { args: Args }) {
   });
 
   const listWidth = Math.max(24, columns);
-  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  c claude  C codex  enter switch  x kill  / filter  q`;
+  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  c claude  C codex  b branch  enter switch  x kill  / filter  q`;
 
   return (
     <Box flexDirection="column">
