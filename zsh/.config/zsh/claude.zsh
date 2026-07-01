@@ -201,7 +201,10 @@ function pf() {
   p --model claude-opus-4-8 "$@"
 }
 
-function tn() {
+# open the tmux-nav session navigator sidebar
+alias tn='tmux-nav'
+
+function tnew() {
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
 
