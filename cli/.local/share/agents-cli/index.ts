@@ -42,6 +42,62 @@ function json(obj: unknown, status = 200): Response {
   });
 }
 
+// --- PWA assets -------------------------------------------------------------
+
+// Self-contained app icon (blue rounded square + white robot head). Served as
+// SVG so no binary blobs live in the repo; modern browsers accept SVG manifest
+// icons for installability.
+const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#2563eb"/>
+  <rect x="120" y="230" width="20" height="60" rx="10" fill="#fff"/>
+  <rect x="372" y="230" width="20" height="60" rx="10" fill="#fff"/>
+  <rect x="248" y="104" width="16" height="46" rx="8" fill="#fff"/>
+  <circle cx="256" cy="96" r="20" fill="#fff"/>
+  <rect x="136" y="150" width="240" height="200" rx="44" fill="#fff"/>
+  <circle cx="206" cy="238" r="26" fill="#2563eb"/>
+  <circle cx="306" cy="238" r="26" fill="#2563eb"/>
+  <rect x="198" y="300" width="116" height="18" rx="9" fill="#2563eb"/>
+</svg>`;
+
+const MANIFEST = {
+  name: "agents",
+  short_name: "agents",
+  description: "Browse agent HTML reports",
+  start_url: "/",
+  scope: "/",
+  display: "standalone",
+  background_color: "#ffffff",
+  theme_color: "#ffffff",
+  icons: [
+    { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
+    { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "maskable" },
+  ],
+};
+
+// Minimal service worker: satisfies installability (has a GET fetch handler) and
+// caches just the static shell assets. Reports/API/SSE always hit the network,
+// so nothing dynamic goes stale — the app only works with the server running.
+const SERVICE_WORKER = `
+const CACHE = "agents-shell-v1";
+const SHELL = ["/icon.svg", "/manifest.webmanifest"];
+self.addEventListener("install", (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  self.skipWaiting();
+});
+self.addEventListener("activate", (e) => {
+  e.waitUntil(caches.keys().then((keys) =>
+    Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+  ));
+  self.clients.claim();
+});
+self.addEventListener("fetch", (e) => {
+  const url = new URL(e.request.url);
+  if (e.request.method === "GET" && SHELL.includes(url.pathname)) {
+    e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
+  }
+});
+`;
+
 // A path is only safe to mv/rm if it stays inside the agents/ tree.
 function safePath(p: unknown): p is string {
   return (
@@ -86,6 +142,14 @@ function buildPage(files: FileEntry[], active: string | null): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${activeLabel} — agents</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" href="/icon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="/icon.svg" />
+<meta name="theme-color" content="#ffffff" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="agents" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   .item.kb-focus { background: #e5e7eb; }
@@ -125,7 +189,10 @@ function buildPage(files: FileEntry[], active: string | null): string {
   <div class="p-4 pb-3 border-b border-gray-200">
     <div class="flex items-center justify-between mb-2.5">
       <h1 class="text-[15px] font-bold">agents</h1>
-      <button id="collapseBtn" class="hidden md:flex items-center justify-center w-6 h-6 text-gray-500 hover:text-gray-900 hover:bg-gray-200 rounded cursor-pointer text-[15px] leading-none" title="Collapse sidebar (b)">&#171;</button>
+      <div class="flex items-center gap-1.5">
+        <button id="installBtn" class="hidden px-2 py-0.5 text-[11px] rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 cursor-pointer" title="Install as app">Install</button>
+        <button id="collapseBtn" class="hidden md:flex items-center justify-center w-6 h-6 text-gray-500 hover:text-gray-900 hover:bg-gray-200 rounded cursor-pointer text-[15px] leading-none" title="Collapse sidebar (b)">&#171;</button>
+      </div>
     </div>
     <input type="text" id="search" placeholder="Search… (/ to focus)" autocomplete="off"
       class="w-full py-1.5 px-2.5 border border-gray-200 rounded-md bg-white text-gray-900 text-[13px] outline-none focus:border-blue-600 placeholder:text-gray-400" />
@@ -455,6 +522,34 @@ function buildPage(files: FileEntry[], active: string | null): string {
     });
     try { previewFrame.contentWindow.focus(); } catch {}
   }
+
+  // PWA: register the service worker and wire up the install button
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    });
+  }
+
+  let deferredPrompt = null;
+  const installBtn = document.getElementById("installBtn");
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    if (installBtn) installBtn.classList.remove("hidden");
+  });
+  if (installBtn) {
+    installBtn.addEventListener("click", async () => {
+      if (!deferredPrompt) return;
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+      deferredPrompt = null;
+      installBtn.classList.add("hidden");
+    });
+  }
+  window.addEventListener("appinstalled", () => {
+    deferredPrompt = null;
+    if (installBtn) installBtn.classList.add("hidden");
+  });
 </script>
 </body>
 </html>`;
@@ -479,6 +574,31 @@ const server = Bun.serve({
   idleTimeout: 255,
   async fetch(req) {
     const url = new URL(req.url);
+
+    if (url.pathname === "/manifest.webmanifest") {
+      return new Response(JSON.stringify(MANIFEST), {
+        headers: { "Content-Type": "application/manifest+json; charset=utf-8" },
+      });
+    }
+
+    if (url.pathname === "/icon.svg") {
+      return new Response(ICON_SVG, {
+        headers: {
+          "Content-Type": "image/svg+xml; charset=utf-8",
+          "Cache-Control": "no-cache",
+        },
+      });
+    }
+
+    if (url.pathname === "/sw.js") {
+      return new Response(SERVICE_WORKER, {
+        headers: {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-cache",
+          "Service-Worker-Allowed": "/",
+        },
+      });
+    }
 
     if (url.pathname === "/events") {
       return new Response(
