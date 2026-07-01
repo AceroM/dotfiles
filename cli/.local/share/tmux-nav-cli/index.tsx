@@ -431,6 +431,53 @@ function killSession(socket: string, sessionName: string) {
   tmux(socket, ["kill-session", "-t", sessionName]);
 }
 
+function spawnAgentSession(
+  agent: "claude" | "codex",
+  socket: string,
+  targetClient: TmuxClient | null,
+  cwd: string,
+) {
+  if (!cwd) throw new Error("Selected session has no current directory");
+
+  const helper =
+    agent === "claude"
+      ? {
+          source: "$HOME/.config/zsh/claude.zsh",
+          fn: "_claude_new_here",
+        }
+      : {
+          source: "$HOME/.config/zsh/codex.zsh",
+          fn: "_codex_new_here",
+        };
+
+  const result = spawnSync(
+    "zsh",
+    [
+      "-lc",
+      [
+        "source $HOME/.config/zsh/variables.zsh",
+        `source ${helper.source}`,
+        `${helper.fn} "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET"`,
+      ].join("; "),
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        TMUX_NAV_SELECTED_CWD: cwd,
+        TMUX_NAV_TARGET_CLIENT: targetClient?.tty || "",
+        TMUX_NAV_SOCKET: socket,
+      },
+    },
+  );
+
+  if (result.status !== 0) {
+    const stderr = (result.stderr || "").trim();
+    const stdout = (result.stdout || "").trim();
+    throw new Error(stderr || stdout || `${agent} launcher exited with status ${result.status}`);
+  }
+}
+
 function timeAgo(seconds: number): string {
   if (!seconds) return "";
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - seconds);
@@ -587,6 +634,22 @@ function App({ args }: { args: Args }) {
     [args.socket, snapshot.targetClient],
   );
 
+  const spawnForSelected = useCallback(
+    (agent: "claude" | "codex", session: TmuxSession) => {
+      try {
+        spawnAgentSession(agent, args.socket, snapshot.targetClient, session.cwd);
+        const next = loadSnapshot(args, targetClientRef.current);
+        if (!targetClientRef.current && next.targetClient) targetClientRef.current = next.targetClient.tty;
+        setSnapshot(next);
+        setSelectedName(next.targetClient?.session || session.name);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [args, snapshot.targetClient],
+  );
+
   const move = useCallback(
     (delta: number): string | null => {
       if (!sessions.length) return null;
@@ -656,6 +719,12 @@ function App({ args }: { args: Args }) {
     } else if ((key.return || key.rightArrow || input === "l") && selected) {
       setCountPrefix("");
       switchToName(selected.name);
+    } else if (input === "c" && selected) {
+      setCountPrefix("");
+      spawnForSelected("claude", selected);
+    } else if (input === "C" && selected) {
+      setCountPrefix("");
+      spawnForSelected("codex", selected);
     } else if (input === "x" && selected) {
       setCountPrefix("");
       try {
@@ -679,7 +748,7 @@ function App({ args }: { args: Args }) {
   });
 
   const listWidth = Math.max(24, columns);
-  const help = `j/k move${autoSwitch ? "+switch" : ""}  a auto  enter switch  x kill  / filter  q`;
+  const help = `j/k move${autoSwitch ? "+switch" : ""}  c claude  C codex  enter switch  x kill  / filter  q`;
 
   return (
     <Box flexDirection="column">

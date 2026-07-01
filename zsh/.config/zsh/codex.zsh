@@ -12,6 +12,16 @@
 
 _CODEX_SESSIONS="$HOME/.codex/sessions"
 
+function _cx_tmux() {
+  local sock="$1"
+  shift
+  if [[ -n "$sock" ]]; then
+    tmux -L "$sock" "$@"
+  else
+    tmux "$@"
+  fi
+}
+
 # Today's rollout folder — new sessions always land here (date-bucketed by codex).
 function _cx_today_dir() { print -r -- "$_CODEX_SESSIONS/$(date +%Y/%m/%d)" }
 
@@ -30,7 +40,8 @@ function _cx_uuids() {
 # Newline list of @codex_session uuids already claimed by a live tmux session — so a
 # same-dir race never tags two sessions to the same rollout.
 function _cx_claimed() {
-  tmux list-sessions -F '#{@codex_session}' 2>/dev/null | grep .
+  local sock="${1:-}"
+  _cx_tmux "$sock" list-sessions -F '#{@codex_session}' 2>/dev/null | grep .
 }
 
 # Discover the rollout that appeared since `before` (a newline uuid snapshot) whose
@@ -42,6 +53,7 @@ function _cx_claimed() {
 # (there's nothing to map yet anyway). Caps so a forgotten idle session self-exits.
 function _cx_tag() {
   local name="$1" cwd="$2"
+  local sock="${4:-}"
   local -A seen
   local u
   while IFS= read -r u; do [[ -n "$u" ]] && seen[$u]=1; done <<< "$3"
@@ -50,7 +62,7 @@ function _cx_tag() {
   while (( tries++ < 340 )); do
     # refresh per tick so a concurrent same-dir launcher's claim is respected
     local -A claimed
-    while IFS= read -r u; do [[ -n "$u" ]] && claimed[$u]=1; done < <(_cx_claimed)
+    while IFS= read -r u; do [[ -n "$u" ]] && claimed[$u]=1; done < <(_cx_claimed "$sock")
     dir="$(_cx_today_dir)"
     # newest-first so a same-dir race picks the freshest unseen rollout
     for f in "$dir"/rollout-*.jsonl(NOm); do
@@ -60,12 +72,12 @@ function _cx_tag() {
       line1="$(head -1 "$f" 2>/dev/null)"
       metacwd="${line1#*\"cwd\":\"}"; metacwd="${metacwd%%\"*}"
       if [[ "$metacwd" == "$cwd" ]]; then
-        tmux set-option -t "$name" @codex_session "$uuid" 2>/dev/null
+        _cx_tmux "$sock" set-option -t "$name" @codex_session "$uuid" 2>/dev/null
         return 0
       fi
     done
     # bail early if the session itself is gone (closed before ever prompting)
-    tmux has-session -t "$name" 2>/dev/null || return 1
+    _cx_tmux "$sock" has-session -t "$name" 2>/dev/null || return 1
     (( tries < 40 )) && sleep 0.25 || sleep 1
   done
   return 1
@@ -77,13 +89,14 @@ function _cx_tag_async() { ( _cx_tag "$@" ) &! }
 # Pick an unused adjective-noun tmux session name, avoiding the first letter of any
 # session already running an agent (codex/claude/node) — mirrors claude.zsh's picker.
 function _cx_pick_name() {
+  local sock="${1:-}"
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
 
   typeset -A used_letters
   local existing cmd
-  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
-    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+  for existing in $(_cx_tmux "$sock" list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(_cx_tmux "$sock" display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
     if [[ "$cmd" == *codex* || "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
       used_letters[${existing:0:1}]=1
     fi
@@ -93,7 +106,7 @@ function _cx_pick_name() {
   while true; do
     name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
     first_letter="${name:0:1}"
-    if ! tmux has-session -t "$name" 2>/dev/null; then
+    if ! _cx_tmux "$sock" has-session -t "$name" 2>/dev/null; then
       if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
         break
       fi
@@ -114,6 +127,27 @@ function _cx_cmd() {
   for arg in "$@"; do cmd+=" ${(q)arg}"; done
   [[ -n "$prompt" ]] && cmd+=" ${(q)prompt}"
   print -r -- "$cmd"
+}
+
+# Spawn a new codex session in <dir> (default $PWD) and switch the attached
+# client to it. Used by tmux-nav's sidebar.
+function _codex_new_here() {
+  local dir="${1:-$PWD}"
+  local client="${2:-}"
+  local sock="${3:-}"
+  local name="$(_cx_pick_name "$sock")"
+  local before="$(_cx_uuids)"
+  local cmd
+
+  builtin cd "$dir" || return 1
+  cmd="$(_cx_cmd "" --dangerously-bypass-approvals-and-sandbox)"
+  _cx_tmux "$sock" new-session -ds "$name" -c "$dir" "$cmd"
+  _cx_tag_async "$name" "$dir" "$before" "$sock"
+  if [[ -n "$client" ]]; then
+    _cx_tmux "$sock" switch-client -c "$client" -t "$name"
+  else
+    _cx_tmux "$sock" switch-client -t "$name"
+  fi
 }
 
 # xc — interactive codex in a fresh tmux session, then attach. The codex twin of `p`.
