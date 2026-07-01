@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename } from "node:path";
 
 const SEP = "\x1f";
@@ -335,6 +335,244 @@ function readClaudeTitle(path: string | null): string {
   }
 }
 
+// ---- Agent usage footer -----------------------------------------------------
+// Per agent: rate-limit windows when on a subscription, else an estimated dollar
+// spend for today (local day) from local token usage. Neither agent records a
+// dollar figure — only token counts — so the cost is an estimate against a
+// static price table, labelled "est" in the UI.
+
+interface UsageWindow {
+  used_percentage: number;
+}
+interface AgentUsage {
+  five_hour: UsageWindow | null;
+  seven_day: UsageWindow | null;
+  costToday: number | null;
+}
+interface UsageSummary {
+  claude: AgentUsage;
+  codex: AgentUsage;
+}
+interface Price {
+  input: number; // $/Mtok, uncached input
+  output: number;
+  cacheRead: number;
+  cacheCreate: number;
+}
+
+function claudePrice(model: string): Price {
+  const m = (model || "").toLowerCase();
+  if (m.includes("opus")) return { input: 15, output: 75, cacheRead: 1.5, cacheCreate: 18.75 };
+  if (m.includes("haiku")) return { input: 0.8, output: 4, cacheRead: 0.08, cacheCreate: 1 };
+  return { input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75 }; // sonnet / default
+}
+
+// Codex token_count events don't carry the model; price with a gpt-5-class
+// default (OpenAI bills no separate cache-creation charge).
+const CODEX_PRICE: Price = { input: 1.25, output: 10, cacheRead: 0.125, cacheCreate: 0 };
+
+function finiteNum(x: unknown): number | null {
+  const n = typeof x === "number" ? x : typeof x === "string" ? Number(x) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function normWindow(win: unknown): UsageWindow | null {
+  if (!win || typeof win !== "object") return null;
+  const o = win as Record<string, unknown>;
+  const used = finiteNum(o.used_percentage ?? o.used_percent);
+  return used == null ? null : { used_percentage: used };
+}
+
+function startOfTodayMs(): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function readTail(path: string, bytes: number): string {
+  const size = statSync(path).size;
+  const startAt = Math.max(0, size - bytes);
+  const len = size - startAt;
+  if (len <= 0) return "";
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(len);
+    const n = readSync(fd, buf, 0, len, startAt);
+    return buf.toString("utf8", 0, n);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Claude subscription windows live in ~/.claude/rate-limits.json (written by the
+// statusline hook). Absent/empty ⇒ the account is API-billed.
+function readClaudeWindows(): { five: UsageWindow | null; seven: UsageWindow | null } {
+  try {
+    const path = `${process.env.HOME}/.claude/rate-limits.json`;
+    if (!existsSync(path)) return { five: null, seven: null };
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    return { five: normWindow(raw?.five_hour), seven: normWindow(raw?.seven_day) };
+  } catch {
+    return { five: null, seven: null };
+  }
+}
+
+// Codex windows come from the newest rollout's latest token_count event carrying
+// rate_limits. None found ⇒ API-billed.
+function readCodexWindows(): { five: UsageWindow | null; seven: UsageWindow | null } {
+  for (const row of recentRollouts().slice(0, 30)) {
+    let tail: string;
+    try {
+      tail = readTail(row.path, 512 * 1024);
+    } catch {
+      continue;
+    }
+    const lines = tail.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (!line.includes('"rate_limits"') || !line.includes('"token_count"')) continue;
+      try {
+        const d = JSON.parse(line);
+        const p = d?.payload;
+        const limits = p?.rate_limits;
+        if (p?.type !== "token_count" || !limits) continue;
+        return { five: normWindow(limits.primary), seven: normWindow(limits.secondary) };
+      } catch {}
+    }
+  }
+  return { five: null, seven: null };
+}
+
+function estimateClaudeCostToday(): number {
+  const since = startOfTodayMs();
+  let cost = 0;
+  try {
+    const glob = new Bun.Glob("**/*.jsonl");
+    for (const rel of glob.scanSync(claudeProjectsRoot)) {
+      const path = `${claudeProjectsRoot}/${rel}`;
+      let mtime = 0;
+      try {
+        mtime = statSync(path).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (mtime < since) continue; // untouched today ⇒ no today lines
+      let text: string;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        continue;
+      }
+      for (const line of text.split("\n")) {
+        if (!line.includes('"assistant"') || !line.includes('"usage"')) continue;
+        let d: any;
+        try {
+          d = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (d?.type !== "assistant") continue;
+        const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : NaN;
+        if (!Number.isFinite(ts) || ts < since) continue;
+        const u = d.message?.usage;
+        if (!u) continue;
+        const p = claudePrice(d.message?.model ?? "");
+        const inp = finiteNum(u.input_tokens) ?? 0;
+        const out = finiteNum(u.output_tokens) ?? 0;
+        const cr = finiteNum(u.cache_read_input_tokens) ?? 0;
+        const cc = finiteNum(u.cache_creation_input_tokens) ?? 0;
+        cost += (inp * p.input + out * p.output + cr * p.cacheRead + cc * p.cacheCreate) / 1e6;
+      }
+    }
+  } catch {}
+  return cost;
+}
+
+function estimateCodexCostToday(): number {
+  const since = startOfTodayMs();
+  let cost = 0;
+  try {
+    const glob = new Bun.Glob("**/rollout-*.jsonl");
+    for (const rel of glob.scanSync(codexSessionsRoot)) {
+      const path = `${codexSessionsRoot}/${rel}`;
+      let mtime = 0;
+      try {
+        mtime = statSync(path).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (mtime < since) continue;
+      let text: string;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        continue;
+      }
+      for (const line of text.split("\n")) {
+        if (!line.includes('"token_count"')) continue;
+        let d: any;
+        try {
+          d = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (d?.payload?.type !== "token_count") continue;
+        const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : NaN;
+        if (!Number.isFinite(ts) || ts < since) continue;
+        // last_token_usage is that turn's delta; summing today's deltas ≈ today.
+        const last = d.payload?.info?.last_token_usage;
+        if (!last) continue;
+        const input = finiteNum(last.input_tokens) ?? 0;
+        const cached = finiteNum(last.cached_input_tokens) ?? 0;
+        const output = finiteNum(last.output_tokens) ?? 0;
+        const uncached = Math.max(0, input - cached);
+        cost += (uncached * CODEX_PRICE.input + cached * CODEX_PRICE.cacheRead + output * CODEX_PRICE.output) / 1e6;
+      }
+    }
+  } catch {}
+  return cost;
+}
+
+let usageCache: { at: number; data: UsageSummary } | null = null;
+
+// Cached for 60s: estimating today's cost scans transcripts, too heavy to run on
+// every refresh tick. Cost is only computed for an agent with no subscription
+// windows (i.e. API-billed), so subscription users never pay the scan.
+function loadUsage(): UsageSummary {
+  const now = Date.now();
+  if (usageCache && now - usageCache.at < 60_000) return usageCache.data;
+
+  const claudeWin = readClaudeWindows();
+  const codexWin = readCodexWindows();
+  const data: UsageSummary = {
+    claude: {
+      five_hour: claudeWin.five,
+      seven_day: claudeWin.seven,
+      costToday: claudeWin.five || claudeWin.seven ? null : estimateClaudeCostToday(),
+    },
+    codex: {
+      five_hour: codexWin.five,
+      seven_day: codexWin.seven,
+      costToday: codexWin.five || codexWin.seven ? null : estimateCodexCostToday(),
+    },
+  };
+  usageCache = { at: now, data };
+  return data;
+}
+
+function formatUsageLine(name: string, u: AgentUsage): string | null {
+  if (u.five_hour || u.seven_day) {
+    const parts: string[] = [];
+    if (u.five_hour) parts.push(`5hr ${Math.round(u.five_hour.used_percentage)}%`);
+    if (u.seven_day) parts.push(`1w ${Math.round(u.seven_day.used_percentage)}%`);
+    return `${name}: ${parts.join(" | ")}`;
+  }
+  if (typeof u.costToday === "number") {
+    return `${name}: $${u.costToday.toFixed(2)} est`;
+  }
+  return null;
+}
+
 function listSessions(socket: string): TmuxSession[] {
   const format = [
     "#{session_name}",
@@ -581,6 +819,7 @@ function App({ args }: { args: Args }) {
   const [countPrefix, setCountPrefix] = useState("");
   const [autoSwitch, setAutoSwitch] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
 
   const refresh = useCallback(() => {
     try {
@@ -594,6 +833,7 @@ function App({ args }: { args: Args }) {
       }
       if (!targetClientRef.current && next.targetClient) targetClientRef.current = next.targetClient.tty;
       setSnapshot(next);
+      setUsage(loadUsage());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -698,8 +938,13 @@ function App({ args }: { args: Args }) {
     [selectedName, sessions],
   );
 
+  const usageLines = usage
+    ? ([formatUsageLine("claude", usage.claude), formatUsageLine("codex", usage.codex)].filter(
+        Boolean,
+      ) as string[])
+    : [];
   const headerLines = filtering || filter ? 3 : 2;
-  const footerLines = error || !snapshot.targetClient ? 2 : 1;
+  const footerLines = (error || !snapshot.targetClient ? 2 : 1) + usageLines.length;
   const maxVisible = Math.max(1, rows - headerLines - footerLines);
   const start = Math.min(
     Math.max(0, selectedIndex - Math.floor(maxVisible / 2)),
@@ -842,6 +1087,11 @@ function App({ args }: { args: Args }) {
       </Box>
 
       <Box flexDirection="column">
+        {usageLines.map((line, i) => (
+          <Text key={`usage-${i}`} color="cyan" dimColor>
+            {truncate(line, listWidth - 1)}
+          </Text>
+        ))}
         {error && <Text color="red">{truncate(error, Math.max(20, listWidth - 1))}</Text>}
         <Text color="gray">{truncate(help, listWidth - 1)}</Text>
       </Box>
