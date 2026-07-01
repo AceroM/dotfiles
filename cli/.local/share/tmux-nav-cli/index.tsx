@@ -88,6 +88,7 @@ Usage:
 
 Keys:
   j/down, k/up  Move selection (supports counts: 5j, 7k)
+  J/K           Jump to next/previous busy or waiting session
   a             Toggle auto-switch after j/k navigation
   Enter         Switch the target tmux client to the selected session
   right         Switch the target tmux client to the selected session
@@ -677,6 +678,26 @@ function App({ args }: { args: Args }) {
     [selectedName, sessions],
   );
 
+  // Jump to the next/previous session that is in progress (busy) or needs
+  // action (waiting), wrapping around the list.
+  const moveToAttention = useCallback(
+    (delta: number): string | null => {
+      if (!sessions.length) return null;
+      const idx = sessions.findIndex((session) => session.name === selectedName);
+      const currentIdx = idx < 0 ? 0 : idx;
+      for (let step = 1; step <= sessions.length; step++) {
+        const nextIdx = (((currentIdx + step * delta) % sessions.length) + sessions.length) % sessions.length;
+        const candidate = sessions[nextIdx];
+        if (candidate.busy || candidate.waiting) {
+          setSelectedName(candidate.name);
+          return candidate.name;
+        }
+      }
+      return null;
+    },
+    [selectedName, sessions],
+  );
+
   const headerLines = filtering || filter ? 3 : 2;
   const footerLines = error || !snapshot.targetClient ? 2 : 1;
   const maxVisible = Math.max(1, rows - headerLines - footerLines);
@@ -698,6 +719,12 @@ function App({ args }: { args: Args }) {
       } else if (input && !key.ctrl && !key.meta) {
         setFilter((value) => value + input);
       }
+      return;
+    }
+
+    if (key.escape) {
+      setCountPrefix("");
+      setFilter("");
       return;
     }
 
@@ -724,6 +751,14 @@ function App({ args }: { args: Args }) {
       setCountPrefix("");
       const nextName = move(-count);
       if (autoSwitch && nextName) switchToName(nextName);
+    } else if (input === "J") {
+      setCountPrefix("");
+      const nextName = moveToAttention(1);
+      if (autoSwitch && nextName) switchToName(nextName);
+    } else if (input === "K") {
+      setCountPrefix("");
+      const nextName = moveToAttention(-1);
+      if (autoSwitch && nextName) switchToName(nextName);
     } else if (input === "g") {
       setCountPrefix("");
       const first = sessions[0];
@@ -740,12 +775,15 @@ function App({ args }: { args: Args }) {
       }
     } else if ((key.return || key.rightArrow || input === "l") && selected) {
       setCountPrefix("");
+      setFilter("");
       switchToName(selected.name);
     } else if (input === "c" && selected) {
       setCountPrefix("");
+      setFilter("");
       spawnForSelected("claude", selected);
     } else if (input === "C" && selected) {
       setCountPrefix("");
+      setFilter("");
       spawnForSelected("codex", selected);
     } else if (input === "x" && selected) {
       setCountPrefix("");
@@ -770,7 +808,7 @@ function App({ args }: { args: Args }) {
   });
 
   const listWidth = Math.max(24, columns);
-  const help = `j/k move${autoSwitch ? "+switch" : ""}  c claude  C codex  enter switch  x kill  / filter  q`;
+  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  c claude  C codex  enter switch  x kill  / filter  q`;
 
   return (
     <Box flexDirection="column">
