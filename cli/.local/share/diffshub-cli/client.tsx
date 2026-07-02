@@ -210,6 +210,7 @@ interface QueuedSession {
   cwd: string;
   optimistic?: boolean;
   agent?: "claude" | "codex"; // which CLI it'll launch as (claude when absent)
+  model?: string;
 }
 
 // A new-session prompt written to the localStorage outbox so it survives reloads
@@ -220,6 +221,7 @@ interface QueuedSession {
 interface OutboxEntry {
   localId: string; // uuid — the optimistic row's key and the drain single-flight key
   prompt: string;
+  model?: string;
   effort?: string;
   chrome?: boolean;
   agent?: "claude" | "codex"; // which CLI to launch (claude when absent)
@@ -476,6 +478,20 @@ const DIFF_OPTIONS = {
   lineHoverHighlight: "line",
   enableLineSelection: true,
 } as const;
+
+const CLAUDE_MODELS = [
+  { value: "sonnet", label: "Sonnet" },
+  { value: "opus", label: "Opus" },
+  { value: "fable", label: "Fable" },
+] as const;
+const CODEX_MODELS = [
+  { value: "gpt-5.5", label: "GPT-5.5" },
+  { value: "gpt-5.4", label: "GPT-5.4" },
+  { value: "gpt-5.4-mini", label: "GPT-5.4-Mini" },
+  { value: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark" },
+] as const;
+const CLAUDE_MODEL_VALUES: ReadonlySet<string> = new Set(CLAUDE_MODELS.map((m) => m.value));
+const CODEX_MODEL_VALUES: ReadonlySet<string> = new Set(CODEX_MODELS.map((m) => m.value));
 
 // How often the Tmux tab re-reads the session list / open transcript while a
 // claude session is actively working (see the queries below).
@@ -1940,6 +1956,15 @@ function saveCaret(key: string, caret: { start: number; end: number } | null) {
   }
 }
 
+function loadModelPref(key: string, fallback: string, allowed: ReadonlySet<string>): string {
+  try {
+    const value = localStorage.getItem(key) ?? fallback;
+    return value === "" || allowed.has(value) ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // ---- New-session outbox (localStorage) ----
 // New sessions are queued optimistically: every `'` submit lands here
 // first (instant Queued row that survives reloads), then drainOutbox POSTs each
@@ -2534,6 +2559,7 @@ function HomeView({
                   <span className="home-dot" />
                   <span className="home-card-name">Queued prompt</span>
                   {q.agent === "codex" && <span className="home-card-agent">codex</span>}
+                  {q.model && <span className="home-card-agent">{q.model}</span>}
                 </div>
                 <div className="home-card-task">{q.prompt}</div>
                 <div className="home-card-cwd">{q.cwd.replace(/^.*\//, "") || q.cwd}</div>
@@ -2913,6 +2939,7 @@ function App() {
     queryKey: ["commits", activeDir],
     queryFn: ({ pageParam, signal }) =>
       fetchJSON<Commit[]>(qd(`/api/commits?page=${pageParam}`), signal),
+    enabled: tab === "commits",
     initialPageParam: 1,
     getNextPageParam: (lastPage, allPages) => (lastPage.length > 0 ? allPages.length + 1 : undefined),
   });
@@ -3105,6 +3132,7 @@ function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               prompt: entry.prompt,
+              model: entry.model || undefined,
               effort: entry.effort || undefined,
               chrome: entry.chrome || undefined,
               agent: entry.agent || undefined,
@@ -3267,7 +3295,10 @@ function App() {
   const [contentVersion, setContentVersion] = useState(0);
 
   // ---- Subway pseudo-offline tab ----
-  const [subwaySnapshots, setSubwaySnapshots] = useState<Record<string, SubwaySnapshot>>(loadSubwaySnapshots);
+  const [subwaySnapshots, setSubwaySnapshots] = useState<Record<string, SubwaySnapshot>>(() =>
+    initial.tab === "subway" ? loadSubwaySnapshots() : {},
+  );
+  const [subwayCacheReady, setSubwayCacheReady] = useState(initial.tab === "subway");
   const [subwayActions, setSubwayActions] = useState<SubwayActionEntry[]>(loadSubwayActions);
   const [subwaySelected, setSubwaySelected] = useState<string | null>(null);
   const [subwayReplyText, setSubwayReplyText] = useState("");
@@ -3280,7 +3311,15 @@ function App() {
   const subwayKey = subwayCacheKey(meta?.id ?? activeDir);
   const subwaySnapshot = subwaySnapshots[subwayKey] ?? null;
 
-  useEffect(() => saveSubwaySnapshots(subwaySnapshots), [subwaySnapshots]);
+  useEffect(() => {
+    if (tab !== "subway" || subwayCacheReady) return;
+    setSubwaySnapshots(loadSubwaySnapshots());
+    setSubwayCacheReady(true);
+  }, [tab, subwayCacheReady]);
+  useEffect(() => {
+    if (!subwayCacheReady) return;
+    saveSubwaySnapshots(subwaySnapshots);
+  }, [subwayCacheReady, subwaySnapshots]);
   useEffect(() => saveSubwayActions(subwayActions), [subwayActions]);
 
   const loadSubwaySnapshot = useCallback(
@@ -3688,6 +3727,22 @@ function App() {
   const [claudeOpen, setClaudeOpen] = useState(false);
   // Loaded per-directory by the effect below once `meta` (the active dir) is known.
   const [claudePrompt, setClaudePrompt] = useState("");
+  // Model for the new session. Claude is explicit by default so launches keep using
+  // sonnet even when Claude Code's own default changes; choosing Default clears it.
+  const [claudeModel, setClaudeModel] = useState<string>(() =>
+    loadModelPref("claudeModel", "sonnet", CLAUDE_MODEL_VALUES),
+  );
+  useEffect(() => {
+    if (claudeModel) localStorage.setItem("claudeModel", claudeModel);
+    else localStorage.removeItem("claudeModel");
+  }, [claudeModel]);
+  const [codexModel, setCodexModel] = useState<string>(() =>
+    loadModelPref("codexModel", "", CODEX_MODEL_VALUES),
+  );
+  useEffect(() => {
+    if (codexModel) localStorage.setItem("codexModel", codexModel);
+    else localStorage.removeItem("codexModel");
+  }, [codexModel]);
   // Reasoning effort for the new session, passed as `claude --effort <level>`.
   // "" means inherit the global settings.json `effortLevel`. Persisted across
   // sessions (a single global key — effort is a preference, not a per-repo draft).
@@ -4714,6 +4769,7 @@ function App() {
       {
         localId: makeLocalId(),
         prompt,
+        model: claudeAgent === "codex" ? codexModel || undefined : claudeModel || undefined,
         effort: claudeAgent === "codex" ? codexEffort || undefined : claudeEffort || undefined,
         chrome: claudeAgent === "codex" ? undefined : claudeChrome || undefined,
         agent: claudeAgent === "codex" ? "codex" : undefined,
@@ -4730,7 +4786,7 @@ function App() {
     if (claudeDraftDirRef.current != null) saveCaret(claudeCaretKey(claudeDraftDirRef.current), null);
     // A Queued row is already on screen; the toast confirms it'll launch on its own.
     setQueuedNote(true);
-  }, [claudePrompt, claudeEffort, codexEffort, claudeChrome, claudeAgent, meta?.path]);
+  }, [claudePrompt, claudeModel, codexModel, claudeEffort, codexEffort, claudeChrome, claudeAgent, meta?.path]);
 
   // Relaunch a closed session: the server starts `claude --resume <sid>` detached
   // in the active directory. Mirrors submitClaude's refresh dance so the resumed
@@ -6270,6 +6326,7 @@ function App() {
         cwd: e.cwd,
         optimistic: true,
         agent: e.agent,
+        model: e.model,
       }))
       .sort((a, b) => b.createdAt - a.createdAt);
     let list = [...optimistic, ...(queuedSessions ?? []).filter((x) => inScope(x.cwd))];
@@ -8266,6 +8323,8 @@ function App() {
                 <div className="sess-top">
                   <span className="sess-queued" />
                   <span className="sess-name">Queued session</span>
+                  {qs.agent === "codex" && <span className="home-card-agent">codex</span>}
+                  {qs.model && <span className="home-card-agent">{qs.model}</span>}
                   <span className="queued-badge">Queued</span>
                 </div>
                 <div className="sess-task">{qs.prompt}</div>
@@ -9697,6 +9756,36 @@ function App() {
                   <option value="claude">claude</option>
                   <option value="codex">codex</option>
                 </select>
+              </label>
+              <label className="claude-opt">
+                <span>Model</span>
+                {claudeAgent === "codex" ? (
+                  <select
+                    value={codexModel}
+                    onChange={(e) => setCodexModel(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  >
+                    <option value="">Default</option>
+                    {CODEX_MODELS.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    value={claudeModel}
+                    onChange={(e) => setClaudeModel(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  >
+                    <option value="">Default</option>
+                    {CLAUDE_MODELS.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </label>
               <label className="claude-opt">
                 <span>Effort</span>
