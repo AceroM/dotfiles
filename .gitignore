@@ -6,3 +6,4 @@ node_modules/
 .DS_Store
 .wrangler/
 diffs/
+codex/.codex/config.toml
