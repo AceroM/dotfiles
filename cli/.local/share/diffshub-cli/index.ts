@@ -2,7 +2,15 @@
 
 import { $ } from "bun";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -54,7 +62,11 @@ interface Workspace {
 
 async function isGitWorkTree(dir: string): Promise<boolean> {
   try {
-    return (await $`git -C ${dir} rev-parse --is-inside-work-tree`.quiet().text()).trim() === "true";
+    return (
+      (
+        await $`git -C ${dir} rev-parse --is-inside-work-tree`.quiet().text()
+      ).trim() === "true"
+    );
   } catch {
     return false;
   }
@@ -64,7 +76,10 @@ async function resolveRepo(key: string, dir: string): Promise<RepoCtx | null> {
   let nameWithOwner: string;
   try {
     nameWithOwner = (
-      await $`gh repo view --json nameWithOwner -q .nameWithOwner`.cwd(dir).quiet().text()
+      await $`gh repo view --json nameWithOwner -q .nameWithOwner`
+        .cwd(dir)
+        .quiet()
+        .text()
     ).trim();
   } catch {
     return null;
@@ -72,8 +87,10 @@ async function resolveRepo(key: string, dir: string): Promise<RepoCtx | null> {
   if (!nameWithOwner) return null;
   let branch = "";
   try {
-    branch = (await $`git branch --show-current`.cwd(dir).quiet().text()).trim();
-  } catch { }
+    branch = (
+      await $`git branch --show-current`.cwd(dir).quiet().text()
+    ).trim();
+  } catch {}
   return { key, dir, nameWithOwner, branch };
 }
 
@@ -84,8 +101,10 @@ async function resolveRepoOrLocal(key: string, dir: string): Promise<RepoCtx> {
   if (r) return r;
   let branch = "";
   try {
-    branch = (await $`git -C ${dir} branch --show-current`.quiet().text()).trim();
-  } catch { }
+    branch = (
+      await $`git -C ${dir} branch --show-current`.quiet().text()
+    ).trim();
+  } catch {}
   return { key, dir, nameWithOwner: "", branch };
 }
 
@@ -101,7 +120,7 @@ function parseRepos(repos: string | null): string[] | null {
         .filter(Boolean);
       return list.length ? list : null;
     }
-  } catch { }
+  } catch {}
   return null;
 }
 
@@ -147,24 +166,34 @@ function expandRepoPatterns(path: string, patterns: string[]): string[] {
 }
 
 // Member repos for a workspace directory (non-git parent or explicit list).
-async function resolveMemberRepos(path: string, explicit: string[] | null): Promise<RepoCtx[]> {
+async function resolveMemberRepos(
+  path: string,
+  explicit: string[] | null,
+): Promise<RepoCtx[]> {
   let keys: string[] = explicit ? [...explicit] : [];
   if (!keys.length && path === cwd) {
     const env = process.env.DIFFSHUB_REPOS;
-    if (env) keys = env.split(",").map((s) => s.trim()).filter(Boolean);
+    if (env)
+      keys = env
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
   }
   if (!keys.length) {
     try {
       const cfg = await Bun.file(`${path}/.diffshub.json`).json();
       const list = Array.isArray(cfg) ? cfg : cfg?.repos;
-      if (Array.isArray(list)) keys = list.filter((x: unknown): x is string => typeof x === "string");
-    } catch { }
+      if (Array.isArray(list))
+        keys = list.filter((x: unknown): x is string => typeof x === "string");
+    } catch {}
   }
   if (!keys.length) keys = ["app", "web"];
   // Exact names and globs alike resolve through expandRepoPatterns (so member lists,
   // $DIFFSHUB_REPOS, and .diffshub.json all get glob support for free).
   const members = expandRepoPatterns(path, keys);
-  let resolved = await Promise.all(members.map((k) => resolveRepoOrLocal(k, `${path}/${k}`)));
+  let resolved = await Promise.all(
+    members.map((k) => resolveRepoOrLocal(k, `${path}/${k}`)),
+  );
   if (!resolved.length) {
     // Fall back to every immediate child that is a git repo.
     resolved = await Promise.all(
@@ -189,10 +218,19 @@ async function resolveMembers(
     }
     let branch = "";
     try {
-      branch = (await $`git -C ${path} branch --show-current`.quiet().text()).trim();
-    } catch { }
+      branch = (
+        await $`git -C ${path} branch --show-current`.quiet().text()
+      ).trim();
+    } catch {}
     return {
-      repos: [{ key: path.split("/").pop() || "repo", dir: path, nameWithOwner: "", branch }],
+      repos: [
+        {
+          key: path.split("/").pop() || "repo",
+          dir: path,
+          nameWithOwner: "",
+          branch,
+        },
+      ],
       isWorkspace: false,
     };
   }
@@ -200,11 +238,22 @@ async function resolveMembers(
 }
 
 async function resolveWorkspace(row: DirRow): Promise<Workspace> {
-  const { repos, isWorkspace } = await resolveMembers(row.path, parseRepos(row.repos));
+  const { repos, isWorkspace } = await resolveMembers(
+    row.path,
+    parseRepos(row.repos),
+  );
   const label = isWorkspace
     ? `${row.path.split("/").pop()} (${repos.map((r) => r.key).join(" · ")})`
     : repos[0]?.nameWithOwner || repos[0]?.key || row.name;
-  return { id: row.id, path: row.path, name: row.name, repos, isWorkspace, label, worktreeDirs: new Set() };
+  return {
+    id: row.id,
+    path: row.path,
+    name: row.name,
+    repos,
+    isWorkspace,
+    label,
+    worktreeDirs: new Set(),
+  };
 }
 
 const repoByKey = (ws: Workspace, key?: string | null): RepoCtx | undefined =>
@@ -254,24 +303,43 @@ db.run(`CREATE TABLE IF NOT EXISTS push_subscriptions (
 )`);
 const upsertSubStmt = db.query(
   "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?) " +
-  "ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
+    "ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
 );
-const listSubsStmt = db.query<PushSub, []>("SELECT endpoint, p256dh, auth FROM push_subscriptions");
-const deleteSubStmt = db.query("DELETE FROM push_subscriptions WHERE endpoint = ?");
-const countSubsStmt = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM push_subscriptions");
+const listSubsStmt = db.query<PushSub, []>(
+  "SELECT endpoint, p256dh, auth FROM push_subscriptions",
+);
+const deleteSubStmt = db.query(
+  "DELETE FROM push_subscriptions WHERE endpoint = ?",
+);
+const countSubsStmt = db.query<{ n: number }, []>(
+  "SELECT COUNT(*) AS n FROM push_subscriptions",
+);
 
 const markReviewedStmt = db.query(
   "INSERT OR REPLACE INTO reviewed (repo, sha, reviewed_at) VALUES (?, ?, ?)",
 );
-const unmarkReviewedStmt = db.query("DELETE FROM reviewed WHERE repo = ? AND sha = ?");
+const unmarkReviewedStmt = db.query(
+  "DELETE FROM reviewed WHERE repo = ? AND sha = ?",
+);
 
-const listDirsStmt = db.query<DirRow, []>("SELECT * FROM directories ORDER BY created_at, id");
-const getDirStmt = db.query<DirRow, [number]>("SELECT * FROM directories WHERE id = ?");
-const getDirByPathStmt = db.query<DirRow, [string]>("SELECT * FROM directories WHERE path = ?");
-const insertDirStmt = db.query<{ id: number }, [string, string, string | null, number]>(
+const listDirsStmt = db.query<DirRow, []>(
+  "SELECT * FROM directories ORDER BY created_at, id",
+);
+const getDirStmt = db.query<DirRow, [number]>(
+  "SELECT * FROM directories WHERE id = ?",
+);
+const getDirByPathStmt = db.query<DirRow, [string]>(
+  "SELECT * FROM directories WHERE path = ?",
+);
+const insertDirStmt = db.query<
+  { id: number },
+  [string, string, string | null, number]
+>(
   "INSERT INTO directories (path, name, repos, created_at) VALUES (?, ?, ?, ?) RETURNING id",
 );
-const insertFileStmt = db.query("INSERT OR IGNORE INTO files (dir_id, path) VALUES (?, ?)");
+const insertFileStmt = db.query(
+  "INSERT OR IGNORE INTO files (dir_id, path) VALUES (?, ?)",
+);
 const listFilesStmt = db.query<{ path: string }, [number]>(
   "SELECT path FROM files WHERE dir_id = ? ORDER BY path",
 );
@@ -291,14 +359,18 @@ db.run(`CREATE TABLE IF NOT EXISTS queued_sessions (
 )`);
 // Migrate DBs created before the agent column existed (no-op once applied).
 try {
-  db.run("ALTER TABLE queued_sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'");
-} catch { }
+  db.run(
+    "ALTER TABLE queued_sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'",
+  );
+} catch {}
 try {
   db.run("ALTER TABLE queued_sessions ADD COLUMN effort TEXT");
-} catch { }
+} catch {}
 try {
-  db.run("ALTER TABLE queued_sessions ADD COLUMN chrome INTEGER NOT NULL DEFAULT 0");
-} catch { }
+  db.run(
+    "ALTER TABLE queued_sessions ADD COLUMN chrome INTEGER NOT NULL DEFAULT 0",
+  );
+} catch {}
 interface QueuedRow {
   id: number;
   dir_id: number;
@@ -308,7 +380,10 @@ interface QueuedRow {
   effort: string | null;
   chrome: number;
 }
-const insertQueuedStmt = db.query<{ id: number }, [number, string, number, string, string | null, number]>(
+const insertQueuedStmt = db.query<
+  { id: number },
+  [number, string, number, string, string | null, number]
+>(
   "INSERT INTO queued_sessions (dir_id, prompt, created_at, agent, effort, chrome) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
 );
 const listQueuedStmt = db.query<QueuedRow, []>(
@@ -331,9 +406,9 @@ db.run(`CREATE TABLE IF NOT EXISTS template_prompts (
 try {
   db.run(
     "INSERT OR IGNORE INTO template_prompts (id, dir_id, title, body, created_at, updated_at) " +
-    "SELECT id, dir_id, title, body, created_at, updated_at FROM saved_prompts",
+      "SELECT id, dir_id, title, body, created_at, updated_at FROM saved_prompts",
   );
-} catch { }
+} catch {}
 interface TemplatePromptRow {
   id: number;
   dir_id: number;
@@ -348,13 +423,21 @@ const listTemplatePromptsStmt = db.query<TemplatePromptRow, [number]>(
 const getTemplatePromptStmt = db.query<TemplatePromptRow, [number, number]>(
   "SELECT * FROM template_prompts WHERE id = ? AND dir_id = ?",
 );
-const insertTemplatePromptStmt = db.query<{ id: number }, [number, string, string, number, number]>(
+const insertTemplatePromptStmt = db.query<
+  { id: number },
+  [number, string, string, number, number]
+>(
   "INSERT INTO template_prompts (dir_id, title, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
 );
-const updateTemplatePromptStmt = db.query<unknown, [string, string, number, number, number]>(
+const updateTemplatePromptStmt = db.query<
+  unknown,
+  [string, string, number, number, number]
+>(
   "UPDATE template_prompts SET title = ?, body = ?, updated_at = ? WHERE id = ? AND dir_id = ?",
 );
-const deleteTemplatePromptStmt = db.query("DELETE FROM template_prompts WHERE id = ? AND dir_id = ?");
+const deleteTemplatePromptStmt = db.query(
+  "DELETE FROM template_prompts WHERE id = ? AND dir_id = ?",
+);
 
 // When each Claude session last finished a turn — written by its Stop hook (POST
 // /api/session-ended), keyed by session_id (which is the transcript file's UUID).
@@ -368,12 +451,14 @@ db.run(`CREATE TABLE IF NOT EXISTS session_ends (
 )`);
 const upsertSessionEndStmt = db.query(
   "INSERT INTO session_ends (session_id, cwd, ended_at) VALUES (?, ?, ?) " +
-  "ON CONFLICT(session_id) DO UPDATE SET ended_at = excluded.ended_at, cwd = excluded.cwd",
+    "ON CONFLICT(session_id) DO UPDATE SET ended_at = excluded.ended_at, cwd = excluded.cwd",
 );
 const getSessionEndStmt = db.query<{ ended_at: number }, [string]>(
   "SELECT ended_at FROM session_ends WHERE session_id = ?",
 );
-const pruneSessionEndsStmt = db.query("DELETE FROM session_ends WHERE ended_at < ?");
+const pruneSessionEndsStmt = db.query(
+  "DELETE FROM session_ends WHERE ended_at < ?",
+);
 
 // Subway "Keep" dismissals: keep the live tmux chat, but remove it from future
 // Subway review snapshots for the selected directory.
@@ -388,23 +473,24 @@ db.run(`CREATE TABLE IF NOT EXISTS subway_kept (
 )`);
 const upsertSubwayKeptStmt = db.query(
   "INSERT INTO subway_kept (dir_id, session_id, session_name, cwd, agent, kept_at) VALUES (?, ?, ?, ?, ?, ?) " +
-  "ON CONFLICT(dir_id, session_id) DO UPDATE SET session_name = excluded.session_name, cwd = excluded.cwd, agent = excluded.agent, kept_at = excluded.kept_at",
+    "ON CONFLICT(dir_id, session_id) DO UPDATE SET session_name = excluded.session_name, cwd = excluded.cwd, agent = excluded.agent, kept_at = excluded.kept_at",
 );
 const listSubwayKeptStmt = db.query<{ session_id: string }, [number]>(
   "SELECT session_id FROM subway_kept WHERE dir_id = ?",
 );
-const pruneSubwayKeptStmt = db.query("DELETE FROM subway_kept WHERE kept_at < ?");
+const pruneSubwayKeptStmt = db.query(
+  "DELETE FROM subway_kept WHERE kept_at < ?",
+);
 
 // ---- Public sharing (R2 via the wrangler CLI) ----
 // The "Share" button in the HTML preview uploads an artifact's .html (plus any
 // local, non-base64 image assets it references) to a public R2 bucket and hands
 // back a cdn link. Bucket + public base live in env vars so these dotfiles stay
-// generic — defaults point at my porio-public bucket / cdn.porio.ai domain.
-const R2_BUCKET = process.env.DIFFSHUB_R2_BUCKET || "porio-public";
-const R2_PUBLIC_BASE = (process.env.DIFFSHUB_R2_PUBLIC_BASE || "https://cdn.porio.ai").replace(
-  /\/+$/,
-  "",
-);
+// generic — defaults point at my app-public bucket / cdn.app.ai domain.
+const R2_BUCKET = process.env.DIFFSHUB_R2_BUCKET || "app-public";
+const R2_PUBLIC_BASE = (
+  process.env.DIFFSHUB_R2_PUBLIC_BASE || "https://cdn.app.ai"
+).replace(/\/+$/, "");
 const R2_PREFIX = "diffshub"; // namespace under the shared public bucket
 // One row per shared artifact, keyed by its absolute path so re-sharing the same
 // file always resolves to the same link (we re-upload in place when the contents
@@ -422,7 +508,7 @@ db.run(`CREATE TABLE IF NOT EXISTS shares (
 // "Undo" delete the artifact's uploaded image objects too). Dupe-column throws.
 try {
   db.run("ALTER TABLE shares ADD COLUMN asset_keys TEXT");
-} catch { }
+} catch {}
 interface ShareRow {
   abs_path: string;
   share_id: string;
@@ -432,12 +518,14 @@ interface ShareRow {
   created_at: number;
   updated_at: number;
 }
-const getShareStmt = db.query<ShareRow, [string]>("SELECT * FROM shares WHERE abs_path = ?");
+const getShareStmt = db.query<ShareRow, [string]>(
+  "SELECT * FROM shares WHERE abs_path = ?",
+);
 const upsertShareStmt = db.query(
   "INSERT INTO shares (abs_path, share_id, url, content_hash, asset_keys, created_at, updated_at) " +
-  "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(abs_path) DO UPDATE SET " +
-  "url = excluded.url, content_hash = excluded.content_hash, asset_keys = excluded.asset_keys, " +
-  "updated_at = excluded.updated_at",
+    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(abs_path) DO UPDATE SET " +
+    "url = excluded.url, content_hash = excluded.content_hash, asset_keys = excluded.asset_keys, " +
+    "updated_at = excluded.updated_at",
 );
 const deleteShareStmt = db.query("DELETE FROM shares WHERE abs_path = ?");
 
@@ -462,7 +550,11 @@ const extOf = (p: string) => (p.split(".").pop() || "").toLowerCase();
 // required — without it wrangler targets its local simulation, not the real
 // bucket). Throws a ShellError carrying wrangler's stderr on a non-zero exit,
 // which errText() surfaces to the share dialog.
-async function r2Put(key: string, body: Buffer | string, contentType: string): Promise<void> {
+async function r2Put(
+  key: string,
+  body: Buffer | string,
+  contentType: string,
+): Promise<void> {
   const tmp = `/tmp/diffshub-share-${crypto.randomUUID()}`;
   await Bun.write(tmp, body);
   try {
@@ -475,14 +567,16 @@ async function r2Put(key: string, body: Buffer | string, contentType: string): P
   } finally {
     try {
       unlinkSync(tmp);
-    } catch { }
+    } catch {}
   }
 }
 
 // Delete an object from R2 by key (used by Undo). Tolerates an already-missing
 // object — wrangler treats a delete of a non-existent key as success.
 async function r2Delete(key: string): Promise<void> {
-  await $`wrangler r2 object delete ${`${R2_BUCKET}/${key}`} --remote`.cwd(stateDir).quiet();
+  await $`wrangler r2 object delete ${`${R2_BUCKET}/${key}`} --remote`
+    .cwd(stateDir)
+    .quiet();
 }
 
 // Pull every src/href/poster/srcset/url(...) reference out of an HTML string.
@@ -491,20 +585,25 @@ function collectAssetRefs(html: string): string[] {
   const add = (u?: string | null) => {
     if (u && u.trim()) refs.add(u.trim());
   };
-  for (const m of html.matchAll(/\b(?:src|href|poster)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi))
+  for (const m of html.matchAll(
+    /\b(?:src|href|poster)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi,
+  ))
     add(m[1] ?? m[2]);
   for (const m of html.matchAll(/\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
     const val = m[1] ?? m[2] ?? "";
     for (const cand of val.split(",")) add(cand.trim().split(/\s+/)[0]);
   }
-  for (const m of html.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi))
+  for (const m of html.matchAll(
+    /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi,
+  ))
     add(m[1] ?? m[2] ?? m[3]);
   return [...refs];
 }
 
 // A ref we should leave alone: already-inlined (data:), already-remote (http(s)
 // or protocol-relative //), or a non-asset URL (anchors, mailto, tel).
-const isExternalRef = (u: string) => /^(?:data:|https?:|\/\/|#|mailto:|tel:|blob:)/i.test(u);
+const isExternalRef = (u: string) =>
+  /^(?:data:|https?:|\/\/|#|mailto:|tel:|blob:)/i.test(u);
 
 // Replace every src/href/poster/srcset/url() ref present in `map` with its mapped
 // value — one pass per attribute family, since a literal string replace would
@@ -521,24 +620,30 @@ function applyRefMap(html: string, map: Map<string, string>): string {
       return mapped ? `${pre}"${mapped}"` : full;
     },
   );
-  out = out.replace(/(\bsrcset\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi, (full, pre, dq, sq) => {
-    const raw = dq ?? sq ?? "";
-    const rebuilt = raw
-      .split(",")
-      .map((cand: string) => {
-        const t = cand.trim();
-        if (!t) return cand;
-        const [u, ...descr] = t.split(/\s+/);
-        const mapped = map.get(u.trim());
-        return mapped ? [mapped, ...descr].join(" ") : t;
-      })
-      .join(", ");
-    return `${pre}"${rebuilt}"`;
-  });
-  out = out.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi, (full, dq, sq, bare) => {
-    const mapped = map.get((dq ?? sq ?? bare ?? "").trim());
-    return mapped ? `url(${mapped})` : full;
-  });
+  out = out.replace(
+    /(\bsrcset\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi,
+    (full, pre, dq, sq) => {
+      const raw = dq ?? sq ?? "";
+      const rebuilt = raw
+        .split(",")
+        .map((cand: string) => {
+          const t = cand.trim();
+          if (!t) return cand;
+          const [u, ...descr] = t.split(/\s+/);
+          const mapped = map.get(u.trim());
+          return mapped ? [mapped, ...descr].join(" ") : t;
+        })
+        .join(", ");
+      return `${pre}"${rebuilt}"`;
+    },
+  );
+  out = out.replace(
+    /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]+))\s*\)/gi,
+    (full, dq, sq, bare) => {
+      const mapped = map.get((dq ?? sq ?? bare ?? "").trim());
+      return mapped ? `url(${mapped})` : full;
+    },
+  );
   return out;
 }
 
@@ -553,7 +658,12 @@ async function uploadHtmlAssets(
   htmlDir: string,
   cwd: string,
   shareId: string,
-): Promise<{ html: string; uploaded: string[]; skipped: string[]; keys: string[] }> {
+): Promise<{
+  html: string;
+  uploaded: string[];
+  skipped: string[];
+  keys: string[];
+}> {
   const uploaded: string[] = [];
   const skipped: string[] = [];
   const keys: string[] = []; // R2 object keys we created (for Undo)
@@ -581,8 +691,15 @@ async function uploadHtmlAssets(
     // different folders don't collide in the flat asset directory. The basename
     // is sanitized to a URL-safe charset so the resulting cdn link never needs
     // quoting/escaping (it goes into bare url(...) / src="" without breakage).
-    const base = (absAsset.split(sep).pop() || "asset").replace(/[^A-Za-z0-9._-]/g, "_");
-    const tag = crypto.createHash("sha1").update(absAsset).digest("hex").slice(0, 8);
+    const base = (absAsset.split(sep).pop() || "asset").replace(
+      /[^A-Za-z0-9._-]/g,
+      "_",
+    );
+    const tag = crypto
+      .createHash("sha1")
+      .update(absAsset)
+      .digest("hex")
+      .slice(0, 8);
     const key = `${R2_PREFIX}/${shareId}/${tag}-${base}`;
     const bytes = Buffer.from(await Bun.file(absAsset).arrayBuffer());
     await r2Put(key, bytes, IMG_MIME[extOf(clean)]);
@@ -603,7 +720,12 @@ async function uploadHtmlAssets(
 // not the file's folder — just 404s into the SPA fallback. Refs that don't resolve
 // to a real file inside cwd (and .html links, which aren't this preview's job) are
 // left untouched.
-function rewriteLocalAssets(html: string, htmlDir: string, cwd: string, session: string): string {
+function rewriteLocalAssets(
+  html: string,
+  htmlDir: string,
+  cwd: string,
+  session: string,
+): string {
   const map = new Map<string, string>(); // original ref -> /api/tmux/asset url
   for (const ref of collectAssetRefs(html)) {
     if (isExternalRef(ref) || map.has(ref)) continue;
@@ -634,7 +756,10 @@ function rewriteLocalAssets(html: string, htmlDir: string, cwd: string, session:
 function listAgentHtml(root: string): { path: string; mtime: number }[] {
   if (!existsSync(`${root}/agents`)) return [];
   const out: { path: string; mtime: number }[] = [];
-  for (const rel of new Bun.Glob("agents/**/*.html").scanSync({ cwd: root, onlyFiles: true })) {
+  for (const rel of new Bun.Glob("agents/**/*.html").scanSync({
+    cwd: root,
+    onlyFiles: true,
+  })) {
     try {
       out.push({ path: rel, mtime: statSync(`${root}/${rel}`).mtimeMs });
     } catch {
@@ -646,7 +771,12 @@ function listAgentHtml(root: string): { path: string; mtime: number }[] {
 
 // Resolve a client-supplied dir id to its workspace root path (sync — no gh).
 function htmlRootFromDir(dir: unknown): string | null {
-  const id = typeof dir === "number" ? dir : typeof dir === "string" ? parseInt(dir, 10) : NaN;
+  const id =
+    typeof dir === "number"
+      ? dir
+      : typeof dir === "string"
+        ? parseInt(dir, 10)
+        : NaN;
   if (!Number.isInteger(id)) return null;
   return getDirStmt.get(id)?.path ?? null;
 }
@@ -723,7 +853,9 @@ const REPORT_SHORTCUTS_JS = `<script>/* diffshub report keys */(function(){
 function injectReportShortcuts(html: string): string {
   if (html.includes("__diffshubReportKeys")) return html;
   const i = html.toLowerCase().lastIndexOf("</body>");
-  return i === -1 ? html + REPORT_SHORTCUTS_JS : html.slice(0, i) + REPORT_SHORTCUTS_JS + html.slice(i);
+  return i === -1
+    ? html + REPORT_SHORTCUTS_JS
+    : html.slice(0, i) + REPORT_SHORTCUTS_JS + html.slice(i);
 }
 
 // ---- Resolved-workspace cache (gh calls are slow) ----
@@ -751,9 +883,16 @@ function expandTilde(p: string): string {
 // Normalize a member-repos input (comma/space text or array) to a JSON string or null.
 function normalizeReposInput(input: unknown): string | null {
   let list: string[] = [];
-  if (typeof input === "string") list = input.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  if (typeof input === "string")
+    list = input
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
   else if (Array.isArray(input))
-    list = input.filter((x): x is string => typeof x === "string").map((s) => s.trim()).filter(Boolean);
+    list = input
+      .filter((x): x is string => typeof x === "string")
+      .map((s) => s.trim())
+      .filter(Boolean);
   return list.length ? JSON.stringify(list) : null;
 }
 
@@ -761,18 +900,26 @@ function normalizeReposInput(input: unknown): string | null {
 const MAX_INDEX_FILES = 20000;
 class TooManyFiles extends Error {
   constructor(public count: number) {
-    super(`${count} files (max ${MAX_INDEX_FILES}) — set member repos to narrow`);
+    super(
+      `${count} files (max ${MAX_INDEX_FILES}) — set member repos to narrow`,
+    );
   }
 }
 
 // Every referencable file across a workspace's repos, respecting .gitignore.
 // Workspace paths are prefixed with the member key so they're relative to ws.path.
-async function collectFiles(repos: RepoCtx[], isWorkspace: boolean): Promise<string[]> {
+async function collectFiles(
+  repos: RepoCtx[],
+  isWorkspace: boolean,
+): Promise<string[]> {
   const lists = await Promise.all(
     repos.map(async (r) => {
       let out: string;
       try {
-        out = await $`git -C ${r.dir} ls-files --cached --others --exclude-standard -z`.quiet().text();
+        out =
+          await $`git -C ${r.dir} ls-files --cached --others --exclude-standard -z`
+            .quiet()
+            .text();
       } catch {
         return [] as string[];
       }
@@ -791,13 +938,18 @@ function syncFiles(dirId: number, paths: string[]): void {
   const toRemove = [...current].filter((p) => !next.has(p));
   if (!toAdd.length && !toRemove.length) return;
   db.transaction(() => {
-    for (const p of toRemove) db.run("DELETE FROM files WHERE dir_id = ? AND path = ?", [dirId, p]);
+    for (const p of toRemove)
+      db.run("DELETE FROM files WHERE dir_id = ? AND path = ?", [dirId, p]);
     for (const p of toAdd) insertFileStmt.run(dirId, p);
   })();
 }
 
 // Count first; throw TooManyFiles before writing any rows.
-async function indexFiles(dirId: number, repos: RepoCtx[], isWorkspace: boolean): Promise<number> {
+async function indexFiles(
+  dirId: number,
+  repos: RepoCtx[],
+  isWorkspace: boolean,
+): Promise<number> {
   const paths = await collectFiles(repos, isWorkspace);
   if (paths.length > MAX_INDEX_FILES) throw new TooManyFiles(paths.length);
   syncFiles(dirId, paths);
@@ -808,7 +960,8 @@ async function indexFiles(dirId: number, repos: RepoCtx[], isWorkspace: boolean)
 function ensureCwdDir(): number {
   const existing = getDirByPathStmt.get(cwd);
   if (existing) return existing.id;
-  return insertDirStmt.get(cwd, cwd.split("/").pop() || cwd, null, Date.now())!.id;
+  return insertDirStmt.get(cwd, cwd.split("/").pop() || cwd, null, Date.now())!
+    .id;
 }
 const defaultDirId = ensureCwdDir();
 
@@ -823,8 +976,8 @@ async function wsFromReq(url: URL): Promise<Workspace> {
 // Warm the default directory's resolution + file index (best-effort; the cwd is
 // exempt from the too-many-files refusal so the server always has a usable default).
 getWorkspace(defaultDirId)
-  .then((ws) => indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => { }))
-  .catch(() => { });
+  .then((ws) => indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => {}))
+  .catch(() => {});
 
 // Permissive CORS so the Chrome extension's content scripts can call the API
 // from any origin (the server is localhost-only and personal). The
@@ -871,13 +1024,19 @@ function editorName(): string {
   const bin = editorTokens()[0];
   return bin.split("/").pop() || bin;
 }
-function editorArgv(fileAbs: string, line: number | null, cwd?: string): string[] {
+function editorArgv(
+  fileAbs: string,
+  line: number | null,
+  cwd?: string,
+): string[] {
   const tokens = editorTokens();
   const name = editorName();
   let argv: string[];
   if (line == null) {
     argv = [...tokens, fileAbs];
-  } else if (/^(code|codium|code-insiders|vscodium|cursor|windsurf)$/.test(name)) {
+  } else if (
+    /^(code|codium|code-insiders|vscodium|cursor|windsurf)$/.test(name)
+  ) {
     argv = [...tokens, "--goto", `${fileAbs}:${line}`];
   } else if (TERMINAL_EDITOR_RE.test(name)) {
     argv = [...tokens, `+${line}`, fileAbs];
@@ -913,7 +1072,10 @@ const NVIM_TMUX_SESSION = "edit";
 async function nvimAlive(sock: string): Promise<boolean> {
   if (!existsSync(sock)) return false;
   try {
-    const s = await Bun.connect({ unix: sock, socket: { data() {}, error() {} } });
+    const s = await Bun.connect({
+      unix: sock,
+      socket: { data() {}, error() {} },
+    });
     s.end();
     return true;
   } catch {
@@ -926,19 +1088,34 @@ async function nvimAlive(sock: string): Promise<boolean> {
 async function focusTmuxSession(session: string): Promise<void> {
   let clients: string[] = [];
   try {
-    clients = (await $`tmux -L default list-clients -F ${"#{client_tty}"}`.quiet().text())
-      .split("\n").map((s) => s.trim()).filter(Boolean);
-  } catch { }
+    clients = (
+      await $`tmux -L default list-clients -F ${"#{client_tty}"}`.quiet().text()
+    )
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {}
   await Promise.all(
     clients.map((tty) =>
-      $`tmux -L default switch-client -c ${tty} -t ${session}`.quiet().catch(() => { })),
+      $`tmux -L default switch-client -c ${tty} -t ${session}`
+        .quiet()
+        .catch(() => {}),
+    ),
   );
 }
-const NVIM_SPAWN = { stdin: "ignore", stdout: "ignore", stderr: "ignore" } as const;
+const NVIM_SPAWN = {
+  stdin: "ignore",
+  stdout: "ignore",
+  stderr: "ignore",
+} as const;
 // Open fileAbs in the user's editor, jumping to `line`. nvim goes into the shared
 // "edit" tmux session (new tab if it's already running); every other editor falls
 // back to editorArgv's one-window-per-open behavior.
-async function launchEditor(fileAbs: string, line: number | null, dir: string): Promise<void> {
+async function launchEditor(
+  fileAbs: string,
+  line: number | null,
+  dir: string,
+): Promise<void> {
   if (editorName() !== "nvim") {
     Bun.spawn(editorArgv(fileAbs, line, dir), { cwd: dir, ...NVIM_SPAWN });
     return;
@@ -948,14 +1125,30 @@ async function launchEditor(fileAbs: string, line: number | null, dir: string): 
   if (await nvimAlive(NVIM_TMUX_SOCK)) {
     // Live server: drop the file in a new tab, then move the cursor. Two steps
     // because `--remote-tab +<line>` would treat the `+<line>` as a filename.
-    await Bun.spawn([nvimBin, "--server", NVIM_TMUX_SOCK, "--remote-tab", fileAbs], NVIM_SPAWN).exited;
+    await Bun.spawn(
+      [nvimBin, "--server", NVIM_TMUX_SOCK, "--remote-tab", fileAbs],
+      NVIM_SPAWN,
+    ).exited;
     if (line != null)
-      await Bun.spawn([nvimBin, "--server", NVIM_TMUX_SOCK, "--remote-expr", `cursor(${line},1)`], NVIM_SPAWN).exited;
+      await Bun.spawn(
+        [
+          nvimBin,
+          "--server",
+          NVIM_TMUX_SOCK,
+          "--remote-expr",
+          `cursor(${line},1)`,
+        ],
+        NVIM_SPAWN,
+      ).exited;
   } else {
     // No live server: clear any dead session/socket, then start nvim --listen in
     // a fresh detached "edit" session so the NEXT open reuses it as a tab.
-    await $`tmux -L default kill-session -t ${NVIM_TMUX_SESSION}`.quiet().catch(() => { });
-    try { if (existsSync(NVIM_TMUX_SOCK)) unlinkSync(NVIM_TMUX_SOCK); } catch { }
+    await $`tmux -L default kill-session -t ${NVIM_TMUX_SESSION}`
+      .quiet()
+      .catch(() => {});
+    try {
+      if (existsSync(NVIM_TMUX_SOCK)) unlinkSync(NVIM_TMUX_SOCK);
+    } catch {}
     const cmd = [...tokens, "--listen", NVIM_TMUX_SOCK];
     if (line != null) cmd.push(`+${line}`);
     cmd.push(fileAbs);
@@ -977,15 +1170,60 @@ async function launchEditor(fileAbs: string, line: number | null, dir: string): 
 // inside a `bg`-socket tmux pane, so a bare `tmux` would inherit $TMUX and land
 // the session on the `bg` socket instead of the default one claude lives on.
 const SESSION_ADJECTIVES = [
-  "amber", "brave", "calm", "dapper", "eager", "fabled", "gentle", "hardy", "icy",
-  "jaunty", "keen", "lucid", "misty", "noble", "odd", "plucky", "quick", "radiant",
-  "sunny", "tidy", "upbeat", "vivid", "witty", "xtra", "young", "zesty",
+  "amber",
+  "brave",
+  "calm",
+  "dapper",
+  "eager",
+  "fabled",
+  "gentle",
+  "hardy",
+  "icy",
+  "jaunty",
+  "keen",
+  "lucid",
+  "misty",
+  "noble",
+  "odd",
+  "plucky",
+  "quick",
+  "radiant",
+  "sunny",
+  "tidy",
+  "upbeat",
+  "vivid",
+  "witty",
+  "xtra",
+  "young",
+  "zesty",
 ];
 const SESSION_NOUNS = [
-  "anchor", "beacon", "citadel", "dragon", "ember", "falcon", "grove", "harbor",
-  "island", "junction", "kingdom", "lantern", "meadow", "nebula", "oasis", "prairie",
-  "quarry", "rocket", "summit", "temple", "urchin", "valley", "workshop", "xenon",
-  "yard", "zephyr",
+  "anchor",
+  "beacon",
+  "citadel",
+  "dragon",
+  "ember",
+  "falcon",
+  "grove",
+  "harbor",
+  "island",
+  "junction",
+  "kingdom",
+  "lantern",
+  "meadow",
+  "nebula",
+  "oasis",
+  "prairie",
+  "quarry",
+  "rocket",
+  "summit",
+  "temple",
+  "urchin",
+  "valley",
+  "workshop",
+  "xenon",
+  "yard",
+  "zephyr",
 ];
 
 // Pick an unused adjective-noun name, avoiding the first letter of any session
@@ -993,30 +1231,38 @@ const SESSION_NOUNS = [
 async function pickClaudeSessionName(): Promise<string> {
   let sessions: string[] = [];
   try {
-    sessions = (await $`tmux -L default list-sessions -F ${"#S"}`.quiet().text())
+    sessions = (
+      await $`tmux -L default list-sessions -F ${"#S"}`.quiet().text()
+    )
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
-  } catch { }
+  } catch {}
   const existing = new Set(sessions);
   const usedLetters = new Set<string>();
   await Promise.all(
     sessions.map(async (s) => {
       try {
         const cmd = (
-          await $`tmux -L default display-message -p -t ${`${s}:0.0`} ${"#{pane_current_command}"}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${s}:0.0`} ${"#{pane_current_command}"}`
+            .quiet()
+            .text()
         ).trim();
-        if (/claude|node|codex/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd)) usedLetters.add(s[0]);
-      } catch { }
+        if (/claude|node|codex/.test(cmd) || /^[0-9]+\.[0-9]+/.test(cmd))
+          usedLetters.add(s[0]);
+      } catch {}
     }),
   );
   let name = "";
   let attempts = 0;
   while (true) {
-    const adj = SESSION_ADJECTIVES[Math.floor(Math.random() * SESSION_ADJECTIVES.length)];
-    const noun = SESSION_NOUNS[Math.floor(Math.random() * SESSION_NOUNS.length)];
+    const adj =
+      SESSION_ADJECTIVES[Math.floor(Math.random() * SESSION_ADJECTIVES.length)];
+    const noun =
+      SESSION_NOUNS[Math.floor(Math.random() * SESSION_NOUNS.length)];
     name = `${adj}-${noun}`;
-    if (!existing.has(name) && (!usedLetters.has(name[0]) || attempts > 50)) break;
+    if (!existing.has(name) && (!usedLetters.has(name[0]) || attempts > 50))
+      break;
     attempts++;
   }
   return name;
@@ -1058,7 +1304,8 @@ async function pasteAndSubmit(name: string, text: string): Promise<void> {
 // ("❯ 1. …"); a plain input box never does. A select/navigate/proceed footer is
 // accepted as a secondary signal in case the cursor glyph ever differs.
 const PROMPT_CURSOR = /❯\s*\d+\.\s/u;
-const PROMPT_FOOTER = /(?:to select|↑\/↓|to navigate|Do you want to proceed|Would you like to proceed)/iu;
+const PROMPT_FOOTER =
+  /(?:to select|↑\/↓|to navigate|Do you want to proceed|Would you like to proceed)/iu;
 // A full-width horizontal rule — claude brackets the prompt box with these.
 const FULL_RULE = /^\s*─{20,}\s*$/u;
 async function capturePendingPrompt(name: string): Promise<string | null> {
@@ -1067,7 +1314,9 @@ async function capturePendingPrompt(name: string): Promise<string | null> {
     // Capture scrollback above the visible area too: a prompt taller than a short
     // pane scrolls its own question off-screen, so the visible lines alone miss it
     // (a 18-row tmux pane shows only the footer of a tall AskUserQuestion).
-    pane = await $`tmux -L default capture-pane -p -S -120 -t ${`${name}:0.0`}`.quiet().text();
+    pane = await $`tmux -L default capture-pane -p -S -120 -t ${`${name}:0.0`}`
+      .quiet()
+      .text();
   } catch {
     return null;
   }
@@ -1080,7 +1329,9 @@ async function capturePendingPrompt(name: string): Promise<string | null> {
   if (rules.length >= 2) lines = lines.slice(rules[rules.length - 2] + 1);
   while (lines.length && !lines[0].trim()) lines.shift();
   const MAX = 80; // backstop for an unusual prompt with no detectable rules
-  const text = (lines.length > MAX ? lines.slice(-MAX) : lines).join("\n").trimEnd();
+  const text = (lines.length > MAX ? lines.slice(-MAX) : lines)
+    .join("\n")
+    .trimEnd();
   return text || null;
 }
 
@@ -1123,7 +1374,8 @@ export type PendingPrompt = {
 // The ticked box is U+2714 (✔) in claude's TUI — NOT the lighter U+2713 (✓); both are
 // accepted here so a marker change can't silently leave a [✔] glyph stuck in the label.
 const OPT_RE = /^(\s*)(❯|>)?\s*(\d+)\.\s+(\[([ xX✓✔·])\]\s+)?(.*\S)\s*$/u;
-const FREE_TEXT_RE = /^(?:type something|type your own|something else|none of the above|chat about this)\b/iu;
+const FREE_TEXT_RE =
+  /^(?:type something|type your own|something else|none of the above|chat about this)\b/iu;
 // A multi-question AskUserQuestion renders a tab strip ("← ⊟ Scope ☐ State ✓ Submit →").
 const TAB_BAR_RE = /[←→]|[⊟☐☑✓▢]\s+\S+\s+[⊟☐☑✓▢]/u;
 const CONFIRM_RE = /ready to submit your answers|submit your answers\?/iu;
@@ -1174,7 +1426,11 @@ function extractPreviewAt(lines: string[], bx: number): string {
   while (segs.length && !segs[0].trim()) segs.shift();
   while (segs.length && !segs[segs.length - 1].trim()) segs.pop();
   if (!segs.length) return "";
-  const indent = Math.min(...segs.filter((s) => s.trim()).map((s) => (s.match(/^ */u)?.[0].length ?? 0)));
+  const indent = Math.min(
+    ...segs
+      .filter((s) => s.trim())
+      .map((s) => s.match(/^ */u)?.[0].length ?? 0),
+  );
   return segs
     .map((s) => s.slice(indent))
     .join("\n")
@@ -1184,13 +1440,18 @@ function extractPreviewAt(lines: string[], bx: number): string {
 function parsePendingPrompt(pane: string | null): PendingPrompt | null {
   if (!pane) return null;
   // Strip any box-drawing side borders so the option regex anchors cleanly.
-  const lines = pane.split("\n").map((l) => l.replace(/^\s*[│┃]\s?/u, "").replace(/\s*[│┃]\s*$/u, ""));
+  const lines = pane
+    .split("\n")
+    .map((l) => l.replace(/^\s*[│┃]\s?/u, "").replace(/\s*[│┃]\s*$/u, ""));
   const multiQuestion = lines.some((l) => TAB_BAR_RE.test(l));
 
   // Split a side preview box off the option columns (only on the box's own rows, so
   // the full-width question above it is left intact), and lift its art separately.
   const bx = detectBoxLeftCol(lines);
-  const optLines = bx == null ? lines : lines.map((l) => (isBoxRow(l, bx) ? l.slice(0, bx) : l));
+  const optLines =
+    bx == null
+      ? lines
+      : lines.map((l) => (isBoxRow(l, bx) ? l.slice(0, bx) : l));
   const focusedPreview = bx == null ? "" : extractPreviewAt(lines, bx);
 
   type Row = { opt: PendingOption; hasBox: boolean; descLines: string[] };
@@ -1236,7 +1497,10 @@ function parsePendingPrompt(pane: string | null): PendingPrompt | null {
     }
   }
 
-  const question = preamble.filter((l) => !TAB_BAR_RE.test(l)).join(" ").trim();
+  const question = preamble
+    .filter((l) => !TAB_BAR_RE.test(l))
+    .join(" ")
+    .trim();
   if (rows.length === 0) {
     return lines.some((l) => CONFIRM_RE.test(l))
       ? { kind: "confirm", question, options: [], multiQuestion }
@@ -1252,7 +1516,12 @@ function parsePendingPrompt(pane: string | null): PendingPrompt | null {
     if (r === focusedRow && focusedPreview) opt.preview = focusedPreview;
     return opt;
   });
-  return { kind: anyBox ? "multi" : "single", question, options, multiQuestion };
+  return {
+    kind: anyBox ? "multi" : "single",
+    question,
+    options,
+    multiQuestion,
+  };
 }
 
 // How long to let the TUI register individual keystrokes (option toggles, Enter)
@@ -1290,7 +1559,11 @@ function promptSignature(p: PendingPrompt): string {
 // Step the TUI cursor onto `target` (1-based option index) by reading the live cursor
 // and pressing Up/Down toward it — robust to list wrapping and interleaved non-answer
 // rows. Returns the parsed prompt once focused, or null if it can't land.
-async function focusOption(name: string, target: number, maxSteps: number): Promise<PendingPrompt | null> {
+async function focusOption(
+  name: string,
+  target: number,
+  maxSteps: number,
+): Promise<PendingPrompt | null> {
   for (let step = 0; step < maxSteps; step++) {
     const p = parsePendingPrompt(await capturePendingPrompt(name));
     if (!p) return null;
@@ -1305,9 +1578,13 @@ async function focusOption(name: string, target: number, maxSteps: number): Prom
 
 // Walk every real (non-free-text) option, capturing each one's preview box, then
 // return focus to where it started. Returns index → preview-text.
-async function captureAllPreviews(name: string, prompt: PendingPrompt): Promise<Map<number, string>> {
+async function captureAllPreviews(
+  name: string,
+  prompt: PendingPrompt,
+): Promise<Map<number, string>> {
   const real = prompt.options.filter((o) => !o.freeText);
-  const startFocus = prompt.options.find((o) => o.cursor)?.index ?? real[0]?.index ?? 1;
+  const startFocus =
+    prompt.options.find((o) => o.cursor)?.index ?? real[0]?.index ?? 1;
   const maxSteps = prompt.options.length * 2 + 4;
   const out = new Map<number, string>();
   for (const o of real) {
@@ -1322,22 +1599,31 @@ async function captureAllPreviews(name: string, prompt: PendingPrompt): Promise<
   return out;
 }
 
-function applyPreviews(prompt: PendingPrompt, previews: Map<number, string>): PendingPrompt {
+function applyPreviews(
+  prompt: PendingPrompt,
+  previews: Map<number, string>,
+): PendingPrompt {
   if (!previews.size) return prompt;
   return {
     ...prompt,
-    options: prompt.options.map((o) => (previews.has(o.index) ? { ...o, preview: previews.get(o.index) } : o)),
+    options: prompt.options.map((o) =>
+      previews.has(o.index) ? { ...o, preview: previews.get(o.index) } : o,
+    ),
   };
 }
 
 // Fill in every option's preview for a single-select prompt that has preview art,
 // via the once-per-prompt cache. No-ops (returns the prompt unchanged) for prompts
 // without a preview box, while a capture is already in flight, or on any tmux error.
-async function enrichSinglePreviews(name: string, prompt: PendingPrompt): Promise<PendingPrompt> {
+async function enrichSinglePreviews(
+  name: string,
+  prompt: PendingPrompt,
+): Promise<PendingPrompt> {
   if (prompt.kind !== "single") return prompt;
   const sig = promptSignature(prompt);
   const cached = previewCacheBySession.get(name);
-  if (cached && cached.sig === sig) return applyPreviews(prompt, cached.previews);
+  if (cached && cached.sig === sig)
+    return applyPreviews(prompt, cached.previews);
   // Nothing to capture if claude rendered no preview art for this prompt.
   if (!prompt.options.some((o) => o.preview)) {
     previewCacheBySession.set(name, { sig, previews: new Map() });
@@ -1364,12 +1650,18 @@ async function enrichSinglePreviews(name: string, prompt: PendingPrompt): Promis
 // — then press Tab to open claude's "Ready to submit your answers?" gate and Enter
 // to commit it. (A bare Enter would just toggle the focused row, not submit.)
 // Returns {ok:false} without submitting if verification fails.
-async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok: boolean; error?: string }> {
+async function answerMultiSelect(
+  name: string,
+  selected: number[],
+): Promise<{ ok: boolean; error?: string }> {
   const parsed = parsePendingPrompt(await capturePendingPrompt(name));
-  if (!parsed || parsed.kind !== "multi") return { ok: false, error: "no multi-select prompt is waiting" };
+  if (!parsed || parsed.kind !== "multi")
+    return { ok: false, error: "no multi-select prompt is waiting" };
   const want = new Set(selected);
   const real = parsed.options.filter((o) => !o.freeText);
-  const toggles = real.filter((o) => want.has(o.index) !== o.checked).map((o) => String(o.index));
+  const toggles = real
+    .filter((o) => want.has(o.index) !== o.checked)
+    .map((o) => String(o.index));
   if (toggles.length) await sendKeySeq(name, toggles);
 
   // Verify: re-read the pane and check every real option matches the desired state.
@@ -1377,11 +1669,13 @@ async function answerMultiSelect(name: string, selected: number[]): Promise<{ ok
   // TUI repaint (the [x] we're about to read back) lags the input.
   await Bun.sleep(VERIFY_SETTLE_MS);
   const after = parsePendingPrompt(await capturePendingPrompt(name));
-  if (!after || after.kind !== "multi") return { ok: false, error: "prompt changed while answering" };
+  if (!after || after.kind !== "multi")
+    return { ok: false, error: "prompt changed while answering" };
   const ok = after.options
     .filter((o) => !o.freeText)
     .every((o) => o.checked === want.has(o.index));
-  if (!ok) return { ok: false, error: "could not confirm the selection in the pane" };
+  if (!ok)
+    return { ok: false, error: "could not confirm the selection in the pane" };
 
   // Tab opens claude's "Review your answers / Ready to submit your answers?" screen
   // (cursor defaulting to "Submit answers"); Enter there commits. A bare Enter here
@@ -1426,12 +1720,15 @@ async function newClaudeSession(
   const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
   // effort is validated against CLAUDE_EFFORTS before it reaches here, so it's a
   // plain word — safe unquoted in the command.
-  const effortArg = effort && CLAUDE_EFFORTS.has(effort) ? ` --effort ${effort}` : "";
+  const effortArg =
+    effort && CLAUDE_EFFORTS.has(effort) ? ` --effort ${effort}` : "";
   // --chrome enables the Claude-in-Chrome integration for this session.
   const chromeArg = chrome ? " --chrome" : "";
   const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${effortArg}${chromeArg}${promptArg}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
-  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => { });
+  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`
+    .quiet()
+    .catch(() => {});
   return name;
 }
 
@@ -1444,7 +1741,9 @@ async function resumeClaudeSession(dir: string, sid: string): Promise<string> {
   const name = await pickClaudeSessionName();
   const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --resume ${sid}`;
   await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
-  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`.quiet().catch(() => { });
+  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`
+    .quiet()
+    .catch(() => {});
   return name;
 }
 
@@ -1459,10 +1758,14 @@ async function resumeClaudeSession(dir: string, sid: string): Promise<string> {
 const ONLINE_PROBE_URL = "https://api.anthropic.com/";
 let onlineState = { online: true, checkedAt: 0 };
 async function checkOnline(force = false): Promise<boolean> {
-  if (!force && Date.now() - onlineState.checkedAt < 10_000) return onlineState.online;
+  if (!force && Date.now() - onlineState.checkedAt < 10_000)
+    return onlineState.online;
   let online = false;
   try {
-    await fetch(ONLINE_PROBE_URL, { method: "HEAD", signal: AbortSignal.timeout(3500) });
+    await fetch(ONLINE_PROBE_URL, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(3500),
+    });
     online = true;
   } catch {
     online = false;
@@ -1504,8 +1807,15 @@ async function drainQueue(): Promise<void> {
         continue;
       }
       try {
-        if (row.agent === "codex") await newCodexSession(dir.path, row.prompt, row.effort ?? undefined);
-        else await newClaudeSession(dir.path, row.prompt, row.effort ?? undefined, row.chrome === 1);
+        if (row.agent === "codex")
+          await newCodexSession(dir.path, row.prompt, row.effort ?? undefined);
+        else
+          await newClaudeSession(
+            dir.path,
+            row.prompt,
+            row.effort ?? undefined,
+            row.chrome === 1,
+          );
         deleteQueuedStmt.run(row.id);
       } catch {
         break;
@@ -1570,7 +1880,7 @@ function findRolloutByUuid(uuid: string): string | null {
       rolloutPathCache.set(uuid, full);
       return full;
     }
-  } catch { }
+  } catch {}
   return null;
 }
 
@@ -1591,7 +1901,10 @@ async function rolloutCwd(path: string): Promise<string> {
 // else the newest rollout recorded in this cwd (covers the brief window before the
 // tag lands, and codex sessions started outside codex.zsh). The cwd scan is bounded
 // to the most recent rollouts so the sidebar poll stays cheap.
-async function resolveCodexTranscript(cwd: string, uuid: string): Promise<string | null> {
+async function resolveCodexTranscript(
+  cwd: string,
+  uuid: string,
+): Promise<string | null> {
   if (uuid) return findRolloutByUuid(uuid); // null until codex writes the first turn
   if (!cwd) return null;
   const recent: { path: string; mtime: number }[] = [];
@@ -1601,7 +1914,7 @@ async function resolveCodexTranscript(cwd: string, uuid: string): Promise<string
       const p = `${codexSessionsRoot}/${rel}`;
       try {
         recent.push({ path: p, mtime: statSync(p).mtimeMs });
-      } catch { }
+      } catch {}
     }
   } catch {
     return null;
@@ -1630,10 +1943,13 @@ function codexRolloutUuids(): Set<string> {
   try {
     const glob = new Bun.Glob("**/rollout-*.jsonl");
     for (const rel of glob.scanSync(codexSessionsRoot)) {
-      const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(rel);
+      const m =
+        /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(
+          rel,
+        );
       if (m) out.add(m[1]);
     }
-  } catch { }
+  } catch {}
   return out;
 }
 
@@ -1642,32 +1958,49 @@ function codexRolloutUuids(): Set<string> {
 // codex mints its own uuid (no --session-id) and only writes the rollout once the
 // first turn starts, so we poll: the new rollout is the one absent from `before`
 // whose session_meta cwd is ours and that no other live session has already claimed.
-async function tagCodexSession(name: string, cwd: string, before: Set<string>): Promise<void> {
+async function tagCodexSession(
+  name: string,
+  cwd: string,
+  before: Set<string>,
+): Promise<void> {
   for (let i = 0; i < 120; i++) {
     const claimed = new Set<string>();
     try {
-      const raw = await $`tmux -L default list-sessions -F ${"#{@codex_session}"}`.quiet().text();
+      const raw =
+        await $`tmux -L default list-sessions -F ${"#{@codex_session}"}`
+          .quiet()
+          .text();
       for (const u of raw.split("\n")) if (u.trim()) claimed.add(u.trim());
-    } catch { }
+    } catch {}
     const fresh: { uuid: string; path: string; mtime: number }[] = [];
     try {
       const glob = new Bun.Glob("**/rollout-*.jsonl");
       for (const rel of glob.scanSync(codexSessionsRoot)) {
-        const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(rel);
+        const m =
+          /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(
+            rel,
+          );
         if (!m || before.has(m[1]) || claimed.has(m[1])) continue;
         const path = `${codexSessionsRoot}/${rel}`;
-        try { fresh.push({ uuid: m[1], path, mtime: statSync(path).mtimeMs }); } catch { }
+        try {
+          fresh.push({ uuid: m[1], path, mtime: statSync(path).mtimeMs });
+        } catch {}
       }
-    } catch { }
+    } catch {}
     fresh.sort((a, b) => b.mtime - a.mtime); // newest first wins a same-cwd race
     for (const f of fresh) {
       if ((await rolloutCwd(f.path)) === cwd) {
-        await $`tmux -L default set-option -t ${name} @codex_session ${f.uuid}`.quiet().catch(() => { });
+        await $`tmux -L default set-option -t ${name} @codex_session ${f.uuid}`
+          .quiet()
+          .catch(() => {});
         return;
       }
     }
     // Give up if the session closed before ever writing a rollout (never prompted).
-    const alive = await $`tmux -L default has-session -t ${name}`.quiet().then(() => true).catch(() => false);
+    const alive = await $`tmux -L default has-session -t ${name}`
+      .quiet()
+      .then(() => true)
+      .catch(() => false);
     if (!alive) return;
     await Bun.sleep(i < 20 ? 250 : 1000);
   }
@@ -1678,7 +2011,11 @@ async function tagCodexSession(name: string, cwd: string, before: Set<string>): 
 // the prompt as codex's positional arg so codex submits it itself on boot (the same
 // zero-timing trick newClaudeSession uses — a send-keys Enter would race codex's paste
 // debounce). The @codex_session tag is discovered + stamped asynchronously.
-async function newCodexSession(dir: string, prompt: string, effort?: string): Promise<string> {
+async function newCodexSession(
+  dir: string,
+  prompt: string,
+  effort?: string,
+): Promise<string> {
   const name = await pickClaudeSessionName();
   const before = codexRolloutUuids();
   const promptArg = prompt.trim() ? ` ${shq(prompt)}` : "";
@@ -1714,8 +2051,9 @@ async function tailAiTitle(path: string): Promise<string> {
       if (!line.includes('"ai-title"')) continue;
       try {
         const d = JSON.parse(line);
-        if (d?.type === "ai-title" && typeof d.aiTitle === "string") title = d.aiTitle;
-      } catch { }
+        if (d?.type === "ai-title" && typeof d.aiTitle === "string")
+          title = d.aiTitle;
+      } catch {}
     }
     return title;
   } catch {
@@ -1741,13 +2079,17 @@ async function headFirstPrompt(path: string): Promise<string> {
       const c = d?.message?.content;
       let s = "";
       if (typeof c === "string") s = c;
-      else if (Array.isArray(c)) s = c.filter((p) => p?.type === "text").map((p) => p.text).join(" ");
+      else if (Array.isArray(c))
+        s = c
+          .filter((p) => p?.type === "text")
+          .map((p) => p.text)
+          .join(" ");
       s = s.replace(/\s+/g, " ").trim();
       // Skip meta turns (tool results, slash-command/system-reminder wrappers in
       // <…> tags) that aren't a real first prompt; keep scanning for one that is.
       if (s && !s.startsWith("<")) return s.slice(0, 140);
     }
-  } catch { }
+  } catch {}
   return "";
 }
 
@@ -1767,14 +2109,16 @@ async function dirCandidates(cwd: string): Promise<Candidate[]> {
       let mtime = 0;
       try {
         mtime = statSync(path).mtimeMs;
-      } catch { }
+      } catch {}
       return { path, mtime };
     })
     .sort((a, b) => b.mtime - a.mtime)
     // Cap so a giant folder stays bounded; live sessions (incl. idle ones whose
     // files are older) need a wide enough net to title-match against.
     .slice(0, 400);
-  return Promise.all(recent.map(async (c) => ({ ...c, aiTitle: await tailAiTitle(c.path) })));
+  return Promise.all(
+    recent.map(async (c) => ({ ...c, aiTitle: await tailAiTitle(c.path) })),
+  );
 }
 
 interface ResumableSession {
@@ -1792,9 +2136,12 @@ async function resumableSessions(cwd: string): Promise<ResumableSession[]> {
   // sids already attached to a running tmux session aren't "old" — skip them.
   const live = new Set<string>();
   try {
-    const raw = await $`tmux -L default list-sessions -F ${"#{@claude_session}"}`.quiet().text();
+    const raw =
+      await $`tmux -L default list-sessions -F ${"#{@claude_session}"}`
+        .quiet()
+        .text();
     for (const s of raw.split("\n")) if (s.trim()) live.add(s.trim());
-  } catch { }
+  } catch {}
   const dir = `${claudeProjectsRoot}/${mungeDir(cwd)}`;
   let files: string[] = [];
   try {
@@ -1808,7 +2155,7 @@ async function resumableSessions(cwd: string): Promise<ResumableSession[]> {
       let mtime = 0;
       try {
         mtime = statSync(`${dir}/${f}`).mtimeMs;
-      } catch { }
+      } catch {}
       return { sid, path: `${dir}/${f}`, mtime };
     })
     .filter((c) => /^[0-9a-fA-F-]{8,}$/.test(c.sid) && !live.has(c.sid))
@@ -1830,7 +2177,9 @@ function titlesMatch(a: string, b: string): boolean {
   const y = b.trim().toLowerCase();
   if (!x || !y) return false;
   if (x === y) return true;
-  return Math.min(x.length, y.length) >= 12 && (x.startsWith(y) || y.startsWith(x));
+  return (
+    Math.min(x.length, y.length) >= 12 && (x.startsWith(y) || y.startsWith(x))
+  );
 }
 
 // Resolve a tmux session to its transcript. Tagged sessions (@claude_session) map
@@ -1872,7 +2221,13 @@ function cleanTitle(title: string, name: string, cmd: string): string {
   let task = (title ?? "").replace(/^[^\x00-\x7f]\s*/u, "").trim();
   // Drop non-task titles: the session/command name, a bare shell, or claude's
   // default "Claude Code" placeholder shown before it generates a real title.
-  if (task === name || task === "zsh" || task === cmd || task === "Claude Code" || task === "claude")
+  if (
+    task === name ||
+    task === "zsh" ||
+    task === cmd ||
+    task === "Claude Code" ||
+    task === "claude"
+  )
     task = "";
   return task;
 }
@@ -1904,7 +2259,14 @@ function finishedTs(s: TmuxSession): number {
 // "2.1.177") once it's running, so we match that, "claude", or "node".
 async function listClaudeSessions(): Promise<TmuxSession[]> {
   const SEP = "\x1f";
-  const fmt = ["#{session_name}", "#{pane_current_path}", "#{pane_current_command}", "#{pane_title}", "#{@claude_session}", "#{@codex_session}"].join(SEP);
+  const fmt = [
+    "#{session_name}",
+    "#{pane_current_path}",
+    "#{pane_current_command}",
+    "#{pane_title}",
+    "#{@claude_session}",
+    "#{@codex_session}",
+  ].join(SEP);
   let raw = "";
   try {
     raw = await $`tmux -L default list-sessions -F ${fmt}`.quiet().text();
@@ -1940,16 +2302,30 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
     if (path) {
       try {
         mtime = statSync(path).mtimeMs;
-      } catch { }
+      } catch {}
     }
     // The Stop hook records "finished a turn" keyed by session_id, which is the
     // transcript's basename UUID. Prefer that (authoritative); fall back to the tmux
     // @claude_session tag when no transcript resolved. 0 = never recorded (e.g. codex,
     // which doesn't run Claude hooks) — finishedTs then falls back to mtime.
-    const uuid = path ? (path.split("/").pop() ?? "").replace(/\.jsonl$/, "") : sid;
+    const uuid = path
+      ? (path.split("/").pop() ?? "").replace(/\.jsonl$/, "")
+      : sid;
     let endedAt = 0;
     if (uuid) endedAt = getSessionEndStmt.get(uuid)?.ended_at ?? 0;
-    out.push({ name, cwd: cwd ?? "", task, busy, waiting: false, sessionId: sid, hasTranscript: !!path, mtime, endedAt, agent, transcriptPath: path ?? undefined });
+    out.push({
+      name,
+      cwd: cwd ?? "",
+      task,
+      busy,
+      waiting: false,
+      sessionId: sid,
+      hasTranscript: !!path,
+      mtime,
+      endedAt,
+      agent,
+      transcriptPath: path ?? undefined,
+    });
   }
   // An idle session may actually be blocked on an interactive prompt (the same
   // case capturePendingPrompt handles for the open transcript). Flag those so the
@@ -1961,7 +2337,8 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
     out.map(async (s) => {
       // capturePendingPrompt parses claude's TUI prompt layout; codex's differs, so
       // we don't flag waiting for codex (it runs autonomously under xe anyway).
-      if (s.agent === "claude" && !s.busy) s.waiting = !!(await capturePendingPrompt(s.name));
+      if (s.agent === "claude" && !s.busy)
+        s.waiting = !!(await capturePendingPrompt(s.name));
     }),
   );
   // Most recently finished first — see finishedTs (idle: Stop time; busy: live mtime).
@@ -1988,14 +2365,47 @@ interface TranscriptMsg {
 function langFromPath(path: string): string {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   const map: Record<string, string> = {
-    ts: "ts", tsx: "tsx", js: "js", jsx: "jsx", mjs: "js", cjs: "js",
-    json: "json", jsonc: "json", md: "markdown", mdx: "markdown",
-    css: "css", scss: "scss", less: "less", html: "html", xml: "xml",
-    py: "python", rb: "ruby", go: "go", rs: "rust", java: "java", kt: "kotlin",
-    c: "c", h: "c", cpp: "cpp", cc: "cpp", hpp: "cpp", cs: "csharp",
-    php: "php", swift: "swift", lua: "lua", sql: "sql", graphql: "graphql",
-    sh: "shell", bash: "shell", zsh: "shell", fish: "shell",
-    yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", dockerfile: "docker",
+    ts: "ts",
+    tsx: "tsx",
+    js: "js",
+    jsx: "jsx",
+    mjs: "js",
+    cjs: "js",
+    json: "json",
+    jsonc: "json",
+    md: "markdown",
+    mdx: "markdown",
+    css: "css",
+    scss: "scss",
+    less: "less",
+    html: "html",
+    xml: "xml",
+    py: "python",
+    rb: "ruby",
+    go: "go",
+    rs: "rust",
+    java: "java",
+    kt: "kotlin",
+    c: "c",
+    h: "c",
+    cpp: "cpp",
+    cc: "cpp",
+    hpp: "cpp",
+    cs: "csharp",
+    php: "php",
+    swift: "swift",
+    lua: "lua",
+    sql: "sql",
+    graphql: "graphql",
+    sh: "shell",
+    bash: "shell",
+    zsh: "shell",
+    fish: "shell",
+    yml: "yaml",
+    yaml: "yaml",
+    toml: "toml",
+    ini: "ini",
+    dockerfile: "docker",
   };
   return map[ext] ?? "text";
 }
@@ -2012,14 +2422,25 @@ function stripLineNumbers(text: string): string {
 // Pull the before/after hunks out of an Edit/Write/MultiEdit tool call so the
 // client can render them with the diffs library. Each hunk is capped so a giant
 // edit doesn't bloat the transcript payload.
-function extractEdits(name: string, input: any): { old: string; new: string }[] | undefined {
+function extractEdits(
+  name: string,
+  input: any,
+): { old: string; new: string }[] | undefined {
   if (input == null || typeof input !== "object") return undefined;
   const cap = (s: unknown) =>
-    typeof s === "string" ? (s.length > 4000 ? s.slice(0, 4000) + "\n… (truncated)" : s) : "";
-  if (name === "Edit") return [{ old: cap(input.old_string), new: cap(input.new_string) }];
+    typeof s === "string"
+      ? s.length > 4000
+        ? s.slice(0, 4000) + "\n… (truncated)"
+        : s
+      : "";
+  if (name === "Edit")
+    return [{ old: cap(input.old_string), new: cap(input.new_string) }];
   if (name === "Write") return [{ old: "", new: cap(input.content) }];
   if (name === "MultiEdit" && Array.isArray(input.edits))
-    return input.edits.map((e: any) => ({ old: cap(e?.old_string), new: cap(e?.new_string) }));
+    return input.edits.map((e: any) => ({
+      old: cap(e?.old_string),
+      new: cap(e?.new_string),
+    }));
   return undefined;
 }
 
@@ -2028,11 +2449,21 @@ function summarizeToolInput(name: string, input: any): string {
   if (input == null || typeof input !== "object") return "";
   const pick = (k: string) => (typeof input[k] === "string" ? input[k] : "");
   if (name === "Bash") return pick("command");
-  if (name === "Read" || name === "Edit" || name === "Write" || name === "MultiEdit" || name === "NotebookEdit")
+  if (
+    name === "Read" ||
+    name === "Edit" ||
+    name === "Write" ||
+    name === "MultiEdit" ||
+    name === "NotebookEdit"
+  )
     return pick("file_path") || pick("notebook_path");
-  if (name === "Grep") return [pick("pattern"), pick("path") && `in ${pick("path")}`].filter(Boolean).join(" ");
+  if (name === "Grep")
+    return [pick("pattern"), pick("path") && `in ${pick("path")}`]
+      .filter(Boolean)
+      .join(" ");
   if (name === "Glob") return pick("pattern");
-  if (name === "Task" || name === "Agent") return pick("description") || pick("subagent_type");
+  if (name === "Task" || name === "Agent")
+    return pick("description") || pick("subagent_type");
   // The whole plan is carried through verbatim — the client renders it as a
   // dedicated plan card (full markdown + approve/keep-planning choices) rather
   // than a one-line tool summary, so it must not be collapsed here.
@@ -2041,7 +2472,8 @@ function summarizeToolInput(name: string, input: any): string {
   // client parses it into a dedicated question card with selectable answers, so
   // pass the whole input through verbatim instead of collapsing the options away.
   if (name === "AskUserQuestion") return JSON.stringify(input);
-  if (name === "TodoWrite") return Array.isArray(input.todos) ? `${input.todos.length} todos` : "";
+  if (name === "TodoWrite")
+    return Array.isArray(input.todos) ? `${input.todos.length} todos` : "";
   const s = JSON.stringify(input);
   return s.length > 200 ? s.slice(0, 200) + "…" : s;
 }
@@ -2051,12 +2483,22 @@ function summarizeToolInput(name: string, input: any): string {
 // (a Read on a png, or a screenshot MCP tool) is nested inside a tool_result.
 // Used both to emit image messages from parseTranscript and to serve the bytes in
 // /api/tmux/image — they share this walk so the ordinal in an imgRef lines up.
-function collectImages(content: unknown): { mediaType: string; data: string }[] {
+function collectImages(
+  content: unknown,
+): { mediaType: string; data: string }[] {
   const out: { mediaType: string; data: string }[] = [];
   const visit = (b: any) => {
-    if (b?.type === "image" && b.source?.type === "base64" && typeof b.source.data === "string")
-      out.push({ mediaType: b.source.media_type || "image/png", data: b.source.data });
-    else if (b?.type === "tool_result" && Array.isArray(b.content)) b.content.forEach(visit);
+    if (
+      b?.type === "image" &&
+      b.source?.type === "base64" &&
+      typeof b.source.data === "string"
+    )
+      out.push({
+        mediaType: b.source.media_type || "image/png",
+        data: b.source.data,
+      });
+    else if (b?.type === "tool_result" && Array.isArray(b.content))
+      b.content.forEach(visit);
   };
   if (Array.isArray(content)) content.forEach(visit);
   return out;
@@ -2066,7 +2508,13 @@ function blockText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content))
     return content
-      .map((b: any) => (typeof b === "string" ? b : b?.type === "text" ? b.text : b?.text ?? ""))
+      .map((b: any) =>
+        typeof b === "string"
+          ? b
+          : b?.type === "text"
+            ? b.text
+            : (b?.text ?? ""),
+      )
       .filter(Boolean)
       .join("\n");
   return "";
@@ -2075,15 +2523,22 @@ function blockText(content: unknown): string {
 // Parse a claude .jsonl transcript into a readable conversation, keeping only the
 // last `limit` messages (the "latest part" the Tmux tab shows). Text is truncated
 // so a multi-MB transcript stays a small payload.
-function parseTranscript(text: string, limit: number): { messages: TranscriptMsg[]; model: string; title: string; total: number } {
+function parseTranscript(
+  text: string,
+  limit: number,
+): { messages: TranscriptMsg[]; model: string; title: string; total: number } {
   const msgs: TranscriptMsg[] = [];
   let model = "";
   let title = "";
   // Remember each tool_use by id so its matching tool_result (which arrives in a
   // later user message) can be enriched — e.g. a Read result rendered as a code
   // block in the file's language.
-  const toolById = new Map<string, { name: string; path: string; label?: string }>();
-  const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
+  const toolById = new Map<
+    string,
+    { name: string; path: string; label?: string }
+  >();
+  const trunc = (s: string, n: number) =>
+    s.length > n ? s.slice(0, n) + "\n… (truncated)" : s;
   // Append-only transcript, so a line's index is stable — image messages carry it
   // (as "<lineIdx>:<imgOrdinal>") so /api/tmux/image can fetch the bytes lazily.
   const lines = text.split("\n");
@@ -2096,25 +2551,38 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
     } catch {
       continue;
     }
-    if (d?.type === "ai-title" && typeof d.aiTitle === "string") title = d.aiTitle;
+    if (d?.type === "ai-title" && typeof d.aiTitle === "string")
+      title = d.aiTitle;
     if (d?.isSidechain) continue; // skip subagent side-conversations
     const type = d?.type;
     if (type !== "user" && type !== "assistant") continue;
     const msg = d.message;
     if (!msg) continue;
     const ts = typeof d.timestamp === "string" ? d.timestamp : undefined;
-    if (type === "assistant" && typeof msg.model === "string") model = msg.model;
+    if (type === "assistant" && typeof msg.model === "string")
+      model = msg.model;
     const content = msg.content;
     if (type === "user") {
       if (typeof content === "string") {
-        if (content.trim()) msgs.push({ role: "user", kind: "text", text: trunc(content, 8000), ts });
+        if (content.trim())
+          msgs.push({
+            role: "user",
+            kind: "text",
+            text: trunc(content, 8000),
+            ts,
+          });
       } else if (Array.isArray(content)) {
         // Image ordinal within this line, matching collectImages(content) order so
         // the imgRef resolves to the right block server-side.
         let imgOrd = 0;
         for (const b of content) {
           if (b?.type === "text" && b.text?.trim())
-            msgs.push({ role: "user", kind: "text", text: trunc(b.text, 8000), ts });
+            msgs.push({
+              role: "user",
+              kind: "text",
+              text: trunc(b.text, 8000),
+              ts,
+            });
           else if (b?.type === "image") {
             // A pasted image — show it in the user bubble.
             msgs.push({
@@ -2145,7 +2613,9 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
                 });
               continue;
             }
-            const t = blockText(b.content) || (typeof b.content === "string" ? b.content : "");
+            const t =
+              blockText(b.content) ||
+              (typeof b.content === "string" ? b.content : "");
             if (src?.name === "Read") {
               // Render Read output as a syntax-highlighted code block: strip the
               // line-number gutter and carry the file's language. Bigger cap than
@@ -2174,7 +2644,12 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
                 ts,
               });
             } else {
-              msgs.push({ role: "tool", kind: "tool_result", text: trunc(t || "(tool result)", 2000), ts });
+              msgs.push({
+                role: "tool",
+                kind: "tool_result",
+                text: trunc(t || "(tool result)", 2000),
+                ts,
+              });
             }
           }
         }
@@ -2183,7 +2658,12 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
       if (Array.isArray(content)) {
         for (const b of content) {
           if (b?.type === "text" && b.text?.trim())
-            msgs.push({ role: "assistant", kind: "text", text: trunc(b.text, 8000), ts });
+            msgs.push({
+              role: "assistant",
+              kind: "text",
+              text: trunc(b.text, 8000),
+              ts,
+            });
           else if (b?.type === "tool_use") {
             const path =
               typeof b.input?.file_path === "string"
@@ -2212,7 +2692,9 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
               // question card can show the whole thing.
               text: trunc(
                 summarizeToolInput(b.name, b.input),
-                b.name === "ExitPlanMode" || b.name === "AskUserQuestion" ? 16000 : 1000,
+                b.name === "ExitPlanMode" || b.name === "AskUserQuestion"
+                  ? 16000
+                  : 1000,
               ),
               // Edit/Write/MultiEdit carry their before/after hunks so the client
               // can render them with the diffs library instead of a one-liner.
@@ -2223,7 +2705,12 @@ function parseTranscript(text: string, limit: number): { messages: TranscriptMsg
           }
         }
       } else if (typeof content === "string" && content.trim()) {
-        msgs.push({ role: "assistant", kind: "text", text: trunc(content, 8000), ts });
+        msgs.push({
+          role: "assistant",
+          kind: "text",
+          text: trunc(content, 8000),
+          ts,
+        });
       }
     }
   }
@@ -2251,18 +2738,27 @@ function codexText(content: unknown): string {
 // Map a codex function_call to (tool label, one-line summary, file path if any) — we
 // reuse claude's tool vocabulary ("Bash") where it lines up so the client renders
 // codex tool calls with the same cards.
-function codexCall(name: unknown, argsJson: unknown): { tool: string; summary: string; path: string } {
+function codexCall(
+  name: unknown,
+  argsJson: unknown,
+): { tool: string; summary: string; path: string } {
   let args: any = {};
   if (typeof argsJson === "string") {
-    try { args = JSON.parse(argsJson); } catch { }
+    try {
+      args = JSON.parse(argsJson);
+    } catch {}
   } else if (argsJson && typeof argsJson === "object") {
     args = argsJson;
   }
   if (name === "exec_command" || name === "shell_command" || name === "shell") {
     const cmd =
-      typeof args.cmd === "string" ? args.cmd
-        : typeof args.command === "string" ? args.command
-          : Array.isArray(args.command) ? args.command.join(" ") : "";
+      typeof args.cmd === "string"
+        ? args.cmd
+        : typeof args.command === "string"
+          ? args.command
+          : Array.isArray(args.command)
+            ? args.command.join(" ")
+            : "";
     return { tool: "Bash", summary: cmd, path: "" };
   }
   if (name === "write_stdin") {
@@ -2271,24 +2767,39 @@ function codexCall(name: unknown, argsJson: unknown): { tool: string; summary: s
   }
   if (name === "update_plan") {
     const plan = Array.isArray(args.plan) ? args.plan : [];
-    const mark = (s: string) => (s === "completed" ? "✔" : s === "in_progress" ? "▶" : "○");
-    const steps = plan.map((s: any) => `${mark(s?.status)} ${s?.step ?? ""}`).join("\n");
-    const head = typeof args.explanation === "string" && args.explanation ? args.explanation + "\n" : "";
+    const mark = (s: string) =>
+      s === "completed" ? "✔" : s === "in_progress" ? "▶" : "○";
+    const steps = plan
+      .map((s: any) => `${mark(s?.status)} ${s?.step ?? ""}`)
+      .join("\n");
+    const head =
+      typeof args.explanation === "string" && args.explanation
+        ? args.explanation + "\n"
+        : "";
     return { tool: "update_plan", summary: head + steps, path: "" };
   }
-  return { tool: typeof name === "string" ? name : "tool", summary: typeof argsJson === "string" ? argsJson : JSON.stringify(args), path: "" };
+  return {
+    tool: typeof name === "string" ? name : "tool",
+    summary: typeof argsJson === "string" ? argsJson : JSON.stringify(args),
+    path: "",
+  };
 }
 
 // Pull the human-readable part out of a codex tool output. exec_command wraps stdout
 // in a header ("Command: …\n…\nOutput:\n<stdout>"); apply_patch outputs a JSON blob
 // {"output":"…","metadata":{…}}. Show the stdout / message, not the wrapper.
 function codexOutput(output: unknown): string {
-  let s = typeof output === "string" ? output : output == null ? "" : JSON.stringify(output);
+  let s =
+    typeof output === "string"
+      ? output
+      : output == null
+        ? ""
+        : JSON.stringify(output);
   if (s.startsWith("{")) {
     try {
       const j = JSON.parse(s);
       if (typeof j.output === "string") s = j.output;
-    } catch { }
+    } catch {}
   }
   const i = s.indexOf("\nOutput:\n");
   if (i !== -1) s = s.slice(i + "\nOutput:\n".length);
@@ -2297,15 +2808,40 @@ function codexOutput(output: unknown): string {
 
 // Parse a codex apply_patch payload into per-file changes with diff hunks, shaped
 // like claude's Edit/Write edits so the client's EditDiff renders them inline.
-function parseApplyPatch(input: string): { tool: string; path: string; edits: { old: string; new: string }[] }[] {
-  const files: { tool: string; path: string; edits: { old: string; new: string }[] }[] = [];
-  let cur: { tool: string; path: string; edits: { old: string; new: string }[] } | null = null;
+function parseApplyPatch(
+  input: string,
+): { tool: string; path: string; edits: { old: string; new: string }[] }[] {
+  const files: {
+    tool: string;
+    path: string;
+    edits: { old: string; new: string }[];
+  }[] = [];
+  let cur: {
+    tool: string;
+    path: string;
+    edits: { old: string; new: string }[];
+  } | null = null;
   let hunk: { old: string; new: string } | null = null;
   for (const raw of input.split("\n")) {
     let m: RegExpExecArray | null;
-    if ((m = /^\*\*\* Add File: (.+)$/.exec(raw))) { cur = { tool: "Write", path: m[1], edits: [{ old: "", new: "" }] }; files.push(cur); hunk = null; continue; }
-    if ((m = /^\*\*\* Update File: (.+)$/.exec(raw))) { cur = { tool: "Edit", path: m[1], edits: [] }; files.push(cur); hunk = null; continue; }
-    if ((m = /^\*\*\* Delete File: (.+)$/.exec(raw))) { cur = { tool: "Delete", path: m[1], edits: [{ old: "", new: "" }] }; files.push(cur); hunk = null; continue; }
+    if ((m = /^\*\*\* Add File: (.+)$/.exec(raw))) {
+      cur = { tool: "Write", path: m[1], edits: [{ old: "", new: "" }] };
+      files.push(cur);
+      hunk = null;
+      continue;
+    }
+    if ((m = /^\*\*\* Update File: (.+)$/.exec(raw))) {
+      cur = { tool: "Edit", path: m[1], edits: [] };
+      files.push(cur);
+      hunk = null;
+      continue;
+    }
+    if ((m = /^\*\*\* Delete File: (.+)$/.exec(raw))) {
+      cur = { tool: "Delete", path: m[1], edits: [{ old: "", new: "" }] };
+      files.push(cur);
+      hunk = null;
+      continue;
+    }
     if (/^\*\*\* (Begin|End) Patch/.test(raw)) continue;
     if (!cur) continue;
     if (cur.tool === "Write") {
@@ -2313,16 +2849,29 @@ function parseApplyPatch(input: string): { tool: string; path: string; edits: { 
       continue;
     }
     if (cur.tool === "Edit") {
-      if (raw.startsWith("@@")) { hunk = { old: "", new: "" }; cur.edits.push(hunk); continue; }
-      if (!hunk) { hunk = { old: "", new: "" }; cur.edits.push(hunk); }
+      if (raw.startsWith("@@")) {
+        hunk = { old: "", new: "" };
+        cur.edits.push(hunk);
+        continue;
+      }
+      if (!hunk) {
+        hunk = { old: "", new: "" };
+        cur.edits.push(hunk);
+      }
       if (raw.startsWith("+")) hunk.new += raw.slice(1) + "\n";
       else if (raw.startsWith("-")) hunk.old += raw.slice(1) + "\n";
-      else { const c = raw.startsWith(" ") ? raw.slice(1) : raw; hunk.old += c + "\n"; hunk.new += c + "\n"; }
+      else {
+        const c = raw.startsWith(" ") ? raw.slice(1) : raw;
+        hunk.old += c + "\n";
+        hunk.new += c + "\n";
+      }
     }
   }
   // Cap each hunk so a giant patch doesn't bloat the transcript payload (mirrors extractEdits).
-  const cap = (s: string) => (s.length > 4000 ? s.slice(0, 4000) + "\n… (truncated)" : s);
-  for (const f of files) f.edits = f.edits.map((e) => ({ old: cap(e.old), new: cap(e.new) }));
+  const cap = (s: string) =>
+    s.length > 4000 ? s.slice(0, 4000) + "\n… (truncated)" : s;
+  for (const f of files)
+    f.edits = f.edits.map((e) => ({ old: cap(e.old), new: cap(e.new) }));
   return files;
 }
 
@@ -2336,17 +2885,25 @@ function parseApplyPatch(input: string): { tool: string; path: string; edits: { 
 //   - tool calls from response_item.function_call / custom_tool_call (+ their outputs)
 // model comes from turn_context; codex writes no ai-title, so the title is the first
 // user message.
-function parseCodexTranscript(text: string, limit: number): { messages: TranscriptMsg[]; model: string; title: string; total: number } {
+function parseCodexTranscript(
+  text: string,
+  limit: number,
+): { messages: TranscriptMsg[]; model: string; title: string; total: number } {
   const msgs: TranscriptMsg[] = [];
   let model = "";
   let title = "";
-  const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
+  const trunc = (s: string, n: number) =>
+    s.length > n ? s.slice(0, n) + "\n… (truncated)" : s;
   // call_id -> tool meta, so a *_output line can label its result with the tool/path.
   const toolById = new Map<string, { tool: string; path: string }>();
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let d: any;
-    try { d = JSON.parse(line); } catch { continue; }
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
     const p = d?.payload;
     if (!p || typeof p !== "object") continue;
     const ts = typeof d.timestamp === "string" ? d.timestamp : undefined;
@@ -2365,7 +2922,14 @@ function parseCodexTranscript(text: string, limit: number): { messages: Transcri
         }
       } else if (p.type === "agent_reasoning") {
         const txt = typeof p.text === "string" ? p.text : "";
-        if (txt.trim()) msgs.push({ role: "assistant", kind: "text", text: trunc(txt, 4000), reasoning: true, ts });
+        if (txt.trim())
+          msgs.push({
+            role: "assistant",
+            kind: "text",
+            text: trunc(txt, 4000),
+            reasoning: true,
+            ts,
+          });
       }
       continue;
     }
@@ -2374,32 +2938,93 @@ function parseCodexTranscript(text: string, limit: number): { messages: Transcri
     if (pt === "message") {
       if (p.role !== "assistant") continue; // skip developer/user (injected context + dupes)
       const txt = codexText(p.content);
-      if (txt.trim()) msgs.push({ role: "assistant", kind: "text", text: trunc(txt, 8000), ts });
+      if (txt.trim())
+        msgs.push({
+          role: "assistant",
+          kind: "text",
+          text: trunc(txt, 8000),
+          ts,
+        });
     } else if (pt === "function_call") {
       const { tool, summary, path } = codexCall(p.name, p.arguments);
-      if (typeof p.call_id === "string") toolById.set(p.call_id, { tool, path });
-      msgs.push({ role: "assistant", kind: "tool_use", tool, text: trunc(summary, 2000), path: path || undefined, ts });
+      if (typeof p.call_id === "string")
+        toolById.set(p.call_id, { tool, path });
+      msgs.push({
+        role: "assistant",
+        kind: "tool_use",
+        tool,
+        text: trunc(summary, 2000),
+        path: path || undefined,
+        ts,
+      });
     } else if (pt === "custom_tool_call") {
       if (p.name === "apply_patch" && typeof p.input === "string") {
         const files = parseApplyPatch(p.input);
         if (files.length) {
           // one Edit/Write/Delete card per file the patch touches
-          for (const f of files) msgs.push({ role: "assistant", kind: "tool_use", tool: f.tool, path: f.path, edits: f.edits, text: "", ts });
+          for (const f of files)
+            msgs.push({
+              role: "assistant",
+              kind: "tool_use",
+              tool: f.tool,
+              path: f.path,
+              edits: f.edits,
+              text: "",
+              ts,
+            });
         } else {
-          msgs.push({ role: "assistant", kind: "tool_use", tool: "apply_patch", text: trunc(p.input, 2000), ts });
+          msgs.push({
+            role: "assistant",
+            kind: "tool_use",
+            tool: "apply_patch",
+            text: trunc(p.input, 2000),
+            ts,
+          });
         }
       } else {
-        const input = typeof p.input === "string" ? p.input : JSON.stringify(p.input ?? "");
-        msgs.push({ role: "assistant", kind: "tool_use", tool: typeof p.name === "string" ? p.name : "tool", text: trunc(input, 2000), ts });
+        const input =
+          typeof p.input === "string" ? p.input : JSON.stringify(p.input ?? "");
+        msgs.push({
+          role: "assistant",
+          kind: "tool_use",
+          tool: typeof p.name === "string" ? p.name : "tool",
+          text: trunc(input, 2000),
+          ts,
+        });
       }
-    } else if (pt === "function_call_output" || pt === "custom_tool_call_output") {
-      const src = typeof p.call_id === "string" ? toolById.get(p.call_id) : undefined;
+    } else if (
+      pt === "function_call_output" ||
+      pt === "custom_tool_call_output"
+    ) {
+      const src =
+        typeof p.call_id === "string" ? toolById.get(p.call_id) : undefined;
       const out = codexOutput(p.output);
-      if (out.trim()) msgs.push({ role: "tool", kind: "tool_result", tool: src?.tool, path: src?.path || undefined, text: trunc(out, 2000), ts });
+      if (out.trim())
+        msgs.push({
+          role: "tool",
+          kind: "tool_result",
+          tool: src?.tool,
+          path: src?.path || undefined,
+          text: trunc(out, 2000),
+          ts,
+        });
     } else if (pt === "web_search_call") {
-      const a = (p.action && typeof p.action === "object" ? p.action : {}) as any;
-      const summary = typeof a.query === "string" ? a.query : typeof a.url === "string" ? a.url : "";
-      msgs.push({ role: "assistant", kind: "tool_use", tool: "WebSearch", text: trunc(summary, 500), ts });
+      const a = (
+        p.action && typeof p.action === "object" ? p.action : {}
+      ) as any;
+      const summary =
+        typeof a.query === "string"
+          ? a.query
+          : typeof a.url === "string"
+            ? a.url
+            : "";
+      msgs.push({
+        role: "assistant",
+        kind: "tool_use",
+        tool: "WebSearch",
+        text: trunc(summary, 500),
+        ts,
+      });
     }
     // response_item.reasoning is encrypted — skipped; we show event_msg.agent_reasoning instead
   }
@@ -2429,7 +3054,9 @@ interface SubwaySessionSnapshot {
   messages: TranscriptMsg[];
 }
 
-function publicTmuxSession(s: TmuxSession): Omit<TmuxSession, "transcriptPath"> {
+function publicTmuxSession(
+  s: TmuxSession,
+): Omit<TmuxSession, "transcriptPath"> {
   const { transcriptPath: _transcriptPath, ...pub } = s;
   return pub;
 }
@@ -2449,11 +3076,17 @@ function transcriptIdFromPath(path?: string): string {
   return path ? (path.split("/").pop() ?? "").replace(/\.jsonl$/, "") : "";
 }
 
-function subwayKeepIds(s: Pick<TmuxSession, "sessionId" | "name" | "transcriptPath">): string[] {
-  return [transcriptIdFromPath(s.transcriptPath), s.sessionId, s.name].filter(Boolean);
+function subwayKeepIds(
+  s: Pick<TmuxSession, "sessionId" | "name" | "transcriptPath">,
+): string[] {
+  return [transcriptIdFromPath(s.transcriptPath), s.sessionId, s.name].filter(
+    Boolean,
+  );
 }
 
-async function subwaySessionSnapshot(s: TmuxSession): Promise<SubwaySessionSnapshot> {
+async function subwaySessionSnapshot(
+  s: TmuxSession,
+): Promise<SubwaySessionSnapshot> {
   let title = "";
   let model = "";
   let total = 0;
@@ -2463,13 +3096,16 @@ async function subwaySessionSnapshot(s: TmuxSession): Promise<SubwaySessionSnaps
     try {
       const parsed =
         s.agent === "codex"
-          ? parseCodexTranscript(await Bun.file(path).text(), SUBWAY_MESSAGE_LIMIT)
+          ? parseCodexTranscript(
+              await Bun.file(path).text(),
+              SUBWAY_MESSAGE_LIMIT,
+            )
           : parseTranscript(await Bun.file(path).text(), SUBWAY_MESSAGE_LIMIT);
       title = parsed.title;
       model = parsed.model;
       total = parsed.total;
       messages = compactSubwayMessages(parsed.messages);
-    } catch { }
+    } catch {}
   }
   return {
     name: s.name,
@@ -2488,10 +3124,12 @@ async function subwaySessionSnapshot(s: TmuxSession): Promise<SubwaySessionSnaps
 }
 
 async function subwaySnapshot(ws: Workspace) {
-  const inScope = (dir: string) => dir === ws.path || dir.startsWith(`${ws.path}${sep}`);
+  const inScope = (dir: string) =>
+    dir === ws.path || dir.startsWith(`${ws.path}${sep}`);
   const kept = new Set(listSubwayKeptStmt.all(ws.id).map((r) => r.session_id));
   const idle = (await listClaudeSessions()).filter(
-    (s) => !s.busy && inScope(s.cwd) && !subwayKeepIds(s).some((id) => kept.has(id)),
+    (s) =>
+      !s.busy && inScope(s.cwd) && !subwayKeepIds(s).some((id) => kept.has(id)),
   );
   const picked = [
     ...idle.filter((s) => s.agent === "claude").slice(0, SUBWAY_AGENT_LIMIT),
@@ -2556,7 +3194,13 @@ function normalizeTokenUsage(usage: unknown): TokenUsage | null {
   const output = finiteNumber(o.output_tokens);
   const reasoning = finiteNumber(o.reasoning_output_tokens);
   const total = finiteNumber(o.total_tokens);
-  if (input == null || cached == null || output == null || reasoning == null || total == null) {
+  if (
+    input == null ||
+    cached == null ||
+    output == null ||
+    reasoning == null ||
+    total == null
+  ) {
     return null;
   }
   return {
@@ -2587,7 +3231,7 @@ async function readCodexUsage(): Promise<AgentUsage> {
       const path = `${codexSessionsRoot}/${rel}`;
       try {
         files.push({ path, mtime: statSync(path).mtimeMs });
-      } catch { }
+      } catch {}
     }
   } catch {
     return emptyAgentUsage();
@@ -2602,11 +3246,18 @@ async function readCodexUsage(): Promise<AgentUsage> {
       for (const line of tail.trimEnd().split("\n").reverse()) {
         if (!line.includes('"rate_limits"')) continue;
         let d: any;
-        try { d = JSON.parse(line); } catch { continue; }
+        try {
+          d = JSON.parse(line);
+        } catch {
+          continue;
+        }
         const p = d?.payload;
         const limits = p?.rate_limits;
         if (p?.type !== "token_count" || !limits) continue;
-        const ts = typeof d.timestamp === "string" ? Date.parse(d.timestamp) / 1000 : mtime / 1000;
+        const ts =
+          typeof d.timestamp === "string"
+            ? Date.parse(d.timestamp) / 1000
+            : mtime / 1000;
         return {
           five_hour: normalizeUsageWindow(limits.primary),
           seven_day: normalizeUsageWindow(limits.secondary),
@@ -2614,10 +3265,11 @@ async function readCodexUsage(): Promise<AgentUsage> {
           total_token_usage: normalizeTokenUsage(p.info?.total_token_usage),
           last_token_usage: normalizeTokenUsage(p.info?.last_token_usage),
           model_context_window: finiteNumber(p.info?.model_context_window),
-          plan_type: typeof limits.plan_type === "string" ? limits.plan_type : null,
+          plan_type:
+            typeof limits.plan_type === "string" ? limits.plan_type : null,
         };
       }
-    } catch { }
+    } catch {}
   }
 
   return emptyAgentUsage();
@@ -2642,11 +3294,16 @@ function settle<T>(settled: PromiseSettledResult<T[]>[]): T[] {
   return settled.flatMap((s) => (s.status === "fulfilled" ? s.value : []));
 }
 
-async function listCommitsForRepo(r: RepoCtx, page: number): Promise<CommitSummary[]> {
+async function listCommitsForRepo(
+  r: RepoCtx,
+  page: number,
+): Promise<CommitSummary[]> {
   const base = `repos/${r.nameWithOwner}/commits?per_page=50&page=${page}`;
   // Prefer the checked-out branch; fall back to the default branch if it
   // isn't pushed to GitHub.
-  const urls = r.branch ? [`${base}&sha=${encodeURIComponent(r.branch)}`, base] : [base];
+  const urls = r.branch
+    ? [`${base}&sha=${encodeURIComponent(r.branch)}`, base]
+    : [base];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -2667,9 +3324,16 @@ async function listCommitsForRepo(r: RepoCtx, page: number): Promise<CommitSumma
   throw lastError;
 }
 
-async function listCommits(ws: Workspace, page: number): Promise<CommitSummary[]> {
-  const settled = await Promise.allSettled(ws.repos.map((r) => listCommitsForRepo(r, page)));
-  return settle(settled).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+async function listCommits(
+  ws: Workspace,
+  page: number,
+): Promise<CommitSummary[]> {
+  const settled = await Promise.allSettled(
+    ws.repos.map((r) => listCommitsForRepo(r, page)),
+  );
+  return settle(settled).sort((a, b) =>
+    a.date < b.date ? 1 : a.date > b.date ? -1 : 0,
+  );
 }
 
 interface PrSummary {
@@ -2704,8 +3368,12 @@ async function listPrsForRepo(r: RepoCtx): Promise<PrSummary[]> {
 }
 
 async function listPrs(ws: Workspace) {
-  const settled = await Promise.allSettled(ws.repos.map((r) => listPrsForRepo(r)));
-  return settle(settled).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
+  const settled = await Promise.allSettled(
+    ws.repos.map((r) => listPrsForRepo(r)),
+  );
+  return settle(settled).sort((a, b) =>
+    a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
+  );
 }
 
 // Commit diffs are immutable, cache them for the lifetime of the server
@@ -2715,10 +3383,11 @@ async function commitDiff(r: RepoCtx, sha: string): Promise<string> {
   const cacheKey = `${r.nameWithOwner}:${sha}`;
   const cached = diffCache.get(cacheKey);
   if (cached !== undefined) return cached;
-  const diff = await $`gh api repos/${r.nameWithOwner}/commits/${sha} -H ${"Accept: application/vnd.github.diff"}`
-    .cwd(r.dir)
-    .quiet()
-    .text();
+  const diff =
+    await $`gh api repos/${r.nameWithOwner}/commits/${sha} -H ${"Accept: application/vnd.github.diff"}`
+      .cwd(r.dir)
+      .quiet()
+      .text();
   diffCache.set(cacheKey, diff);
   return diff;
 }
@@ -2732,12 +3401,16 @@ interface UntrackedEntry {
   tooLarge?: boolean;
 }
 
-async function untrackedEntry(dir: string, path: string): Promise<UntrackedEntry> {
+async function untrackedEntry(
+  dir: string,
+  path: string,
+): Promise<UntrackedEntry> {
   try {
     const file = Bun.file(`${dir}/${path}`);
     if (file.size > 512 * 1024) return { path, contents: null, tooLarge: true };
     const bytes = new Uint8Array(await file.arrayBuffer());
-    if (bytes.subarray(0, 8000).includes(0)) return { path, contents: null, binary: true };
+    if (bytes.subarray(0, 8000).includes(0))
+      return { path, contents: null, binary: true };
     return { path, contents: new TextDecoder().decode(bytes) };
   } catch {
     return { path, contents: null, binary: true };
@@ -2781,8 +3454,13 @@ async function listWorktrees(repoDir: string): Promise<Worktree[]> {
     let branch = "";
     let bare = false;
     for (const line of block.split("\n")) {
-      if (line.startsWith("worktree ")) dir = line.slice("worktree ".length).trim();
-      else if (line.startsWith("branch ")) branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+      if (line.startsWith("worktree "))
+        dir = line.slice("worktree ".length).trim();
+      else if (line.startsWith("branch "))
+        branch = line
+          .slice("branch ".length)
+          .trim()
+          .replace(/^refs\/heads\//, "");
       else if (line === "bare") bare = true;
     }
     if (dir && !bare) worktrees.push({ dir, branch });
@@ -2792,7 +3470,10 @@ async function listWorktrees(repoDir: string): Promise<Worktree[]> {
 
 // Working-tree status for a single directory (one worktree).
 async function statusDir(dir: string) {
-  const raw = await $`git status --porcelain=v1 -z -uall`.cwd(dir).quiet().text();
+  const raw = await $`git status --porcelain=v1 -z -uall`
+    .cwd(dir)
+    .quiet()
+    .text();
   const parts = raw.split("\0");
   const staged: { path: string; status: string }[] = [];
   const unstaged: { path: string; status: string }[] = [];
@@ -2812,14 +3493,19 @@ async function statusDir(dir: string) {
     if (y !== " ") unstaged.push({ path, status: y });
   }
   const [stagedDiff, unstagedDiff, untracked] = await Promise.all([
-    staged.length ? $`git diff --cached`.cwd(dir).quiet().text() : Promise.resolve(""),
+    staged.length
+      ? $`git diff --cached`.cwd(dir).quiet().text()
+      : Promise.resolve(""),
     unstaged.length ? $`git diff`.cwd(dir).quiet().text() : Promise.resolve(""),
     Promise.all(untrackedPaths.map((p) => untrackedEntry(dir, p))),
   ]);
   return { staged, unstaged, untracked, stagedDiff, unstagedDiff };
 }
 
-async function getChangesForRepo(ws: Workspace, r: RepoCtx): Promise<RepoChanges[]> {
+async function getChangesForRepo(
+  ws: Workspace,
+  r: RepoCtx,
+): Promise<RepoChanges[]> {
   const worktrees = await listWorktrees(r.dir);
   const multiWt = worktrees.length > 1;
   return Promise.all(
@@ -2842,20 +3528,29 @@ async function getChangesForRepo(ws: Workspace, r: RepoCtx): Promise<RepoChanges
 }
 
 async function getChanges(ws: Workspace): Promise<RepoChanges[]> {
-  const all = (await Promise.all(ws.repos.map((r) => getChangesForRepo(ws, r)))).flat();
+  const all = (
+    await Promise.all(ws.repos.map((r) => getChangesForRepo(ws, r)))
+  ).flat();
   ws.worktreeDirs.clear();
   for (const rc of all) ws.worktreeDirs.add(rc.dir);
   // Keep the file index fresh on every Changes refresh — never fatal to the view
   // (a directory that has grown past the limit just keeps its existing rows).
-  void indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => { });
+  void indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => {});
   return all;
 }
 
 // Resolve a client-supplied worktree dir to a real directory, only allowing a
 // dir this workspace has already reported; falls back to the repo's main dir.
-function dirForWorktree(ws: Workspace, worktree: unknown, repoKey: unknown): string {
-  if (typeof worktree === "string" && ws.worktreeDirs.has(worktree)) return worktree;
-  return repoByKey(ws, typeof repoKey === "string" ? repoKey : null)?.dir ?? ws.path;
+function dirForWorktree(
+  ws: Workspace,
+  worktree: unknown,
+  repoKey: unknown,
+): string {
+  if (typeof worktree === "string" && ws.worktreeDirs.has(worktree))
+    return worktree;
+  return (
+    repoByKey(ws, typeof repoKey === "string" ? repoKey : null)?.dir ?? ws.path
+  );
 }
 
 // Locate which repo owns a worktree dir (re-listing live, so we never trust the
@@ -2867,7 +3562,8 @@ async function repoOfWorktree(
 ): Promise<{ repoDir: string; isMain: boolean } | null> {
   for (const r of ws.repos) {
     const wts = await listWorktrees(r.dir);
-    if (wts.some((w) => w.dir === dir)) return { repoDir: r.dir, isMain: wts[0]?.dir === dir };
+    if (wts.some((w) => w.dir === dir))
+      return { repoDir: r.dir, isMain: wts[0]?.dir === dir };
   }
   return null;
 }
@@ -2910,7 +3606,9 @@ function safeRepoPath(p: unknown): p is string {
 
 async function runGitAction(action: string, dir: string, path?: string) {
   if (action === "stage") {
-    return path ? $`git add -- ${path}`.cwd(dir).quiet() : $`git add -A`.cwd(dir).quiet();
+    return path
+      ? $`git add -- ${path}`.cwd(dir).quiet()
+      : $`git add -A`.cwd(dir).quiet();
   }
   if (action === "unstage") {
     return path
@@ -2954,10 +3652,19 @@ async function savePatch(dir: string): Promise<string | null> {
   if (!diff.trim()) return null;
   await ensureGitignored(dir, "diffs/");
   const branch =
-    (await $`git symbolic-ref --quiet --short HEAD`.cwd(dir).nothrow().quiet().text()).trim() ||
-    "detached";
+    (
+      await $`git symbolic-ref --quiet --short HEAD`
+        .cwd(dir)
+        .nothrow()
+        .quiet()
+        .text()
+    ).trim() || "detached";
   const safeBranch = branch.replace(/[^A-Za-z0-9._-]+/g, "-") || "patch";
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")
+    .replace("T", "_")
+    .slice(0, 19);
   const rel = `diffs/${safeBranch}-${stamp}.patch`;
   await Bun.write(`${dir}/${rel}`, diff);
   return rel;
@@ -4735,8 +5442,18 @@ const MANIFEST_JSON = JSON.stringify({
   background_color: "#1c1c1f",
   theme_color: "#6e56cf",
   icons: [
-    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+    {
+      src: "/icon-192.png",
+      sizes: "192x192",
+      type: "image/png",
+      purpose: "any maskable",
+    },
+    {
+      src: "/icon-512.png",
+      sizes: "512x512",
+      type: "image/png",
+      purpose: "any maskable",
+    },
   ],
 });
 
@@ -4795,13 +5512,22 @@ let vapid: { publicKey: string; privateKeyPem: string };
 try {
   vapid = JSON.parse(readFileSync(vapidPath, "utf8"));
 } catch {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+  });
   const jwk = publicKey.export({ format: "jwk" }) as { x: string; y: string };
   // applicationServerKey is the uncompressed point: 0x04 || X || Y.
-  const pub = Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]);
+  const pub = Buffer.concat([
+    Buffer.from([0x04]),
+    fromB64url(jwk.x),
+    fromB64url(jwk.y),
+  ]);
   vapid = {
     publicKey: b64url(pub),
-    privateKeyPem: privateKey.export({ format: "pem", type: "pkcs8" }) as string,
+    privateKeyPem: privateKey.export({
+      format: "pem",
+      type: "pkcs8",
+    }) as string,
   };
   writeFileSync(vapidPath, JSON.stringify(vapid));
 }
@@ -4861,7 +5587,9 @@ function encryptPayload(sub: PushSub, payload: Buffer): Buffer {
 // VAPID Authorization header: an ES256 JWT signed with our private key.
 function vapidAuthHeader(endpoint: string): string {
   const aud = new URL(endpoint).origin;
-  const head = b64url(Buffer.from(JSON.stringify({ typ: "JWT", alg: "ES256" })));
+  const head = b64url(
+    Buffer.from(JSON.stringify({ typ: "JWT", alg: "ES256" })),
+  );
   const body = b64url(
     Buffer.from(
       JSON.stringify({
@@ -4879,7 +5607,10 @@ function vapidAuthHeader(endpoint: string): string {
   return `vapid t=${signingInput}.${b64url(sig)}, k=${vapid.publicKey}`;
 }
 
-async function sendPush(sub: PushSub, payload: object): Promise<{ ok: boolean; gone: boolean }> {
+async function sendPush(
+  sub: PushSub,
+  payload: object,
+): Promise<{ ok: boolean; gone: boolean }> {
   try {
     const encrypted = encryptPayload(sub, Buffer.from(JSON.stringify(payload)));
     const res = await fetch(sub.endpoint, {
@@ -4927,7 +5658,9 @@ async function notifyAll(payload: {
 // Resolve a tmux session name to its clean chat title (claude's current task) and
 // cwd, so a notification can name the chat and deep-link to its directory. Empty
 // fields if the pane can't be read.
-async function sessionInfo(name: string): Promise<{ task: string; cwd: string }> {
+async function sessionInfo(
+  name: string,
+): Promise<{ task: string; cwd: string }> {
   try {
     const SEP = "\x1f";
     const info = (
@@ -4952,7 +5685,8 @@ function dirIdForCwd(cwd: string): number | null {
   let best: { id: number; len: number } | null = null;
   for (const d of listDirsStmt.all()) {
     if (cwd === d.path || cwd.startsWith(`${d.path}/`)) {
-      if (!best || d.path.length > best.len) best = { id: d.id, len: d.path.length };
+      if (!best || d.path.length > best.len)
+        best = { id: d.id, len: d.path.length };
     }
   }
   return best?.id ?? null;
@@ -4965,7 +5699,8 @@ const server = Bun.serve({
     const url = new URL(req.url);
 
     // CORS preflight for the extension's cross-origin API calls.
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    if (req.method === "OPTIONS")
+      return new Response(null, { status: 204, headers: CORS });
 
     if (url.pathname === "/client.js") {
       return new Response(clientJS, {
@@ -4995,7 +5730,10 @@ const server = Bun.serve({
     }
     // The browser fetches the applicationServerKey before subscribing.
     if (url.pathname === "/api/push/vapid" && req.method === "GET") {
-      return json({ publicKey: vapid.publicKey, count: countSubsStmt.get()?.n ?? 0 });
+      return json({
+        publicKey: vapid.publicKey,
+        count: countSubsStmt.get()?.n ?? 0,
+      });
     }
     if (url.pathname === "/api/push/subscribe" && req.method === "POST") {
       let b: any;
@@ -5007,7 +5745,11 @@ const server = Bun.serve({
       const endpoint = b?.endpoint;
       const p256dh = b?.keys?.p256dh;
       const auth = b?.keys?.auth;
-      if (typeof endpoint !== "string" || typeof p256dh !== "string" || typeof auth !== "string") {
+      if (
+        typeof endpoint !== "string" ||
+        typeof p256dh !== "string" ||
+        typeof auth !== "string"
+      ) {
         return json({ error: "Invalid subscription" }, 400);
       }
       upsertSubStmt.run(endpoint, p256dh, auth, Date.now());
@@ -5044,7 +5786,14 @@ const server = Bun.serve({
         const dirParam = dirId != null ? `&dir=${dirId}` : "";
         payload = {
           title: task || session,
-          body: kind === "ask" ? "Needs your input" : kind === "stop" ? "Finished" : task ? session : "",
+          body:
+            kind === "ask"
+              ? "Needs your input"
+              : kind === "stop"
+                ? "Finished"
+                : task
+                  ? session
+                  : "",
           // Pin the directory so the deep-linked session is in the Home tab's
           // dir-scoped list and doesn't get dropped from the open chat on load.
           url: `/?home=${encodeURIComponent(session)}${dirParam}`,
@@ -5052,7 +5801,10 @@ const server = Bun.serve({
         };
       } else {
         payload = {
-          title: typeof b?.title === "string" && b.title.trim() ? b.title.trim() : "diffshub",
+          title:
+            typeof b?.title === "string" && b.title.trim()
+              ? b.title.trim()
+              : "diffshub",
           body: typeof b?.body === "string" ? b.body : "",
           url: typeof b?.url === "string" ? b.url : "/",
           tag: typeof b?.tag === "string" ? b.tag : undefined,
@@ -5082,7 +5834,11 @@ const server = Bun.serve({
             : "";
       if (sid) {
         const now = Date.now();
-        upsertSessionEndStmt.run(sid, typeof b?.cwd === "string" ? b.cwd : "", now);
+        upsertSessionEndStmt.run(
+          sid,
+          typeof b?.cwd === "string" ? b.cwd : "",
+          now,
+        );
         pruneSessionEndsStmt.run(now - 60 * 86_400_000); // drop ends older than 60d
       }
       return json({ ok: !!sid });
@@ -5113,11 +5869,13 @@ const server = Bun.serve({
       }
       const path = expandTilde(body.path.trim());
       try {
-        if (!statSync(path).isDirectory()) return json({ error: `Not a directory: ${path}` }, 400);
+        if (!statSync(path).isDirectory())
+          return json({ error: `Not a directory: ${path}` }, 400);
       } catch {
         return json({ error: `No such directory: ${path}` }, 400);
       }
-      if (getDirByPathStmt.get(path)) return json({ error: `Already added: ${path}` }, 409);
+      if (getDirByPathStmt.get(path))
+        return json({ error: `Already added: ${path}` }, 409);
       const reposStr = normalizeReposInput(body.repos);
       const name =
         typeof body.name === "string" && body.name.trim()
@@ -5127,7 +5885,10 @@ const server = Bun.serve({
       // is created), so a giant directory never gets a row or a file index.
       let paths: string[];
       try {
-        const { repos, isWorkspace } = await resolveMembers(path, parseRepos(reposStr));
+        const { repos, isWorkspace } = await resolveMembers(
+          path,
+          parseRepos(reposStr),
+        );
         paths = await collectFiles(repos, isWorkspace);
       } catch (e) {
         return json({ error: errText(e) }, 500);
@@ -5169,10 +5930,15 @@ const server = Bun.serve({
         return json({ error: "Invalid JSON" }, 400);
       }
       const newPath =
-        typeof body.path === "string" && body.path.trim() ? expandTilde(body.path.trim()) : row.path;
+        typeof body.path === "string" && body.path.trim()
+          ? expandTilde(body.path.trim())
+          : row.path;
       const newName =
-        typeof body.name === "string" && body.name.trim() ? body.name.trim() : row.name;
-      const newReposStr = body.repos !== undefined ? normalizeReposInput(body.repos) : row.repos;
+        typeof body.name === "string" && body.name.trim()
+          ? body.name.trim()
+          : row.name;
+      const newReposStr =
+        body.repos !== undefined ? normalizeReposInput(body.repos) : row.repos;
       if (newPath !== row.path) {
         try {
           if (!statSync(newPath).isDirectory())
@@ -5181,13 +5947,17 @@ const server = Bun.serve({
           return json({ error: `No such directory: ${newPath}` }, 400);
         }
         const dup = getDirByPathStmt.get(newPath);
-        if (dup && dup.id !== id) return json({ error: `Already added: ${newPath}` }, 409);
+        if (dup && dup.id !== id)
+          return json({ error: `Already added: ${newPath}` }, 409);
       }
       const reResolve = newPath !== row.path || newReposStr !== row.repos;
       if (reResolve) {
         let paths: string[];
         try {
-          const { repos, isWorkspace } = await resolveMembers(newPath, parseRepos(newReposStr));
+          const { repos, isWorkspace } = await resolveMembers(
+            newPath,
+            parseRepos(newReposStr),
+          );
           paths = await collectFiles(repos, isWorkspace);
         } catch (e) {
           return json({ error: errText(e) }, 500);
@@ -5196,12 +5966,10 @@ const server = Bun.serve({
           return json({ error: new TooManyFiles(paths.length).message }, 400);
         }
         db.transaction(() => {
-          db.run("UPDATE directories SET path = ?, name = ?, repos = ? WHERE id = ?", [
-            newPath,
-            newName,
-            newReposStr,
-            id,
-          ]);
+          db.run(
+            "UPDATE directories SET path = ?, name = ?, repos = ? WHERE id = ?",
+            [newPath, newName, newReposStr, id],
+          );
           db.run("DELETE FROM files WHERE dir_id = ?", [id]);
           for (const p of paths) insertFileStmt.run(id, p);
         })();
@@ -5222,7 +5990,10 @@ const server = Bun.serve({
       if (!row) return json({ error: "No such directory" }, 404);
       let paths: string[];
       try {
-        const { repos, isWorkspace } = await resolveMembers(row.path, parseRepos(row.repos));
+        const { repos, isWorkspace } = await resolveMembers(
+          row.path,
+          parseRepos(row.repos),
+        );
         paths = await collectFiles(repos, isWorkspace);
       } catch (e) {
         return json({ error: errText(e) }, 500);
@@ -5262,16 +6033,23 @@ const server = Bun.serve({
         path: ws.path,
         cwd: ws.path, // alias kept for the client's claudeRef @-ref builder
         repo: ws.label,
-        branch: ws.isWorkspace ? "" : ws.repos[0]?.branch ?? "",
+        branch: ws.isWorkspace ? "" : (ws.repos[0]?.branch ?? ""),
         workspace: ws.isWorkspace,
         editor: editorName(),
-        repos: ws.repos.map((r) => ({ key: r.key, nameWithOwner: r.nameWithOwner, branch: r.branch })),
+        repos: ws.repos.map((r) => ({
+          key: r.key,
+          nameWithOwner: r.nameWithOwner,
+          branch: r.branch,
+        })),
         defaultDirId,
       });
     }
 
     if (url.pathname === "/api/commits") {
-      const pageNum = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+      const pageNum = Math.max(
+        1,
+        parseInt(url.searchParams.get("page") || "1", 10) || 1,
+      );
       try {
         return json(await listCommits(await wsFromReq(url), pageNum));
       } catch (e) {
@@ -5317,10 +6095,16 @@ const server = Bun.serve({
         } catch {
           return json({ error: "Invalid JSON" }, 400);
         }
-        if (typeof body.sha !== "string" || !/^[0-9a-f]{7,40}$/.test(body.sha)) {
+        if (
+          typeof body.sha !== "string" ||
+          !/^[0-9a-f]{7,40}$/.test(body.sha)
+        ) {
           return json({ error: "Invalid sha" }, 400);
         }
-        const nwo = repoByKey(ws, typeof body.repo === "string" ? body.repo : null)?.nameWithOwner;
+        const nwo = repoByKey(
+          ws,
+          typeof body.repo === "string" ? body.repo : null,
+        )?.nameWithOwner;
         if (!nwo) return json({ error: "No repo to mark" }, 400);
         if (body.reviewed) markReviewedStmt.run(nwo, body.sha, Date.now());
         else unmarkReviewedStmt.run(nwo, body.sha);
@@ -5330,9 +6114,10 @@ const server = Bun.serve({
       if (!names.length) return json([]);
       const placeholders = names.map(() => "?").join(",");
       const rows = db
-        .query<{ sha: string }, string[]>(
-          `SELECT DISTINCT sha FROM reviewed WHERE repo IN (${placeholders})`,
-        )
+        .query<
+          { sha: string },
+          string[]
+        >(`SELECT DISTINCT sha FROM reviewed WHERE repo IN (${placeholders})`)
         .all(...names);
       return json(rows.map((r) => r.sha));
     }
@@ -5344,7 +6129,12 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-      let body: { action?: unknown; path?: unknown; repo?: unknown; worktree?: unknown };
+      let body: {
+        action?: unknown;
+        path?: unknown;
+        repo?: unknown;
+        worktree?: unknown;
+      };
       try {
         body = await req.json();
       } catch {
@@ -5368,13 +6158,18 @@ const server = Bun.serve({
       let dirs: string[];
       if (path !== undefined) {
         dirs = [dirForWorktree(ws, body.worktree, body.repo)];
-      } else if (typeof body.worktree === "string" && ws.worktreeDirs.has(body.worktree)) {
+      } else if (
+        typeof body.worktree === "string" &&
+        ws.worktreeDirs.has(body.worktree)
+      ) {
         dirs = [body.worktree];
       } else if (typeof body.repo === "string") {
         const r = repoByKey(ws, body.repo);
         dirs = r ? [r.dir] : [];
       } else {
-        dirs = ws.worktreeDirs.size ? [...ws.worktreeDirs] : ws.repos.map((r) => r.dir);
+        dirs = ws.worktreeDirs.size
+          ? [...ws.worktreeDirs]
+          : ws.repos.map((r) => r.dir);
       }
       try {
         if (action === "save-patch") {
@@ -5385,7 +6180,8 @@ const server = Bun.serve({
           }
           return json({ ok: true, files });
         }
-        for (const dir of dirs) await runGitAction(action, dir, path as string | undefined);
+        for (const dir of dirs)
+          await runGitAction(action, dir, path as string | undefined);
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -5408,12 +6204,15 @@ const server = Bun.serve({
       } catch {
         return json({ error: "Invalid JSON" }, 400);
       }
-      const dirs =
-        Array.isArray(body.worktrees)
-          ? [...new Set(body.worktrees.filter((d): d is string => typeof d === "string"))]
-          : typeof body.worktree === "string"
-            ? [body.worktree]
-            : [];
+      const dirs = Array.isArray(body.worktrees)
+        ? [
+            ...new Set(
+              body.worktrees.filter((d): d is string => typeof d === "string"),
+            ),
+          ]
+        : typeof body.worktree === "string"
+          ? [body.worktree]
+          : [];
       if (!dirs.length) return json({ error: "Missing worktree" }, 400);
       const unknown = dirs.find((dir) => !ws.worktreeDirs.has(dir));
       if (unknown) return json({ error: `Unknown worktree: ${unknown}` }, 400);
@@ -5422,7 +6221,8 @@ const server = Bun.serve({
       for (const dir of dirs) {
         const info = await repoOfWorktree(ws, dir);
         if (!info) return json({ error: `Worktree not found: ${dir}` }, 404);
-        if (info.isMain) return json({ error: `Can't remove the main worktree: ${dir}` }, 400);
+        if (info.isMain)
+          return json({ error: `Can't remove the main worktree: ${dir}` }, 400);
         targets.push({ dir, repoDir: info.repoDir });
       }
       const removed: string[] = [];
@@ -5457,7 +6257,14 @@ const server = Bun.serve({
       // Which worktrees to commit: the requested dirs (deduped, validated) or
       // every known worktree.
       const wantedDirs = Array.isArray(body.worktrees)
-        ? [...new Set(body.worktrees.filter((d): d is string => typeof d === "string" && ws.worktreeDirs.has(d)))]
+        ? [
+            ...new Set(
+              body.worktrees.filter(
+                (d): d is string =>
+                  typeof d === "string" && ws.worktreeDirs.has(d),
+              ),
+            ),
+          ]
         : null;
       const targetDirs =
         wantedDirs && wantedDirs.length
@@ -5479,7 +6286,9 @@ const server = Bun.serve({
             `git -C ${shq(dir)} commit -F ${shq(msgFile)} && git -C ${shq(dir)} push; fi`,
         );
         const script = `${steps.join("; ")}; rm -f ${shq(msgFile)}`;
-        await $`tmux -L bg new-session -d -c ${ws.path} -s ${session} ${script}`.cwd(ws.path).quiet();
+        await $`tmux -L bg new-session -d -c ${ws.path} -s ${session} ${script}`
+          .cwd(ws.path)
+          .quiet();
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -5507,13 +6316,19 @@ const server = Bun.serve({
         // Find the pane whose window matches `windowName` on the bg socket.
         const SEP = "\x1f";
         const target = (
-          await $`tmux -L bg list-panes -a -F ${`#{window_name}${SEP}#{session_name}:#{window_index}.#{pane_index}`}`.quiet().text()
+          await $`tmux -L bg list-panes -a -F ${`#{window_name}${SEP}#{session_name}:#{window_index}.#{pane_index}`}`
+            .quiet()
+            .text()
         )
           .trim()
           .split("\n")
           .map((l) => l.split(SEP))
           .find(([name]) => name === windowName)?.[1];
-        if (!target) return json({ error: `No \`${windowName}\` window on the bg tmux socket` }, 404);
+        if (!target)
+          return json(
+            { error: `No \`${windowName}\` window on the bg tmux socket` },
+            404,
+          );
         const session = `diffshub-restart-${Date.now()}`;
         const script =
           `sleep 0.4; tmux -L bg send-keys -t ${shq(target)} C-c; ` +
@@ -5530,7 +6345,10 @@ const server = Bun.serve({
     // event with rate_limits metadata.
     if (req.method === "GET" && url.pathname === "/api/usage") {
       try {
-        const [claude, codex] = await Promise.all([readClaudeUsage(), readCodexUsage()]);
+        const [claude, codex] = await Promise.all([
+          readClaudeUsage(),
+          readCodexUsage(),
+        ]);
         return json({
           ...claude,
           claude,
@@ -5555,19 +6373,23 @@ const server = Bun.serve({
       if (typeof imgBody.data !== "string" || !imgBody.data) {
         return json({ error: "Missing image data" }, 400);
       }
-      const m = imgBody.data.match(/^data:(image\/[a-z0-9.+-]+)?;base64,(.*)$/is);
+      const m = imgBody.data.match(
+        /^data:(image\/[a-z0-9.+-]+)?;base64,(.*)$/is,
+      );
       const mime = (m?.[1] ?? "image/png").toLowerCase();
       const b64 = m ? m[2] : imgBody.data;
       const ext =
-        ({
-          "image/png": "png",
-          "image/jpeg": "jpg",
-          "image/jpg": "jpg",
-          "image/gif": "gif",
-          "image/webp": "webp",
-          "image/bmp": "bmp",
-          "image/svg+xml": "svg",
-        } as Record<string, string>)[mime] ?? "png";
+        (
+          {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/jpg": "jpg",
+            "image/gif": "gif",
+            "image/webp": "webp",
+            "image/bmp": "bmp",
+            "image/svg+xml": "svg",
+          } as Record<string, string>
+        )[mime] ?? "png";
       let buf: Buffer;
       try {
         buf = Buffer.from(b64, "base64");
@@ -5575,7 +6397,8 @@ const server = Bun.serve({
         return json({ error: "Invalid base64" }, 400);
       }
       if (buf.length === 0) return json({ error: "Empty image" }, 400);
-      if (buf.length > 32 * 1024 * 1024) return json({ error: "Image too large (max 32MB)" }, 413);
+      if (buf.length > 32 * 1024 * 1024)
+        return json({ error: "Image too large (max 32MB)" }, 413);
       try {
         const imgDir = "/tmp/images";
         mkdirSync(imgDir, { recursive: true });
@@ -5623,7 +6446,13 @@ const server = Bun.serve({
       if (!promptBody) return json({ error: "Empty prompt" }, 400);
       if (!title) return json({ error: "Empty title" }, 400);
       const now = Date.now();
-      const id = insertTemplatePromptStmt.get(ws.id, title, promptBody, now, now)!.id;
+      const id = insertTemplatePromptStmt.get(
+        ws.id,
+        title,
+        promptBody,
+        now,
+        now,
+      )!.id;
       const row = getTemplatePromptStmt.get(id, ws.id)!;
       return json({
         id: row.id,
@@ -5643,7 +6472,8 @@ const server = Bun.serve({
         return json({ error: errText(e) }, 500);
       }
       const id = Number(promptMatch[1]);
-      if (!Number.isInteger(id) || id < 1) return json({ error: "Invalid id" }, 400);
+      if (!Number.isInteger(id) || id < 1)
+        return json({ error: "Invalid id" }, 400);
       const existing = getTemplatePromptStmt.get(id, ws.id);
       if (!existing) return json({ error: "Prompt not found" }, 404);
       if (req.method === "DELETE") {
@@ -5678,7 +6508,12 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-      let body: { prompt?: unknown; effort?: unknown; chrome?: unknown; agent?: unknown };
+      let body: {
+        prompt?: unknown;
+        effort?: unknown;
+        chrome?: unknown;
+        agent?: unknown;
+      };
       try {
         body = await req.json();
       } catch {
@@ -5687,7 +6522,8 @@ const server = Bun.serve({
       if (typeof body.prompt !== "string" || !body.prompt.trim()) {
         return json({ error: "Empty prompt" }, 400);
       }
-      const agent: "claude" | "codex" = body.agent === "codex" ? "codex" : "claude";
+      const agent: "claude" | "codex" =
+        body.agent === "codex" ? "codex" : "claude";
       // Allowlisted so it's safe to splice straight into the shell command, and so a
       // bad value falls back to the global default rather than erroring the launch.
       const effort =
@@ -5699,7 +6535,14 @@ const server = Bun.serve({
       // Offline → enqueue instead of launching a session that couldn't reach the
       // API. drainQueue() launches it (as its agent) automatically once we're online.
       if (!(await checkOnline(true))) {
-        const id = insertQueuedStmt.get(ws.id, body.prompt, Date.now(), agent, effort ?? null, chrome ? 1 : 0)!.id;
+        const id = insertQueuedStmt.get(
+          ws.id,
+          body.prompt,
+          Date.now(),
+          agent,
+          effort ?? null,
+          chrome ? 1 : 0,
+        )!.id;
         return json({ ok: true, queued: true, id });
       }
       try {
@@ -5723,7 +6566,10 @@ const server = Bun.serve({
         return json({ error: errText(e) }, 500);
       }
       try {
-        return json({ sessions: await resumableSessions(ws.path), cwd: ws.path });
+        return json({
+          sessions: await resumableSessions(ws.path),
+          cwd: ws.path,
+        });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -5745,9 +6591,11 @@ const server = Bun.serve({
         return json({ error: "Invalid JSON" }, 400);
       }
       const sid = typeof body.sid === "string" ? body.sid.trim() : "";
-      if (!/^[0-9a-fA-F-]{8,}$/.test(sid)) return json({ error: "Invalid session id" }, 400);
+      if (!/^[0-9a-fA-F-]{8,}$/.test(sid))
+        return json({ error: "Invalid session id" }, 400);
       // claude needs the API to do anything; don't spawn a session that can't reach it.
-      if (!(await checkOnline(true))) return json({ error: "You're offline" }, 503);
+      if (!(await checkOnline(true)))
+        return json({ error: "You're offline" }, 503);
       try {
         const session = await resumeClaudeSession(ws.path, sid);
         return json({ ok: true, session });
@@ -5792,7 +6640,14 @@ const server = Bun.serve({
     // session drains cleanly; Keep persists a Subway dismissal without touching
     // tmux; replies still fail if the target pane disappeared.
     if (req.method === "POST" && url.pathname === "/api/subway/action") {
-      let body: { kind?: unknown; session?: unknown; sessionId?: unknown; agent?: unknown; cwd?: unknown; text?: unknown };
+      let body: {
+        kind?: unknown;
+        session?: unknown;
+        sessionId?: unknown;
+        agent?: unknown;
+        cwd?: unknown;
+        text?: unknown;
+      };
       try {
         body = await req.json();
       } catch {
@@ -5860,7 +6715,8 @@ const server = Bun.serve({
         return json({ error: "Invalid JSON" }, 400);
       }
       const id = Number(body.id);
-      if (!Number.isInteger(id) || id < 1) return json({ error: "Invalid id" }, 400);
+      if (!Number.isInteger(id) || id < 1)
+        return json({ error: "Invalid id" }, 400);
       deleteQueuedStmt.run(id);
       return json({ ok: true });
     }
@@ -5869,11 +6725,19 @@ const server = Bun.serve({
     if (req.method === "GET" && url.pathname === "/api/tmux/transcript") {
       const name = url.searchParams.get("session") ?? "";
       if (!name) return json({ error: "Missing session" }, 400);
-      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "500", 10) || 500, 1), 1000);
+      const limit = Math.min(
+        Math.max(
+          parseInt(url.searchParams.get("limit") || "500", 10) || 500,
+          1,
+        ),
+        1000,
+      );
       try {
         const SEP = "\x1f";
         const info = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}", "#{@codex_session}"].join(SEP)}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}", "#{@codex_session}"].join(SEP)}`
+            .quiet()
+            .text()
         ).trim();
         const [cwd, claudeSid, cmd, paneTitle, codexSid] = info.split(SEP);
         const agent = agentOf(cmd ?? "", codexSid ?? "");
@@ -5883,11 +6747,36 @@ const server = Bun.serve({
         if (agent === "codex") {
           const path = await resolveCodexTranscript(cwd ?? "", codexSid ?? "");
           if (!path || !existsSync(path)) {
-            return json({ session: name, cwd, sessionId: codexSid ?? "", path: null, messages: [], model: "", title: "", total: 0, pendingPane: null, pendingPrompt: null });
+            return json({
+              session: name,
+              cwd,
+              sessionId: codexSid ?? "",
+              path: null,
+              messages: [],
+              model: "",
+              title: "",
+              total: 0,
+              pendingPane: null,
+              pendingPrompt: null,
+            });
           }
           const text = await Bun.file(path).text();
-          const { messages, model, title, total } = parseCodexTranscript(text, limit);
-          return json({ session: name, cwd, sessionId: codexSid ?? "", path, messages, model, title, total, pendingPane: null, pendingPrompt: null });
+          const { messages, model, title, total } = parseCodexTranscript(
+            text,
+            limit,
+          );
+          return json({
+            session: name,
+            cwd,
+            sessionId: codexSid ?? "",
+            path,
+            messages,
+            model,
+            title,
+            total,
+            pendingPane: null,
+            pendingPrompt: null,
+          });
         }
         const sid = claudeSid;
         const task = cleanTitle(paneTitle ?? "", name, cmd ?? "");
@@ -5901,14 +6790,38 @@ const server = Bun.serve({
         // For a single-select with option previews, fill in every option's art (the
         // capture only has the focused one) — once per prompt, cached thereafter.
         const parsedPrompt = parsePendingPrompt(pendingPane);
-        const pendingPrompt = parsedPrompt ? await enrichSinglePreviews(name, parsedPrompt) : parsedPrompt;
+        const pendingPrompt = parsedPrompt
+          ? await enrichSinglePreviews(name, parsedPrompt)
+          : parsedPrompt;
         const path = await resolveTranscript(cwd ?? "", sid ?? "", task);
         if (!path || !existsSync(path)) {
-          return json({ session: name, cwd, sessionId: sid, path: null, messages: [], model: "", title: "", total: 0, pendingPane, pendingPrompt });
+          return json({
+            session: name,
+            cwd,
+            sessionId: sid,
+            path: null,
+            messages: [],
+            model: "",
+            title: "",
+            total: 0,
+            pendingPane,
+            pendingPrompt,
+          });
         }
         const text = await Bun.file(path).text();
         const { messages, model, title, total } = parseTranscript(text, limit);
-        return json({ session: name, cwd, sessionId: sid, path, messages, model, title, total, pendingPane, pendingPrompt });
+        return json({
+          session: name,
+          cwd,
+          sessionId: sid,
+          path,
+          messages,
+          model,
+          title,
+          total,
+          pendingPane,
+          pendingPrompt,
+        });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -5927,13 +6840,18 @@ const server = Bun.serve({
       try {
         const SEP = "\x1f";
         const info = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}"].join(SEP)}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}"].join(SEP)}`
+            .quiet()
+            .text()
         ).trim();
         const [cwd, sid, cmd, paneTitle] = info.split(SEP);
         const task = cleanTitle(paneTitle ?? "", name, cmd ?? "");
         const path = await resolveTranscript(cwd ?? "", sid ?? "", task);
-        if (!path || !existsSync(path)) return json({ error: "No transcript" }, 404);
-        const line = (await Bun.file(path).text()).split("\n")[parseInt(m[1], 10)];
+        if (!path || !existsSync(path))
+          return json({ error: "No transcript" }, 404);
+        const line = (await Bun.file(path).text()).split("\n")[
+          parseInt(m[1], 10)
+        ];
         if (!line) return json({ error: "Out of range" }, 404);
         let d: any;
         try {
@@ -5964,15 +6882,20 @@ const server = Bun.serve({
     if (req.method === "GET" && url.pathname === "/api/tmux/html") {
       const name = url.searchParams.get("session") ?? "";
       const want = url.searchParams.get("path") ?? "";
-      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      if (!name || !want)
+        return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+            .quiet()
+            .text()
         ).trim();
         if (!cwd) return json({ error: "No such session" }, 404);
         const abs = resolve(cwd, want);
-        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
-        if (!/\.html?$/i.test(abs)) return json({ error: "Not an HTML file" }, 400);
+        if (abs !== cwd && !abs.startsWith(cwd + sep))
+          return json({ error: "Path outside session" }, 403);
+        if (!/\.html?$/i.test(abs))
+          return json({ error: "Not an HTML file" }, 400);
         if (!existsSync(abs)) return json({ error: "File not found" }, 404);
         const html = await Bun.file(abs).text();
         // Rewrite local asset refs (sibling images/css/js/fonts) to absolute
@@ -6001,15 +6924,20 @@ const server = Bun.serve({
     if (req.method === "GET" && url.pathname === "/api/tmux/asset") {
       const name = url.searchParams.get("session") ?? "";
       const want = url.searchParams.get("path") ?? "";
-      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      if (!name || !want)
+        return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+            .quiet()
+            .text()
         ).trim();
         if (!cwd) return json({ error: "No such session" }, 404);
         const abs = resolve(cwd, want);
-        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
-        if (!existsSync(abs) || !statSync(abs).isFile()) return json({ error: "File not found" }, 404);
+        if (abs !== cwd && !abs.startsWith(cwd + sep))
+          return json({ error: "Path outside session" }, 403);
+        if (!existsSync(abs) || !statSync(abs).isFile())
+          return json({ error: "File not found" }, 404);
         const file = Bun.file(abs);
         return new Response(file, {
           headers: {
@@ -6057,10 +6985,14 @@ const server = Bun.serve({
       const agentsDir = `${root}/agents`;
       if (abs !== agentsDir && !abs.startsWith(agentsDir + sep))
         return new Response("Forbidden", { status: 403 });
-      if (!existsSync(abs) || !statSync(abs).isFile()) return new Response("Not found", { status: 404 });
+      if (!existsSync(abs) || !statSync(abs).isFile())
+        return new Response("Not found", { status: 404 });
       if (/\.html?$/i.test(abs)) {
         return new Response(injectReportShortcuts(await Bun.file(abs).text()), {
-          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
         });
       }
       const file = Bun.file(abs);
@@ -6133,31 +7065,42 @@ const server = Bun.serve({
       }
       const name = typeof body.session === "string" ? body.session : "";
       const want = typeof body.path === "string" ? body.path : "";
-      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      if (!name || !want)
+        return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+            .quiet()
+            .text()
         ).trim();
         if (!cwd) return json({ error: "No such session" }, 404);
         const abs = resolve(cwd, want);
-        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
-        if (!/\.html?$/i.test(abs)) return json({ error: "Not an HTML file" }, 400);
+        if (abs !== cwd && !abs.startsWith(cwd + sep))
+          return json({ error: "Path outside session" }, 403);
+        if (!/\.html?$/i.test(abs))
+          return json({ error: "Not an HTML file" }, 400);
         if (!existsSync(abs)) return json({ error: "File not found" }, 404);
         const html = await Bun.file(abs).text();
         const hash = crypto.createHash("sha256").update(html).digest("hex");
         const existing = getShareStmt.get(abs);
         // Unchanged since the last share → hand back the existing link, no upload.
         if (existing && existing.content_hash === hash) {
-          return json({ url: existing.url, alreadyShared: true, assets: 0, skipped: [] });
+          return json({
+            url: existing.url,
+            alreadyShared: true,
+            assets: 0,
+            skipped: [],
+          });
         }
         // Reuse the prior id so edits re-upload in place and the URL stays stable.
-        const shareId = existing?.share_id ?? crypto.randomBytes(6).toString("hex");
-        const { html: rewritten, uploaded, skipped, keys } = await uploadHtmlAssets(
-          html,
-          dirname(abs),
-          cwd,
-          shareId,
-        );
+        const shareId =
+          existing?.share_id ?? crypto.randomBytes(6).toString("hex");
+        const {
+          html: rewritten,
+          uploaded,
+          skipped,
+          keys,
+        } = await uploadHtmlAssets(html, dirname(abs), cwd, shareId);
         const htmlKey = `${R2_PREFIX}/${shareId}.html`;
         await r2Put(htmlKey, rewritten, "text/html; charset=utf-8");
         const shareUrl = `${R2_PUBLIC_BASE}/${htmlKey}`;
@@ -6171,7 +7114,12 @@ const server = Bun.serve({
           existing?.created_at ?? now,
           now,
         );
-        return json({ url: shareUrl, alreadyShared: false, assets: uploaded.length, skipped });
+        return json({
+          url: shareUrl,
+          alreadyShared: false,
+          assets: uploaded.length,
+          skipped,
+        });
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -6190,22 +7138,29 @@ const server = Bun.serve({
       }
       const name = typeof body.session === "string" ? body.session : "";
       const want = typeof body.path === "string" ? body.path : "";
-      if (!name || !want) return json({ error: "Missing session or path" }, 400);
+      if (!name || !want)
+        return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`.quiet().text()
+          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+            .quiet()
+            .text()
         ).trim();
         if (!cwd) return json({ error: "No such session" }, 404);
         const abs = resolve(cwd, want);
-        if (abs !== cwd && !abs.startsWith(cwd + sep)) return json({ error: "Path outside session" }, 403);
+        if (abs !== cwd && !abs.startsWith(cwd + sep))
+          return json({ error: "Path outside session" }, 403);
         const existing = getShareStmt.get(abs);
         if (!existing) return json({ ok: true, removed: false });
         let assetKeys: string[] = [];
         try {
           assetKeys = JSON.parse(existing.asset_keys || "[]");
-        } catch { }
+        } catch {}
         // HTML first, then its assets — deleting a missing key is a no-op.
-        for (const key of [`${R2_PREFIX}/${existing.share_id}.html`, ...assetKeys]) {
+        for (const key of [
+          `${R2_PREFIX}/${existing.share_id}.html`,
+          ...assetKeys,
+        ]) {
           await r2Delete(key);
         }
         deleteShareStmt.run(abs);
@@ -6291,12 +7246,17 @@ const server = Bun.serve({
         return json({ error: "Missing session" }, 400);
       }
       const selected = Array.isArray(body.selected)
-        ? body.selected.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0)
+        ? body.selected.filter(
+            (n): n is number =>
+              typeof n === "number" && Number.isInteger(n) && n > 0,
+          )
         : null;
       if (!selected) return json({ error: "Missing selected" }, 400);
       try {
         const res = await answerMultiSelect(body.session, selected);
-        return res.ok ? json({ ok: true }) : json({ error: res.error ?? "answer failed" }, 409);
+        return res.ok
+          ? json({ ok: true })
+          : json({ error: res.error ?? "answer failed" }, 409);
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -6315,7 +7275,15 @@ const server = Bun.serve({
       if (typeof body.session !== "string" || !body.session) {
         return json({ error: "Missing session" }, 400);
       }
-      const ALLOWED = new Set(["Enter", "Escape", "Up", "Down", "Left", "Right", "Space"]);
+      const ALLOWED = new Set([
+        "Enter",
+        "Escape",
+        "Up",
+        "Down",
+        "Left",
+        "Right",
+        "Space",
+      ]);
       if (typeof body.key !== "string" || !ALLOWED.has(body.key)) {
         return json({ error: "Invalid key" }, 400);
       }
@@ -6334,7 +7302,12 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-      let body: { path?: unknown; line?: unknown; repo?: unknown; worktree?: unknown };
+      let body: {
+        path?: unknown;
+        line?: unknown;
+        repo?: unknown;
+        worktree?: unknown;
+      };
       try {
         body = await req.json();
       } catch {
@@ -6344,7 +7317,9 @@ const server = Bun.serve({
         return json({ error: "Invalid path" }, 400);
       }
       const line =
-        typeof body.line === "number" && Number.isInteger(body.line) && body.line > 0
+        typeof body.line === "number" &&
+        Number.isInteger(body.line) &&
+        body.line > 0
           ? body.line
           : null;
       const dir = dirForWorktree(ws, body.worktree, body.repo);
@@ -6385,7 +7360,12 @@ const server = Bun.serve({
       }
       const start = Number(body.start);
       const end = Number(body.end);
-      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1) {
+      if (
+        !Number.isInteger(start) ||
+        !Number.isInteger(end) ||
+        start < 1 ||
+        end < 1
+      ) {
         return json({ error: "Invalid line range" }, 400);
       }
       const lo = Math.min(start, end);
@@ -6400,15 +7380,26 @@ const server = Bun.serve({
         if (body.source === "working") {
           const dir = dirForWorktree(ws, body.worktree, body.repo);
           const fileAbs = `${dir}/${body.path}`;
-          await Bun.write(fileAbs, removeFileLines(await Bun.file(fileAbs).text(), lo, hi));
+          await Bun.write(
+            fileAbs,
+            removeFileLines(await Bun.file(fileAbs).text(), lo, hi),
+          );
           return json({ ok: true });
         }
         if (body.source === "patch") {
-          if (typeof body.name !== "string" || !/^[^/\0]+\.patch$/.test(body.name)) {
+          if (
+            typeof body.name !== "string" ||
+            !/^[^/\0]+\.patch$/.test(body.name)
+          ) {
             return json({ error: "Invalid patch name" }, 400);
           }
           const patchPath = `${ws.path}/diffs/${body.name}`;
-          const edited = removePatchAdditions(await Bun.file(patchPath).text(), body.path, lo, hi);
+          const edited = removePatchAdditions(
+            await Bun.file(patchPath).text(),
+            body.path,
+            lo,
+            hi,
+          );
           await Bun.write(patchPath, edited);
           return json({ ok: true });
         }
@@ -6429,7 +7420,10 @@ const server = Bun.serve({
       const r = repoByKey(ws, url.searchParams.get("repo"));
       if (!r) return new Response("No repo", { status: 404 });
       try {
-        const diff = await $`gh pr diff ${prDiffMatch[1]}`.cwd(r.dir).quiet().text();
+        const diff = await $`gh pr diff ${prDiffMatch[1]}`
+          .cwd(r.dir)
+          .quiet()
+          .text();
         return new Response(diff, {
           headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS },
         });

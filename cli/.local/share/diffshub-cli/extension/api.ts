@@ -13,8 +13,12 @@ declare global {
         set(items: Record<string, unknown>): Promise<void>;
       };
       onChanged: {
-        addListener(cb: (changes: Record<string, unknown>, area: string) => void): void;
-        removeListener(cb: (changes: Record<string, unknown>, area: string) => void): void;
+        addListener(
+          cb: (changes: Record<string, unknown>, area: string) => void,
+        ): void;
+        removeListener(
+          cb: (changes: Record<string, unknown>, area: string) => void,
+        ): void;
       };
     };
     runtime: {
@@ -34,7 +38,10 @@ declare global {
       };
     };
     tabs: {
-      query(q: { active: boolean; currentWindow: boolean }): Promise<{ url?: string }[]>;
+      query(q: {
+        active: boolean;
+        currentWindow: boolean;
+      }): Promise<{ url?: string }[]>;
       captureVisibleTab(options: { format: "png" | "jpeg" }): Promise<string>;
     };
   };
@@ -65,7 +72,8 @@ export function detectEnvironment(origin: string): Environment {
     const u = new URL(origin);
     if (u.protocol !== "https:") return "development";
     if (u.hostname.endsWith(".ts.net")) return "development";
-    if (/^(localhost|127\.|0\.0\.0\.0$|\[?::1)/.test(u.hostname)) return "development";
+    if (/^(localhost|127\.|0\.0\.0\.0$|\[?::1)/.test(u.hostname))
+      return "development";
     return "production";
   } catch {
     return "development";
@@ -76,7 +84,11 @@ export function detectEnvironment(origin: string): Environment {
 // knows where the request came from before it does anything. Development gets
 // explicit license to poke at the local dev database and to lean on the route I'm
 // looking at; production is flagged read-only so a prompt can't trash live data.
-export function environmentBlock(env: Environment, url: string, route: string): string {
+export function environmentBlock(
+  env: Environment,
+  url: string,
+  route: string,
+): string {
   if (env === "development") {
     return `<environment>
 This request comes from the DEVELOPMENT environment (local dev server), not production.
@@ -114,7 +126,7 @@ export interface DirEntry {
 }
 
 // Placeholder shown in the popup's auth-probe textarea — documents the format and
-// gives a copy-pasteable starting point for a better-auth app (e.g. porio).
+// gives a copy-pasteable starting point for a better-auth app (e.g. app).
 export const AUTH_PROBE_EXAMPLE = `GET /api/auth/get-session
 name: user.name
 userId: user.id
@@ -147,7 +159,9 @@ export function isContextInvalidated(err: unknown): boolean {
 // chrome.storage.local get/set that no-op on a dead extension context (see
 // isContextInvalidated): get resolves to {} so callers fall back to their defaults,
 // set resolves quietly. Any other error still propagates.
-async function storageGet(keys: string[] | string | null): Promise<Record<string, unknown>> {
+async function storageGet(
+  keys: string[] | string | null,
+): Promise<Record<string, unknown>> {
   try {
     return await chrome.storage.local.get(keys);
   } catch (err) {
@@ -181,7 +195,10 @@ export async function getConfig(): Promise<Config> {
   };
 }
 
-export async function setMapping(origin: string, dirId: number | null): Promise<void> {
+export async function setMapping(
+  origin: string,
+  dirId: number | null,
+): Promise<void> {
   const { mappings } = await getConfig();
   if (dirId == null) delete mappings[origin];
   else mappings[origin] = dirId;
@@ -196,7 +213,10 @@ export async function setFallbackServerUrl(url: string): Promise<void> {
   await storageSet({ fallbackServerUrl: url.replace(/\/+$/, "") });
 }
 
-export async function setContext(origin: string, template: string): Promise<void> {
+export async function setContext(
+  origin: string,
+  template: string,
+): Promise<void> {
   const { contexts } = await getConfig();
   const map = contexts ?? {};
   if (template.trim()) map[origin] = template;
@@ -256,7 +276,8 @@ export function parseAuthProbe(text: string): AuthProbe | null {
 // Read a dot-path ("session.activeOrganizationId") out of a parsed JSON value.
 function readPath(obj: unknown, path: string): unknown {
   return path.split(".").reduce<unknown>((acc, k) => {
-    if (acc != null && typeof acc === "object") return (acc as Record<string, unknown>)[k];
+    if (acc != null && typeof acc === "object")
+      return (acc as Record<string, unknown>)[k];
     return undefined;
   }, obj);
 }
@@ -264,7 +285,9 @@ function readPath(obj: unknown, path: string): unknown {
 // Run a probe against the current page (relative URL → same origin, cookies sent).
 // Returns the resolved field map, or null when the request fails or nothing
 // resolves (e.g. get-session returns null for a logged-out user).
-export async function runAuthProbe(probe: AuthProbe): Promise<Record<string, string> | null> {
+export async function runAuthProbe(
+  probe: AuthProbe,
+): Promise<Record<string, string> | null> {
   let res: Response;
   try {
     res = await fetch(probe.url, {
@@ -308,13 +331,18 @@ export interface AuthCacheEntry {
   ts: number;
 }
 
-export async function getAuthCache(origin: string): Promise<AuthCacheEntry | null> {
+export async function getAuthCache(
+  origin: string,
+): Promise<AuthCacheEntry | null> {
   const s = await storageGet(["authCache"]);
   const map = (s.authCache as Record<string, AuthCacheEntry>) || {};
   return map[origin] ?? null;
 }
 
-export async function setAuthCache(origin: string, entry: AuthCacheEntry | null): Promise<void> {
+export async function setAuthCache(
+  origin: string,
+  entry: AuthCacheEntry | null,
+): Promise<void> {
   const s = await storageGet(["authCache"]);
   const map = (s.authCache as Record<string, AuthCacheEntry>) || {};
   if (entry) map[origin] = entry;

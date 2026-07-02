@@ -9,6 +9,3 @@ insert_newline = "shift-enter"
 
 [projects."/Users/miguel/.dotfiles"]
 trust_level = "trusted"
-
-[projects."/Users/miguel/porio"]
-trust_level = "trusted"
