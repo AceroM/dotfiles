@@ -77,7 +77,6 @@ import {
   X,
   Bookmark,
   TextCursor,
-  TrainFrontTunnel,
 } from "lucide-react";
 
 type Theme = "light" | "dark";
@@ -163,11 +162,11 @@ interface DiffSelection {
   range: SelectedLineRange;
 }
 
-type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux" | "html" | "prompts" | "subway";
+type Tab = "home" | "commits" | "prs" | "changes" | "manual" | "tmux" | "html" | "prompts";
 
-// Order drives the 1–9 shortcuts and the tab strip. The first entry is the
+// Order drives the numeric shortcuts and the tab strip. The first entry is the
 // landing tab for the default route (see initialView) — Home, the session monitor.
-const TAB_ORDER: Tab[] = ["home", "tmux", "prompts", "changes", "commits", "prs", "manual", "html", "subway"];
+const TAB_ORDER: Tab[] = ["home", "tmux", "prompts", "changes", "commits", "prs", "manual", "html"];
 
 interface ManualPatch {
   name: string;
@@ -240,40 +239,6 @@ interface ReplyOutboxEntry {
   localId: string; // uuid — the optimistic turn's key and the drain single-flight key
   session: string; // target tmux session — the reply is pasted into its pane
   text: string;
-  createdAt: number;
-}
-
-// Subway is its own pseudo-offline surface: it snapshots recent, not-in-progress
-// agent sessions once, then queues local optimistic actions until Wi-Fi returns.
-interface SubwaySession {
-  name: string;
-  cwd: string;
-  task: string;
-  waiting: boolean;
-  sessionId: string;
-  mtime: number;
-  endedAt: number;
-  agent: "claude" | "codex";
-  title: string;
-  model: string;
-  total: number;
-  messages: TranscriptMsg[];
-}
-interface SubwaySnapshot {
-  dir: number;
-  cwd: string;
-  fetchedAt: number;
-  sessions: SubwaySession[];
-}
-interface SubwayActionEntry {
-  localId: string;
-  kind: "delete" | "reply" | "keep";
-  session: string;
-  sessionId?: string;
-  agent: "claude" | "codex";
-  cwd: string;
-  dir: number | null;
-  text?: string;
   createdAt: number;
 }
 
@@ -1757,54 +1722,6 @@ const TranscriptTurn = memo(function TranscriptTurn({
   );
 });
 
-const SubwayMessage = memo(function SubwayMessage({
-  msg,
-  pending = false,
-}: {
-  msg: TranscriptMsg;
-  pending?: boolean;
-}) {
-  const side = msg.role === "user" ? "user" : "assistant";
-  let body: ReactNode;
-  if (msg.kind === "tool_use") {
-    body = (
-      <div className="subway-tool">
-        <span className="tool-name">{msg.tool || "tool"}</span>
-        {msg.path && <span className="tool-path">{msg.path}</span>}
-        {msg.text && <span className="tool-arg">{msg.text}</span>}
-      </div>
-    );
-  } else if (msg.kind === "tool_result") {
-    body = (
-      <div className="subway-tool-result">
-        {(msg.tool || msg.path) && (
-          <div className="subway-tool-head">
-            {msg.tool && <span className="tool-name">{msg.tool}</span>}
-            {msg.path && <span className="tool-path">{msg.path}</span>}
-          </div>
-        )}
-        <pre>{msg.text}</pre>
-      </div>
-    );
-  } else if (msg.kind === "image") {
-    body = <div className="subway-image-note">Image available when you reconnect to the live session.</div>;
-  } else if (msg.reasoning) {
-    body = (
-      <div className="reasoning">
-        <Markdown text={msg.text} />
-      </div>
-    );
-  } else {
-    body = <Markdown text={msg.text} />;
-  }
-  return (
-    <div className={`subway-msg ${side}${pending ? " pending" : ""}`}>
-      {body}
-      {pending && <span className="subway-pending">Queued</span>}
-    </div>
-  );
-});
-
 // An Edit/Write/MultiEdit tool call — carries diff hunks we render inline.
 function isEditMsg(m: TranscriptMsg): boolean {
   return m.kind === "tool_use" && !!m.edits && m.edits.length > 0;
@@ -1866,7 +1783,6 @@ function initialView(): { tab: Tab; view: View; dir: number | null; homeChat?: s
     const id = /^\d+$/.test(prompt) ? parseInt(prompt, 10) : null;
     return { tab: "prompts", view: { kind: "prompt", id }, dir };
   }
-  if (params.has("subway")) return { tab: "subway", view: { kind: "none" }, dir };
   const sha = params.get("sha");
   if (sha) return { tab: "commits", view: { kind: "commit", sha, repo }, dir };
   // Home deep-link (?home=<session>): land on the Home tab with that session's chat
@@ -2040,102 +1956,6 @@ function saveReplyOutbox(entries: ReplyOutboxEntry[]) {
   }
 }
 
-// ---- Subway cache + action outbox (localStorage) ----
-// Separate from the Tmux tab queues: Subway takes one review snapshot per
-// directory, then records optimistic reply/delete/keep actions locally until the
-// browser can reach diffshub again.
-const SUBWAY_CACHE_KEY = "subwaySnapshots";
-const SUBWAY_ACTIONS_KEY = "subwayActionOutbox";
-function subwayCacheKey(dir: number | null | undefined): string {
-  return dir == null ? "default" : String(dir);
-}
-function validMsg(x: any): x is TranscriptMsg {
-  return (
-    !!x &&
-    (x.role === "user" || x.role === "assistant" || x.role === "tool") &&
-    (x.kind === "text" || x.kind === "tool_use" || x.kind === "tool_result" || x.kind === "image") &&
-    typeof x.text === "string"
-  );
-}
-function validSubwaySession(x: any): x is SubwaySession {
-  return (
-    !!x &&
-    typeof x.name === "string" &&
-    typeof x.cwd === "string" &&
-    (x.agent === "claude" || x.agent === "codex") &&
-    Array.isArray(x.messages) &&
-    x.messages.every(validMsg)
-  );
-}
-function loadSubwaySnapshots(): Record<string, SubwaySnapshot> {
-  try {
-    const raw = localStorage.getItem(SUBWAY_CACHE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const out: Record<string, SubwaySnapshot> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, any>)) {
-      if (
-        value &&
-        typeof value.dir === "number" &&
-        typeof value.cwd === "string" &&
-        typeof value.fetchedAt === "number" &&
-        Array.isArray(value.sessions)
-      ) {
-        out[key] = {
-          dir: value.dir,
-          cwd: value.cwd,
-          fetchedAt: value.fetchedAt,
-          sessions: value.sessions.filter(validSubwaySession),
-        };
-      }
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-function saveSubwaySnapshots(snapshots: Record<string, SubwaySnapshot>) {
-  try {
-    if (Object.keys(snapshots).length) localStorage.setItem(SUBWAY_CACHE_KEY, JSON.stringify(snapshots));
-    else localStorage.removeItem(SUBWAY_CACHE_KEY);
-  } catch {
-    // ignore storage failures (private mode, quota, etc.)
-  }
-}
-function loadSubwayActions(): SubwayActionEntry[] {
-  try {
-    const raw = localStorage.getItem(SUBWAY_ACTIONS_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr)
-      ? arr.filter(
-          (x): x is SubwayActionEntry =>
-            !!x &&
-            typeof x.localId === "string" &&
-            (x.kind === "delete" || x.kind === "reply" || x.kind === "keep") &&
-            typeof x.session === "string" &&
-            (x.sessionId === undefined || typeof x.sessionId === "string") &&
-            (x.agent === "claude" || x.agent === "codex") &&
-            typeof x.cwd === "string" &&
-            (typeof x.dir === "number" || x.dir === null) &&
-            typeof x.createdAt === "number" &&
-            (x.kind !== "reply" || typeof x.text === "string"),
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
-function saveSubwayActions(entries: SubwayActionEntry[]) {
-  try {
-    if (entries.length) localStorage.setItem(SUBWAY_ACTIONS_KEY, JSON.stringify(entries));
-    else localStorage.removeItem(SUBWAY_ACTIONS_KEY);
-  } catch {
-    // ignore storage failures (private mode, quota, etc.)
-  }
-}
-
 // ---- Numeric prefs (localStorage) ----
 // Small helpers for the resizable-sidebar widths; fall back to the default when
 // the key is missing or corrupt.
@@ -2209,8 +2029,6 @@ function tabDefaults(t: Tab): { view: View; param: string } {
       return { view: { kind: "html", path: "" }, param: "html=" };
     case "prompts":
       return { view: { kind: "prompt", id: null }, param: "prompt=" };
-    case "subway":
-      return { view: { kind: "none" }, param: "subway=" };
     default:
       return { view: { kind: "none" }, param: "" };
   }
@@ -3293,253 +3111,6 @@ function App() {
   const [contentFilter, setContentFilter] = useState("");
   const contentIndex = useRef<Map<string, string>>(new Map());
   const [contentVersion, setContentVersion] = useState(0);
-
-  // ---- Subway pseudo-offline tab ----
-  const [subwaySnapshots, setSubwaySnapshots] = useState<Record<string, SubwaySnapshot>>(() =>
-    initial.tab === "subway" ? loadSubwaySnapshots() : {},
-  );
-  const [subwayCacheReady, setSubwayCacheReady] = useState(initial.tab === "subway");
-  const [subwayActions, setSubwayActions] = useState<SubwayActionEntry[]>(loadSubwayActions);
-  const [subwaySelected, setSubwaySelected] = useState<string | null>(null);
-  const [subwayReplyText, setSubwayReplyText] = useState("");
-  const [subwayLoading, setSubwayLoading] = useState(false);
-  const [subwayError, setSubwayError] = useState<string | null>(null);
-  const subwayFetchedRef = useRef<Set<string>>(new Set());
-  const subwayActionsRef = useRef(subwayActions);
-  const subwayReplyEl = useRef<HTMLTextAreaElement | null>(null);
-  subwayActionsRef.current = subwayActions;
-  const subwayKey = subwayCacheKey(meta?.id ?? activeDir);
-  const subwaySnapshot = subwaySnapshots[subwayKey] ?? null;
-
-  useEffect(() => {
-    if (tab !== "subway" || subwayCacheReady) return;
-    setSubwaySnapshots(loadSubwaySnapshots());
-    setSubwayCacheReady(true);
-  }, [tab, subwayCacheReady]);
-  useEffect(() => {
-    if (!subwayCacheReady) return;
-    saveSubwaySnapshots(subwaySnapshots);
-  }, [subwayCacheReady, subwaySnapshots]);
-  useEffect(() => saveSubwayActions(subwayActions), [subwayActions]);
-
-  const loadSubwaySnapshot = useCallback(
-    async (force = false) => {
-      if (!meta) return;
-      const hintKey = subwayCacheKey(meta.id ?? activeDirRef.current);
-      if (!force && subwayFetchedRef.current.has(hintKey)) return;
-      setSubwayLoading(true);
-      setSubwayError(null);
-      try {
-        const res = await fetch(qd("/api/subway/snapshot"));
-        const body = await res.json().catch(() => ({}) as any);
-        if (!res.ok) throw new Error(body.error ?? res.statusText);
-        const snap = body as SubwaySnapshot;
-        const key = subwayCacheKey(snap.dir);
-        setSubwaySnapshots((prev) => ({ ...prev, [key]: snap }));
-        subwayFetchedRef.current.add(key);
-        setSubwaySelected((cur) => cur ?? snap.sessions[0]?.name ?? null);
-      } catch (e) {
-        setSubwayError(errMessage(e));
-      } finally {
-        setSubwayLoading(false);
-      }
-    },
-    [activeDir, meta, qd],
-  );
-
-  useEffect(() => {
-    if (tab !== "subway" || !meta || !clientOnline) return;
-    void loadSubwaySnapshot(false);
-  }, [tab, meta, clientOnline, loadSubwaySnapshot]);
-
-  const removeSubwayAction = useCallback((localId: string) => {
-    setSubwayActions((prev) => prev.filter((e) => e.localId !== localId));
-  }, []);
-
-  const drainingSubwayRef = useRef(false);
-  const drainSubwayActions = useCallback(async () => {
-    if (drainingSubwayRef.current) return;
-    if (typeof navigator !== "undefined" && !navigator.onLine) return;
-    drainingSubwayRef.current = true;
-    try {
-      const pending = [...subwayActionsRef.current].sort((a, b) => a.createdAt - b.createdAt);
-      for (const entry of pending) {
-        const url = entry.dir == null ? "/api/subway/action" : `/api/subway/action?dir=${entry.dir}`;
-        let res: Response;
-        try {
-          res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              kind: entry.kind,
-              session: entry.session,
-              sessionId: entry.sessionId,
-              agent: entry.agent,
-              cwd: entry.cwd,
-              text: entry.kind === "reply" ? entry.text : undefined,
-            }),
-          });
-        } catch {
-          break;
-        }
-        if (res.ok) {
-          removeSubwayAction(entry.localId);
-          continue;
-        }
-        if (res.status >= 400 && res.status < 500) {
-          const body = await res.json().catch(() => ({}) as any);
-          removeSubwayAction(entry.localId);
-          if (entry.kind === "reply") alert(`Subway reply dropped: ${body.error ?? res.statusText}`);
-          continue;
-        }
-        break;
-      }
-    } finally {
-      drainingSubwayRef.current = false;
-    }
-  }, [removeSubwayAction]);
-
-  useEffect(() => {
-    if (clientOnline && subwayActions.length) void drainSubwayActions();
-  }, [clientOnline, subwayActions, drainSubwayActions]);
-  useEffect(() => {
-    if (subwayActions.length === 0) return;
-    const t = setInterval(() => void drainSubwayActions(), TMUX_QUEUE_POLL_MS);
-    return () => clearInterval(t);
-  }, [subwayActions.length, drainSubwayActions]);
-
-  const subwayDismissQueued = useMemo(
-    () =>
-      new Set(
-        subwayActions
-          .filter((a) => a.kind === "delete" || a.kind === "keep")
-          .map((a) => a.session),
-      ),
-    [subwayActions],
-  );
-  const subwayPendingBySession = useMemo(() => {
-    const m = new Map<string, SubwayActionEntry[]>();
-    for (const a of subwayActions) {
-      const arr = m.get(a.session) ?? [];
-      arr.push(a);
-      m.set(a.session, arr);
-    }
-    return m;
-  }, [subwayActions]);
-  const subwaySessions = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    const sessions = (subwaySnapshot?.sessions ?? []).filter((s) => !subwayDismissQueued.has(s.name));
-    if (!q) return sessions;
-    return sessions.filter((s) => {
-      const hay = [
-        s.name,
-        s.cwd,
-        s.task,
-        s.title,
-        s.model,
-        s.agent,
-        ...s.messages.map((m) => `${m.tool ?? ""} ${m.path ?? ""} ${m.text}`),
-      ]
-        .join("\n")
-        .toLowerCase();
-      return hay.includes(q);
-    });
-  }, [filter, subwayDismissQueued, subwaySnapshot]);
-  const selectedSubway = useMemo(
-    () => subwaySessions.find((s) => s.name === subwaySelected) ?? subwaySessions[0] ?? null,
-    [subwaySelected, subwaySessions],
-  );
-
-  useEffect(() => {
-    if (tab !== "subway") return;
-    if (!subwaySelected || !subwaySessions.some((s) => s.name === subwaySelected)) {
-      setSubwaySelected(subwaySessions[0]?.name ?? null);
-    }
-  }, [tab, subwaySelected, subwaySessions]);
-  useEffect(() => {
-    autosize(subwayReplyEl.current);
-  }, [subwayReplyText, selectedSubway?.name]);
-
-  const hideSubwaySession = useCallback(
-    (dir: number | null, sessionName: string) => {
-      const key = subwayCacheKey(dir);
-      setSubwaySnapshots((prev) => {
-        const snap = prev[key];
-        if (!snap) return prev;
-        return {
-          ...prev,
-          [key]: { ...snap, sessions: snap.sessions.filter((s) => s.name !== sessionName) },
-        };
-      });
-      if (subwaySelected === sessionName) setSubwaySelected(null);
-    },
-    [subwaySelected],
-  );
-
-  const queueSubwayDelete = useCallback(
-    (session: SubwaySession) => {
-      const dir = meta?.id ?? activeDirRef.current;
-      const entry: SubwayActionEntry = {
-        localId: makeLocalId(),
-        kind: "delete",
-        session: session.name,
-        sessionId: session.sessionId,
-        agent: session.agent,
-        cwd: session.cwd,
-        dir,
-        createdAt: Date.now(),
-      };
-      setSubwayActions((prev) =>
-        prev.some((a) => (a.kind === "delete" || a.kind === "keep") && a.session === session.name)
-          ? prev
-          : [...prev, entry],
-      );
-      hideSubwaySession(dir, session.name);
-    },
-    [hideSubwaySession, meta?.id],
-  );
-
-  const queueSubwayKeep = useCallback(
-    (session: SubwaySession) => {
-      const dir = meta?.id ?? activeDirRef.current;
-      const entry: SubwayActionEntry = {
-        localId: makeLocalId(),
-        kind: "keep",
-        session: session.name,
-        sessionId: session.sessionId,
-        agent: session.agent,
-        cwd: session.cwd,
-        dir,
-        createdAt: Date.now(),
-      };
-      setSubwayActions((prev) =>
-        prev.some((a) => (a.kind === "delete" || a.kind === "keep") && a.session === session.name)
-          ? prev
-          : [...prev, entry],
-      );
-      hideSubwaySession(dir, session.name);
-    },
-    [hideSubwaySession, meta?.id],
-  );
-
-  const queueSubwayReply = useCallback(() => {
-    const session = selectedSubway;
-    const text = subwayReplyText.trim();
-    if (!session || !text) return;
-    const entry: SubwayActionEntry = {
-      localId: makeLocalId(),
-      kind: "reply",
-      session: session.name,
-      sessionId: session.sessionId,
-      agent: session.agent,
-      cwd: session.cwd,
-      dir: meta?.id ?? activeDirRef.current,
-      text,
-      createdAt: Date.now(),
-    };
-    setSubwayActions((prev) => [...prev, entry]);
-    setSubwayReplyText("");
-  }, [meta?.id, selectedSubway, subwayReplyText]);
 
   // The session whose chat is on screen. On the Tmux tab that's the tab's
   // selection; on the Home dashboard it's the card whose chat side-panel is open
@@ -7172,7 +6743,7 @@ function App() {
   // Keys typed inside a report iframe can't reach the parent's keydown handler
   // (separate document), so the injected vim layer postMessages the app-level
   // actions up here — the same selectHtml / search / copy / open / reload the
-  // parent shortcuts use, plus 1-9 to switch tabs from inside a report.
+  // parent shortcuts use, plus numeric keys to switch tabs from inside a report.
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { source?: string; action?: string } | null;
@@ -7992,15 +7563,6 @@ function App() {
             >
               <Images />
             </button>
-            <button
-              className={tab === "subway" ? "on" : ""}
-              data-tip="Subway"
-              aria-label="Subway"
-              onClick={() => selectTab("subway")}
-            >
-              <TrainFrontTunnel />
-              {subwayActions.length > 0 && <span className="tab-badge waiting">{subwayActions.length}</span>}
-            </button>
           </div>
           {tab !== "changes" && (
             <input
@@ -8017,9 +7579,7 @@ function App() {
                         ? "Filter reports…"
                         : tab === "prompts"
                           ? "Filter prompts…"
-                          : tab === "subway"
-                            ? "Filter subway cache…"
-                            : "Filter patches…"
+                          : "Filter patches…"
               }
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -8386,97 +7946,6 @@ function App() {
           </div>
         )}
 
-        {tab === "subway" && (
-          <div className="commit-list">
-            <div className="subway-status">
-              <span>
-                {subwaySnapshot
-                  ? `Cached ${timeAgo(subwaySnapshot.fetchedAt)}`
-                  : subwayLoading
-                    ? "Syncing cache…"
-                    : "No cache yet"}
-              </span>
-              <button
-                type="button"
-                disabled={subwayLoading || !clientOnline}
-                onClick={() => void loadSubwaySnapshot(true)}
-              >
-                <RefreshCw size={12} className={subwayLoading ? "spin" : ""} />
-                Sync
-              </button>
-            </div>
-            {!clientOnline && (
-              <div className="offline-note">
-                <span className="offline-dot" />
-                Offline — Subway actions stay queued on this device.
-              </div>
-            )}
-            {subwayActions.length > 0 && (
-              <div className="subway-queue-note">
-                {subwayActions.length} queued {subwayActions.length === 1 ? "action" : "actions"}
-              </div>
-            )}
-            {subwayLoading && !subwaySnapshot && <SkeletonList />}
-            {subwayError && <div className="side-note error">{subwayError}</div>}
-            {subwaySessions.map((s) => {
-              const pending = subwayPendingBySession.get(s.name)?.length ?? 0;
-              return (
-                <div
-                  key={s.name}
-                  id={`row-subway-${s.name}`}
-                  className={`commit subway-row${selectedSubway?.name === s.name ? " active" : ""}${
-                    s.waiting ? " waiting" : ""
-                  }`}
-                  onClick={() => setSubwaySelected(s.name)}
-                >
-                  <div className="sess-top">
-                    <span className={`sess-busy${s.waiting ? " waiting" : ""}`} />
-                    <span className="sess-name">{s.name}</span>
-                    <span className="home-card-agent">{s.agent}</span>
-                    {pending > 0 && <span className="queued-badge">{pending}</span>}
-                  </div>
-                  <div className="sess-task">{s.title || s.task || "No title"}</div>
-                  <div className="sess-cwd">
-                    {s.cwd.replace(/^.*\//, "") || s.cwd}
-                    {(s.endedAt || s.mtime) ? ` · ${timeAgo(s.endedAt || s.mtime)}` : ""}
-                  </div>
-                  <button
-                    className="kill-btn keep-btn"
-                    title="Keep chat"
-                    aria-label="Keep chat"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      queueSubwayKeep(s);
-                    }}
-                  >
-                    <Check size={12} />
-                  </button>
-                  <button
-                    className="kill-btn"
-                    title="Delete chat"
-                    aria-label="Delete chat"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      queueSubwayDelete(s);
-                    }}
-                  >
-                    ✕
-                  </button>
-                </div>
-              );
-            })}
-            {!subwayLoading && subwaySessions.length === 0 && (
-              <div className="side-note">
-                {filter
-                  ? "No matching cached sessions"
-                  : subwaySnapshot
-                    ? "No idle Claude or Codex sessions in this directory"
-                    : "Open Subway while online to cache idle sessions"}
-              </div>
-            )}
-          </div>
-        )}
-
         {tab === "html" && (
           <div className="commit-list">
             {htmlFiles === null && !htmlError && <SkeletonList />}
@@ -8591,7 +8060,7 @@ function App() {
       <div className="resizer rz-left" onPointerDown={startResize("left")} />
 
       <main
-        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : tab === "html" ? " report-main" : tab === "prompts" ? " prompts-main" : tab === "subway" ? " subway-main" : ""}${
+        className={`diffs${tab === "tmux" ? " tmux" : tab === "home" ? " home-main" : tab === "html" ? " report-main" : tab === "prompts" ? " prompts-main" : ""}${
           tab === "home" && homeChat ? " chat-open" : ""
         }`}
         ref={mainEl}
@@ -8754,84 +8223,6 @@ function App() {
                 />
               </label>
             </div>
-            )}
-          </div>
-        )}
-        {tab === "subway" && (
-          <div className="subway-pane">
-            {selectedSubway ? (
-              <>
-                <div className="subway-head">
-                  <div>
-                    <h2>{selectedSubway.title || selectedSubway.task || selectedSubway.name}</h2>
-                    <p>
-                      {selectedSubway.agent}
-                      {selectedSubway.model ? ` · ${selectedSubway.model}` : ""}
-                      {selectedSubway.cwd ? ` · ${selectedSubway.cwd}` : ""}
-                    </p>
-                  </div>
-                  <div className="subway-actions">
-                    <button className="act keep" onClick={() => queueSubwayKeep(selectedSubway)}>
-                      <Check size={14} /> Keep
-                    </button>
-                    <button className="act delete" onClick={() => queueSubwayDelete(selectedSubway)}>
-                      <Trash2 size={14} /> Delete
-                    </button>
-                  </div>
-                </div>
-                {selectedSubway.messages.length > 0 ? (
-                  <div className="subway-messages">
-                    {selectedSubway.messages.map((m, i) => (
-                      <SubwayMessage key={`${selectedSubway.name}-${i}`} msg={m} />
-                    ))}
-                    {subwayActions
-                      .filter((a) => a.kind === "reply" && a.session === selectedSubway.name)
-                      .map((a) => (
-                        <SubwayMessage
-                          key={a.localId}
-                          pending
-                          msg={{
-                            role: "user",
-                            kind: "text",
-                            text: a.text ?? "",
-                            ts: new Date(a.createdAt).toISOString(),
-                          }}
-                        />
-                      ))}
-                  </div>
-                ) : (
-                  <div className="empty">No cached messages for this session.</div>
-                )}
-                <div className="subway-composer">
-                  <textarea
-                    ref={subwayReplyEl}
-                    value={subwayReplyText}
-                    placeholder="Queue a reply for when Wi-Fi returns…"
-                    onChange={(e) => setSubwayReplyText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        queueSubwayReply();
-                      }
-                    }}
-                  />
-                  <button className="act primary" disabled={!subwayReplyText.trim()} onClick={queueSubwayReply}>
-                    <Send size={14} /> Queue
-                  </button>
-                </div>
-              </>
-            ) : (
-              <div className="subway-empty">
-                <TrainFrontTunnel size={28} />
-                <h2>Subway</h2>
-                <p>
-                  {subwayLoading
-                    ? "Caching idle sessions…"
-                    : subwaySnapshot
-                      ? "No cached session selected."
-                      : "Open this tab while online to cache idle Claude and Codex sessions for offline review."}
-                </p>
-              </div>
             )}
           </div>
         )}

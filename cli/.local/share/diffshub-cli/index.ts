@@ -465,28 +465,6 @@ const pruneSessionEndsStmt = db.query(
   "DELETE FROM session_ends WHERE ended_at < ?",
 );
 
-// Subway "Keep" dismissals: keep the live tmux chat, but remove it from future
-// Subway review snapshots for the selected directory.
-db.run(`CREATE TABLE IF NOT EXISTS subway_kept (
-  dir_id INTEGER NOT NULL,
-  session_id TEXT NOT NULL,
-  session_name TEXT NOT NULL,
-  cwd TEXT NOT NULL,
-  agent TEXT NOT NULL,
-  kept_at INTEGER NOT NULL,
-  PRIMARY KEY (dir_id, session_id)
-)`);
-const upsertSubwayKeptStmt = db.query(
-  "INSERT INTO subway_kept (dir_id, session_id, session_name, cwd, agent, kept_at) VALUES (?, ?, ?, ?, ?, ?) " +
-    "ON CONFLICT(dir_id, session_id) DO UPDATE SET session_name = excluded.session_name, cwd = excluded.cwd, agent = excluded.agent, kept_at = excluded.kept_at",
-);
-const listSubwayKeptStmt = db.query<{ session_id: string }, [number]>(
-  "SELECT session_id FROM subway_kept WHERE dir_id = ?",
-);
-const pruneSubwayKeptStmt = db.query(
-  "DELETE FROM subway_kept WHERE kept_at < ?",
-);
-
 // ---- Public sharing (R2 via the wrangler CLI) ----
 // The "Share" button in the HTML preview uploads an artifact's .html (plus any
 // local, non-base64 image assets it references) to a public R2 bucket and hands
@@ -2262,7 +2240,6 @@ interface TmuxSession {
   mtime: number; // transcript mtime (ms), 0 if none — last write, advances mid-turn
   endedAt: number; // when its Stop hook last fired (ms), 0 if never — see session_ends
   agent: "claude" | "codex"; // which CLI is running — drives transcript resolution + a badge
-  transcriptPath?: string; // server-only: lets Subway snapshot exact resolved files
 }
 
 // The timestamp the session lists sort and label by: when a non-busy session last
@@ -2343,7 +2320,6 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
       mtime,
       endedAt,
       agent,
-      transcriptPath: path ?? undefined,
     });
   }
   // An idle session may actually be blocked on an interactive prompt (the same
@@ -3048,118 +3024,6 @@ function parseCodexTranscript(
     // response_item.reasoning is encrypted — skipped; we show event_msg.agent_reasoning instead
   }
   return { messages: msgs.slice(-limit), model, title, total: msgs.length };
-}
-
-// ---- Subway tab snapshot ----
-// One-shot offline cache for reviewing backlog on a train: only idle/waiting/done
-// sessions in the selected directory, capped separately by agent so one tool cannot
-// starve the other.
-const SUBWAY_AGENT_LIMIT = 10;
-const SUBWAY_MESSAGE_LIMIT = 16;
-const SUBWAY_TEXT_LIMIT = 2200;
-
-interface SubwaySessionSnapshot {
-  name: string;
-  cwd: string;
-  task: string;
-  waiting: boolean;
-  sessionId: string;
-  mtime: number;
-  endedAt: number;
-  agent: "claude" | "codex";
-  title: string;
-  model: string;
-  total: number;
-  messages: TranscriptMsg[];
-}
-
-function publicTmuxSession(
-  s: TmuxSession,
-): Omit<TmuxSession, "transcriptPath"> {
-  const { transcriptPath: _transcriptPath, ...pub } = s;
-  return pub;
-}
-
-function compactSubwayMessages(messages: TranscriptMsg[]): TranscriptMsg[] {
-  return messages.map((m) => ({
-    ...m,
-    text:
-      m.text.length > SUBWAY_TEXT_LIMIT
-        ? `${m.text.slice(0, SUBWAY_TEXT_LIMIT)}\n... (truncated for Subway cache)`
-        : m.text,
-    edits: undefined,
-  }));
-}
-
-function transcriptIdFromPath(path?: string): string {
-  return path ? (path.split("/").pop() ?? "").replace(/\.jsonl$/, "") : "";
-}
-
-function subwayKeepIds(
-  s: Pick<TmuxSession, "sessionId" | "name" | "transcriptPath">,
-): string[] {
-  return [transcriptIdFromPath(s.transcriptPath), s.sessionId, s.name].filter(
-    Boolean,
-  );
-}
-
-async function subwaySessionSnapshot(
-  s: TmuxSession,
-): Promise<SubwaySessionSnapshot> {
-  let title = "";
-  let model = "";
-  let total = 0;
-  let messages: TranscriptMsg[] = [];
-  const path = s.transcriptPath;
-  if (path && existsSync(path)) {
-    try {
-      const parsed =
-        s.agent === "codex"
-          ? parseCodexTranscript(
-              await Bun.file(path).text(),
-              SUBWAY_MESSAGE_LIMIT,
-            )
-          : parseTranscript(await Bun.file(path).text(), SUBWAY_MESSAGE_LIMIT);
-      title = parsed.title;
-      model = parsed.model;
-      total = parsed.total;
-      messages = compactSubwayMessages(parsed.messages);
-    } catch {}
-  }
-  return {
-    name: s.name,
-    cwd: s.cwd,
-    task: s.task,
-    waiting: s.waiting,
-    sessionId: s.sessionId,
-    mtime: s.mtime,
-    endedAt: s.endedAt,
-    agent: s.agent,
-    title,
-    model,
-    total,
-    messages,
-  };
-}
-
-async function subwaySnapshot(ws: Workspace) {
-  const inScope = (dir: string) =>
-    dir === ws.path || dir.startsWith(`${ws.path}${sep}`);
-  const kept = new Set(listSubwayKeptStmt.all(ws.id).map((r) => r.session_id));
-  const idle = (await listClaudeSessions()).filter(
-    (s) =>
-      !s.busy && inScope(s.cwd) && !subwayKeepIds(s).some((id) => kept.has(id)),
-  );
-  const picked = [
-    ...idle.filter((s) => s.agent === "claude").slice(0, SUBWAY_AGENT_LIMIT),
-    ...idle.filter((s) => s.agent === "codex").slice(0, SUBWAY_AGENT_LIMIT),
-  ].sort((a, b) => finishedTs(b) - finishedTs(a));
-  return {
-    dir: ws.id,
-    cwd: ws.path,
-    fetchedAt: Date.now(),
-    sessions: await Promise.all(picked.map(subwaySessionSnapshot)),
-  };
 }
 
 interface UsageWindow {
@@ -4004,100 +3868,6 @@ const page = `<!DOCTYPE html>
     font-size: 12px; color: var(--amber);
     background: var(--bg-soft); border: 1px solid var(--amber); border-radius: 8px;
   }
-
-  /* ---- Subway tab: one-shot offline review cache ---- */
-  .subway-status {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    margin: 8px 14px 4px; color: var(--text-muted); font-size: 11px;
-  }
-  .subway-status button {
-    display: inline-flex; align-items: center; gap: 5px; min-height: 24px;
-    padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 6px;
-    background: var(--bg); color: var(--text-2); cursor: pointer;
-  }
-  .subway-status button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
-  .subway-status button:disabled { opacity: .5; cursor: default; }
-  .subway-queue-note {
-    margin: 7px 14px 2px; padding: 6px 9px;
-    font-size: 11px; color: var(--amber);
-    background: var(--bg-soft); border: 1px solid var(--amber); border-radius: 7px;
-  }
-  .commit.subway-row { border-left-color: var(--border); }
-  .commit.subway-row.waiting { border-left-color: var(--amber); }
-  .commit.subway-row .sess-task, .commit.subway-row .sess-cwd { padding-right: 48px; }
-  .diffs.subway-main { padding: 0; background: var(--bg); }
-  .subway-pane {
-    min-height: 100%; width: min(100%, 980px); margin: 0 auto; padding: 0 20px 120px;
-    display: flex; flex-direction: column;
-  }
-  .subway-head {
-    position: sticky; top: 0; z-index: 5;
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
-    padding: 15px 0 12px; border-bottom: 1px solid var(--border); background: var(--bg);
-  }
-  .subway-head h2 { margin: 0 0 3px; font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }
-  .subway-head p { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
-  .subway-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-  .subway-head .act {
-    min-height: 30px; display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 10px; border-radius: 7px; flex-shrink: 0;
-  }
-  .act.keep { color: var(--green); border-color: var(--green-border); }
-  .act.keep:hover:not(:disabled) { background: var(--green-bg); border-color: var(--green); color: var(--green); }
-  .act.delete { color: var(--red); border-color: var(--red-border); }
-  .act.delete:hover:not(:disabled) { background: var(--red-bg); border-color: var(--red); color: var(--red); }
-  .subway-messages {
-    display: flex; flex-direction: column; gap: 12px; padding: 18px 0 14px;
-  }
-  .subway-msg {
-    max-width: min(760px, 92%); padding: 10px 12px; border: 1px solid var(--border);
-    border-radius: 8px; background: var(--bg-raised); color: var(--text-md);
-    line-height: 1.55; overflow-wrap: anywhere;
-  }
-  .subway-msg.user {
-    align-self: flex-end; background: var(--accent-bg); border-color: var(--accent-border);
-    color: var(--text-q);
-  }
-  .subway-msg.assistant { align-self: flex-start; }
-  .subway-msg.pending { opacity: .72; border-style: dashed; }
-  .subway-pending {
-    display: inline-flex; margin-top: 7px; font-size: 10px; font-weight: 700;
-    letter-spacing: .04em; text-transform: uppercase; color: var(--amber);
-  }
-  .subway-tool, .subway-tool-head {
-    display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
-    color: var(--text-muted); font-size: 12px;
-  }
-  .subway-tool .tool-path, .subway-tool-head .tool-path {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--text-faint);
-  }
-  .subway-tool-result pre {
-    margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
-    font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace; color: var(--text-muted);
-  }
-  .subway-image-note { color: var(--text-muted); font-size: 12px; }
-  .subway-composer {
-    position: sticky; bottom: 0; z-index: 4;
-    display: flex; align-items: flex-end; gap: 8px;
-    margin-top: auto; padding: 10px 0 14px;
-    background: linear-gradient(to top, var(--bg) 84%, transparent);
-  }
-  .subway-composer textarea {
-    flex: 1 1 auto; min-height: 42px; max-height: 180px; resize: none;
-    padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 8px;
-    background: var(--bg); color: var(--text); font: inherit; line-height: 1.45; outline: none;
-  }
-  .subway-composer textarea:focus { border-color: var(--accent); }
-  .subway-composer .act {
-    min-height: 38px; display: inline-flex; align-items: center; gap: 6px;
-    padding: 8px 12px; border-radius: 8px; flex-shrink: 0;
-  }
-  .subway-empty {
-    min-height: 360px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 8px; color: var(--text-muted); text-align: center; padding: 20px;
-  }
-  .subway-empty h2 { margin: 0; color: var(--text); font-size: 18px; }
-  .subway-empty p { margin: 0; max-width: 420px; }
 
   /* ---- Tmux tab: transcript (ChatGPT-style chat) ---- */
   .transcript { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
@@ -6636,7 +6406,7 @@ const server = Bun.serve({
     // List claude tmux sessions (global, not dir-scoped) with transcript status.
     if (req.method === "GET" && url.pathname === "/api/tmux/sessions") {
       try {
-        const sessions = (await listClaudeSessions()).map(publicTmuxSession);
+        const sessions = await listClaudeSessions();
         return json({
           sessions,
           queued: listQueuedSessions(),
@@ -6645,93 +6415,6 @@ const server = Bun.serve({
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
-    }
-
-    // ---- Subway tab ----
-    // One-shot pseudo-offline snapshot: latest messages for up to 10 non-busy
-    // Claude sessions and 10 non-busy Codex sessions in the selected directory.
-    if (req.method === "GET" && url.pathname === "/api/subway/snapshot") {
-      let ws: Workspace;
-      try {
-        ws = await wsFromReq(url);
-      } catch (e) {
-        return json({ error: errText(e) }, 500);
-      }
-      try {
-        return json(await subwaySnapshot(ws));
-      } catch (e) {
-        return json({ error: errText(e) }, 500);
-      }
-    }
-
-    // Execute one Subway queued action. Deletes are idempotent so an already-gone
-    // session drains cleanly; Keep persists a Subway dismissal without touching
-    // tmux; replies still fail if the target pane disappeared.
-    if (req.method === "POST" && url.pathname === "/api/subway/action") {
-      let body: {
-        kind?: unknown;
-        session?: unknown;
-        sessionId?: unknown;
-        agent?: unknown;
-        cwd?: unknown;
-        text?: unknown;
-      };
-      try {
-        body = await req.json();
-      } catch {
-        return json({ error: "Invalid JSON" }, 400);
-      }
-      if (typeof body.session !== "string" || !body.session) {
-        return json({ error: "Missing session" }, 400);
-      }
-      if (body.kind === "keep") {
-        let ws: Workspace;
-        try {
-          ws = await wsFromReq(url);
-        } catch (e) {
-          return json({ error: errText(e) }, 500);
-        }
-        const now = Date.now();
-        const sid =
-          typeof body.sessionId === "string" && body.sessionId.trim()
-            ? body.sessionId.trim()
-            : body.session;
-        upsertSubwayKeptStmt.run(
-          ws.id,
-          sid,
-          body.session,
-          typeof body.cwd === "string" ? body.cwd : "",
-          body.agent === "codex" ? "codex" : "claude",
-          now,
-        );
-        pruneSubwayKeptStmt.run(now - 60 * 86_400_000);
-        return json({ ok: true });
-      }
-      if (body.kind === "delete") {
-        try {
-          await $`tmux -L default has-session -t ${body.session}`.quiet();
-        } catch {
-          return json({ ok: true, gone: true });
-        }
-        try {
-          await $`tmux -L default kill-session -t ${body.session}`.quiet();
-          return json({ ok: true });
-        } catch (e) {
-          return json({ error: errText(e) }, 500);
-        }
-      }
-      if (body.kind === "reply") {
-        if (typeof body.text !== "string" || !body.text.trim()) {
-          return json({ error: "Empty reply" }, 400);
-        }
-        try {
-          await pasteAndSubmit(body.session, body.text);
-          return json({ ok: true });
-        } catch (e) {
-          return json({ error: errText(e) }, 500);
-        }
-      }
-      return json({ error: "Invalid action" }, 400);
     }
 
     // Drop a queued (offline) prompt before it launches.
