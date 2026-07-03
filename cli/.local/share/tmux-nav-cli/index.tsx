@@ -31,6 +31,7 @@ interface TmuxSession {
   agent: string;
   transcriptTitle: string;
   claudeSession: string;
+  codexSession: string;
 }
 
 interface TmuxClient {
@@ -90,6 +91,7 @@ Usage:
 Keys:
   j/down, k/up  Move selection (supports counts: 5j, 7k)
   J/K           Jump to next/previous busy or waiting session
+  g/G           Jump to first/bottom session
   a             Toggle auto-switch after j/k navigation
   Enter         Switch the target tmux client to the selected session (and focus its split)
   right/left    Switch the target tmux client to the selected session (and focus its split)
@@ -97,6 +99,7 @@ Keys:
   c             Spawn a new claude session in the selected session's directory
   C             Spawn a new codex session in the selected session's directory
   b             Branch: new claude prefilled to look at the selected claude session's transcript
+  y             Copy the selected agent session id
   x             Kill the selected session
   /             Filter sessions
   Esc           Clear filter
@@ -634,6 +637,25 @@ function formatUsageLine(name: string, u: AgentUsage): string | null {
   return null;
 }
 
+function copyToClipboard(value: string) {
+  for (const [command, args] of [
+    ["pbcopy", []],
+    ["reattach-to-user-namespace", ["pbcopy"]],
+  ] as const) {
+    const result = spawnSync(command, args, { input: value, encoding: "utf8" });
+    if (result.status === 0) return;
+    if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") continue;
+  }
+
+  throw new Error("Could not copy to clipboard");
+}
+
+function agentSessionRef(session: TmuxSession): string | null {
+  if (session.agent === "claude" && session.claudeSession) return `claude: ${session.claudeSession}`;
+  if (session.agent === "codex" && session.codexSession) return `codex: ${session.codexSession}`;
+  return null;
+}
+
 // ---- Admin API (org usage, cross-machine) -----------------------------------
 // When ANTHROPIC_ADMIN_API_KEY is set, prefer the org Usage Report over local
 // transcript scanning for Claude: it aggregates this user's key usage across all
@@ -764,6 +786,7 @@ function listSessions(socket: string): TmuxSession[] {
               ? readClaudeTitle(findClaudeTranscriptByUuid(claudeSession || ""))
               : "",
         claudeSession: claudeSession || "",
+        codexSession: codexSession || "",
       };
     });
 
@@ -1168,9 +1191,11 @@ function App({ args }: { args: Args }) {
       : usage?.claude ?? null;
   const usageLines =
     usage && claudeAgent
-      ? ([formatUsageLine("claude", claudeAgent), formatUsageLine("codex", usage.codex)].filter(
-          Boolean,
-        ) as string[])
+      ? [
+          ([formatUsageLine("claude", claudeAgent), formatUsageLine("codex", usage.codex)].filter(
+            Boolean,
+          ) as string[]).join("  "),
+        ].filter(Boolean)
       : [];
   const headerLines = filtering || filter ? 3 : 2;
   const footerLines = (error || !snapshot.targetClient ? 2 : 1) + usageLines.length;
@@ -1271,6 +1296,19 @@ function App({ args }: { args: Args }) {
       } else {
         setError("Selected session has no claude session to branch from");
       }
+    } else if (input === "y" && selected) {
+      setCountPrefix("");
+      const ref = agentSessionRef(selected);
+      if (!ref) {
+        setError("Selected session has no claude/codex session id");
+      } else {
+        try {
+          copyToClipboard(ref);
+          setError(null);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      }
     } else if (input === "x" && selected) {
       setCountPrefix("");
       try {
@@ -1294,7 +1332,7 @@ function App({ args }: { args: Args }) {
   });
 
   const listWidth = Math.max(24, columns);
-  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  c claude  C codex  b branch  enter switch  x kill  / filter  q`;
+  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  g/G first/bottom  c claude  C codex  b branch  y copy  enter switch  x kill  / filter  q`;
 
   return (
     <Box flexDirection="column">
