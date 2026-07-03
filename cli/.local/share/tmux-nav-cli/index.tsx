@@ -828,24 +828,43 @@ function killSession(socket: string, sessionName: string) {
   tmux(socket, ["kill-session", "-t", sessionName]);
 }
 
+function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 // Move keyboard focus from this (tmux-nav) split to the terminal split after a
-// commit action (Enter / spawn). tmux-nav runs as a plain process in its own
-// Ghostty split, so switch-client only re-points what the *other* split is
-// attached to — focus stays here. Ghostty 1.3.x exposes no IPC to trigger
-// goto_split from a child, and tmux can't move focus across Ghostty splits
-// (separate PTYs), so we synthesize its default `super+]` (goto_split:next)
-// keybind via macOS System Events. Requires granting Ghostty Accessibility
-// permission (first use prompts). Opt out with TMUX_NAV_NO_FOCUS=1; change the
-// key with TMUX_NAV_FOCUS_KEY (default "]", e.g. "[" for goto_split:previous).
+// commit action (Enter / spawn). switch-client only re-points what the *other*
+// tmux client is attached to; focus stays in tmux-nav. In Ghostty, synthesize
+// its default `super+]` (goto_split:next). In Zed, synthesize cmd+shift+/ to
+// hand focus back from the terminal panel. Requires Accessibility permission.
+// Opt out with TMUX_NAV_NO_FOCUS=1; change the Ghostty key with
+// TMUX_NAV_FOCUS_KEY (default "]", e.g. "[" for goto_split:previous).
 function focusOtherSplit() {
   if (process.platform !== "darwin" || process.env.TMUX_NAV_NO_FOCUS) return;
   const key = process.env.TMUX_NAV_FOCUS_KEY || "]";
+  const script = `
+tell application "System Events"
+  set frontApp to first application process whose frontmost is true
+  set frontAppName to name of frontApp
+  set frontAppBundleID to ""
+  try
+    set frontAppBundleID to bundle identifier of frontApp
+  end try
+
+  set isZed to frontAppBundleID is "dev.zed.Zed"
+  ignoring case
+    if frontAppName is "zed" then set isZed to true
+  end ignoring
+
+  if isZed then
+    key code 44 using {command down, shift down}
+  else
+    keystroke ${appleScriptString(key)} using command down
+  end if
+end tell
+`;
   try {
-    spawnSync(
-      "osascript",
-      ["-e", `tell application "System Events" to keystroke "${key}" using command down`],
-      { stdio: "ignore" },
-    );
+    spawnSync("osascript", ["-e", script], { stdio: "ignore" });
   } catch {}
 }
 
