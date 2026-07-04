@@ -51,15 +51,19 @@ interface Snapshot {
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
-    socket: process.env.TMUX_NAV_SOCKET || "default",
+    socket: process.env.TMUX_NAV_SERVER || process.env.TMUX_NAV_SOCKET || "default",
     client: process.env.TMUX_NAV_CLIENT || null,
     refreshMs: 1500,
   };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--socket" || arg === "-L") {
+    if (arg === "--server" || arg === "--socket" || arg === "-L") {
       args.socket = argv[++i] || args.socket;
+    } else if (arg.startsWith("-L") && arg.length > 2) {
+      args.socket = arg.slice(2) || args.socket;
+    } else if (arg.startsWith("--server=")) {
+      args.socket = arg.slice("--server=".length) || args.socket;
     } else if (arg.startsWith("--socket=")) {
       args.socket = arg.slice("--socket=".length) || args.socket;
     } else if (arg === "--client" || arg === "-c") {
@@ -86,7 +90,11 @@ function printHelp() {
 Arc-style tmux session navigator for a narrow terminal pane.
 
 Usage:
-  tmux-nav [--socket default] [--client /dev/ttys001]
+  tmux-nav [-L default] [--client /dev/ttys001]
+
+Options:
+  -L, --server NAME  Connect to tmux's server/socket name, like tmux -L NAME
+  --socket NAME      Alias for --server
 
 Keys:
   j/down, k/up  Move selection (supports counts: 5j, 7k)
@@ -108,8 +116,8 @@ Keys:
 
 Typical setup:
   1. Put Ghostty in two vertical splits.
-  2. In the right split: tmux -L default attach
-  3. In the left split:  tmux-nav
+  2. In the right split: tmux -L migz attach
+  3. In the left split:  tmux-nav -L migz
 
 When multiple tmux clients are attached, pass --client with the right split's tty.
 `);
@@ -1092,6 +1100,8 @@ function App({ args }: { args: Args }) {
   }, []);
 
   const activeSession = snapshot.targetClient?.session || "";
+  const serverName = args.socket.trim();
+  const showServer = serverName && serverName !== "default";
   const sessions = useMemo(
     () => snapshot.sessions.filter((session) => matchesFilter(session, filter)),
     [filter, snapshot.sessions],
@@ -1197,7 +1207,7 @@ function App({ args }: { args: Args }) {
           ) as string[]).join("  "),
         ].filter(Boolean)
       : [];
-  const headerLines = filtering || filter ? 3 : 2;
+  const headerLines = (filtering || filter ? 3 : 2) + (showServer ? 1 : 0);
   const footerLines = (error || !snapshot.targetClient ? 2 : 1) + usageLines.length;
   const maxVisible = Math.max(1, rows - headerLines - footerLines);
   const start = Math.min(
@@ -1340,6 +1350,7 @@ function App({ args }: { args: Args }) {
         <Text bold color="cyan">
           {activeSession || selectedName || "tmux-nav"}{autoSwitch ? " [auto]" : ""}
         </Text>
+        {showServer && <Text color="gray">server {serverName}</Text>}
         {(filtering || filter) && (
           <Text color={filtering ? "yellow" : "gray"}>
             filter {filtering ? "> " : ""}{filter || "(none)"}
