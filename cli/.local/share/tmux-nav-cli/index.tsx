@@ -104,14 +104,16 @@ Keys:
   Enter         Switch the target tmux client to the selected session (and focus its split)
   right/left    Switch the target tmux client to the selected session (and focus its split)
   l/h           Switch the target tmux client to the selected session (and focus its split)
+  n             Spawn a new plain tmux session in the selected session's directory
   c             Spawn a new claude session in the selected session's directory
   C             Spawn a new codex session in the selected session's directory
   b             Branch: new claude prefilled to look at the selected claude session's transcript
   y             Copy the selected agent session id
   x             Kill the selected session
+  r             Rename the selected session
   /             Filter sessions
   Esc           Clear filter
-  r             Refresh now
+  R             Refresh now
   q             Quit
 
 Typical setup:
@@ -859,6 +861,10 @@ function killSession(socket: string, sessionName: string) {
   tmux(socket, ["kill-session", "-t", sessionName]);
 }
 
+function renameSession(socket: string, oldName: string, newName: string) {
+  tmux(socket, ["rename-session", "-t", oldName, newName]);
+}
+
 function appleScriptString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
@@ -956,6 +962,37 @@ function spawnAgentSession(
   }
 }
 
+function spawnPlainSession(socket: string, targetClient: TmuxClient | null, cwd: string) {
+  if (!cwd) throw new Error("Selected session has no current directory");
+
+  const result = spawnSync(
+    "zsh",
+    [
+      "-lc",
+      [
+        "source $HOME/.config/zsh/variables.zsh",
+        "source $HOME/.config/zsh/tmux.zsh",
+        `_t_new_here "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET"`,
+      ].join("; "),
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        TMUX_NAV_SELECTED_CWD: cwd,
+        TMUX_NAV_TARGET_CLIENT: targetClient?.tty || "",
+        TMUX_NAV_SOCKET: socket,
+      },
+    },
+  );
+
+  if (result.status !== 0) {
+    const stderr = (result.stderr || "").trim();
+    const stdout = (result.stdout || "").trim();
+    throw new Error(stderr || stdout || `plain tmux launcher exited with status ${result.status}`);
+  }
+}
+
 function timeAgo(seconds: number): string {
   if (!seconds) return "";
   const diff = Math.max(0, Math.floor(Date.now() / 1000) - seconds);
@@ -1047,6 +1084,8 @@ function App({ args }: { args: Args }) {
   const [selectedName, setSelectedName] = useState<string>("");
   const [filter, setFilter] = useState("");
   const [filtering, setFiltering] = useState(false);
+  const [renamingName, setRenamingName] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [countPrefix, setCountPrefix] = useState("");
   const [autoSwitch, setAutoSwitch] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1144,10 +1183,67 @@ function App({ args }: { args: Args }) {
     [args.socket, snapshot.targetClient],
   );
 
+  const beginRename = useCallback((session: TmuxSession) => {
+    setCountPrefix("");
+    setFilter("");
+    setFiltering(false);
+    setRenamingName(session.name);
+    setRenameValue(session.name);
+    setError(null);
+  }, []);
+
+  const commitRename = useCallback(() => {
+    if (!renamingName) return;
+
+    const nextName = renameValue.trim();
+    if (!nextName) {
+      setError("Session name cannot be empty");
+      return;
+    }
+
+    if (nextName === renamingName) {
+      setRenamingName(null);
+      setRenameValue("");
+      setError(null);
+      return;
+    }
+
+    try {
+      renameSession(args.socket, renamingName, nextName);
+      if (targetClientRef.current === renamingName) targetClientRef.current = nextName;
+      const next = loadSnapshot(args, targetClientRef.current);
+      if (!targetClientRef.current && next.targetClient) targetClientRef.current = next.targetClient.tty;
+      setSnapshot(next);
+      setSelectedName(nextName);
+      setRenamingName(null);
+      setRenameValue("");
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [args, renameValue, renamingName]);
+
   const spawnForSelected = useCallback(
     (agent: "claude" | "codex", session: TmuxSession, prompt: string = "") => {
       try {
         spawnAgentSession(agent, args.socket, snapshot.targetClient, session.cwd, prompt);
+        const next = loadSnapshot(args, targetClientRef.current);
+        if (!targetClientRef.current && next.targetClient) targetClientRef.current = next.targetClient.tty;
+        setSnapshot(next);
+        setSelectedName(next.targetClient?.session || session.name);
+        setError(null);
+        focusOtherSplit();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [args, snapshot.targetClient],
+  );
+
+  const spawnPlainForSelected = useCallback(
+    (session: TmuxSession) => {
+      try {
+        spawnPlainSession(args.socket, snapshot.targetClient, session.cwd);
         const next = loadSnapshot(args, targetClientRef.current);
         if (!targetClientRef.current && next.targetClient) targetClientRef.current = next.targetClient.tty;
         setSnapshot(next);
@@ -1207,7 +1303,7 @@ function App({ args }: { args: Args }) {
           ) as string[]).join("  "),
         ].filter(Boolean)
       : [];
-  const headerLines = (filtering || filter ? 3 : 2) + (showServer ? 1 : 0);
+  const headerLines = filtering || filter || renamingName ? 3 : 2;
   const footerLines = (error || !snapshot.targetClient ? 2 : 1) + usageLines.length;
   const maxVisible = Math.max(1, rows - headerLines - footerLines);
   const start = Math.min(
@@ -1217,6 +1313,23 @@ function App({ args }: { args: Args }) {
   const visible = sessions.slice(start, start + maxVisible);
 
   useInput((input, key) => {
+    if (renamingName) {
+      if (input === "c" && key.ctrl) {
+        exit();
+      } else if (key.escape) {
+        setRenamingName(null);
+        setRenameValue("");
+        setError(null);
+      } else if (key.return) {
+        commitRename();
+      } else if (key.backspace || key.delete) {
+        setRenameValue((value) => value.slice(0, -1));
+      } else if (input && !key.ctrl && !key.meta) {
+        setRenameValue((value) => value + input);
+      }
+      return;
+    }
+
     if (filtering) {
       if (key.escape) {
         setFilter("");
@@ -1241,9 +1354,11 @@ function App({ args }: { args: Args }) {
       exit();
     } else if (/^\d$/.test(input) && !key.ctrl && !key.meta && (countPrefix || input !== "0")) {
       setCountPrefix((value) => `${value}${input}`.slice(0, 4));
-    } else if (input === "r") {
+    } else if (input === "R") {
       setCountPrefix("");
       refresh();
+    } else if (input === "r" && selected) {
+      beginRename(selected);
     } else if (input === "a") {
       setCountPrefix("");
       setAutoSwitch((value) => !value);
@@ -1287,6 +1402,10 @@ function App({ args }: { args: Args }) {
       setFilter("");
       switchToName(selected.name);
       focusOtherSplit();
+    } else if (input === "n" && selected) {
+      setCountPrefix("");
+      setFilter("");
+      spawnPlainForSelected(selected);
     } else if (input === "c" && selected) {
       setCountPrefix("");
       setFilter("");
@@ -1342,18 +1461,23 @@ function App({ args }: { args: Args }) {
   });
 
   const listWidth = Math.max(24, columns);
-  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  g/G first/bottom  c claude  C codex  b branch  y copy  enter switch  x kill  / filter  q`;
+  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  g/G first/bottom  n tmux  c claude  C codex  b branch  r rename  R refresh  y copy  enter switch  x kill  / filter  q`;
 
   return (
     <Box flexDirection="column">
       <Box flexDirection="column">
         <Text bold color="cyan">
           {activeSession || selectedName || "tmux-nav"}{autoSwitch ? " [auto]" : ""}
+          {showServer && <Text color="gray"> server {serverName}</Text>}
         </Text>
-        {showServer && <Text color="gray">server {serverName}</Text>}
         {(filtering || filter) && (
           <Text color={filtering ? "yellow" : "gray"}>
             filter {filtering ? "> " : ""}{filter || "(none)"}
+          </Text>
+        )}
+        {renamingName && (
+          <Text color="yellow">
+            rename {renamingName} &gt; {renameValue}
           </Text>
         )}
       </Box>

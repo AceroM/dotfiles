@@ -28,6 +28,20 @@ function _session_random_name() {
   echo "$name"
 }
 
+function _t_new_here() {
+  local dir="${1:-$PWD}"
+  local client="${2:-}"
+  local sock="${3:-}"
+  local name="$(_session_random_name "$sock")"
+
+  _tm "$sock" new-session -ds "$name" -c "$dir"
+  if [[ -n "$client" ]]; then
+    _tm "$sock" switch-client -c "$client" -t "$name"
+  else
+    _tm "$sock" switch-client -t "$name"
+  fi
+}
+
 _T_CHOOSE_FORMAT="#{session_name}#{?#{&&:#{!=:#{pane_title},#{session_name}},#{&&:#{!=:#{pane_title},zsh},#{!=:#{pane_title},#{pane_current_command}}}},: #{pane_title},}"
 
 # the next session worth attending to — for now: first session whose claude is
