@@ -28,8 +28,9 @@ cursor-style = block
 cursor-style-blink = false
 
 # Shell integration can reset the cursor to a bar at the prompt.
-# Disabling the cursor feature keeps the block everywhere.
-shell-integration-features = no-cursor
+# Disabling the cursor feature keeps the block everywhere. The SSH features
+# prevent remote hosts from seeing xterm-ghostty without terminfo support.
+shell-integration-features = no-cursor,ssh-env,ssh-terminfo
 
 # Treat the Option key as Alt/Meta so tmux's M-* bindings work
 # (Option+arrows for pane nav, M-d detach, M-a picker, M-n new claude, etc.).

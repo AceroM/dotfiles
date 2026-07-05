@@ -74,6 +74,205 @@ const MANIFEST = {
   ],
 };
 
+const REPORT_THEME_SNIPPET = String.raw`<style id="agents-theme-vars">
+  :root {
+    color-scheme: light;
+    --agents-bg: #ffffff;
+    --agents-page: #f8fafc;
+    --agents-surface: #ffffff;
+    --agents-surface-2: #f1f5f9;
+    --agents-text: #111827;
+    --agents-muted: #64748b;
+    --agents-border: #e2e8f0;
+    --agents-soft: #eef2f7;
+    --agents-code: #f8fafc;
+    --agents-link: #2563eb;
+    --agents-accent: #2563eb;
+    --agents-ok: #16a34a;
+    --agents-warn: #b45309;
+    --agents-danger: #dc2626;
+  }
+
+  html[data-agents-theme="dark"] {
+    color-scheme: dark;
+    --agents-bg: #0b0f19;
+    --agents-page: #0f1623;
+    --agents-surface: #151d2b;
+    --agents-surface-2: #1c2636;
+    --agents-text: #e5e7eb;
+    --agents-muted: #a3adbd;
+    --agents-border: #334155;
+    --agents-soft: #1e293b;
+    --agents-code: #111827;
+    --agents-link: #7dd3fc;
+    --agents-accent: #60a5fa;
+    --agents-ok: #4ade80;
+    --agents-warn: #fbbf24;
+    --agents-danger: #f87171;
+    --bg: var(--agents-page);
+    --panel: var(--agents-surface);
+    --ink: var(--agents-text);
+    --muted: var(--agents-muted);
+    --line: var(--agents-border);
+    --soft: var(--agents-soft);
+    --code: var(--agents-code);
+    --accent: var(--agents-accent);
+    --accent-2: #5eead4;
+    --ok: var(--agents-ok);
+    --warn: var(--agents-warn);
+    --danger: var(--agents-danger);
+  }
+
+  html[data-agents-theme="dark"] body {
+    background: var(--agents-bg) !important;
+    color: var(--agents-text) !important;
+  }
+
+  html[data-agents-theme="dark"] a { color: var(--agents-link); }
+  html[data-agents-theme="dark"] code:not(pre code) {
+    background: var(--agents-code) !important;
+    color: var(--agents-text) !important;
+    border-color: var(--agents-border) !important;
+  }
+  html[data-agents-theme="dark"] pre,
+  html[data-agents-theme="dark"] pre code {
+    background: #070b12 !important;
+    color: #dbeafe !important;
+  }
+  html[data-agents-theme="dark"] table,
+  html[data-agents-theme="dark"] .card,
+  html[data-agents-theme="dark"] .stat,
+  html[data-agents-theme="dark"] blockquote {
+    background-color: var(--agents-surface) !important;
+    border-color: var(--agents-border) !important;
+  }
+  html[data-agents-theme="dark"] th {
+    background-color: var(--agents-surface-2) !important;
+    color: var(--agents-text) !important;
+  }
+  html[data-agents-theme="dark"] td,
+  html[data-agents-theme="dark"] th {
+    border-color: var(--agents-border) !important;
+  }
+  html[data-agents-theme="dark"] img {
+    border-color: var(--agents-border) !important;
+  }
+
+  html[data-agents-theme="dark"] .bg-white { background-color: var(--agents-surface) !important; }
+  html[data-agents-theme="dark"] .bg-gray-50,
+  html[data-agents-theme="dark"] .bg-slate-50,
+  html[data-agents-theme="dark"] .bg-zinc-50,
+  html[data-agents-theme="dark"] .bg-neutral-50 { background-color: var(--agents-page) !important; }
+  html[data-agents-theme="dark"] .bg-gray-100,
+  html[data-agents-theme="dark"] .bg-slate-100,
+  html[data-agents-theme="dark"] .bg-zinc-100,
+  html[data-agents-theme="dark"] .bg-neutral-100 { background-color: var(--agents-surface-2) !important; }
+  html[data-agents-theme="dark"] .bg-gray-200,
+  html[data-agents-theme="dark"] .bg-slate-200 { background-color: #243044 !important; }
+  html[data-agents-theme="dark"] .bg-blue-50,
+  html[data-agents-theme="dark"] .bg-indigo-50,
+  html[data-agents-theme="dark"] .bg-sky-50 { background-color: rgba(96, 165, 250, 0.16) !important; }
+  html[data-agents-theme="dark"] .bg-green-50,
+  html[data-agents-theme="dark"] .bg-emerald-50 { background-color: rgba(74, 222, 128, 0.13) !important; }
+  html[data-agents-theme="dark"] .bg-yellow-50,
+  html[data-agents-theme="dark"] .bg-amber-50,
+  html[data-agents-theme="dark"] .bg-orange-50 { background-color: rgba(251, 191, 36, 0.14) !important; }
+  html[data-agents-theme="dark"] .bg-red-50,
+  html[data-agents-theme="dark"] .bg-rose-50 { background-color: rgba(248, 113, 113, 0.14) !important; }
+  html[data-agents-theme="dark"] .bg-purple-50,
+  html[data-agents-theme="dark"] .bg-violet-50 { background-color: rgba(192, 132, 252, 0.14) !important; }
+
+  html[data-agents-theme="dark"] .text-gray-950,
+  html[data-agents-theme="dark"] .text-gray-900,
+  html[data-agents-theme="dark"] .text-gray-800,
+  html[data-agents-theme="dark"] .text-slate-950,
+  html[data-agents-theme="dark"] .text-slate-900,
+  html[data-agents-theme="dark"] .text-slate-800,
+  html[data-agents-theme="dark"] .text-zinc-900,
+  html[data-agents-theme="dark"] .text-neutral-900 { color: var(--agents-text) !important; }
+  html[data-agents-theme="dark"] .text-gray-700,
+  html[data-agents-theme="dark"] .text-gray-600,
+  html[data-agents-theme="dark"] .text-gray-500,
+  html[data-agents-theme="dark"] .text-gray-400,
+  html[data-agents-theme="dark"] .text-slate-700,
+  html[data-agents-theme="dark"] .text-slate-600,
+  html[data-agents-theme="dark"] .text-slate-500,
+  html[data-agents-theme="dark"] .text-slate-400,
+  html[data-agents-theme="dark"] .text-zinc-600 { color: var(--agents-muted) !important; }
+  html[data-agents-theme="dark"] .text-blue-700,
+  html[data-agents-theme="dark"] .text-blue-600,
+  html[data-agents-theme="dark"] .text-indigo-700,
+  html[data-agents-theme="dark"] .text-indigo-600,
+  html[data-agents-theme="dark"] .text-sky-700,
+  html[data-agents-theme="dark"] .text-sky-600 { color: var(--agents-link) !important; }
+  html[data-agents-theme="dark"] .text-green-700,
+  html[data-agents-theme="dark"] .text-green-600,
+  html[data-agents-theme="dark"] .text-emerald-700,
+  html[data-agents-theme="dark"] .text-emerald-600 { color: var(--agents-ok) !important; }
+  html[data-agents-theme="dark"] .text-yellow-700,
+  html[data-agents-theme="dark"] .text-amber-700,
+  html[data-agents-theme="dark"] .text-orange-700 { color: var(--agents-warn) !important; }
+  html[data-agents-theme="dark"] .text-red-700,
+  html[data-agents-theme="dark"] .text-red-600,
+  html[data-agents-theme="dark"] .text-rose-700 { color: var(--agents-danger) !important; }
+
+  html[data-agents-theme="dark"] .border-gray-100,
+  html[data-agents-theme="dark"] .border-gray-200,
+  html[data-agents-theme="dark"] .border-gray-300,
+  html[data-agents-theme="dark"] .border-slate-100,
+  html[data-agents-theme="dark"] .border-slate-200,
+  html[data-agents-theme="dark"] .border-slate-300,
+  html[data-agents-theme="dark"] .border-zinc-200,
+  html[data-agents-theme="dark"] .border-neutral-200,
+  html[data-agents-theme="dark"] .divide-gray-200 > :not([hidden]) ~ :not([hidden]) {
+    border-color: var(--agents-border) !important;
+  }
+  html[data-agents-theme="dark"] .border-blue-200,
+  html[data-agents-theme="dark"] .border-blue-600,
+  html[data-agents-theme="dark"] .border-l-blue-600 { border-color: var(--agents-accent) !important; }
+  html[data-agents-theme="dark"] .shadow,
+  html[data-agents-theme="dark"] .shadow-sm,
+  html[data-agents-theme="dark"] .shadow-md,
+  html[data-agents-theme="dark"] .shadow-lg,
+  html[data-agents-theme="dark"] .shadow-xl {
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28) !important;
+  }
+</style>
+<script id="agents-theme-script">
+(() => {
+  const KEY = "agentsTheme";
+  const root = document.documentElement;
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const readStored = () => {
+    try { return localStorage.getItem(KEY); } catch { return null; }
+  };
+  const normalize = (value) => value === "dark" || value === "light" ? value : (media.matches ? "dark" : "light");
+  const apply = (value) => {
+    const theme = normalize(value);
+    root.dataset.agentsTheme = theme;
+    root.style.colorScheme = theme;
+  };
+  window.addEventListener("message", (event) => {
+    if (event.data && event.data.type === "agents-theme") apply(event.data.theme);
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key === KEY) apply(event.newValue);
+  });
+  media.addEventListener?.("change", () => {
+    if (!readStored()) apply(null);
+  });
+  apply(readStored());
+})();
+</script>`;
+
+function injectReportTheme(html: string): string {
+  if (html.includes('id="agents-theme-vars"')) return html;
+  if (/<\/head>/i.test(html)) {
+    return html.replace(/<\/head>/i, `${REPORT_THEME_SNIPPET}\n</head>`);
+  }
+  return `${REPORT_THEME_SNIPPET}\n${html}`;
+}
+
 // Minimal service worker: satisfies installability (has a GET fetch handler) and
 // caches just the static shell assets. Reports/API/SSE always hit the network,
 // so nothing dynamic goes stale — the app only works with the server running.
@@ -150,10 +349,104 @@ function buildPage(files: FileEntry[], active: string | null): string {
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-title" content="agents" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<script>
+  (() => {
+    const key = "agentsTheme";
+    let stored = null;
+    try { stored = localStorage.getItem(key); } catch {}
+    const system = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    document.documentElement.dataset.theme = stored === "dark" || stored === "light" ? stored : system;
+  })();
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
-  .item.kb-focus { background: #e5e7eb; }
-  .item.active.kb-focus { background: #dbeafe; }
+  :root {
+    color-scheme: light;
+    --ui-bg: #ffffff;
+    --ui-panel: #f9fafb;
+    --ui-surface: #ffffff;
+    --ui-elevated: #ffffff;
+    --ui-text: #111827;
+    --ui-muted: #6b7280;
+    --ui-subtle: #9ca3af;
+    --ui-border: #e5e7eb;
+    --ui-hover: #f3f4f6;
+    --ui-hover-strong: #e5e7eb;
+    --ui-active: #eff6ff;
+    --ui-active-focus: #dbeafe;
+    --ui-accent: #2563eb;
+    --ui-accent-soft: #dbeafe;
+    --ui-danger: #dc2626;
+    --ui-danger-soft: #fef2f2;
+    --ui-code: #f3f4f6;
+    --ui-toast: #111827;
+    --ui-toast-text: #ffffff;
+  }
+
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --ui-bg: #0b0f19;
+    --ui-panel: #101827;
+    --ui-surface: #151d2b;
+    --ui-elevated: #1a2434;
+    --ui-text: #e5e7eb;
+    --ui-muted: #a3adbd;
+    --ui-subtle: #7f8da3;
+    --ui-border: #334155;
+    --ui-hover: #1e293b;
+    --ui-hover-strong: #263348;
+    --ui-active: rgba(96, 165, 250, 0.16);
+    --ui-active-focus: rgba(96, 165, 250, 0.24);
+    --ui-accent: #7dd3fc;
+    --ui-accent-soft: rgba(96, 165, 250, 0.16);
+    --ui-danger: #f87171;
+    --ui-danger-soft: rgba(248, 113, 113, 0.14);
+    --ui-code: #111827;
+    --ui-toast: #e5e7eb;
+    --ui-toast-text: #0b0f19;
+  }
+
+  body { background: var(--ui-bg); color: var(--ui-text); }
+  dialog { background: var(--ui-elevated); color: var(--ui-text); }
+  .item.kb-focus { background: var(--ui-hover-strong); }
+  .item.active.kb-focus { background: var(--ui-active-focus); }
+  .theme-sun { display: none; }
+  html[data-theme="dark"] .theme-sun { display: block; }
+  html[data-theme="dark"] .theme-moon { display: none; }
+
+  html[data-theme="dark"] .bg-white { background-color: var(--ui-surface) !important; }
+  html[data-theme="dark"] .bg-gray-50 { background-color: var(--ui-panel) !important; }
+  html[data-theme="dark"] .bg-gray-100 { background-color: var(--ui-hover) !important; }
+  html[data-theme="dark"] .bg-gray-200 { background-color: var(--ui-hover-strong) !important; }
+  html[data-theme="dark"] .bg-blue-50 { background-color: var(--ui-active) !important; }
+  html[data-theme="dark"] .bg-red-50 { background-color: var(--ui-danger-soft) !important; }
+  html[data-theme="dark"] .bg-gray-900 { background-color: var(--ui-toast) !important; }
+  html[data-theme="dark"] .text-white { color: var(--ui-toast-text) !important; }
+  html[data-theme="dark"] .text-gray-900,
+  html[data-theme="dark"] .text-gray-800,
+  html[data-theme="dark"] .text-gray-700 { color: var(--ui-text) !important; }
+  html[data-theme="dark"] .text-gray-600,
+  html[data-theme="dark"] .text-gray-500,
+  html[data-theme="dark"] .text-gray-400 { color: var(--ui-muted) !important; }
+  html[data-theme="dark"] .text-blue-600 { color: var(--ui-accent) !important; }
+  html[data-theme="dark"] .text-red-600 { color: var(--ui-danger) !important; }
+  html[data-theme="dark"] .border-gray-200,
+  html[data-theme="dark"] .border-blue-200 { border-color: var(--ui-border) !important; }
+  html[data-theme="dark"] .border-l-blue-600,
+  html[data-theme="dark"] .\\!border-l-blue-600 { border-left-color: var(--ui-accent) !important; }
+  html[data-theme="dark"] .focus\\:border-blue-600:focus { border-color: var(--ui-accent) !important; }
+  html[data-theme="dark"] .placeholder\\:text-gray-400::placeholder { color: var(--ui-subtle) !important; }
+  html[data-theme="dark"] .hover\\:bg-gray-100:hover,
+  html[data-theme="dark"] .group:hover .group-hover\\:bg-gray-100 { background-color: var(--ui-hover) !important; }
+  html[data-theme="dark"] .hover\\:bg-gray-200:hover { background-color: var(--ui-hover-strong) !important; }
+  html[data-theme="dark"] .hover\\:bg-blue-100:hover { background-color: var(--ui-active-focus) !important; }
+  html[data-theme="dark"] .hover\\:bg-red-50:hover { background-color: var(--ui-danger-soft) !important; }
+  html[data-theme="dark"] .hover\\:text-gray-900:hover { color: var(--ui-text) !important; }
+  html[data-theme="dark"] code:not(pre code) {
+    background-color: var(--ui-code) !important;
+    color: var(--ui-text) !important;
+    border-color: var(--ui-border) !important;
+  }
 
   #renameDialog::backdrop { background: rgba(0,0,0,.4); }
 
@@ -191,6 +484,10 @@ function buildPage(files: FileEntry[], active: string | null): string {
       <h1 class="text-[15px] font-bold">agents</h1>
       <div class="flex items-center gap-1.5">
         <button id="installBtn" class="hidden px-2 py-0.5 text-[11px] rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 cursor-pointer" title="Install as app">Install</button>
+        <button id="themeBtn" class="flex items-center justify-center w-6 h-6 text-gray-500 hover:text-gray-900 hover:bg-gray-200 rounded cursor-pointer" title="Toggle dark mode (t)" aria-label="Toggle dark mode" aria-pressed="false">
+          <svg class="theme-moon w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"/></svg>
+          <svg class="theme-sun w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        </button>
         <button id="collapseBtn" class="hidden md:flex items-center justify-center w-6 h-6 text-gray-500 hover:text-gray-900 hover:bg-gray-200 rounded cursor-pointer text-[15px] leading-none" title="Collapse sidebar (b)">&#171;</button>
       </div>
     </div>
@@ -207,6 +504,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">r</kbd> refresh</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">/</kbd> search</span>
     <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">b</kbd> sidebar</span>
+    <span class="ml-1.5"><kbd class="px-1 py-0.5 bg-gray-200 rounded text-[10px]">t</kbd> theme</span>
   </div>
 </nav>
 
@@ -246,6 +544,52 @@ function buildPage(files: FileEntry[], active: string | null): string {
   const overlay = document.getElementById("overlay");
   const allItems = Array.from(list.querySelectorAll(".item"));
   let focusIdx = -1;
+
+  const THEME_KEY = "agentsTheme";
+  const themeBtn = document.getElementById("themeBtn");
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+  const normalizeTheme = (value) => value === "dark" || value === "light" ? value : (themeMedia.matches ? "dark" : "light");
+
+  function pushThemeToFrame(theme = document.documentElement.dataset.theme) {
+    const frame = document.getElementById("preview");
+    if (!frame || !frame.contentWindow) return;
+    try {
+      frame.contentWindow.postMessage({ type: "agents-theme", theme }, window.location.origin);
+      frame.contentDocument.documentElement.dataset.agentsTheme = theme;
+      frame.contentDocument.documentElement.style.colorScheme = theme;
+    } catch {}
+  }
+
+  function setTheme(value, persist = true) {
+    const theme = normalizeTheme(value);
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    if (themeMeta) themeMeta.setAttribute("content", theme === "dark" ? "#0b0f19" : "#ffffff");
+    if (themeBtn) themeBtn.setAttribute("aria-pressed", String(theme === "dark"));
+    try {
+      if (persist) localStorage.setItem(THEME_KEY, theme);
+    } catch {}
+    pushThemeToFrame(theme);
+  }
+
+  if (themeBtn) {
+    themeBtn.addEventListener("click", () => {
+      setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+    });
+  }
+  themeMedia.addEventListener?.("change", () => {
+    try {
+      if (localStorage.getItem(THEME_KEY)) return;
+    } catch {}
+    setTheme(null, false);
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key === THEME_KEY) setTheme(event.newValue, false);
+  });
+  let storedTheme = null;
+  try { storedTheme = localStorage.getItem(THEME_KEY); } catch {}
+  setTheme(storedTheme, false);
 
   const rowOf = (el) => el.closest(".item-row");
 
@@ -396,6 +740,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     if (e.key === ";") { e.preventDefault(); copyPath(); }
     if (e.key === "r") { e.preventDefault(); location.reload(); }
     if (e.key === "b") { e.preventDefault(); setCollapsed(!document.documentElement.classList.contains("collapsed")); }
+    if (e.key === "t") { e.preventDefault(); setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"); }
   });
 
   // Per-item action menu (rename / delete)
@@ -509,7 +854,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     function attachIframeKeys() {
       try {
         previewFrame.contentWindow.addEventListener("keydown", (e) => {
-          if (["j", "k", ";", "b", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
+          if (["j", "k", ";", "b", "t", "/", "Escape", "ArrowUp", "ArrowDown"].includes(e.key)) {
             e.preventDefault();
             document.dispatchEvent(new KeyboardEvent("keydown", { key: e.key, bubbles: true }));
           }
@@ -518,6 +863,7 @@ function buildPage(files: FileEntry[], active: string | null): string {
     }
     previewFrame.addEventListener("load", () => {
       attachIframeKeys();
+      pushThemeToFrame();
       try { previewFrame.contentWindow.focus(); } catch {}
     });
     try { previewFrame.contentWindow.focus(); } catch {}
@@ -555,7 +901,9 @@ function buildPage(files: FileEntry[], active: string | null): string {
 </html>`;
 }
 
-const sseClients = new Set<ReadableStreamDirectController>();
+type DirectSseController = { write(chunk: string): void };
+
+const sseClients = new Set<DirectSseController>();
 
 watch(`${cwd}/agents`, { recursive: true }, (_event, filename) => {
   cachedFiles = null;
@@ -604,12 +952,12 @@ const server = Bun.serve({
       return new Response(
         new ReadableStream({
           type: "direct",
-          pull(controller) {
+          pull(controller: DirectSseController) {
             sseClients.add(controller);
             controller.write("data: connected\n\n");
             return new Promise(() => {});
           },
-        }),
+        } as any),
         {
           headers: {
             "Content-Type": "text/event-stream",
@@ -675,6 +1023,11 @@ const server = Bun.serve({
       const resolved = Bun.file(`${cwd}/${rel}`);
       if (!(await resolved.exists())) {
         return new Response("Not found", { status: 404 });
+      }
+      if (rel.endsWith(".html")) {
+        return new Response(injectReportTheme(await resolved.text()), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
       }
       return new Response(resolved); // Content-Type inferred from extension
     }
