@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+interval="${1:-3}"
+
+usage() {
+  cat <<'USAGE'
+Usage: allow-chrome-remote-debugging [interval_seconds]
+
+Poll for Chrome's "Allow remote debugging?" prompt and click Allow.
+Defaults to polling every 3 seconds. Press Ctrl-C to stop.
+USAGE
+}
+
+case "${interval}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+if ! [[ "${interval}" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "${interval}" == "0" || "${interval}" == "0.0" ]]; then
+  echo "interval_seconds must be a positive number" >&2
+  exit 2
+fi
+
+echo "Polling every ${interval}s for Chrome's remote debugging prompt. Press Ctrl-C to stop."
+
+while true; do
+  result="$(
+    /usr/bin/osascript <<'APPLESCRIPT'
+on staticTextFrom(uiElements)
+  set combinedText to ""
+  repeat with uiElement in uiElements
+    try
+      if (role of uiElement as text) is "AXStaticText" then
+        try
+          set combinedText to combinedText & linefeed & (value of uiElement as text)
+        on error
+          try
+            set combinedText to combinedText & linefeed & (name of uiElement as text)
+          end try
+        end try
+      end if
+    end try
+  end repeat
+  return combinedText
+end staticTextFrom
+
+on clickAllowButton(uiElements)
+  repeat with uiElement in uiElements
+    try
+      if ((role of uiElement as text) is "AXButton") and ((name of uiElement as text) is "Allow") then
+        tell application "System Events" to click uiElement
+        return true
+      end if
+    end try
+  end repeat
+  return false
+end clickAllowButton
+
+tell application "System Events"
+  set chromeProcessNames to {"Google Chrome", "Google Chrome Beta", "Google Chrome Canary", "Chromium", "Chrome for Testing", "Google Chrome for Testing"}
+
+  repeat with chromeProcessName in chromeProcessNames
+    if exists process chromeProcessName then
+      tell process chromeProcessName
+        repeat with chromeWindow in windows
+          set windowName to ""
+          try
+            set windowName to name of chromeWindow as text
+          end try
+
+          set uiElements to {}
+          try
+            set uiElements to entire contents of chromeWindow
+          on error
+            set uiElements to {chromeWindow}
+          end try
+
+          set promptText to my staticTextFrom(uiElements)
+          if (windowName contains "Allow remote debugging") or (promptText contains "Allow remote debugging?") then
+            if my clickAllowButton(uiElements) then
+              return "clicked " & chromeProcessName
+            end if
+          end if
+        end repeat
+      end tell
+    end if
+  end repeat
+end tell
+
+return "not found"
+APPLESCRIPT
+  )" || result="osascript failed"
+
+  if [[ "${result}" == clicked* ]]; then
+    printf '%s\n' "${result}"
+  elif [[ "${result}" == "osascript failed" ]]; then
+    echo "osascript failed; check Accessibility permission for your terminal app" >&2
+  fi
+
+  sleep "${interval}"
+done
