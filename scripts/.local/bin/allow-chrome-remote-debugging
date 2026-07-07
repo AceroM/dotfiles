@@ -9,6 +9,12 @@ Usage: allow-chrome-remote-debugging [interval_seconds]
 
 Poll for Chrome's "Allow remote debugging?" prompt and click Allow.
 Defaults to polling every 3 seconds. Press Ctrl-C to stop.
+
+Note: the prompt is a Chrome Views *sheet*, not a normal macOS window, and its
+buttons expose their label via AXDescription (not AXTitle). We match the button
+whose description is "Allow" and press it. Requires Accessibility permission for
+whichever terminal app runs this script (System Settings > Privacy & Security >
+Accessibility).
 USAGE
 }
 
@@ -29,35 +35,21 @@ echo "Polling every ${interval}s for Chrome's remote debugging prompt. Press Ctr
 while true; do
   result="$(
     /usr/bin/osascript <<'APPLESCRIPT'
-on staticTextFrom(uiElements)
-  set combinedText to ""
-  repeat with uiElement in uiElements
-    try
-      if (role of uiElement as text) is "AXStaticText" then
-        try
-          set combinedText to combinedText & linefeed & (value of uiElement as text)
-        on error
-          try
-            set combinedText to combinedText & linefeed & (name of uiElement as text)
-          end try
-        end try
-      end if
-    end try
-  end repeat
-  return combinedText
-end staticTextFrom
-
-on clickAllowButton(uiElements)
-  repeat with uiElement in uiElements
-    try
-      if ((role of uiElement as text) is "AXButton") and ((name of uiElement as text) is "Allow") then
-        tell application "System Events" to click uiElement
-        return true
-      end if
-    end try
-  end repeat
-  return false
-end clickAllowButton
+on pressAllowInSheet(theSheet, procName)
+  tell application "System Events"
+    repeat with e in (entire contents of theSheet)
+      try
+        if (role of e as text) is "AXButton" and (description of e as text) is "Allow" then
+          -- Bring Chrome forward so the sheet is key, then press Allow.
+          tell application "Google Chrome" to activate
+          perform action "AXPress" of e
+          return "clicked " & procName
+        end if
+      end try
+    end repeat
+  end tell
+  return ""
+end pressAllowInSheet
 
 tell application "System Events"
   set chromeProcessNames to {"Google Chrome", "Google Chrome Beta", "Google Chrome Canary", "Chromium", "Chrome for Testing", "Google Chrome for Testing"}
@@ -66,22 +58,14 @@ tell application "System Events"
     if exists process chromeProcessName then
       tell process chromeProcessName
         repeat with chromeWindow in windows
-          set windowName to ""
-          try
-            set windowName to name of chromeWindow as text
-          end try
-
-          set uiElements to {}
-          try
-            set uiElements to entire contents of chromeWindow
-          on error
-            set uiElements to {chromeWindow}
-          end try
-
-          set promptText to my staticTextFrom(uiElements)
-          if (windowName contains "Allow remote debugging") or (promptText contains "Allow remote debugging?") then
-            if my clickAllowButton(uiElements) then
-              return "clicked " & chromeProcessName
+          if exists sheet 1 of chromeWindow then
+            set sheetName to ""
+            try
+              set sheetName to name of sheet 1 of chromeWindow as text
+            end try
+            if sheetName contains "Allow remote debugging" then
+              set clicked to my pressAllowInSheet(sheet 1 of chromeWindow, chromeProcessName as text)
+              if clicked is not "" then return clicked
             end if
           end if
         end repeat
