@@ -1,0 +1,5 @@
+# Add global npm packages here, one per line.
+typescript
+prettier
+wrangler
+void

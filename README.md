@@ -11,12 +11,19 @@ i.e: if I wanted to copy my neovim configuration
 stow nvim
 ```
 
+For a fresh Linux VPS, run the interactive bootstrap:
+
+```
+./vps/setup.sh
+```
+
 ## Structure
 
 ```
 .
 └── zsh # my zsh configuration
 └── pi # my pi-agent configuration
+└── vps # Linux VPS bootstrap
 ```
 
 ## Troubleshooting
