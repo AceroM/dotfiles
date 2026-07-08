@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+interval="${1:-3}"
+
+usage() {
+  cat <<'USAGE'
+Usage: allow-helium-remote-debugging [interval_seconds]
+
+Poll for Helium's "Allow remote debugging?" prompt and click Allow.
+Defaults to polling every 3 seconds. Press Ctrl-C to stop.
+
+Helium is imput.co's Chromium fork (bundle net.imput.helium). The prompt is a
+Chromium Views *sheet*, not a normal macOS window, and its buttons expose their
+label via AXDescription (not AXTitle). Unlike upstream Chrome, `entire contents of`
+the sheet returns opaque/stale proxies for these web-rendered buttons, so we walk
+the `UI elements` tree recursively instead and press the button whose description is
+"Allow". Requires Accessibility permission for whichever terminal app runs this
+script (System Settings > Privacy & Security > Accessibility).
+USAGE
+}
+
+case "${interval}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+if ! [[ "${interval}" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "${interval}" == "0" || "${interval}" == "0.0" ]]; then
+  echo "interval_seconds must be a positive number" >&2
+  exit 2
+fi
+
+echo "Polling every ${interval}s for Helium's remote debugging prompt. Press Ctrl-C to stop."
+
+while true; do
+  result="$(
+    /usr/bin/osascript <<'APPLESCRIPT'
+-- Depth-first walk of the AX tree. We must materialize children via `UI elements`
+-- (not `entire contents`, which returns unusable proxies for Chromium's
+-- web-rendered sheet). Returns true after pressing the "Allow" button.
+on findAndPressAllow(el, depth)
+  tell application "System Events"
+    set r to ""
+    try
+      set r to role of el as text
+    end try
+    if r is "AXButton" then
+      set d to ""
+      try
+        set d to description of el as text
+      end try
+      if d is "Allow" then
+        -- Bring Helium forward so the sheet is key, then press Allow.
+        tell application "Helium" to activate
+        perform action "AXPress" of el
+        return true
+      end if
+    end if
+    if depth < 12 then
+      try
+        repeat with k in (UI elements of el)
+          if my findAndPressAllow(k, depth + 1) then return true
+        end repeat
+      end try
+    end if
+    return false
+  end tell
+end findAndPressAllow
+
+tell application "System Events"
+  set heliumProcessNames to {"Helium", "Helium Beta", "Helium Canary"}
+
+  repeat with heliumProcessName in heliumProcessNames
+    if exists process heliumProcessName then
+      tell process heliumProcessName
+        repeat with heliumWindow in windows
+          if exists sheet 1 of heliumWindow then
+            set sheetName to ""
+            try
+              set sheetName to name of sheet 1 of heliumWindow as text
+            end try
+            if sheetName contains "Allow remote debugging" then
+              if my findAndPressAllow(sheet 1 of heliumWindow, 0) then
+                return "clicked " & (heliumProcessName as text)
+              end if
+            end if
+          end if
+        end repeat
+      end tell
+    end if
+  end repeat
+end tell
+
+return "not found"
+APPLESCRIPT
+  )" || result="osascript failed"
+
+  if [[ "${result}" == clicked* ]]; then
+    printf '%s\n' "${result}"
+  elif [[ "${result}" == "osascript failed" ]]; then
+    echo "osascript failed; check Accessibility permission for your terminal app" >&2
+  fi
+
+  sleep "${interval}"
+done
