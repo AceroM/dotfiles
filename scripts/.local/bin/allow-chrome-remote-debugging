@@ -1,85 +1,255 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-interval="${1:-3}"
+interval="3"
+mode="poll"
 
 usage() {
   cat <<'USAGE'
 Usage: allow-chrome-remote-debugging [interval_seconds]
+       allow-chrome-remote-debugging --dump
 
 Poll for Chrome's "Allow remote debugging?" prompt and click Allow.
 Defaults to polling every 3 seconds. Press Ctrl-C to stop.
 
-Note: the prompt is a Chrome Views *sheet*, not a normal macOS window, and its
-buttons expose their label via AXDescription (not AXTitle). We match the button
-whose description is "Allow" and press it. Requires Accessibility permission for
-whichever terminal app runs this script (System Settings > Privacy & Security >
-Accessibility).
+  --dump   Print the accessibility structure of Chrome's sheets/dialogs once
+           and exit. Run this WHILE the prompt is on screen to see exactly how
+           the buttons and text are exposed, so discovery can be adjusted.
+
+Notes:
+  * The prompt is a Chrome Views *sheet* (or dialog window), not a normal macOS
+    window. Its buttons expose their label via AXDescription and/or AXTitle, so
+    we check both. We do NOT rely on the sheet's name/title (that wording has
+    changed across Chrome versions and breaks name-based matching); instead we
+    confirm the sheet by looking for text mentioning "debug" plus an "Allow"
+    button.
+  * Requires Accessibility permission for whichever app runs this script
+    (System Settings > Privacy & Security > Accessibility). Permission is
+    per-app, so a script that worked from one terminal may silently fail from
+    another launcher (tmux pane started elsewhere, cron, a different terminal).
 USAGE
 }
 
-case "${interval}" in
+case "${1:-}" in
   -h|--help)
     usage
     exit 0
     ;;
+  -d|--dump)
+    mode="dump"
+    ;;
+  "")
+    ;;
+  *)
+    interval="$1"
+    ;;
 esac
 
-if ! [[ "${interval}" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "${interval}" == "0" || "${interval}" == "0.0" ]]; then
-  echo "interval_seconds must be a positive number" >&2
-  exit 2
+if [[ "${mode}" == "poll" ]]; then
+  if ! [[ "${interval}" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "${interval}" == "0" || "${interval}" == "0.0" ]]; then
+    echo "interval_seconds must be a positive number" >&2
+    exit 2
+  fi
 fi
 
-echo "Polling every ${interval}s for Chrome's remote debugging prompt. Press Ctrl-C to stop."
-
-while true; do
-  result="$(
-    /usr/bin/osascript <<'APPLESCRIPT'
-on pressAllowInSheet(theSheet, procName)
+# ---- shared AppleScript helpers (label reading + sheet scanning) -----------
+read -r -d '' HELPERS <<'APPLESCRIPT' || true
+on labelOf(e)
   tell application "System Events"
-    repeat with e in (entire contents of theSheet)
+    set lbl to ""
+    try
+      set d to (description of e)
+      if d is not missing value then set lbl to (d as text)
+    end try
+    if lbl is "" then
       try
-        if (role of e as text) is "AXButton" and (description of e as text) is "Allow" then
-          -- Bring Chrome forward so the sheet is key, then press Allow.
-          tell application "Google Chrome" to activate
-          perform action "AXPress" of e
-          return "clicked " & procName
+        set nm to (name of e)
+        if nm is not missing value then set lbl to (nm as text)
+      end try
+    end if
+    if lbl is "" then
+      try
+        set tt to (title of e)
+        if tt is not missing value then set lbl to (tt as text)
+      end try
+    end if
+    return lbl
+  end tell
+end labelOf
+
+on isAllowLabel(lbl)
+  if lbl is "Allow" then return true
+  if lbl starts with "Allow " then return true
+  return false
+end isAllowLabel
+
+on scanSheet(theSheet)
+  -- returns {allowButtonOrMissing, sawDebugText}
+  tell application "System Events"
+    set theButton to missing value
+    set sawDebug to false
+    set els to {}
+    try
+      set els to entire contents of theSheet
+    end try
+    repeat with e in els
+      try
+        if (role of e as text) is "AXButton" then
+          if my isAllowLabel(my labelOf(e)) then set theButton to (contents of e)
+        end if
+      end try
+      try
+        set v to ""
+        try
+          set v to (value of e as text)
+        end try
+        if v contains "debug" then set sawDebug to true
+        if not sawDebug then
+          if (my labelOf(e)) contains "debug" then set sawDebug to true
         end if
       end try
     end repeat
+    return {theButton, sawDebug}
   end tell
-  return ""
-end pressAllowInSheet
+end scanSheet
+
+on chromeProcs()
+  return {"Google Chrome", "Google Chrome Beta", "Google Chrome Canary", "Chromium", "Chrome for Testing", "Google Chrome for Testing"}
+end chromeProcs
+APPLESCRIPT
+
+run_dump() {
+  /usr/bin/osascript <<APPLESCRIPT
+${HELPERS}
+
+set out to ""
+tell application "System Events"
+  repeat with pn in my chromeProcs()
+    if exists process (pn as text) then
+      tell process (pn as text)
+        set out to out & "== process: " & (pn as text) & " ==" & linefeed
+        set wc to (count of windows)
+        set out to out & "  windows: " & wc & linefeed
+        repeat with wi from 1 to wc
+          set w to window wi
+          set wn to ""
+          try
+            set wn to (name of w as text)
+          end try
+          set wsub to ""
+          try
+            set wsub to (subrole of w as text)
+          end try
+          set out to out & "  window " & wi & " subrole=" & wsub & " name=" & wn & linefeed
+          set shs to {}
+          try
+            set shs to sheets of w
+          end try
+          set out to out & "    sheets: " & (count of shs) & linefeed
+          set containers to shs
+          if wsub is "AXDialog" then set end of containers to w
+          repeat with s in containers
+            set sn to ""
+            try
+              set sn to (name of s as text)
+            end try
+            set out to out & "    container name=" & sn & linefeed
+            try
+              repeat with e in (entire contents of s)
+                set r to ""
+                try
+                  set r to (role of e as text)
+                end try
+                if r is "AXButton" or r is "AXStaticText" then
+                  set out to out & "      [" & r & "] label=" & (my labelOf(e))
+                  set vv to ""
+                  try
+                    set vv to (value of e as text)
+                  end try
+                  if vv is not "" then set out to out & " value=" & vv
+                  set out to out & linefeed
+                end if
+              end repeat
+            end try
+          end repeat
+        end repeat
+      end tell
+    end if
+  end repeat
+end tell
+if out is "" then return "No Chrome-family process found."
+return out
+APPLESCRIPT
+}
+
+run_poll_once() {
+  /usr/bin/osascript <<APPLESCRIPT
+${HELPERS}
 
 tell application "System Events"
-  set chromeProcessNames to {"Google Chrome", "Google Chrome Beta", "Google Chrome Canary", "Chromium", "Chrome for Testing", "Google Chrome for Testing"}
-
-  repeat with chromeProcessName in chromeProcessNames
-    if exists process chromeProcessName then
-      tell process chromeProcessName
-        repeat with chromeWindow in windows
-          if exists sheet 1 of chromeWindow then
-            set sheetName to ""
+  set sawAllowSomewhere to false
+  repeat with pn in my chromeProcs()
+    if exists process (pn as text) then
+      tell process (pn as text)
+        set containers to {}
+        try
+          repeat with w in windows
             try
-              set sheetName to name of sheet 1 of chromeWindow as text
+              repeat with s in sheets of w
+                set end of containers to s
+              end repeat
             end try
-            if sheetName contains "Allow remote debugging" then
-              set clicked to my pressAllowInSheet(sheet 1 of chromeWindow, chromeProcessName as text)
-              if clicked is not "" then return clicked
+            try
+              if (subrole of w as text) is "AXDialog" then set end of containers to w
+            end try
+          end repeat
+        end try
+        repeat with sh in containers
+          set res to my scanSheet(sh)
+          set btn to item 1 of res
+          set okText to item 2 of res
+          if btn is not missing value then
+            set sawAllowSomewhere to true
+            if okText then
+              set frontmost to true
+              try
+                perform action "AXPress" of btn
+              end try
+              return "clicked " & (pn as text)
             end if
           end if
         end repeat
       end tell
     end if
   end repeat
+  if sawAllowSomewhere then return "seen-allow"
 end tell
-
 return "not found"
 APPLESCRIPT
-  )" || result="osascript failed"
+}
+
+if [[ "${mode}" == "dump" ]]; then
+  if ! run_dump; then
+    echo "osascript failed; check Accessibility permission for your terminal app" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+echo "Polling every ${interval}s for Chrome's remote debugging prompt. Press Ctrl-C to stop."
+
+warned_seen_allow=0
+while true; do
+  result="$(run_poll_once)" || result="osascript failed"
 
   if [[ "${result}" == clicked* ]]; then
     printf '%s\n' "${result}"
+    warned_seen_allow=0
+  elif [[ "${result}" == "seen-allow" ]]; then
+    if [[ "${warned_seen_allow}" == "0" ]]; then
+      echo "Found an 'Allow' button but couldn't confirm it's the remote-debugging prompt (no 'debug' text nearby). Run with --dump while the prompt is up to inspect it." >&2
+      warned_seen_allow=1
+    fi
   elif [[ "${result}" == "osascript failed" ]]; then
     echo "osascript failed; check Accessibility permission for your terminal app" >&2
   fi
