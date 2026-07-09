@@ -11,7 +11,7 @@ RUN_SMOKE=0
 ONLY=""
 
 FAILED_PHASES=()
-EXPECTED_TOOLS=(git stow gh fnm node npm bun codex claude wrangler psql rg tmux zsh)
+EXPECTED_TOOLS=(git stow gh fnm node npm bun codex claude wrangler psql rg fd tmux zsh)
 
 usage() {
   cat <<'EOF'
@@ -201,6 +201,19 @@ install_system_packages() {
   else
     warn "unsupported package manager; install packages from vps/packages manually"
   fi
+
+  ensure_fd_command
+}
+
+ensure_fd_command() {
+  add_user_bin_paths
+
+  command -v fd >/dev/null 2>&1 && return 0
+  command -v fdfind >/dev/null 2>&1 || return 0
+
+  log "Adding fd command for Debian fd-find"
+  run_cmd mkdir -p "$HOME/.local/bin"
+  run_cmd ln -sf "$(command -v fdfind)" "$HOME/.local/bin/fd"
 }
 
 install_gh_apt() {
