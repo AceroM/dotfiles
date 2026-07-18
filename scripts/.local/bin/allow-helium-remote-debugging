@@ -9,6 +9,7 @@ Usage: allow-helium-remote-debugging [interval_seconds]
 
 Poll for Helium's "Allow remote debugging?" prompt and click Allow.
 Defaults to polling every 3 seconds. Press Ctrl-C to stop.
+If Helium exits after this script has seen it running, relaunch it.
 
 Helium is imput.co's Chromium fork (bundle net.imput.helium). The prompt is a
 Chromium Views *sheet*, not a normal macOS window, and its buttons expose their
@@ -33,6 +34,10 @@ if ! [[ "${interval}" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "${interval}" == "0" || "
 fi
 
 echo "Polling every ${interval}s for Helium's remote debugging prompt. Press Ctrl-C to stop."
+echo "If Helium exits after being seen running, it will be relaunched."
+
+last_seen_helium_app=""
+relaunched_after_exit=0
 
 while true; do
   result="$(
@@ -71,9 +76,13 @@ end findAndPressAllow
 
 tell application "System Events"
   set heliumProcessNames to {"Helium", "Helium Beta", "Helium Canary"}
+  set foundHeliumProcessName to ""
 
   repeat with heliumProcessName in heliumProcessNames
     if exists process heliumProcessName then
+      if foundHeliumProcessName is "" then
+        set foundHeliumProcessName to heliumProcessName as text
+      end if
       tell process heliumProcessName
         repeat with heliumWindow in windows
           if exists sheet 1 of heliumWindow then
@@ -91,14 +100,30 @@ tell application "System Events"
       end tell
     end if
   end repeat
+
+  if foundHeliumProcessName is not "" then
+    return "running " & foundHeliumProcessName
+  end if
 end tell
 
-return "not found"
+return "not running"
 APPLESCRIPT
   )" || result="osascript failed"
 
   if [[ "${result}" == clicked* ]]; then
     printf '%s\n' "${result}"
+    last_seen_helium_app="${result#clicked }"
+    relaunched_after_exit=0
+  elif [[ "${result}" == running* ]]; then
+    last_seen_helium_app="${result#running }"
+    relaunched_after_exit=0
+  elif [[ "${result}" == "not running" && -n "${last_seen_helium_app}" && "${relaunched_after_exit}" == "0" ]]; then
+    printf 'Helium exited after being seen running; relaunching %s...\n' "${last_seen_helium_app}" >&2
+    if /usr/bin/open -a "${last_seen_helium_app}"; then
+      relaunched_after_exit=1
+    else
+      printf 'Failed to relaunch %s with open -a\n' "${last_seen_helium_app}" >&2
+    fi
   elif [[ "${result}" == "osascript failed" ]]; then
     echo "osascript failed; check Accessibility permission for your terminal app" >&2
   fi

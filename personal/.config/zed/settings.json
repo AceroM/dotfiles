@@ -46,13 +46,13 @@
   },
   "languages": {
     "TypeScript": {
-      "language_servers": ["tsgo"],
+      "language_servers": ["vtsls", "!tsgo", "!typescript-language-server", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }],
     },
     "TSX": {
-      "language_servers": ["...", "!eslint", "oxfmt"],
+      "language_servers": ["vtsls", "!tsgo", "!typescript-language-server", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }],
