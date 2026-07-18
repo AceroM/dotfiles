@@ -210,6 +210,11 @@ function pf() {
   p --model claude-opus-4-8 "$@"
 }
 
+# like p, but bypasses Claude permissions
+function pb() {
+  p --dangerously-skip-permissions "$@"
+}
+
 # open the tmux-nav session navigator sidebar
 alias tn='tmux-nav'
 

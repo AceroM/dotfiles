@@ -218,4 +218,15 @@
       "alt-cmd-n": "agent::NewThread",
     },
   },
+  {
+    "context": "Editor",
+    "unbind": {
+      "cmd-;": "editor::ToggleLineNumbers"
+    }
+  },
+  {
+    "bindings": {
+      "cmd-;": "editor::CopyFileLocation"
+    }
+  }
 ]
