@@ -101,9 +101,9 @@ Keys:
   J/K           Jump to next/previous busy or waiting session
   g/G           Jump to first/bottom session
   a             Toggle auto-switch after j/k navigation
-  Enter         Switch the target tmux client to the selected session (and focus its split)
-  right/left    Switch the target tmux client to the selected session (and focus its split)
-  l/h           Switch the target tmux client to the selected session (and focus its split)
+  Enter         Switch the target tmux client to the selected session
+  right/left    Switch the target tmux client to the selected session
+  l/h           Switch the target tmux client to the selected session
   n             Spawn a new plain tmux session in the selected session's directory
   c             Spawn a new claude session in the selected session's directory
   C             Spawn a new codex session in the selected session's directory
@@ -865,20 +865,15 @@ function renameSession(socket: string, oldName: string, newName: string) {
   tmux(socket, ["rename-session", "-t", oldName, newName]);
 }
 
-function appleScriptString(value: string): string {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
 // Move keyboard focus from this (tmux-nav) split to the terminal split after a
 // commit action (Enter / spawn). switch-client only re-points what the *other*
-// tmux client is attached to; focus stays in tmux-nav. In Ghostty, synthesize
-// its default `super+]` (goto_split:next). In Zed, synthesize cmd+shift+/ to
-// hand focus back from the terminal panel. Requires Accessibility permission.
-// Opt out with TMUX_NAV_NO_FOCUS=1; change the Ghostty key with
-// TMUX_NAV_FOCUS_KEY (default "]", e.g. "[" for goto_split:previous).
+// tmux client is attached to; focus stays in tmux-nav. In Zed, synthesize
+// cmd+shift+/ to hand focus back from the terminal panel. Terminals like
+// Ghostty are deliberately left alone: synthesizing their split-navigation key
+// stole focus in the common single-split case. Requires Accessibility
+// permission. Opt out with TMUX_NAV_NO_FOCUS=1.
 function focusOtherSplit() {
   if (process.platform !== "darwin" || process.env.TMUX_NAV_NO_FOCUS) return;
-  const key = process.env.TMUX_NAV_FOCUS_KEY || "]";
   const script = `
 tell application "System Events"
   set frontApp to first application process whose frontmost is true
@@ -895,8 +890,6 @@ tell application "System Events"
 
   if isZed then
     key code 44 using {command down, shift down}
-  else
-    keystroke ${appleScriptString(key)} using command down
   end if
 end tell
 `;
