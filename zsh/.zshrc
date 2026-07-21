@@ -10,7 +10,6 @@ if [ -f ~/.zsh_private ]; then
   source ~/.zsh_private
 fi
 
-
 # sentry
 fpath=("/Users/miguelacero/.local/share/zsh/site-functions" $fpath)
 
@@ -19,3 +18,12 @@ fpath=("/Users/miguelacero/.local/share/zsh/site-functions" $fpath)
 
 # direnv
 eval "$(direnv hook zsh)"
+alias 1="cd ~/porio-miguel"
+alias 2="cd /srv/porio/apps/9af15709-7faf-4251-a83f-422295a7589c/repo"
+alias 3="cd /srv/porio/apps/f0846634-32fb-4c5e-97cb-5081ab5eb40e/repo"
+
+[ -f "$HOME/.config/cloudflare/wrangler.env" ] && . "$HOME/.config/cloudflare/wrangler.env"
+
+# >>> Codex installer >>>
+export PATH="/home/porio/.local/bin:$PATH"
+# <<< Codex installer <<<

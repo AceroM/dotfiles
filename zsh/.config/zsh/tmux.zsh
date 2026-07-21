@@ -1,5 +1,5 @@
-# Two tmux servers: default socket = claude sessions, `tmux -L bg` = background processes.
-# Claude server: a / l / k / r          bg server: bg / ba / bl / bk / bgr / bgn
+# Two tmux servers: default socket = interactive shells, `tmux -L bg` = background processes and detached agents.
+# Default server: a / l / k / r          bg server: bg / ba / bl / bk / bgr / bgn
 
 # stale aliases from older versions of this file shadow the functions below on re-source
 unalias l a k r t tb bg ba bl bk bgr bgn sk 2>/dev/null
@@ -44,7 +44,7 @@ function _t_new_here() {
 
 _T_CHOOSE_FORMAT="#{session_name}#{?#{&&:#{!=:#{pane_title},#{session_name}},#{&&:#{!=:#{pane_title},zsh},#{!=:#{pane_title},#{pane_current_command}}}},: #{pane_title},}"
 
-# the next session worth attending to — for now: first session whose claude is
+# the next session worth attending to — for now: first session whose agent is
 # actively working (busy spinner is a braille glyph; idle is ✳).
 # optional $2 excludes a session (e.g. the one you're about to kill)
 function next_priority_session() {
@@ -81,7 +81,7 @@ function _t_switch_next_and_kill() {
 }
 
 # attach to <name> (creating it if missing, with optional <cmd>);
-# no args: attach to an in-progress claude session if there is one, else fall back
+# no args: attach to an in-progress agent session if there is one, else fall back
 # per <fallback>: "first" attaches to the first session, "picker" opens choose-tree
 function _t_attach() {
   local sock="$1" fallback="$2" name="$3" session_cmd="$4"
@@ -150,7 +150,7 @@ function tb() { tmux -L bg "$@" }
 alias tx='tmux source-file ~/.tmux.conf; tmux -L bg source-file ~/.tmux.conf 2>/dev/null'
 alias tz='tx'
 
-# ── claude server (default socket) ──────────────────────────────────
+# ── default server (interactive socket) ─────────────────────────────
 function a() { _t_attach "" first "$@" }
 function l() { _t_list "" }
 function k() { _t_kill "" "$@" }
@@ -168,7 +168,7 @@ function bg() { # shadows the zsh builtin; use `builtin bg` for job control
   fi
   _t_attach bg first "$@"
 }
-function ba() { _t_attach bg picker "$@" } # picker (old no-arg bg behavior)
+function ba() { _t_attach bg picker "$@" } # picker
 function bl() { _t_list bg }
 alias bgl='bl'
 function bk() { _t_kill bg "$@" }

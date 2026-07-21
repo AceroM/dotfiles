@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_dir="${HOME}/.local/share/diffshub-cli"
+bin_path="$(readlink -f "${BASH_SOURCE[0]}")"
+local_dir="$(dirname "$(dirname "${bin_path}")")"
+script_dir="${local_dir}/share/diffshub-cli"
 # bun resolves symlinks, so node_modules must be next to the real index.ts
 real_script="$(readlink -f "${script_dir}/index.ts")"
 real_dir="$(dirname "${real_script}")"
@@ -11,4 +13,4 @@ if [ ! -d "${real_dir}/node_modules" ]; then
   (cd "${real_dir}" && bun install --frozen-lockfile)
 fi
 
-exec bun run "${script_dir}/index.ts" "$@"
+exec bun "${script_dir}/index.ts" "$@"
