@@ -107,6 +107,7 @@ Keys:
   n             Spawn a new plain tmux session in the selected session's directory
   c             Spawn a new claude session in the selected session's directory
   C             Spawn a new codex session in the selected session's directory
+  !             Like c, but launches claude with --dangerously-skip-permissions
   b             Branch: new claude prefilled to look at the selected claude session's transcript
   y             Copy the selected agent session id
   x             Kill the selected session
@@ -906,6 +907,8 @@ function spawnAgentSession(
   // When set (claude only), the new session's input is prefilled with this text
   // but NOT submitted, so the user can finish the prompt before sending.
   prompt: string = "",
+  // When true (claude only), launch with --dangerously-skip-permissions.
+  bypass: boolean = false,
 ) {
   if (!cwd) throw new Error("Selected session has no current directory");
 
@@ -920,10 +923,10 @@ function spawnAgentSession(
           fn: "_codex_new_here",
         };
 
-  // Only claude's helper accepts a prefill prompt (4th arg).
+  // Only claude's helper accepts a prefill prompt (4th arg) and bypass flag (5th).
   const call =
     agent === "claude"
-      ? `${helper.fn} "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET" "$TMUX_NAV_PROMPT"`
+      ? `${helper.fn} "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET" "$TMUX_NAV_PROMPT" "$TMUX_NAV_BYPASS"`
       : `${helper.fn} "$TMUX_NAV_SELECTED_CWD" "$TMUX_NAV_TARGET_CLIENT" "$TMUX_NAV_SOCKET"`;
 
   const result = spawnSync(
@@ -944,6 +947,7 @@ function spawnAgentSession(
         TMUX_NAV_TARGET_CLIENT: targetClient?.tty || "",
         TMUX_NAV_SOCKET: socket,
         TMUX_NAV_PROMPT: prompt,
+        TMUX_NAV_BYPASS: bypass ? "1" : "",
       },
     },
   );
@@ -1217,9 +1221,9 @@ function App({ args }: { args: Args }) {
   }, [args, renameValue, renamingName]);
 
   const spawnForSelected = useCallback(
-    (agent: "claude" | "codex", session: TmuxSession, prompt: string = "") => {
+    (agent: "claude" | "codex", session: TmuxSession, prompt: string = "", bypass: boolean = false) => {
       try {
-        spawnAgentSession(agent, args.socket, snapshot.targetClient, session.cwd, prompt);
+        spawnAgentSession(agent, args.socket, snapshot.targetClient, session.cwd, prompt, bypass);
         const next = loadSnapshot(args, targetClientRef.current);
         if (!targetClientRef.current && next.targetClient) targetClientRef.current = next.targetClient.tty;
         setSnapshot(next);
@@ -1407,6 +1411,11 @@ function App({ args }: { args: Args }) {
       setCountPrefix("");
       setFilter("");
       spawnForSelected("codex", selected);
+    } else if (input === "!" && selected) {
+      // Same as "c", but claude launches with --dangerously-skip-permissions.
+      setCountPrefix("");
+      setFilter("");
+      spawnForSelected("claude", selected, "", true);
     } else if (input === "b" && selected) {
       // Branch: spawn a fresh claude in the same dir, prefilled with a pointer to
       // the selected session's transcript so it can pick up context on demand
@@ -1454,7 +1463,7 @@ function App({ args }: { args: Args }) {
   });
 
   const listWidth = Math.max(24, columns);
-  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  g/G first/bottom  n tmux  c claude  C codex  b branch  r rename  R refresh  y copy  enter switch  x kill  / filter  q`;
+  const help = `j/k move${autoSwitch ? "+switch" : ""}  J/K jump  g/G first/bottom  n tmux  c claude  ! claude(bypass)  C codex  b branch  r rename  R refresh  y copy  enter switch  x kill  / filter  q`;
 
   return (
     <Box flexDirection="column">

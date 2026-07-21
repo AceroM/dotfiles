@@ -162,11 +162,14 @@ function pa() {
 # optional 4th arg prefills the new session's input with <prompt> but does NOT
 # submit it (used by tmux-nav's "branch" key to seed a pointer to another
 # session's transcript, leaving the cursor for the user to finish the prompt).
+# optional 5th arg, when non-empty, launches with --dangerously-skip-permissions
+# (tmux-nav's "!" key).
 function _claude_new_here() {
   local dir="${1:-$PWD}"
   local client="${2:-}"
   local sock="${3:-}"
   local prompt="${4:-}"
+  local bypass="${5:-}"
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
   local -a nouns=("${SESSION_NAME_NOUNS[@]}")
 
@@ -191,7 +194,9 @@ function _claude_new_here() {
     ((attempts++))
   done
   local sid=$(_cl_sid)
-  _cl_tmux "$sock" new-session -ds "$name" -c "$dir" "CLAUDE_CODE_NO_FLICKER=1 direnv exec ${(q)dir} claude --session-id $sid"
+  local flags=""
+  [[ -n "$bypass" ]] && flags=" --dangerously-skip-permissions"
+  _cl_tmux "$sock" new-session -ds "$name" -c "$dir" "CLAUDE_CODE_NO_FLICKER=1 direnv exec ${(q)dir} claude --session-id $sid$flags"
   _cl_tag "$name" "$sid" "$sock"
   if [[ -n "$client" ]]; then
     _cl_tmux "$sock" switch-client -c "$client" -t "$name"
