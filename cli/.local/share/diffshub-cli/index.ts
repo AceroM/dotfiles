@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { removeFileLines, removePatchAdditions } from "./patch-edit";
@@ -19,6 +20,10 @@ import { removeFileLines, removePatchAdditions } from "./patch-edit";
 const cwd = process.cwd();
 const port = parseInt(process.argv[2] || "3433", 10); // 3433 = DIFF on a phone keypad
 const here = dirname(fileURLToPath(import.meta.url));
+const realHome = process.env.DIFFSHUB_REAL_HOME || homedir();
+const agentTmuxSocket = process.env.DIFFSHUB_TMUX_SOCKET || "bg";
+const restartWindow = process.env.DIFFSHUB_RESTART_WINDOW || "dh";
+const restartCommand = process.env.DIFFSHUB_RESTART_COMMAND || "dh";
 
 // ---- Directories & repo resolution ----
 // A "directory" (persisted in sqlite) is a top-level entry the UI switches
@@ -858,8 +863,8 @@ const invalidateWorkspace = (id: number) => wsCache.delete(id);
 
 // Tilde-expand a user-entered path.
 function expandTilde(p: string): string {
-  if (p === "~") return process.env.HOME || p;
-  if (p.startsWith("~/")) return `${process.env.HOME}/${p.slice(2)}`;
+  if (p === "~") return realHome;
+  if (p.startsWith("~/")) return `${realHome}/${p.slice(2)}`;
   return p;
 }
 
@@ -948,6 +953,23 @@ function ensureCwdDir(): number {
 }
 const defaultDirId = ensureCwdDir();
 
+function ensureDir(path: string, name?: string): number | null {
+  if (!existsSync(path)) return null;
+  try {
+    if (!statSync(path).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const existing = getDirByPathStmt.get(path);
+  if (existing) return existing.id;
+  return insertDirStmt.get(path, name || path.split("/").pop() || path, null, Date.now())!
+    .id;
+}
+
+const startupDirIds = [ensureDir(`${realHome}/dotfiles`, "dotfiles")].filter(
+  (id): id is number => id != null,
+);
+
 // Resolve the workspace for a request's ?dir=<id> (default = the launch cwd).
 async function wsFromReq(url: URL): Promise<Workspace> {
   const raw = url.searchParams.get("dir");
@@ -961,6 +983,12 @@ async function wsFromReq(url: URL): Promise<Workspace> {
 getWorkspace(defaultDirId)
   .then((ws) => indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => {}))
   .catch(() => {});
+for (const id of startupDirIds) {
+  if (id === defaultDirId) continue;
+  getWorkspace(id)
+    .then((ws) => indexFiles(ws.id, ws.repos, ws.isWorkspace).catch(() => {}))
+    .catch(() => {});
+}
 
 // Permissive CORS so the Chrome extension's content scripts can call the API
 // from any origin (the server is localhost-only and personal). The
@@ -1149,9 +1177,9 @@ async function launchEditor(
 // claude in a detached tmux session and pastes the first prompt. We can't call
 // `p` directly — it ends by attaching, which needs a TTY this server doesn't
 // have — so we reproduce its session-creation half and skip the attach.
-// All claude tmux commands pass `-L default` explicitly: this server often runs
-// inside a `bg`-socket tmux pane, so a bare `tmux` would inherit $TMUX and land
-// the session on the `bg` socket instead of the default one claude lives on.
+// All agent tmux commands pass an explicit socket. Diffshub launches and monitors
+// Claude/Codex on the background socket by default, regardless of the socket this
+// server itself was launched from.
 const SESSION_ADJECTIVES = [
   "amber",
   "brave",
@@ -1215,7 +1243,7 @@ async function pickClaudeSessionName(): Promise<string> {
   let sessions: string[] = [];
   try {
     sessions = (
-      await $`tmux -L default list-sessions -F ${"#S"}`.quiet().text()
+      await $`tmux -L ${agentTmuxSocket} list-sessions -F ${"#S"}`.quiet().text()
     )
       .split("\n")
       .map((s) => s.trim())
@@ -1227,7 +1255,7 @@ async function pickClaudeSessionName(): Promise<string> {
     sessions.map(async (s) => {
       try {
         const cmd = (
-          await $`tmux -L default display-message -p -t ${`${s}:0.0`} ${"#{pane_current_command}"}`
+          await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${s}:0.0`} ${"#{pane_current_command}"}`
             .quiet()
             .text()
         ).trim();
@@ -1265,10 +1293,10 @@ async function pasteAndSubmit(name: string, text: string): Promise<void> {
   const bufFile = `${stateDir}/claude-prompt-${Date.now()}.txt`;
   await Bun.write(bufFile, text);
   const buf = `diffshub-${name}`;
-  await $`tmux -L default load-buffer -b ${buf} ${bufFile}`.quiet();
-  await $`tmux -L default paste-buffer -d -b ${buf} -t ${`${name}:0.0`}`.quiet();
+  await $`tmux -L ${agentTmuxSocket} load-buffer -b ${buf} ${bufFile}`.quiet();
+  await $`tmux -L ${agentTmuxSocket} paste-buffer -d -b ${buf} -t ${`${name}:0.0`}`.quiet();
   await Bun.sleep(PASTE_SETTLE_MS);
-  await $`tmux -L default send-keys -t ${`${name}:0.0`} Enter`.quiet();
+  await $`tmux -L ${agentTmuxSocket} send-keys -t ${`${name}:0.0`} Enter`.quiet();
   await $`rm -f ${bufFile}`.quiet();
 }
 
@@ -1297,7 +1325,7 @@ async function capturePendingPrompt(name: string): Promise<string | null> {
     // Capture scrollback above the visible area too: a prompt taller than a short
     // pane scrolls its own question off-screen, so the visible lines alone miss it
     // (a 18-row tmux pane shows only the footer of a tall AskUserQuestion).
-    pane = await $`tmux -L default capture-pane -p -S -120 -t ${`${name}:0.0`}`
+    pane = await $`tmux -L ${agentTmuxSocket} capture-pane -p -S -120 -t ${`${name}:0.0`}`
       .quiet()
       .text();
   } catch {
@@ -1518,7 +1546,7 @@ const VERIFY_SETTLE_MS = 200;
 // between each so claude's input handler processes them as distinct keypresses.
 async function sendKeySeq(name: string, keys: string[]): Promise<void> {
   for (const key of keys) {
-    await $`tmux -L default send-keys -t ${`${name}:0.0`} ${key}`.quiet();
+    await $`tmux -L ${agentTmuxSocket} send-keys -t ${`${name}:0.0`} ${key}`.quiet();
     await Bun.sleep(KEY_SETTLE_MS);
   }
 }
@@ -1713,8 +1741,8 @@ async function newClaudeSession(
   // --chrome enables the Claude-in-Chrome integration for this session.
   const chromeArg = chrome ? " --chrome" : "";
   const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --session-id ${sid}${modelArg}${effortArg}${chromeArg}${promptArg}`;
-  await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
-  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`
+  await $`tmux -L ${agentTmuxSocket} new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
+  await $`tmux -L ${agentTmuxSocket} set-option -t ${name} @claude_session ${sid}`
     .quiet()
     .catch(() => {});
   return name;
@@ -1728,8 +1756,8 @@ async function newClaudeSession(
 async function resumeClaudeSession(dir: string, sid: string): Promise<string> {
   const name = await pickClaudeSessionName();
   const claudeCmd = `CLAUDE_CODE_NO_FLICKER=1 direnv exec ${shq(dir)} claude --resume ${sid}`;
-  await $`tmux -L default new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
-  await $`tmux -L default set-option -t ${name} @claude_session ${sid}`
+  await $`tmux -L ${agentTmuxSocket} new-session -ds ${name} -c ${dir} ${claudeCmd}`.quiet();
+  await $`tmux -L ${agentTmuxSocket} set-option -t ${name} @claude_session ${sid}`
     .quiet()
     .catch(() => {});
   return name;
@@ -1962,7 +1990,7 @@ async function tagCodexSession(
     const claimed = new Set<string>();
     try {
       const raw =
-        await $`tmux -L default list-sessions -F ${"#{@codex_session}"}`
+        await $`tmux -L ${agentTmuxSocket} list-sessions -F ${"#{@codex_session}"}`
           .quiet()
           .text();
       for (const u of raw.split("\n")) if (u.trim()) claimed.add(u.trim());
@@ -1985,14 +2013,14 @@ async function tagCodexSession(
     fresh.sort((a, b) => b.mtime - a.mtime); // newest first wins a same-cwd race
     for (const f of fresh) {
       if ((await rolloutCwd(f.path)) === cwd) {
-        await $`tmux -L default set-option -t ${name} @codex_session ${f.uuid}`
+        await $`tmux -L ${agentTmuxSocket} set-option -t ${name} @codex_session ${f.uuid}`
           .quiet()
           .catch(() => {});
         return;
       }
     }
     // Give up if the session closed before ever writing a rollout (never prompted).
-    const alive = await $`tmux -L default has-session -t ${name}`
+    const alive = await $`tmux -L ${agentTmuxSocket} has-session -t ${name}`
       .quiet()
       .then(() => true)
       .catch(() => false);
@@ -2021,7 +2049,7 @@ async function newCodexSession(
       ? ` -c ${shq(`model_reasoning_effort="${effort}"`)}`
       : "";
   const codexCmd = `direnv exec ${shq(dir)} codex --dangerously-bypass-approvals-and-sandbox${modelArg}${effortArg}${promptArg}`;
-  await $`tmux -L default new-session -ds ${name} -c ${dir} ${codexCmd}`.quiet();
+  await $`tmux -L ${agentTmuxSocket} new-session -ds ${name} -c ${dir} ${codexCmd}`.quiet();
   void tagCodexSession(name, dir, before);
   return name;
 }
@@ -2134,7 +2162,7 @@ async function resumableSessions(cwd: string): Promise<ResumableSession[]> {
   const live = new Set<string>();
   try {
     const raw =
-      await $`tmux -L default list-sessions -F ${"#{@claude_session}"}`
+      await $`tmux -L ${agentTmuxSocket} list-sessions -F ${"#{@claude_session}"}`
         .quiet()
         .text();
     for (const s of raw.split("\n")) if (s.trim()) live.add(s.trim());
@@ -2250,9 +2278,9 @@ function finishedTs(s: TmuxSession): number {
   return s.busy ? s.mtime : s.endedAt || s.mtime;
 }
 
-// List tmux sessions on the default socket that are running claude, each resolved
-// to its transcript. `pane_current_command` is claude's version string (e.g.
-// "2.1.177") once it's running, so we match that, "claude", or "node".
+// List tmux sessions on the agent socket, each resolved to its transcript.
+// `pane_current_command` is claude's version string (e.g. "2.1.177") once it's
+// running, so we match that, "claude", or "node".
 async function listClaudeSessions(): Promise<TmuxSession[]> {
   const SEP = "\x1f";
   const fmt = [
@@ -2265,7 +2293,7 @@ async function listClaudeSessions(): Promise<TmuxSession[]> {
   ].join(SEP);
   let raw = "";
   try {
-    raw = await $`tmux -L default list-sessions -F ${fmt}`.quiet().text();
+    raw = await $`tmux -L ${agentTmuxSocket} list-sessions -F ${fmt}`.quiet().text();
   } catch {
     return [];
   }
@@ -5453,7 +5481,7 @@ async function sessionInfo(
   try {
     const SEP = "\x1f";
     const info = (
-      await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_title}", "#{pane_current_command}", "#{pane_current_path}"].join(SEP)}`
+      await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${name}:0.0`} ${["#{pane_title}", "#{pane_current_command}", "#{pane_current_path}"].join(SEP)}`
         .quiet()
         .text()
     ).trim();
@@ -6065,7 +6093,7 @@ const server = Bun.serve({
       try {
         // Stash the message in a file so it never has to be shell-escaped, then
         // commit + push each worktree that has staged changes, detached in the
-        // `bg` tmux server so it outlives this request (attach: `tmux -L bg attach`).
+        // agent tmux server so it outlives this request.
         const msgFile = `${stateDir}/commit-msg-${Date.now()}.txt`;
         await Bun.write(msgFile, body.message);
         const session = `diffshub-commit-${Date.now()}`;
@@ -6075,7 +6103,7 @@ const server = Bun.serve({
             `git -C ${shq(dir)} commit -F ${shq(msgFile)} && git -C ${shq(dir)} push; fi`,
         );
         const script = `${steps.join("; ")}; rm -f ${shq(msgFile)}`;
-        await $`tmux -L bg new-session -d -c ${ws.path} -s ${session} ${script}`
+        await $`tmux -L ${agentTmuxSocket} new-session -d -c ${ws.path} -s ${session} ${script}`
           .cwd(ws.path)
           .quiet();
       } catch (e) {
@@ -6090,7 +6118,7 @@ const server = Bun.serve({
     // the target window and the relaunch command anywhere. A manual refresh is
     // Ctrl-C in that pane then re-typing the command. We can't do that inline —
     // sending C-c kills *this* process mid-request, before it could relaunch
-    // anything. So, like /api/commit, we hand the work to a detached `tmux -L bg`
+    // anything. So, like /api/commit, we hand the work to a detached tmux
     // session that outlives our death: it pauses (so this response flushes
     // first), sends C-c to drop back to the shell, waits for the port to free,
     // then types the command + Enter.
@@ -6100,12 +6128,12 @@ const server = Bun.serve({
           window?: string;
           command?: string;
         };
-        const windowName = (body.window ?? "").trim() || "dh";
-        const command = (body.command ?? "").trim() || "dh";
-        // Find the pane whose window matches `windowName` on the bg socket.
+        const windowName = (body.window ?? "").trim() || restartWindow;
+        const command = (body.command ?? "").trim() || restartCommand;
+        // Find the pane whose window matches `windowName` on the agent socket.
         const SEP = "\x1f";
         const target = (
-          await $`tmux -L bg list-panes -a -F ${`#{window_name}${SEP}#{session_name}:#{window_index}.#{pane_index}`}`
+          await $`tmux -L ${agentTmuxSocket} list-panes -a -F ${`#{window_name}${SEP}#{session_name}:#{window_index}.#{pane_index}`}`
             .quiet()
             .text()
         )
@@ -6115,14 +6143,14 @@ const server = Bun.serve({
           .find(([name]) => name === windowName)?.[1];
         if (!target)
           return json(
-            { error: `No \`${windowName}\` window on the bg tmux socket` },
+            { error: `No \`${windowName}\` window on the ${agentTmuxSocket} tmux socket` },
             404,
           );
         const session = `diffshub-restart-${Date.now()}`;
         const script =
-          `sleep 0.4; tmux -L bg send-keys -t ${shq(target)} C-c; ` +
-          `sleep 1; tmux -L bg send-keys -t ${shq(target)} ${shq(command)} Enter`;
-        await $`tmux -L bg new-session -d -s ${session} ${script}`.quiet();
+          `sleep 0.4; tmux -L ${shq(agentTmuxSocket)} send-keys -t ${shq(target)} C-c; ` +
+          `sleep 1; tmux -L ${shq(agentTmuxSocket)} send-keys -t ${shq(target)} ${shq(command)} Enter`;
+        await $`tmux -L ${agentTmuxSocket} new-session -d -s ${session} ${script}`.quiet();
       } catch (e) {
         return json({ error: errText(e) }, 500);
       }
@@ -6446,7 +6474,7 @@ const server = Bun.serve({
       try {
         const SEP = "\x1f";
         const info = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}", "#{@codex_session}"].join(SEP)}`
+          await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}", "#{@codex_session}"].join(SEP)}`
             .quiet()
             .text()
         ).trim();
@@ -6551,7 +6579,7 @@ const server = Bun.serve({
       try {
         const SEP = "\x1f";
         const info = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}"].join(SEP)}`
+          await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${name}:0.0`} ${["#{pane_current_path}", "#{@claude_session}", "#{pane_current_command}", "#{pane_title}"].join(SEP)}`
             .quiet()
             .text()
         ).trim();
@@ -6597,7 +6625,7 @@ const server = Bun.serve({
         return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+          await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
             .quiet()
             .text()
         ).trim();
@@ -6639,7 +6667,7 @@ const server = Bun.serve({
         return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+          await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
             .quiet()
             .text()
         ).trim();
@@ -6780,7 +6808,7 @@ const server = Bun.serve({
         return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+          await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
             .quiet()
             .text()
         ).trim();
@@ -6853,7 +6881,7 @@ const server = Bun.serve({
         return json({ error: "Missing session or path" }, 400);
       try {
         const cwd = (
-          await $`tmux -L default display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
+          await $`tmux -L ${agentTmuxSocket} display-message -p -t ${`${name}:0.0`} ${"#{pane_current_path}"}`
             .quiet()
             .text()
         ).trim();
@@ -6893,7 +6921,7 @@ const server = Bun.serve({
         return json({ error: "Missing session" }, 400);
       }
       try {
-        await $`tmux -L default kill-session -t ${body.session}`.quiet();
+        await $`tmux -L ${agentTmuxSocket} kill-session -t ${body.session}`.quiet();
         return json({ ok: true });
       } catch (e) {
         return json({ error: errText(e) }, 500);
@@ -6936,7 +6964,7 @@ const server = Bun.serve({
         return json({ error: "Missing session" }, 400);
       }
       try {
-        await $`tmux -L default send-keys -t ${`${body.session}:0.0`} Escape`.quiet();
+        await $`tmux -L ${agentTmuxSocket} send-keys -t ${`${body.session}:0.0`} Escape`.quiet();
         return json({ ok: true });
       } catch (e) {
         return json({ error: errText(e) }, 500);
@@ -6999,7 +7027,7 @@ const server = Bun.serve({
         return json({ error: "Invalid key" }, 400);
       }
       try {
-        await $`tmux -L default send-keys -t ${`${body.session}:0.0`} ${body.key}`.quiet();
+        await $`tmux -L ${agentTmuxSocket} send-keys -t ${`${body.session}:0.0`} ${body.key}`.quiet();
         return json({ ok: true });
       } catch (e) {
         return json({ error: errText(e) }, 500);

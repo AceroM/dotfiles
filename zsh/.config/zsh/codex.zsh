@@ -167,7 +167,7 @@ function xc() {
   tmux attach -t "$name"
 }
 
-# xa — like xc, but async: spins up the session in the background without attaching
+# xa — like xc, but async: spins up the session on the bg server without attaching
 # and echoes the session name. The codex twin of `pa`.
 function xa() {
   local input=""
@@ -175,19 +175,19 @@ function xa() {
     input=$(cat)
   fi
 
-  local name="$(_cx_pick_name)"
+  local name="$(_cx_pick_name bg)"
   local before="$(_cx_uuids)"
-  tmux new-session -ds "$name" -c "$PWD" "$(_cx_cmd "$input" "$@")"
-  _cx_tag_async "$name" "$PWD" "$before"
+  _cx_tmux bg new-session -ds "$name" -c "$PWD" "$(_cx_cmd "$input" "$@")"
+  _cx_tag_async "$name" "$PWD" "$before" bg
   print -r -- "$name"
 }
 
-# xe — autonomous codex: a detached session with approvals + sandbox bypassed, fed a
+# xe — autonomous codex: a detached bg session with approvals + sandbox bypassed, fed a
 # first prompt. The codex twin of `ce`.
 function xe() {
-  local name="$(_cx_pick_name)"
+  local name="$(_cx_pick_name bg)"
   local before="$(_cx_uuids)"
-  tmux new-session -ds "$name" -c "$PWD" \
+  _cx_tmux bg new-session -ds "$name" -c "$PWD" \
     "$(_cx_cmd "$1" --dangerously-bypass-approvals-and-sandbox)"
-  _cx_tag_async "$name" "$PWD" "$before"
+  _cx_tag_async "$name" "$PWD" "$before" bg
 }

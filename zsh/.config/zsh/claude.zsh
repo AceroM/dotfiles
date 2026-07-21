@@ -18,18 +18,18 @@ function _cl_tag() { _cl_tmux "${3:-}" set-option -t "$1" @claude_session "$2" 2
 function ce() {
   local s="claude-$(uuidgen | cut -d- -f1)"
   local sid=$(_cl_sid)
-  tmux new-session -d "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid --dangerously-skip-permissions"
-  _cl_tag "$s" "$sid"
+  _cl_tmux bg new-session -d -s "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid --dangerously-skip-permissions"
+  _cl_tag "$s" "$sid" bg
   sleep 1
-  tmux send-keys -t "$s:0.0" "$1" C-m
+  _cl_tmux bg send-keys -t "$s:0.0" "$1" C-m
 }
 
 function pm() {
   local s="claude-pm-$(uuidgen | cut -d- -f1)"
   local prompt='Review the staged + unstaged diff and the recent git log for style. Write a Conventional Commits message (type(scope): summary, with a body if the change warrants it) that accurately describes the change — never use a placeholder like "changes". Then commit and push. Do NOT add a Co-Authored-By footer or any AI attribution.'
   local sid=$(_cl_sid)
-  tmux new-session -ds "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
-  _cl_tag "$s" "$sid"
+  _cl_tmux bg new-session -ds "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid --dangerously-skip-permissions -p $(printf '%q' "$prompt")"
+  _cl_tag "$s" "$sid" bg
 }
 
 function j() {
@@ -38,8 +38,8 @@ function j() {
 
   typeset -A used_letters
   local existing cmd
-  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
-    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+  for existing in $(_cl_tmux bg list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(_cl_tmux bg display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
     if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
       used_letters[${existing:0:1}]=1
     fi
@@ -49,7 +49,7 @@ function j() {
   while true; do
     name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
     first_letter="${name:0:1}"
-    if ! tmux has-session -t "$name" 2>/dev/null; then
+    if ! _cl_tmux bg has-session -t "$name" 2>/dev/null; then
       if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
         break
       fi
@@ -57,11 +57,11 @@ function j() {
     ((attempts++))
   done
   local sid=$(_cl_sid)
-  tmux new-session -ds "$name" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid"
-  _cl_tag "$name" "$sid"
+  _cl_tmux bg new-session -ds "$name" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid"
+  _cl_tag "$name" "$sid" bg
   sleep 1
-  tmux send-keys -t "$name:0.0" "$1" C-m
-  tmux send-keys -t "$name:0.0" C-m
+  _cl_tmux bg send-keys -t "$name:0.0" "$1" C-m
+  _cl_tmux bg send-keys -t "$name:0.0" C-m
 }
 
 function p() {
@@ -110,7 +110,7 @@ function p() {
   tmux attach -t "$name"
 }
 
-# like p, but async: spins up the session in the background without attaching
+# like p, but async: spins up the session on the bg server without attaching
 function pa() {
   local input=""
   if [[ ! -t 0 ]]; then
@@ -122,8 +122,8 @@ function pa() {
 
   typeset -A used_letters
   local existing cmd
-  for existing in $(tmux list-sessions -F '#S' 2>/dev/null); do
-    cmd=$(tmux display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
+  for existing in $(_cl_tmux bg list-sessions -F '#S' 2>/dev/null); do
+    cmd=$(_cl_tmux bg display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
     if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
       used_letters[${existing:0:1}]=1
     fi
@@ -133,7 +133,7 @@ function pa() {
   while true; do
     name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
     first_letter="${name:0:1}"
-    if ! tmux has-session -t "$name" 2>/dev/null; then
+    if ! _cl_tmux bg has-session -t "$name" 2>/dev/null; then
       if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
         break
       fi
@@ -146,13 +146,13 @@ function pa() {
   for arg in "$@"; do
     claude_cmd+=" ${(q)arg}"
   done
-  tmux new-session -ds "$name" -c "$PWD" "$claude_cmd"
-  _cl_tag "$name" "$sid"
+  _cl_tmux bg new-session -ds "$name" -c "$PWD" "$claude_cmd"
+  _cl_tag "$name" "$sid" bg
   if [[ -n "$input" ]]; then
     sleep 1
-    printf '%s' "$input" | tmux load-buffer -
-    tmux paste-buffer -t "$name:0.0"
-    tmux send-keys -t "$name:0.0" Enter
+    printf '%s' "$input" | _cl_tmux bg load-buffer -
+    _cl_tmux bg paste-buffer -t "$name:0.0"
+    _cl_tmux bg send-keys -t "$name:0.0" Enter
   fi
   echo "$name"
 }
