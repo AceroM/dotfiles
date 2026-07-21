@@ -1,93 +1,130 @@
 ---
 name: html
-description: Read AND write html.porio.ai docs. READ — when a prompt references an https://html.porio.ai/d/<slug> (or /md/<slug>) link, curl it back as markdown with the VPS-sourced token (the app is auth-gated; WebFetch won't work). WRITE — on /html or "a doc / write-up / handoff / walkthrough / QA report", publish markdown to html.porio.ai in a Porio repo (return the /d/<slug> link) or a local .html file elsewhere. Triggers: any "html.porio.ai" link, "/html", "read this doc", "save a doc", "write this up", "handoff", "give me a link".
+description: Read, search, publish, and update durable Porio markdown docs in the authenticated html.porio.ai D1 archive, or create a self-contained local HTML report when explicitly requested for non-Porio work. Use for any html.porio.ai link, /html, Porio handoff, discovery, review, walkthrough, QA report, historical lookup, "write this up", "save a doc", or "give me a link" request.
 ---
 
-# /html — html.porio.ai docs (read + write)
+# /html — Porio D1 docs and explicit local HTML
 
-Porio's durable docs are **markdown in D1 behind https://html.porio.ai** (Google-OAuth reader for humans, bearer token for agents). The app is **auth-gated**, so a plain fetch/WebFetch of a doc URL returns the login gate — always go through the API with the token below.
+Porio's durable docs are markdown records in the remote `documents` D1 table behind https://html.porio.ai. Humans use the Google-OAuth reader; agents use its bearer-authenticated API.
 
-## The token (needed for every read and write)
+## Choose the mode by intent, never by working directory
 
-Canonical source is the VPS file `/home/porio/html/.env.local` (it is **not** in Doppler):
+- **Porio documentation, handoffs, discoveries, reviews, walkthroughs, QA reports, historical lookups, or any `html.porio.ai` link:** use Mode A and the D1 archive, regardless of the current directory.
+- **An explicitly requested standalone `.html` deliverable for non-Porio work:** use Mode B.
+
+If the intent is ambiguous but the content concerns Porio, use Mode A. Do not select local HTML merely because the current directory is outside `~/porio`.
+
+## Mode A — remote Porio D1 archive
+
+**D1 is the only durable source of truth for Porio docs.** Never add a Porio document to a repository, `docs/`, `handoffs/`, or a Git commit. Do not create a raw `.html` Porio handoff. Draft outside repositories under `/tmp`, publish and verify it, then remove the temporary draft. A Git push does not publish to html.porio.ai.
+
+### Client and credential
+
+Use the bundled client for document API operations:
 
 ```bash
-# From the mac (this machine): read it over SSH.
-TOKEN=$(ssh -o BatchMode=yes root@178.156.146.209 \
-  "sudo -u porio bash -lc \"grep '^DOCS_INGEST_TOKEN=' /home/porio/html/.env.local | cut -d= -f2\"")
+CODEX_HTML_SKILL="${CODEX_HOME:-$HOME/.codex}/skills/html"
+if [ -x "$CODEX_HTML_SKILL/scripts/porio_docs.py" ]; then
+  DOCS="$CODEX_HTML_SKILL/scripts/porio_docs.py"
+else
+  DOCS="$HOME/.claude/skills/html/scripts/porio_docs.py"
+fi
+test -x "$DOCS"
 ```
 
-(An agent running **on the VPS** reads it directly: `TOKEN=$(grep '^DOCS_INGEST_TOKEN=' /home/porio/html/.env.local | cut -d= -f2)`.)
+The client reads `DOCS_INGEST_TOKEN` without printing it, in this order: the process environment, `$PORIO_DOCS_ENV_FILE`, `~/.config/porio/docs.env`, then the canonical VPS checkout at `/home/porio/porioHQ/html-porio-ai/.env.local`. If none is available, stop and report the credential blocker. Never print, `cat`, log, commit, or paste the token into a prompt, and never fall back to Git.
 
----
+### Read linked docs and search history
 
-## READ — resolve a linked doc to markdown
-
-**Whenever a prompt references an `https://html.porio.ai/d/<slug>` or `/md/<slug>` link, fetch its markdown and read it before acting.** Extract the slug (last path segment) and curl `/md/<slug>`:
+Whenever a prompt references `https://html.porio.ai/d/<slug>` or `/md/<slug>`, extract the last path segment and read its markdown before acting:
 
 ```bash
-URL="https://html.porio.ai/d/2026-07-12-quante-patreon-stripe-flows"   # the linked doc
+URL="https://html.porio.ai/d/2026-07-19-exact-topic"
 SLUG=$(printf '%s' "$URL" | sed -E 's#[?#].*$##; s#/+$##; s#.*/##')
-curl -s "https://html.porio.ai/md/$SLUG" -H "Authorization: Bearer $TOKEN"
-# → the raw markdown (frontmatter + body). `?token=$TOKEN` as a query param also works.
+"$DOCS" view "$SLUG"
 ```
 
-- **Images** referenced as `/i/<path>` are fetched the same way: `curl -s "https://html.porio.ai/i/<path>" -H "Authorization: Bearer $TOKEN"`.
-- **Search / discover** across all docs: `curl -s "https://html.porio.ai/api/docs?q=<terms>&limit=20" -H "Authorization: Bearer $TOKEN"` → JSON `{documents,total}` (searches title/slug/description/project/kind/tags). Omit `q` + page with `?offset=&limit=` to list.
-- Do **not** use WebFetch on `/d/<slug>` — it's the auth-gated HTML page, not the content.
+Use the archive instead of guessing about prior work:
 
----
+```bash
+"$DOCS" list --offset 0 --limit 40
+"$DOCS" search "distinctive project or topic terms" --limit 20
+"$DOCS" get 2026-07-19-exact-topic
+"$DOCS" view 2026-07-19-exact-topic
+```
 
-## WRITE — two modes, pick by location
+Do not browse the auth-gated `/d/` page to obtain content. Fetch referenced `/i/<path>` images with an authenticated request when they are relevant.
 
-- **In a Porio repo (cwd under `~/porio`) → publish markdown to html.porio.ai** and give the user the `/d/<slug>` link. Default for all Porio work.
-- **Anywhere else → write a self-contained local `.html`** file (Mode B).
+### Publish or update
 
-### Mode A — Porio repo → html.porio.ai
+1. Finish all safe implementation and verification first. Gather real payloads and screenshots; never invent values.
+2. Search before writing so an existing record can be intentionally updated instead of duplicated:
 
-1. Do the work first; gather real payloads/screenshots. Never invent values.
-2. Author GitHub-flavored markdown with YAML frontmatter, saved as a seed in `<repo>/html/<slug>.md` (root `html/` is gitignored scratch):
+   ```bash
+   "$DOCS" search "distinctive project or topic terms" --limit 20
+   ```
+
+3. Write `/tmp/porio-doc-<slug>.md` as GitHub-flavored markdown with YAML frontmatter:
 
    ```markdown
    ---
    title: Exact document title
    description: One-sentence summary.
-   project: quante            # lowercase-kebab — quante, porio-void, porio-hub, dev-porio, porio-html, app, web, …
-   kind: walkthrough          # handoff | discovery | review | walkthrough | note
-   date: 2026-07-12
-   tags: [patreon, stripe]
-   slug: 2026-07-12-<topic>   # YYYY-MM-DD-<topic>; the upsert key
+   project: porio-hub
+   kind: handoff
+   date: 2026-07-19
+   slug: 2026-07-19-exact-topic
+   tags: [dns, oauth]
    ---
 
-   ## Summary
-   Lead with the conclusion / verdict box, then detail.
+   ## Status
+
+   Lead with the conclusion or current status.
    ```
 
-   Name code-fence languages (shiki). `> [!WARNING]` alerts and `::: tip … :::` containers render styled. Tables for enumerable facts (records, env vars, IDs, state machines). Reference repo files as `path:line`.
+   `project` is lowercase kebab-case. `kind` is `handoff`, `discovery`, `review`, `walkthrough`, or `note`. Use a new descriptive slug for a distinct historical record; reuse a slug only when intentionally updating that record. Name every code-fence language. Prefer tables for enumerable facts and reference repository files as `path:line`.
 
-3. **Publish** (upsert by slug — re-POST the same slug to update the same doc/link):
+4. Publish the temporary file:
 
    ```bash
-   jq -n --rawfile md "<repo>/html/<slug>.md" --arg slug "<slug>" '{markdown:$md, slug:$slug}' \
-     | curl -s -X POST https://html.porio.ai/api/docs \
-         -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @-
-   # → {"slug":"…","created":true,"url":"/d/…"}
+   "$DOCS" publish /tmp/porio-doc-2026-07-19-exact-topic.md
    ```
 
-4. **Report the live URL** `https://html.porio.ai/d/<slug>` — the link the user wants.
+5. Treat the document as published only after both verification calls succeed:
 
-**Images** (screenshots/diagrams): never base64-inline. Upload keyed by slug, then reference the returned `/i/...` path (deterministic — re-POST replaces):
+   ```bash
+   "$DOCS" get 2026-07-19-exact-topic
+   "$DOCS" view 2026-07-19-exact-topic >/dev/null
+   ```
+
+6. Remove the temporary markdown and report `https://html.porio.ai/d/<slug>`.
+
+Frontmatter drives metadata. `publish --slug <slug>` explicitly overrides its slug, and re-publishing the same slug upserts that D1 record.
+
+### Images
+
+Images live in the private `porio-html` R2 bucket, never inline as base64 and never in Git. Upload under a deterministic document-scoped key:
 
 ```bash
-curl -s -X POST "https://html.porio.ai/api/images/<slug>/01-context.png" \
-  -H "Authorization: Bearer $TOKEN" -H "content-type: image/png" --data-binary @01-context.png
-# markdown: ![alt](/i/<slug>/01-context.png)   (png/jpg/gif/webp/svg/avif, ≤20MB)
+"$DOCS" upload-image 2026-07-19-exact-topic /tmp/01-context.png
 ```
 
-Content rules: lead with the conclusion; tables/payloads over prose; never include secret values (name them + where they're set); mark owner-only work "handoff required" until confirmed; prefer updating an existing slug over a near-duplicate. The system reference is the box `/home/porio/html/AGENTS.md` (`## porio-html`); app = the `porio-html` Void worker (`github.com/AceroM/porio-html`, checkout `/home/porio/html`, D1 `porio-html-db`).
+Reference the returned root-relative `/i/...` URL in markdown. Supported extensions are png, jpg/jpeg, gif, webp, svg, and avif, up to 20 MB. Re-uploading the same name replaces the image.
 
-### Mode B — Non-Porio → self-contained local `.html`
+### Content requirements
 
-- Write to `<project-root>/html/<slug>.html` (kebab-case slug). Images → own subfolder `html/<slug>/index.html` + sibling `NN-<context>.png` with **relative** `src`, never base64.
-- Ensure `html/` is gitignored (`/html/`). One `<html>` file, zero external requests: inline CSS, system font stack, no CDN; readable as `file://`. Dark-first (`color-scheme: dark`), ~60rem max-width.
-- Lead with the conclusion; real headings, tables, `<code>`, `path:line` refs. End by printing the file path.
+- Lead with status, then completed work.
+- Record owner actions with exact non-secret values and where to enter them.
+- Include verification, remaining risks, assumptions, rollback notes, and a clear “not completed by agent” section when relevant.
+- Never include secret values. Name the secret and point to where the owner sets it.
+- Do not imply owner-only work is complete until confirmed.
+
+The system reference is `/home/porio/porioHQ/html-porio-ai/AGENTS.md` (`## porio-html`). The worker checkout is `/home/porio/porioHQ/html-porio-ai`, and its D1 database is `porio-html-db`.
+
+## Mode B — explicit non-Porio standalone HTML
+
+- Use this mode only when the user explicitly requests a local/self-contained `.html` deliverable and the content is not a durable Porio document.
+- Write to `<project-root>/html/<slug>.html`. If the page has images, use `html/<slug>/index.html` plus sibling `NN-<context>.png` files with relative `src` paths; never base64-inline them.
+- Ensure the project ignores `/html/`.
+- Produce one self-contained HTML file with inline CSS, a system font stack, no CDN or external requests, and correct `file://` behavior. Default to dark-first (`color-scheme: dark`) and about `60rem` maximum width.
+- Lead with the conclusion; use semantic headings, tables, `<code>`, and `path:line` references. End by reporting the local file path.

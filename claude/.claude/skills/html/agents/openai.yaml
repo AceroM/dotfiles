@@ -1,0 +1,4 @@
+interface:
+  display_name: "Porio Docs + Local HTML"
+  short_description: "Publish and search Porio D1 docs or build local HTML"
+  default_prompt: "Use $html to publish, retrieve, or create the requested document."
