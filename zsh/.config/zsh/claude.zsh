@@ -94,7 +94,7 @@ function p() {
     ((attempts++))
   done
   local sid=$(_cl_sid)
-  local claude_cmd="CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid"
+  local claude_cmd="CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid${CLAUDE_P_DANGEROUS:+ --dangerously-skip-permissions}"
   local arg
   for arg in "$@"; do
     claude_cmd+=" ${(q)arg}"
@@ -108,6 +108,11 @@ function p() {
     tmux send-keys -t "$name:0.0" Enter
   fi
   tmux attach -t "$name"
+}
+
+# like p, but with --dangerously-skip-permissions (yolo)
+function 'p!'() {
+  CLAUDE_P_DANGEROUS=1 p "$@"
 }
 
 # like p, but async: spins up the session on the bg server without attaching
