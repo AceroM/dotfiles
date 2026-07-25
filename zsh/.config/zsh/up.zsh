@@ -9,7 +9,7 @@
 # Registry: each app gets a `_up_<name>_status` and `_up_<name>_update`
 # function. To add a new app, define both and add its name to `_up_apps`.
 
-_up_apps=(claude wrangler pi)
+_up_apps=(claude wrangler pi gws)
 
 _up_print() {
   # _up_print <name> <version> <state>
@@ -77,6 +77,28 @@ _up_pi_status() {
 
 _up_pi_update() {
   npm install -g @earendil-works/pi-coding-agent
+}
+
+_up_gws_status() {
+  if ! command -v gws >/dev/null 2>&1; then
+    _up_print gws "-" "not installed"
+    return
+  fi
+  local current latest
+  current=$(gws --version 2>/dev/null | head -n1 | awk '{print $NF}')
+  latest=$(npm view @googleworkspace/cli version 2>/dev/null)
+  if [[ -z "$latest" ]]; then
+    _up_print gws "${current:-?}" "unknown (npm lookup failed)"
+  elif [[ "$current" == "$latest" ]]; then
+    _up_print gws "$current" "up to date"
+  else
+    _up_print gws "$current" "outdated (latest: $latest)"
+  fi
+}
+
+_up_gws_update() {
+  # gws is a vp-managed global bin (see ~/.vite-plus/bins/gws.json).
+  vp install -g @googleworkspace/cli
 }
 
 _up_list() {
