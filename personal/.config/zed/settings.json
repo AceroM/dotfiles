@@ -11,6 +11,7 @@
     },
   },
   "cli_default_open_behavior": "new_window",
+  "close_panel_on_toggle": false,
   "project_panel": {
     "dock": "right",
   },

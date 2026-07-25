@@ -2,16 +2,16 @@
   {
     "context": "ProjectPanel && not_editing",
     "bindings": {
-      "n": "project_panel::NewFile",
-    },
+      "n": "project_panel::NewFile"
+    }
   },
   {
     "context": "ProjectSearch",
-    "bindings": {},
+    "bindings": {}
   },
   {
     "context": "FileFinder",
-    "bindings": {},
+    "bindings": {}
   },
   {
     "context": "Workspace",
@@ -21,8 +21,8 @@
       "alt-s": "workspace::Save",
       "alt-b": "workspace::ToggleLeftDock",
       "alt-;": "workspace::ToggleRightDock",
-      "alt-f": "workspace::NewSearch",
-    },
+      "alt-f": "workspace::NewSearch"
+    }
   },
   {
     "context": "Pane",
@@ -33,14 +33,14 @@
       "alt-[": "pane::ActivatePreviousItem",
       "alt-]": "pane::ActivateNextItem",
       "alt-w": "pane::CloseActiveItem",
-      "ctrl-shift-w": "pane::CloseAllItems",
-    },
+      "ctrl-shift-w": "pane::CloseAllItems"
+    }
   },
   {
     "context": "AssistantPanel",
     "bindings": {
-      "ctrl-e": "project_panel::ToggleFocus",
-    },
+      "ctrl-e": "project_panel::ToggleFocus"
+    }
   },
   {
     "context": "Editor",
@@ -67,8 +67,8 @@
       "alt-shift-g": "search::SelectPreviousMatch",
       "alt-g": "search::SelectNextMatch",
       "alt-h": "editor::Hover",
-      "alt-enter": "editor::ToggleCodeActions",
-    },
+      "alt-enter": "editor::ToggleCodeActions"
+    }
   },
   {
     "context": "Editor && VimControl && !VimWaiting && !menu",
@@ -77,99 +77,102 @@
       "g l": "editor::SelectNext",
       "g a": "editor::SelectAllMatches",
       "g r": "editor::FindAllReferences",
-      "g ;": "editor::Rename",
-    },
+      "g ;": "editor::Rename"
+    }
   },
   {
     "context": "(Workspace && !Terminal)",
     "bindings": {
-      "ctrl-cmd-shift-r": "task::Spawn",
-    },
+      "ctrl-cmd-shift-r": "task::Spawn"
+    }
   },
   {
     "context": "(Workspace && !Terminal)",
     "bindings": {
-      "ctrl-alt-cmd-r": "task::Spawn",
-    },
+      "ctrl-alt-cmd-r": "task::Spawn"
+    }
   },
   {
     "bindings": {
-      "cmd-shift-r": "workspace::CopyRelativePath",
-    },
+      "cmd-shift-r": "workspace::CopyRelativePath"
+    }
   },
   {
     "context": "Pane",
     "bindings": {
-      "cmd-0": "git_panel::ToggleFocus",
-    },
+      "cmd-0": "git_panel::ToggleFocus"
+    }
   },
   {
     "bindings": {
-      "ctrl-alt-p": "editor::OpenPermalinkToLine",
-    },
+      "ctrl-alt-p": "editor::OpenPermalinkToLine"
+    }
   },
   {
     "context": "Editor",
     "bindings": {
-      "cmd-0": "git_panel::ToggleFocus",
-    },
+      "cmd-0": "git_panel::ToggleFocus"
+    }
   },
   {
     "bindings": {
-      "ctrl-alt-j": "terminal_panel::ToggleFocus",
-    },
-  },
-  {
-    "context": "Workspace",
-    "bindings": {
-      "ctrl-alt-cmd-d": "debug_panel::ToggleFocus",
-    },
+      "cmd-i": "terminal_panel::ToggleFocus",
+      "ctrl-alt-j": "terminal_panel::ToggleFocus"
+    }
   },
   {
     "context": "Workspace",
     "bindings": {
-      "cmd-shift-d": "git::Diff",
-    },
+      "ctrl-alt-cmd-d": "debug_panel::ToggleFocus"
+    }
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "cmd-shift-d": "git::Diff"
+    }
   },
   {
     "context": "GitPanel",
     "bindings": {
-      "ctrl-g d": null,
-    },
+      "ctrl-g d": null
+    }
   },
   {
     "bindings": {
-      "alt-/": "editor::CopyRelativePath",
-    },
+      "alt-/": "workspace::CopyRelativePath"
+    }
   },
   {
     "context": "Terminal",
     "bindings": {
+      "cmd-;": ["workspace::SendKeystrokes", "cmd-i alt-/ cmd-i cmd-v"],
+      "cmd-'": ["workspace::SendKeystrokes", "cmd-i cmd-; cmd-i cmd-v"],
       "ctrl-alt-down": null,
       "ctrl-r": ["terminal::SendKeystroke", "ctrl-r"],
       "ctrl-a": null,
       "ctrl-e": null,
       "alt-backspace": ["terminal::SendKeystroke", "ctrl-w"],
-      "ctrl-alt-k": "terminal_panel::ToggleFocus",
-    },
+      "ctrl-alt-k": "terminal_panel::ToggleFocus"
+    }
   },
   {
     "context": "(Editor && mode == full)",
     "bindings": {
-      "ctrl-alt-down": "editor::GoToNextChange",
-    },
+      "ctrl-alt-down": "editor::GoToNextChange"
+    }
   },
   {
     "context": "Editor",
     "bindings": {
-      "ctrl-l": ["editor::InsertSnippet", { "snippet": "console.log($1);" }],
-    },
+      "ctrl-l": ["editor::InsertSnippet", { "snippet": "console.log($1);" }]
+    }
   },
   {
     "context": "Editor && vim_mode == insert",
     "bindings": {
-      "ctrl-d": ["editor::InsertSnippet", { "snippet": "debugger;" }],
-    },
+      "ctrl-d": ["editor::InsertSnippet", { "snippet": "debugger;" }]
+    }
   },
   {
     "context": "Editor",
@@ -177,46 +180,46 @@
       "alt-up": "vim::ScrollUp",
       "alt-down": "vim::ScrollDown",
       "alt-shift-up": "editor::MoveLineUp",
-      "alt-shift-down": "editor::MoveLineDown",
-    },
+      "alt-shift-down": "editor::MoveLineDown"
+    }
   },
   {
     "context": "VimControl && !menu",
     "bindings": {
-      "alt-enter": "editor::OpenExcerpts",
-    },
+      "alt-enter": "editor::OpenExcerpts"
+    }
   },
   {
     "context": "VimControl && !menu",
     "unbind": {
-      "g space": "editor::OpenExcerpts",
-    },
+      "g space": "editor::OpenExcerpts"
+    }
   },
   {
     "bindings": {
-      "g cmd-d": "git::BranchDiff",
-    },
+      "g cmd-d": "git::BranchDiff"
+    }
   },
   {
     "bindings": {
-      "cmd-5": "editor::RestartLanguageServer",
-    },
+      "cmd-5": "editor::RestartLanguageServer"
+    }
   },
   {
     "context": "Workspace",
     "bindings": {
-      "cmd-alt-;": "workspace::ToggleRightDock",
-    },
+      "cmd-alt-;": "workspace::ToggleRightDock"
+    }
   },
   {
     "bindings": {
-      "cmd-shift-.": "editor::ToggleFocus",
-    },
+      "cmd-shift-.": "editor::ToggleFocus"
+    }
   },
   {
     "bindings": {
-      "alt-cmd-n": "agent::NewThread",
-    },
+      "alt-cmd-n": "agent::NewThread"
+    }
   },
   {
     "context": "Editor",
