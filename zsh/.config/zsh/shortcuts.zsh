@@ -8,6 +8,9 @@ alias n="nvim"
 alias nl="NVIM_NO_LSP=1 nvim" # open without any LSP (see nvim options.lua)
 alias c="claude"
 alias cs="claude --dangerously-skip-permissions"
+function 'c!'() {
+  cs "$@"
+}
 alias ca="claude --permission-mode plan"
 alias cx="codex --yolo"
 alias pn="pnpm"
