@@ -171,7 +171,9 @@
   {
     "context": "Editor && vim_mode == insert",
     "bindings": {
-      "ctrl-d": ["editor::InsertSnippet", { "snippet": "debugger;" }]
+      "ctrl-d": ["editor::InsertSnippet", { "snippet": "debugger;" }],
+      "ctrl-c": ["editor::InsertSnippet", { "snippet": "const $1" }],
+      "ctrl-r": ["editor::InsertSnippet", { "snippet": "return $1" }]
     }
   },
   {
@@ -230,6 +232,27 @@
   {
     "bindings": {
       "cmd-;": "editor::CopyFileLocation"
+    }
+  },
+  // Helper for the visual-mode ctrl-l below; not meant to be pressed directly.
+  {
+    "context": "Editor",
+    "bindings": {
+      "ctrl-alt-cmd-shift-l": [
+        "editor::InsertSnippet",
+        { "snippet": "console.log('$1 :>>', $2);" }
+      ]
+    }
+  },
+  // Select a variable, hit ctrl-l -> logs it on the line below.
+  // copy | leave visual | open line below | template | fill both tabstops
+  {
+    "context": "Editor && vim_mode == visual",
+    "bindings": {
+      "ctrl-l": [
+        "workspace::SendKeystrokes",
+        "cmd-c escape o ctrl-alt-cmd-shift-l cmd-v tab cmd-v escape"
+      ]
     }
   }
 ]
