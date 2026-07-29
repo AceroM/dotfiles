@@ -9,10 +9,27 @@ return {
     local ls = require("luasnip")
     local types = require("luasnip.util.types")
 
+    -- Filetypes that get no general-purpose snippets. Keep in sync with the
+    -- blink.cmp `enabled` gate in plugins/completion.lua. The small "universal"
+    -- set remains available even here for explicitly global snippets.
+    local no_snippets = { text = true, [""] = true }
+
     ls.config.set_config({
       history = true,
       updateevents = "TextChanged,TextChangedI",
       enable_autosnippets = true,
+      -- snippets/all.lua is registered under the "global" pseudo-filetype so it
+      -- applies everywhere. It can't use LuaSnip's real "all" filetype: LuaSnip
+      -- appends "all" to ft_func()'s result unconditionally, so there would be
+      -- no way to opt a buffer back out of it.
+      ft_func = function()
+        local filetypes = { "universal" }
+        if no_snippets[vim.bo.filetype] then
+          return filetypes
+        end
+        vim.list_extend(filetypes, { vim.bo.filetype, "global" })
+        return filetypes
+      end,
       ext_opts = {
         [types.choiceNode] = {
           active = {
@@ -23,27 +40,17 @@ return {
     })
 
     -- require("luasnip.loaders.from_vscode").lazy_load()
-    require("luasnip.loaders.from_lua").lazy_load({ paths = { "./lua/snippets" } })
 
-    -- Load snippets only for JS/TS filetypes
-    local js_ts_filetypes = { "javascript", "typescript", "javascriptreact", "typescriptreact" }
+    -- One add_snippets() call per key. Calling it repeatedly with the same key
+    -- invalidates the previous call's snippets, and because every filetype was
+    -- handed the same snippet objects that used to wipe out all of them.
+    -- Extra filetypes are wired up with filetype_extend instead.
+    ls.add_snippets("universal", require("snippets.universal"), { type = "autosnippets", key = "snippets_universal" })
+    ls.add_snippets("global", require("snippets.all"), { type = "autosnippets", key = "snippets_all" })
+    ls.add_snippets("javascript", require("snippets.init"), { type = "autosnippets", key = "snippets_init" })
 
-    local init_snippets = require("snippets.init")
-    local all_snippets = require("snippets.all")
-
-    for _, ft in ipairs(js_ts_filetypes) do
-      ls.add_snippets(ft, init_snippets, {
-        autotrigger = true,
-        type = "autosnippets",
-        key = "init",
-        priority = 9999,
-      })
-      ls.add_snippets(ft, all_snippets, {
-        autotrigger = true,
-        type = "autosnippets",
-        key = "all",
-        priority = 9999,
-      })
+    for _, ft in ipairs({ "typescript", "javascriptreact", "typescriptreact" }) do
+      ls.filetype_extend(ft, { "javascript" })
     end
 
     vim.keymap.set({ "i" }, "<C-K>", function()

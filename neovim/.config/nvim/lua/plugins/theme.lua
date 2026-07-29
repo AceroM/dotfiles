@@ -24,6 +24,11 @@ return {
     opts = {
       variant = "auto",
       dark_variant = "main", -- "main" or "moon" for the dark flavor
+      styles = {
+        -- Let the local terminal provide the background while preserving all
+        -- of rose-pine's foregrounds and component-specific highlights.
+        transparency = not in_ssh,
+      },
     },
     config = function(_, opts)
       require("rose-pine").setup(opts)
