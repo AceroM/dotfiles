@@ -1,5 +1,9 @@
 {
-  "icon_theme": "Zed (Default)",
+  "icon_theme": {
+    "mode": "light",
+    "light": "Zed (Default)",
+    "dark": "Zed (Default)"
+  },
   "disable_ai": false,
   "agent_servers": {
     "claude-acp": {
