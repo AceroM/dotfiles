@@ -146,6 +146,8 @@
   {
     "context": "Terminal",
     "bindings": {
+      // Match Ghostty's Shift+Enter CSI-u sequence so Codex inserts a newline.
+      "shift-enter": ["terminal::SendText", "\u001b[13;2u"],
       "cmd-;": ["workspace::SendKeystrokes", "cmd-i alt-/ cmd-i cmd-v"],
       "cmd-'": ["workspace::SendKeystrokes", "cmd-i cmd-; cmd-i cmd-v"],
       "ctrl-alt-down": null,
