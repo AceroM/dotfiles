@@ -254,5 +254,12 @@
         "cmd-c escape o ctrl-alt-cmd-shift-l cmd-v tab cmd-v escape"
       ]
     }
+  },
+  {
+    "context": "Editor && vim_mode == visual && !menu",
+    "bindings": {
+      "v": "editor::SelectLargerSyntaxNode",
+      "V": "editor::SelectSmallerSyntaxNode"
+    }
   }
 ]
