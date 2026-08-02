@@ -30,6 +30,13 @@ function pl() {
   fi
   git pull origin $(sc)
 }
+function pu() {
+  if [[ -f ./scripts/pu.sh ]]; then
+    ./scripts/pu.sh "$@"
+    return
+  fi
+  git push origin $(sc) "$@"
+}
 function gd() { gh pr diff "$@"; }
 # gn [pr] — open a PR's full diff in nvim with real per-file syntax highlighting
 # (via diffview). Fetches the PR head into a local pr-<n> ref; does NOT switch
