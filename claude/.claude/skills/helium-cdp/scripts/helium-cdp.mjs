@@ -26,7 +26,6 @@ const require = createRequire(import.meta.url);
 function loadPuppeteer() {
   const candidates = [
     process.env.PUPPETEER_CORE,
-    path.join(os.homedir(), 'redacted/vibesdk/node_modules/puppeteer-core'),
     'puppeteer-core',
     'puppeteer',
   ].filter(Boolean);

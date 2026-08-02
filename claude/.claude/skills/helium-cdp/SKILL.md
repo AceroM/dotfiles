@@ -1,6 +1,6 @@
 ---
 name: helium-cdp
-description: Drive the user's already-running Helium browser (a Chromium 150 fork) over the Chrome DevTools Protocol — with all their live logins intact (Cloudflare dashboard, Google Cloud console, registrar panels, redacted app, etc). Use when a task needs to read or act inside an authenticated web dashboard the user is already signed into and no API token exists or the token lacks scope: completing a Cloudflare DNS/Workers/for-SaaS setup, reading a Google OAuth client config, checking a registrar's domain panel, or any "continue the browser stuff / do it in my browser / look at the Cloudflare dashboard" request. Prefer this over agent-browser when the value is the user's EXISTING session (agent-browser launches its own fresh, logged-out Chrome). Triggers: "in my browser", "the Cloudflare dashboard", "helium", "CDP", "remote debugging", "continue the domain/cloudflare stuff".
+description: Drive the user's already-running Helium browser (a Chromium 150 fork) over the Chrome DevTools Protocol — with all their live logins intact (Cloudflare dashboard, Google Cloud console, registrar panels, app dashboards, etc). Use when a task needs to read or act inside an authenticated web dashboard the user is already signed into and no API token exists or the token lacks scope: completing a Cloudflare DNS/Workers/for-SaaS setup, reading a Google OAuth client config, checking a registrar's domain panel, or any "continue the browser stuff / do it in my browser / look at the Cloudflare dashboard" request. Prefer this over agent-browser when the value is the user's EXISTING session (agent-browser launches its own fresh, logged-out Chrome). Triggers: "in my browser", "the Cloudflare dashboard", "helium", "CDP", "remote debugging", "continue the domain/cloudflare stuff".
 allowed-tools: Bash, Read
 ---
 
@@ -38,8 +38,8 @@ attaches to it directly (skip `browserURL` — that path hits the dead `/json/ve
 ## Usage — the bundled driver
 
 `scripts/helium-cdp.mjs` does the port-file read + connect for you. Run with plain
-`node` (it auto-discovers `puppeteer-core`; installed at
-`~/redacted/vibesdk/node_modules/puppeteer-core`, else set `PUPPETEER_CORE`):
+`node` (it resolves `puppeteer-core` from `PUPPETEER_CORE=/path/to/node_modules/puppeteer-core`
+if set, else from the ambient module path):
 
 ```bash
 S=~/.claude/skills/helium-cdp/scripts/helium-cdp.mjs
@@ -53,7 +53,7 @@ node $S type  <url-substr> "<css>" "<text>"   # focus + type into an input
 node $S waitfor <url-substr> "<css>" [ms]     # wait for a selector
 ```
 
-Match tabs by a stable URL substring (e.g. `redacted.ai/dns/records`,
+Match tabs by a stable URL substring (e.g. `example.com/dns/records`,
 `custom-hostnames`, `console.cloud.google`). Screenshot into your scratchpad and
 `Read` the PNG to see state. Coordinates in Read's image note are retina (×dpr);
 puppeteer mouse/`page` coords are CSS pixels (≈ the "displayed at NxN" numbers), so
@@ -65,7 +65,7 @@ Dashboards are SPA-heavy. Prefer `eval` to extract text/state over screenshottin
 + OCR when you need exact values:
 
 ```bash
-node $S eval "redacted.ai/dns/records" "[...document.querySelectorAll('table tr')].map(r=>r.innerText).join('\n')"
+node $S eval "example.com/dns/records" "[...document.querySelectorAll('table tr')].map(r=>r.innerText).join('\n')"
 ```
 
 To expand a row / open a menu, `eval` a click by matching visible text rather than

@@ -22,5 +22,5 @@ eval "$(direnv hook zsh)"
 [ -f "$HOME/.config/cloudflare/wrangler.env" ] && . "$HOME/.config/cloudflare/wrangler.env"
 
 # >>> Codex installer >>>
-export PATH="/home/redacted/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 # <<< Codex installer <<<
