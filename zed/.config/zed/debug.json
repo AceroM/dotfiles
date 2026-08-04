@@ -1,0 +1,113 @@
+// Zed debug scenarios (global — symlinked to ~/.config/zed/debug.json, so every project gets them).
+// Start one with `debugger: start` (f5 / ctrl-alt-cmd-s) → "Debug" tab.
+//
+// SHAPE MATTERS: launch scenarios use `program` (a file Node can execute directly) with the
+// documented substitutions ($ZED_FILE / $ZED_WORKTREE_ROOT). A `runtimeExecutable` pointing at a
+// shell wrapper does NOT work — the adapter connects but never spawns a process, leaving an empty
+// terminal and "no adapter running to send request: ThreadsCommand" in ~/Library/Logs/Zed/Zed.log.
+//
+// The Node scenarios run TypeScript through `tsx`, so breakpoints land in .ts sources with no build
+// step, and doppler injects secrets at launch — nothing is written to disk. Zed's JavaScript adapter
+// (vscode-js-debug) attaches through the doppler wrapper via NODE_OPTIONS, so the `node` child is
+// the process being debugged.
+[
+  {
+    "label": "Debug current file with Node (doppler dev_personal)",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "$ZED_FILE",
+    "runtimeExecutable": "/opt/homebrew/bin/doppler",
+    "runtimeArgs": [
+      "-p",
+      "tax-holiday",
+      "-c",
+      "dev_personal",
+      "run",
+      "--",
+      "node",
+      "--import",
+      "tsx"
+    ],
+    "autoAttachChildProcesses": true,
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    "label": "Debug current file with Node (doppler dev)",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "$ZED_FILE",
+    "runtimeExecutable": "/opt/homebrew/bin/doppler",
+    "runtimeArgs": [
+      "-p",
+      "tax-holiday",
+      "-c",
+      "dev",
+      "run",
+      "--",
+      "node",
+      "--import",
+      "tsx"
+    ],
+    "autoAttachChildProcesses": true,
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    // Plain Node, no doppler — for scratch files that need no secrets.
+    "label": "Debug current file with Node (no secrets)",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "$ZED_FILE",
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    // Attach to any Node process started with --inspect-brk=127.0.0.1:9229.
+    // e.g. `./out/benton-lane.sh --debug` in tax-holiday.
+    "label": "Attach to Node on :9229",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "attach",
+    "port": 9229,
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    // Client-side debugging of an ALREADY-RUNNING dev server (th replica → :3001, th dev2 → :3002).
+    // Launches Chrome only; it does not start Next.js.
+    "label": "Launch web app in Chrome (:3001 replica)",
+    "adapter": "JavaScript",
+    "type": "chrome",
+    "request": "launch",
+    "url": "http://localhost:3001",
+    "webRoot": "$ZED_WORKTREE_ROOT/src",
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    "label": "Launch web app in Chrome (:3002 second server)",
+    "adapter": "JavaScript",
+    "type": "chrome",
+    "request": "launch",
+    "url": "http://127.0.0.1:3002",
+    "webRoot": "$ZED_WORKTREE_ROOT/src",
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    "label": "Attach to browser on :9222",
+    "adapter": "JavaScript",
+    "type": "chrome",
+    "request": "attach",
+    "port": 9222,
+    "webRoot": "$ZED_WORKTREE_ROOT/src",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  }
+]

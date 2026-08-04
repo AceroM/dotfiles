@@ -129,6 +129,31 @@
   {
     "context": "Workspace",
     "bindings": {
+      "f5": "debugger::Start",
+      "ctrl-alt-cmd-s": "debugger::Start",
+      "shift-f5": "debugger::Stop",
+      "cmd-shift-f5": "debugger::Rerun",
+      "f8": "debugger::Continue",
+      "alt-shift-n": "debugger::Continue",
+      "f10": "debugger::StepOver",
+      "alt-shift-o": "debugger::StepOver",
+      "f11": "debugger::StepInto",
+      "alt-shift-i": "debugger::StepInto",
+      "shift-f11": "debugger::StepOut",
+      "alt-shift-u": "debugger::StepOut",
+      "alt-shift-r": "debugger::RunToCursor"
+    }
+  },
+  {
+    "context": "Editor",
+    "bindings": {
+      "f9": "editor::ToggleBreakpoint",
+      "alt-shift-b": "editor::ToggleBreakpoint"
+    }
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
       "cmd-shift-d": "git::Diff"
     }
   },
@@ -146,8 +171,8 @@
   {
     "context": "Terminal",
     "bindings": {
-      // Match Ghostty's Shift+Enter CSI-u sequence so Codex inserts a newline.
       "shift-enter": ["terminal::SendText", "\u001b[13;2u"],
+      "ctrl-;": ["terminal::SendText", "\u001b[59;5u"],
       "cmd-;": ["workspace::SendKeystrokes", "cmd-i alt-/ cmd-i cmd-v"],
       "cmd-'": ["workspace::SendKeystrokes", "cmd-i cmd-; cmd-i cmd-v"],
       "ctrl-alt-down": null,
