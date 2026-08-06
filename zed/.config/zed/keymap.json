@@ -46,6 +46,7 @@
     "context": "Editor",
     "bindings": {
       "alt-d": "editor::SelectNext",
+      "alt-t": "editor::WrapSelectionsInTag",
       "alt-p": "command_palette::Toggle",
       "alt-shift-k": "editor::DuplicateLineUp",
       "alt-shift-j": "editor::DuplicateLineDown",
@@ -286,7 +287,33 @@
     "context": "Editor && vim_mode == visual && !menu",
     "bindings": {
       "v": "editor::SelectLargerSyntaxNode",
-      "V": "editor::SelectSmallerSyntaxNode"
+      "V": "editor::SelectSmallerSyntaxNode",
+      // Don't use vim marks, so ' is free for the text finder.
+      "'": "text_finder::Toggle"
+    }
+  },
+  {
+    "context": "Editor && mode == full",
+    "bindings": {
+      "alt-f": "text_finder::Toggle"
+    }
+  },
+  {
+    "context": "Editor && mode == full",
+    "unbind": {
+      "alt-cmd-f": "text_finder::Toggle"
+    }
+  },
+  {
+    "context": "BufferSearchBar",
+    "bindings": {
+      "alt-f": "text_finder::Toggle"
+    }
+  },
+  {
+    "context": "BufferSearchBar",
+    "unbind": {
+      "alt-cmd-f": "text_finder::Toggle"
     }
   }
 ]
