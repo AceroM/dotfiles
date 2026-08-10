@@ -1,3 +1,4 @@
+onboarding = false
 # Herdr configuration
 # Stowed with: stow herdr  ->  ~/.config/herdr/config.toml
 #
@@ -10,6 +11,36 @@
 # Anything left commented out keeps its documented default, so every stock
 # prefix binding (prefix+c, prefix+w, prefix+hjkl ...) still works alongside
 # the direct chords below.
+
+[theme]
+# Herdr defaults to catppuccin (base #1e1e2e, a cool purple-black). Ghostty
+# here runs its stock theme, whose background is #282c34 -- warm neutral gray,
+# i.e. One Dark. Stacking the two made herdr's chrome read as a differently
+# tinted sheet laid over the terminal. one-dark shares Ghostty's exact
+# background, so the panel stops looking like a separate surface.
+name = "one-dark"
+
+[theme.custom]
+# --- Tabs ---------------------------------------------------------------
+# The active tab is a solid fill of the theme's blue/accent, so a saturated
+# accent turns it into the loudest element on screen. #81a2be is Ghostty's own
+# ANSI blue (palette 4), so the active tab now agrees with every other blue the
+# terminal draws instead of competing with it.
+# Want more pop back? Delete these two lines to fall back to One Dark's #61afef.
+accent = "#81a2be"
+blue = "#81a2be"
+
+# --- Active highlights --------------------------------------------------
+# Selected space/agent rows are painted with the surface tokens. The stock
+# values sit only a couple of steps off panel_bg, which is close to invisible
+# on a dark background. These are One Dark's real surface/selection greys, so
+# a selected row actually reads as selected.
+panel_bg = "#21252b"
+surface_dim = "#23272e"
+surface0 = "#2c313c"
+surface1 = "#3e4451"
+overlay0 = "#5c6370"
+overlay1 = "#7f848e"
 
 [keys]
 # --- Tabs ---------------------------------------------------------------
@@ -68,6 +99,10 @@ width = "80%"
 height = "80%"
 
 [ui]
+# Borders and navigate-mode UI default to cyan, which would be a third hue
+# alongside the tab blue and the grey chrome. Pin it to the same steel blue.
+accent = "#81a2be"
+
 # ctrl+alt+n should feel like a browser new-tab, so skip the name prompt.
 # Flip to true to be asked for a tab name on every create.
 prompt_new_tab_name = false
