@@ -71,3 +71,7 @@ height = "80%"
 # ctrl+alt+n should feel like a browser new-tab, so skip the name prompt.
 # Flip to true to be asked for a tab name on every create.
 prompt_new_tab_name = false
+
+# Workspaces are long-lived and picked by name (ctrl+alt+shift+w), so always
+# ask for one on ctrl+alt+shift+n instead of taking a generated name.
+prompt_new_workspace_name = true
