@@ -23,11 +23,12 @@ rename_tab = "ctrl+alt+r"
 
 # --- Workspaces ("spaces") ---------------------------------------------
 # ctrl+alt+j/k move down/up the workspace list in the sidebar, mirroring
-# the tab motion one axis over. ctrl+alt+w opens the workspace picker to
-# jump straight to one by name.
+# the tab motion one axis over. ctrl+alt+shift+w opens the workspace picker
+# to jump straight to one by name (plain ctrl+alt+w closes a pane, browser
+# style).
 next_workspace = "ctrl+alt+j"
 previous_workspace = "ctrl+alt+k"
-workspace_picker = "ctrl+alt+w"
+workspace_picker = "ctrl+alt+shift+w"
 rename_workspace = "ctrl+alt+shift+r"
 new_workspace = "ctrl+alt+shift+n"
 
@@ -44,7 +45,9 @@ focus_pane_up = "ctrl+alt+up"
 focus_pane_right = "ctrl+alt+right"
 split_vertical = "ctrl+alt+v"
 split_horizontal = "ctrl+alt+minus"
-close_pane = "ctrl+alt+shift+x"
+# ctrl+alt+w closes the focused pane; the tab only goes away once its last
+# pane is gone. ctrl+alt+x is the deliberate "close the whole tab" chord.
+close_pane = "ctrl+alt+w"
 rename_pane = "ctrl+alt+shift+p"
 zoom = "ctrl+alt+z"
 
