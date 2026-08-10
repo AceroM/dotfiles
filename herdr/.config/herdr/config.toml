@@ -1,0 +1,70 @@
+# Herdr configuration
+# Stowed with: stow herdr  ->  ~/.config/herdr/config.toml
+#
+# See `herdr --default-config` for the full annotated reference.
+# Apply edits to the running server with `herdr server reload-config` (or `hr`).
+#
+# Binding syntax:
+#   "prefix+n"      -> requires the prefix key first (default ctrl+b)
+#   "ctrl+alt+n"    -> direct chord, works straight from terminal mode
+# Anything left commented out keeps its documented default, so every stock
+# prefix binding (prefix+c, prefix+w, prefix+hjkl ...) still works alongside
+# the direct chords below.
+
+[keys]
+# --- Tabs ---------------------------------------------------------------
+# ctrl+alt+n opens a tab, ctrl+alt+x closes it, ctrl+alt+h/l walk between
+# them (same left/right feel as vim's h/l).
+new_tab = "ctrl+alt+n"
+close_tab = "ctrl+alt+x"
+previous_tab = "ctrl+alt+h"
+next_tab = "ctrl+alt+l"
+rename_tab = "ctrl+alt+r"
+
+# --- Workspaces ("spaces") ---------------------------------------------
+# ctrl+alt+j/k move down/up the workspace list in the sidebar, mirroring
+# the tab motion one axis over. ctrl+alt+w opens the workspace picker to
+# jump straight to one by name.
+next_workspace = "ctrl+alt+j"
+previous_workspace = "ctrl+alt+k"
+workspace_picker = "ctrl+alt+w"
+rename_workspace = "ctrl+alt+shift+r"
+new_workspace = "ctrl+alt+shift+n"
+
+# --- Agents -------------------------------------------------------------
+# Shift on the same j/k axis hops between agent rows instead of workspaces.
+next_agent = "ctrl+alt+shift+j"
+previous_agent = "ctrl+alt+shift+k"
+
+# --- Panes --------------------------------------------------------------
+# hjkl is already spent on tabs/workspaces, so pane focus uses the arrows.
+focus_pane_left = "ctrl+alt+left"
+focus_pane_down = "ctrl+alt+down"
+focus_pane_up = "ctrl+alt+up"
+focus_pane_right = "ctrl+alt+right"
+split_vertical = "ctrl+alt+v"
+split_horizontal = "ctrl+alt+minus"
+close_pane = "ctrl+alt+shift+x"
+rename_pane = "ctrl+alt+shift+p"
+zoom = "ctrl+alt+z"
+
+# --- Chrome -------------------------------------------------------------
+toggle_sidebar = "ctrl+alt+b"
+
+# Indexed tab switching stays on the default prefix+1..9 on purpose:
+# alt+1..9 is claimed by Raycast's global hotkeys and ctrl+alt+digit is not
+# reliably delivered by terminals.
+# switch_tab = "prefix+1..9"
+
+# lazygit in a session-modal popup, no layout churn.
+[[keys.command]]
+key = "ctrl+alt+g"
+type = "popup"
+command = "lazygit"
+width = "80%"
+height = "80%"
+
+[ui]
+# ctrl+alt+n should feel like a browser new-tab, so skip the name prompt.
+# Flip to true to be asked for a tab name on every create.
+prompt_new_tab_name = false
