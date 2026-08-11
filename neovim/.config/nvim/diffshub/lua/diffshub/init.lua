@@ -1,11 +1,12 @@
 -- diffshub.nvim — a centered prompt modal that fires a prompt at the local
 -- diffshub server (http://localhost:3433), which launches a Claude session for
--- it (POST /api/claude → { ok, session }). Bound to `'`.
+-- it (POST /api/claude → { ok, session }). Bound to `'` in normal mode.
 --
--- In normal mode it's just an input box. In visual mode it grabs the highlighted
--- text first and shows it (file + line range + the lines themselves, syntax
--- highlighted) right above the input, so you can see the context being attached;
--- the selection is folded into the prompt as a fenced code block on send.
+-- In normal mode it's just an input box. Called via M.ask_visual() from a visual
+-- mode it grabs the highlighted text first and shows it (file + line range + the
+-- lines themselves, syntax highlighted) right above the input, so you can see the
+-- context being attached; the selection is folded into the prompt as a fenced code
+-- block on send. That path is unbound now — visual `'` greps instead.
 
 local M = {}
 
@@ -276,12 +277,10 @@ function M.setup(opts)
   config = vim.tbl_deep_extend("force", config, opts or {})
 
   vim.keymap.set("n", "'", M.ask, { desc = "diffshub: prompt", silent = true })
-  vim.keymap.set(
-    "x",
-    "'",
-    "<Cmd>lua require('diffshub').ask_visual()<CR>",
-    { desc = "diffshub: prompt with selection", silent = true }
-  )
+  -- Visual-mode `'` is NOT ours — it greps the highlight (see lua/config/keymaps.lua).
+  -- M.ask_visual() is still here and still works; bind it to something with
+  --   vim.keymap.set("x", "<key>", "<Cmd>lua require('diffshub').ask_visual()<CR>")
+  -- (must be a <Cmd> mapping, so the selection is still live when it runs).
   vim.api.nvim_create_user_command("Diffshub", M.ask, { desc = "diffshub: prompt" })
 end
 

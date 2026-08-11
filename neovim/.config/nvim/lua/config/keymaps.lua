@@ -23,8 +23,29 @@ end, { desc = "Find files" })
 vim.keymap.set("n", "<C-g>", function()
   Snacks.picker.resume()
 end, { desc = "Resume last picker" })
--- `'` opens the diffshub prompt modal (normal + visual). Owned by the diffshub
--- plugin (lua/plugins/diffshub.lua); set there so this VeryLazy file can't clobber it.
+-- Normal-mode `'` opens the diffshub prompt modal — owned by the diffshub plugin
+-- (lua/plugins/diffshub.lua), set there so this VeryLazy file can't clobber it.
+--
+-- On a highlight, `'` instead greps for the selected text. Literal, not regex
+-- (snacks' grep_word runs with regex = false), so `foo.bar()` or a path matches
+-- as typed; the picker's prompt then filters the results, and <C-g>/resume gets
+-- you back. Multi-line highlights grep their FIRST line only — ripgrep matches
+-- within a line, so a pattern containing a newline could never hit anything.
+vim.keymap.set("x", "'", function()
+  local mode = vim.fn.mode():sub(1, 1)
+  if mode ~= "v" and mode ~= "V" and mode ~= "\22" then
+    mode = "v"
+  end
+  local ok, region = pcall(vim.fn.getregion, vim.fn.getpos("v"), vim.fn.getpos("."), { type = mode })
+  local text = vim.trim((ok and region and region[1]) or "")
+  if text == "" then
+    vim.notify("grep: nothing selected", vim.log.levels.WARN)
+    return
+  end
+  -- grep_word also ends visual mode for us (it snapshots the selection on open).
+  Snacks.picker.grep_word({ search = text })
+end, { desc = "Grep the selection" })
+
 vim.keymap.set({ "n", "v" }, "<c-/>", function()
   vim.cmd("normal gcc+")
 end, { silent = true, noremap = true })

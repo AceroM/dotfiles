@@ -1,7 +1,7 @@
 {
   "diff_view_style": "split",
   "icon_theme": {
-    "mode": "dark",
+    "mode": "light",
     "light": "Zed (Default)",
     "dark": "Zed (Default)"
   },
@@ -104,6 +104,6 @@
   "theme": {
     "light": "Rosé Pine Dawn",
     "dark": "Rosé Pine",
-    "mode": "dark"
+    "mode": "light"
   }
 }
