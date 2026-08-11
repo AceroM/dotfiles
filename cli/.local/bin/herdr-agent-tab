@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# New Herdr tab running the same coding agent as the pane you pressed from.
+#
+# Bound to ctrl+alt+; in herdr's config.toml as a `type = "shell"` command, so
+# the herdr server spawns it detached: it cannot count on $PATH, on the pressing
+# pane's own HERDR_* vars, or on a tty to print errors to. Hence the explicit
+# PATH, the layered source-pane lookup, and the log file instead of stderr.
+#
+#   herdr-agent-tab            same agent as the focused pane
+#   herdr-agent-tab codex      force a kind
+#
+# With no agent to mirror it makes a plain shell tab, i.e. exactly ctrl+alt+n,
+# so the chord always leaves you with a usable tab.
+#
+# Kept bash-3.2 clean: the shebang resolves against whatever PATH the server
+# hands us, which may well find /bin/bash rather than homebrew's bash 5.
+set -uo pipefail
+
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
+# Fixed path on purpose: $TMPDIR is per-user-session on macOS, so the server's
+# detached spawn and a hand-run from a pane would otherwise log to two files.
+log_file="$HOME/.local/state/herdr-agent-tab.log"
+mkdir -p "$(dirname "$log_file")" 2>/dev/null
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; }
+die() { log "error: $*"; exit 1; }
+
+# ── where the keypress came from ────────────────────────────────────────
+# HERDR_ACTIVE_PANE_ID is what herdr hands a custom command: the pane that was
+# active when the key was pressed. HERDR_PANE_ID covers running this by hand from
+# inside a pane. Failing both, the focused pane is the best guess available.
+panes_json="$(herdr pane list 2>/dev/null)" || die "pane list failed"
+source_pane="${HERDR_ACTIVE_PANE_ID:-${HERDR_PANE_ID:-}}"
+if [ -z "$source_pane" ]; then
+  source_pane="$(jq -r 'first(.result.panes[] | select(.focused == true) | .pane_id) // ""' \
+    <<<"$panes_json")"
+fi
+[ -n "$source_pane" ] || die "no focused pane"
+
+IFS=$'\t' read -r workspace tab cwd detected < <(jq -r --arg id "$source_pane" '
+  .result.panes[] | select(.pane_id == $id)
+  | [.workspace_id, .tab_id, (.foreground_cwd // .cwd // env.HOME), (.agent // "")]
+  | @tsv' <<<"$panes_json")
+[ -n "${workspace:-}" ] || die "pane $source_pane not found"
+
+# ── which agent ─────────────────────────────────────────────────────────
+# An explicit argument wins; then the focused pane's own agent; then any agent
+# elsewhere in the same tab, since focus drifts to a shell pane in a split.
+# model_pane is whichever pane the answer came from, so the flags below are read
+# off the process actually being mirrored rather than off a bare shell.
+kind="${1:-$detected}"
+model_pane="$source_pane"
+if [ -z "$kind" ]; then
+  IFS=$'\t' read -r kind model_pane < <(jq -r --arg tab "$tab" '
+    first(.result.panes[] | select(.tab_id == $tab and .agent != null))
+    | [.agent, .pane_id] | @tsv' <<<"$panes_json")
+  kind="${kind:-}"
+  model_pane="${model_pane:-$source_pane}"
+fi
+
+# ── which flags ─────────────────────────────────────────────────────────
+# Mirror the running agent's own flags, so a tab spawned from `claude
+# --dangerously-skip-permissions` is not silently downgraded to a bare `claude`.
+# Flag values come along (`--model sonnet`); bare positionals do not, because
+# those are one-off prompts and codex subcommands (`codex resume`). Flags that
+# would clone the source conversation or open a tab that exits immediately are
+# dropped by name, per kind — the same short letter means different things to
+# different agents (claude's -p is --print, codex's is --profile).
+case "$kind" in
+  claude)
+    drop_with_value=" --resume -r --session-id "
+    drop_flag=" --continue -c --fork-session --print -p "
+    ;;
+  *)
+    drop_with_value=" "
+    drop_flag=" "
+    ;;
+esac
+
+agent_args=()
+if [ -n "$kind" ]; then
+  raw=()
+  while IFS= read -r token; do
+    raw+=("$token")
+  done < <(herdr pane process-info --pane "$model_pane" 2>/dev/null | jq -r --arg kind "$kind" '
+    [ .result.process_info.foreground_processes[]
+      | select((.argv0 // "") == $kind or (.argv[0]? // "") == $kind)
+      | .argv // [] ]
+    | (first // []) | .[1:] | .[]')
+
+  keep_next=no   # yes = the previous token was a kept flag, so this is its value
+  for token in ${raw[@]+"${raw[@]}"}; do
+    if [[ "$drop_with_value" == *" $token "* ]]; then keep_next=drop; continue; fi
+    if [[ "$drop_flag" == *" $token "* ]]; then keep_next=no; continue; fi
+    case "$token" in
+      -*) agent_args+=("$token"); keep_next=yes; continue ;;
+    esac
+    [ "$keep_next" = yes ] && agent_args+=("$token")
+    keep_next=no
+  done
+fi
+
+# ── the tab ─────────────────────────────────────────────────────────────
+tab_json="$(herdr tab create --workspace "$workspace" --cwd "$cwd" --focus 2>/dev/null)" ||
+  die "tab create failed in $workspace"
+new_pane="$(jq -r '.result.root_pane.pane_id // ""' <<<"$tab_json")"
+[ -n "$new_pane" ] || die "tab create returned no root pane"
+
+if [ -z "$kind" ]; then
+  log "plain tab $new_pane (no agent on $source_pane)"
+  exit 0
+fi
+
+# agent start wants a unique name matching [a-z][a-z0-9_-]{0,31}. Pane IDs are
+# unique and never reused; ':' and their uppercase base-36 digits are not allowed
+# in a name, and lowercasing stays unique because the IDs never use lowercase.
+name="$kind-$(printf '%s' "$new_pane" | tr 'A-Z:' 'a-z-')"
+cmd=(herdr agent start "$name" --kind "$kind" --pane "$new_pane")
+[ ${#agent_args[@]} -gt 0 ] && cmd+=(-- "${agent_args[@]}")
+
+# The pane is a few hundred ms behind the tab: its shell has to finish sourcing
+# rc files before herdr will call it an available shell, and until then start
+# fails fast with agent_pane_busy. Only that error is worth retrying — anything
+# else will not fix itself by waiting.
+attempt=1
+started=no
+while :; do
+  if err="$("${cmd[@]}" 2>&1 >/dev/null)"; then
+    started=yes
+    break
+  fi
+  case "$err" in
+    *agent_pane_busy*)
+      if [ "$attempt" -ge 50 ]; then
+        log "gave up: $new_pane never became an available shell"
+        break
+      fi
+      attempt=$((attempt + 1))
+      sleep 0.2
+      ;;
+    *)
+      # Readiness detection can time out on an agent that actually came up fine,
+      # so leave the pane alone rather than starting a second copy on top of it.
+      log "agent start $kind failed in $new_pane: $err"
+      break
+      ;;
+  esac
+done
+[ "$started" = yes ] &&
+  log "started $kind in $new_pane as $name after $attempt tries ${agent_args[*]:-}"

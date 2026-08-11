@@ -101,6 +101,19 @@ command = "lazygit"
 width = "80%"
 height = "80%"
 
+# ctrl+alt+; -- new tab already running the agent I pressed from, same cwd, same
+# flags. ctrl+alt+n's shell-tab sibling: ';' sits right of 'l', so it lands in
+# the same right-hand cluster as the h/l tab motion.
+#
+# There is no built-in action for this, so it goes through a script that reads
+# the focused pane and then drives `tab create` + `agent start`. `type = "shell"`
+# gets spawned detached with the server's environment, so the command is wrapped
+# in an explicit /bin/sh rather than trusting $PATH to contain ~/.local/bin.
+[[keys.command]]
+key = "ctrl+alt+semicolon"
+type = "shell"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-agent-tab"'
+
 [ui]
 # Borders and navigate-mode UI default to cyan, which would be a third hue
 # alongside the tab blue and the grey chrome. Pin it to the same steel blue.
