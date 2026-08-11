@@ -85,10 +85,13 @@ zoom = "ctrl+alt+z"
 # --- Chrome -------------------------------------------------------------
 toggle_sidebar = "ctrl+alt+b"
 
-# Indexed tab switching stays on the default prefix+1..9 on purpose:
-# alt+1..9 is claimed by Raycast's global hotkeys and ctrl+alt+digit is not
-# reliably delivered by terminals.
-# switch_tab = "prefix+1..9"
+# --- Indexed tabs -------------------------------------------------------
+# ctrl+alt+1..9 jumps straight to the Nth tab -- browser muscle memory, and the
+# same ctrl+alt chord family as everything above. Bare alt+1..9 stays off the
+# table: Raycast claims it globally. ctrl+alt+digit has no legacy terminal
+# encoding, but herdr pushes the kitty keyboard enhancement flags and Ghostty
+# answers in CSI-u (ctrl+alt+1 -> CSI 49;7u), so the chord arrives intact.
+switch_tab = "ctrl+alt+1..9"
 
 # lazygit in a session-modal popup, no layout churn.
 [[keys.command]]

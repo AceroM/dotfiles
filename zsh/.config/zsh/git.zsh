@@ -59,8 +59,11 @@ function gb() { gh browse "$@" }
 function gu() {
   git remote get-url origin | sed -E 's#git@github\.com:#https://github.com/#; s#\.git$##'
 }
+# gx <pr> — a PR's diff through delta (side-by-side, `n`/`N` between files),
+# then its summary. --paging=always because piping into delta bypasses the
+# pager delta would pick on a tty, which is what the navigate binding rides on.
 function gx() {
-  gh pr diff "$1"
+  gh pr diff "$1" | delta --paging=always
   gh pr view "$1"
 }
 # cn [pr] — build & submit a PR review interactively (tiered prompts: pick a

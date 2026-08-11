@@ -14,12 +14,21 @@ if not (vim.uv or vim.loop).fs_stat(lazypath) then
 end
 vim.opt.rtp:prepend(lazypath)
 
+-- Machine-local overrides that shouldn't be committed live in a separate stow
+-- package (~/.dotfiles/private → ~/.config/nvim-private). Each file in
+-- `lua/private/plugins/` is a normal lazy.nvim spec. Absent on a fresh machine,
+-- in which case this is a no-op.
+local private_path = vim.fn.stdpath("config") .. "-private"
+local has_private = vim.uv.fs_stat(private_path .. "/lua/private/plugins") ~= nil
+
 require("lazy").setup({
   spec = {
     -- add LazyVim and import its plugins
     { "LazyVim/LazyVim", import = "lazyvim.plugins" },
     -- import/override with your plugins
     { import = "plugins" },
+    -- private overrides last, so they win on any key collision
+    has_private and { import = "private.plugins" } or nil,
   },
   defaults = {
     -- By default, only LazyVim plugins will be lazy-loaded. Your custom plugins will load during startup.
@@ -37,6 +46,9 @@ require("lazy").setup({
   }, -- automatically check for plugin updates
   performance = {
     rtp = {
+      -- `reset = true` (the default) wipes anything prepended to the rtp before
+      -- specs are parsed, so the private package has to go through `paths`.
+      paths = has_private and { private_path } or {},
       -- disable some rtp plugins
       disabled_plugins = {
         "gzip",

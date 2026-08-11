@@ -21,4 +21,5 @@ zed() {
 }
 
 alias z="zed"
+alias z.="zed ."
 alias zd="zed ~/.dotfiles"
