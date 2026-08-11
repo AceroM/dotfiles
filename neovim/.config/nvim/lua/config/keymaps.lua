@@ -99,7 +99,21 @@ vim.keymap.set("v", "<leader>y", function()
   vim.notify("Sent selection to local clipboard (OSC 52)")
 end, { desc = "Send selection to local clipboard (OSC 52)" })
 
-vim.keymap.set("n", "<C-;>", 'ggdG', { desc = "Clear entire file" })
+-- Hand the cursor's location to the claude running in the Herdr split next door,
+-- as `@path/to/file.html:2044` — the reference lands in its prompt box unsubmitted
+-- so you can finish the sentence. See lua/config/herdr.lua for how it gets there.
+-- Visual mode sends the selected range (`@file:2044-2061`).
+vim.keymap.set({ "n", "x" }, "<C-;>", function()
+  require("config.herdr").send({ range = vim.fn.mode():find("[vV\22]") ~= nil })
+end, { desc = "Send @path:line to herdr agent (and jump to it)" })
+
+-- Same thing on a leader chord, for when <C-;> is awkward to reach. Both focus
+-- the agent's pane once the reference lands; M.opts.jump = false in herdr.lua
+-- turns that off globally if stacking several references ever matters again.
+vim.keymap.set({ "n", "x" }, "<leader>;", function()
+  require("config.herdr").send({ range = vim.fn.mode():find("[vV\22]") ~= nil })
+end, { desc = "Send @path:line to herdr agent (and jump to it)" })
+
 vim.keymap.set("n", "<A-Down>", "<C-d>", { desc = "Half-page down" })
 vim.keymap.set("n", "<A-Up>", "<C-u>", { desc = "Half-page up" })
 
