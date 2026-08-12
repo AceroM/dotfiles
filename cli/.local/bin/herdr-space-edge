@@ -7,9 +7,9 @@
 # Herdr has no built-in first/last workspace action -- keys.previous_workspace
 # and keys.next_workspace only step one row, and keys.switch_workspace is an
 # indexed 1..9 binding, which cannot name "whichever one is last". So this is
-# bound in config.toml as a `type = "shell"` command (ctrl+alt+g /
-# ctrl+alt+shift+g) and the server spawns it detached: no $PATH, no tty to print
-# errors to. Hence the explicit PATH and the log file instead of stderr.
+# bound in config.toml as a `type = "shell"` command (ctrl+alt+g -> last; `first`
+# is kept for hand-running) and the server spawns it detached: no $PATH, no tty
+# to print errors to. Hence the explicit PATH and the log file instead of stderr.
 #
 # Kept bash-3.2 clean: the shebang resolves against whatever PATH the server
 # hands us, which may well find /bin/bash rather than homebrew's bash 5.

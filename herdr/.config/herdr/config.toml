@@ -93,27 +93,22 @@ toggle_sidebar = "ctrl+alt+b"
 # answers in CSI-u (ctrl+alt+1 -> CSI 49;7u), so the chord arrives intact.
 switch_tab = "ctrl+alt+1..9"
 
-# ctrl+alt+g / ctrl+alt+shift+g -- jump to the first / last space in the sidebar.
-# ctrl+alt+j/k already walk the list one row at a time; these are the ends of
-# that same axis, so g keeps its vim "go to" feel (gg / G) with shift picking the
-# far end, matching how shift works on the j/k and w/r/n chords above.
+# ctrl+alt+g -- jump to the last space in the sidebar. ctrl+alt+j/k already walk
+# the list one row at a time; this is the far end of that same axis, so g keeps
+# its vim "go to" feel (G). The shift variant that jumped to the *first* space is
+# deliberately unbound -- the bottom of the sidebar is the only end I actually
+# jump to, and leaving ctrl+alt+shift+g free keeps the chord available.
 #
-# Herdr has no first_workspace/last_workspace action to bind -- switch_workspace
-# is an indexed 1..9 binding, which cannot name "whichever is last" -- so both go
-# through a script that reads `workspace list` and focuses the edge of the array.
+# Herdr has no last_workspace action to bind -- switch_workspace is an indexed
+# 1..9 binding, which cannot name "whichever is last" -- so this goes through a
+# script that reads `workspace list` and focuses the edge of the array.
 # `type = "shell"` gets spawned detached with the server's environment, so the
 # command is wrapped in an explicit /bin/sh rather than trusting $PATH to contain
 # ~/.local/bin.
 #
-# This chord used to open lazygit in a popup; it now has no binding at all.
+# This chord used to open lazygit in a popup; lazygit now has no binding at all.
 [[keys.command]]
 key = "ctrl+alt+g"
-type = "shell"
-description = "First space"
-command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-edge first"'
-
-[[keys.command]]
-key = "ctrl+alt+shift+g"
 type = "shell"
 description = "Last space"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-edge last"'

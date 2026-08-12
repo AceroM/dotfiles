@@ -9,6 +9,12 @@ function jw() {
 function jd() {
   gh pr diff "$@"
 }
+function jk() {
+  gh pr diff "$@" | delta
+}
+function jks() {
+  gh pr diff "$@" | delta --side-by-side
+}
 function jc() {
   gh pr checkout "$@"
 }
