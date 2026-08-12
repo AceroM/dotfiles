@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Jump to the first or last space in Herdr's sidebar order.
+#
+#   herdr-space-edge first    focus the top space
+#   herdr-space-edge last     focus the bottom space
+#
+# Herdr has no built-in first/last workspace action -- keys.previous_workspace
+# and keys.next_workspace only step one row, and keys.switch_workspace is an
+# indexed 1..9 binding, which cannot name "whichever one is last". So this is
+# bound in config.toml as a `type = "shell"` command (ctrl+alt+g /
+# ctrl+alt+shift+g) and the server spawns it detached: no $PATH, no tty to print
+# errors to. Hence the explicit PATH and the log file instead of stderr.
+#
+# Kept bash-3.2 clean: the shebang resolves against whatever PATH the server
+# hands us, which may well find /bin/bash rather than homebrew's bash 5.
+set -uo pipefail
+
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
+# Fixed path on purpose: $TMPDIR is per-user-session on macOS, so the server's
+# detached spawn and a hand-run from a pane would otherwise log to two files.
+log_file="$HOME/.local/state/herdr-space-edge.log"
+mkdir -p "$(dirname "$log_file")" 2>/dev/null
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; }
+die() { log "error: $*"; exit 1; }
+
+edge="${1:-first}"
+case "$edge" in
+  first) picker='.result.workspaces | first' ;;
+  last)  picker='.result.workspaces | last' ;;
+  *)     die "usage: herdr-space-edge first|last (got '$edge')" ;;
+esac
+
+# `workspace list` returns the spaces in sidebar order, so first/last of the
+# array is exactly the top/bottom row. Never guess IDs from the order itself --
+# they are opaque handles (w2, wA, wD) with no relation to position.
+list_json="$(herdr workspace list 2>/dev/null)" || die "workspace list failed"
+
+IFS=$'\t' read -r target label focused < <(jq -r "
+  $picker | [.workspace_id, (.label // \"\"), (.focused | tostring)] | @tsv" \
+  <<<"$list_json")
+[ -n "${target:-}" ] || die "no spaces in the session"
+
+# Already there: focusing again is harmless but logging the no-op keeps the log
+# readable when the chord gets mashed.
+if [ "$focused" = "true" ]; then
+  log "$edge space $target ($label) already focused"
+  exit 0
+fi
+
+herdr workspace focus "$target" >/dev/null 2>&1 ||
+  die "workspace focus $target failed"
+log "focused $edge space $target ($label)"
