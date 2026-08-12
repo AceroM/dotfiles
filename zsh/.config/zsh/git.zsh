@@ -10,10 +10,10 @@ function jd() {
   gh pr diff "$@"
 }
 function jk() {
-  gh pr diff "$@" | delta
+  gh pr diff "$@" | DELTA_FEATURES=+side-by-side delta
 }
-function jks() {
-  gh pr diff "$@" | delta --side-by-side
+function js() {
+  gh pr diff "$@" | DELTA_FEATURES='' delta
 }
 function jc() {
   gh pr checkout "$@"
@@ -69,7 +69,7 @@ function gu() {
 # then its summary. --paging=always because piping into delta bypasses the
 # pager delta would pick on a tty, which is what the navigate binding rides on.
 function gx() {
-  gh pr diff "$1" | delta --paging=always
+  gh pr diff "$1" | delta --side-by-side --paging=always
   gh pr view "$1"
 }
 # cn [pr] — build & submit a PR review interactively (tiered prompts: pick a
