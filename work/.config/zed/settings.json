@@ -1,7 +1,7 @@
 {
   "diff_view_style": "unified",
   "icon_theme": {
-    "mode": "light",
+    "mode": "dark",
     "light": "Zed (Default)",
     "dark": "Zed (Default)"
   },
@@ -103,7 +103,7 @@
   "buffer_font_size": 14,
   "theme": {
     "light": "Rosé Pine Dawn",
-    "dark": "Ayu Mirage",
+    "dark": "One Dark",
     "mode": "dark"
   }
 }

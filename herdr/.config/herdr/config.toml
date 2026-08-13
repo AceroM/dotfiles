@@ -93,22 +93,34 @@ toggle_sidebar = "ctrl+alt+b"
 # answers in CSI-u (ctrl+alt+1 -> CSI 49;7u), so the chord arrives intact.
 switch_tab = "ctrl+alt+1..9"
 
-# ctrl+alt+g -- jump to the last space in the sidebar. ctrl+alt+j/k already walk
-# the list one row at a time; this is the far end of that same axis, so g keeps
-# its vim "go to" feel (G). The shift variant that jumped to the *first* space is
-# deliberately unbound -- the bottom of the sidebar is the only end I actually
-# jump to, and leaving ctrl+alt+shift+g free keeps the chord available.
+# ctrl+alt+u/i -- jump to the first/last space in the sidebar. ctrl+alt+j/k walk
+# the list one row at a time; these are the two ends of that same axis, and u/i
+# sit directly above j/k on the home row, so the "one row" and "all the way"
+# motions stay in one finger cluster. (This used to be a lone ctrl+alt+g for the
+# bottom end, on vim's G; keeping both ends means the pair reads better as u=up,
+# i=down than as g/shift+g.)
 #
-# Herdr has no last_workspace action to bind -- switch_workspace is an indexed
-# 1..9 binding, which cannot name "whichever is last" -- so this goes through a
-# script that reads `workspace list` and focuses the edge of the array.
+# Herdr has no first_workspace/last_workspace action to bind -- switch_workspace
+# is an indexed 1..9 binding, which cannot name "whichever is last" -- so these go
+# through a script that reads `workspace list` and focuses the edge of the array.
 # `type = "shell"` gets spawned detached with the server's environment, so the
 # command is wrapped in an explicit /bin/sh rather than trusting $PATH to contain
 # ~/.local/bin.
 #
-# This chord used to open lazygit in a popup; lazygit now has no binding at all.
+# ctrl+i is legacy-encoded as Tab, but herdr pushes the kitty keyboard flags and
+# Ghostty answers in CSI-u (ctrl+alt+i -> CSI 105;7u), so the chord is distinct
+# from a real Tab -- same mechanism the ctrl+alt+1..9 binding relies on.
+#
+# ctrl+alt+g used to sit on the last-space job (and lazygit-in-a-popup before
+# that); it now has no binding at all.
 [[keys.command]]
-key = "ctrl+alt+g"
+key = "ctrl+alt+u"
+type = "shell"
+description = "First space"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-edge first"'
+
+[[keys.command]]
+key = "ctrl+alt+i"
 type = "shell"
 description = "Last space"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-edge last"'
