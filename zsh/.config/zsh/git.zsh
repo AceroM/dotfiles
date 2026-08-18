@@ -133,7 +133,8 @@ function gs() { git show "$@" }
 function sa() { git stash "$@" }
 function di() { git diff "$@" }
 alias dl="delta"
-function dr() { DELTA_FEATURES=raw-view git diff "$@" }
+# same diff as `d`, through delta's full view (line numbers, hunk headers)
+function dr() { _d_diff "$@" }
 function ns() {
   if [[ -f ./scripts/ns.sh ]]; then
     ./scripts/ns.sh "$@"

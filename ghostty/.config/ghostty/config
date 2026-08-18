@@ -44,6 +44,23 @@ keybind = shift+enter=csi:13;2u
 # Cycle focus through split panes. With two panes, Cmd+I toggles between them.
 keybind = super+i=goto_split:next
 
+# Hand cmd+opt+shift+w and +j to herdr instead of keeping Ghostty's defaults.
+# herdr binds cmd+alt+shift+a..z to "jump to the space whose name starts with
+# this letter" (see ~/.config/herdr/config.toml), and these are the only two
+# letters of the 26 that Ghostty already claims:
+#
+#   super+alt+shift+w = close_all_windows        <- and confirm-close-surface is
+#                                                   false above, so it closed
+#                                                   every window without asking
+#   super+alt+shift+j = write_screen_file:open   <- dumps the screen to a file
+#
+# `unbind` removes the binding so the chord is encoded and sent to the running
+# program (herdr); `ignore` would swallow it here instead, which is not what we
+# want. Closing windows is still cmd+w (surface), cmd+opt+w (tab), and
+# cmd+shift+w (window) -- only the close-everything chord goes away.
+keybind = super+alt+shift+w=unbind
+keybind = super+alt+shift+j=unbind
+
 # Don't dim the unfocused split. Ghostty defaults to 0.7, which fades the
 # terminal split whenever tmux-nav (the other split) is focused. Keep both
 # splits at full opacity so the terminal stays fully readable while navigating.

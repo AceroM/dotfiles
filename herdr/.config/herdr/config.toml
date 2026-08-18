@@ -3,7 +3,7 @@ onboarding = false
 # Stowed with: stow herdr  ->  ~/.config/herdr/config.toml
 #
 # See `herdr --default-config` for the full annotated reference.
-# Apply edits to the running server with `herdr server reload-config` (or `hr`).
+# Apply edits to the running server with `herdr server reload-config` (or `hrc`).
 #
 # Binding syntax:
 #   "prefix+n"      -> requires the prefix key first (default ctrl+b)
@@ -79,7 +79,11 @@ split_horizontal = "ctrl+alt+minus"
 # ctrl+alt+w closes the focused pane; the tab only goes away once its last
 # pane is gone. ctrl+alt+x is the deliberate "close the whole tab" chord.
 close_pane = "ctrl+alt+w"
-rename_pane = "ctrl+alt+shift+p"
+# rename_pane has no direct chord on purpose. It sat on ctrl+alt+shift+p, but
+# that swallowed cmd+alt+shift+p before the "jump to the p* space" command below
+# could see it -- the one letter of the 26 that misfired that way (cmd+alt+shift+r
+# reaches its command fine despite rename_workspace next door). Renaming a pane
+# is rare enough to live on the stock prefix binding, ctrl+b then shift+p.
 zoom = "ctrl+alt+z"
 
 # --- Chrome -------------------------------------------------------------
@@ -136,6 +140,182 @@ key = "ctrl+alt+i"
 type = "shell"
 description = "Last space"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-edge last"'
+
+# --- Spaces by initial ---------------------------------------------------
+# cmd+alt+shift+a..z -- jump to the topmost space whose name starts with that
+# letter. This is the letter half of the indexed binding above: cmd+alt+shift+digit
+# addresses a space by its position in the sidebar, cmd+alt+shift+letter by its
+# initial, so the whole space axis stays on one chord family and the cmd side of
+# the keyboard keeps meaning "spaces" the way ctrl+alt means "tabs and panes".
+# hjkl is fair game here -- ctrl+alt+hjkl owns the tab/workspace motion, and this
+# is a different modifier set, so nothing collides.
+#
+# Herdr has no built-in "focus the space whose name starts with X" action
+# (workspace_picker is an interactive fuzzy prompt, switch_workspace is indexed
+# 1..9), so each letter runs the same script with its letter as the argument.
+# First match in sidebar order wins; a letter that matches nothing is a silent
+# no-op. `type = "shell"` is spawned detached with no tty, so the script reports
+# to ~/.local/state/herdr-space-letter.log rather than stderr.
+#
+# Yes, 26 near-identical blocks: the binding syntax has a 1..9 range for indexed
+# actions but no a..z range for commands, and no way to hand the pressed key to
+# the command, so each one has to be spelled out.
+
+[[keys.command]]
+key = "cmd+alt+shift+a"
+type = "shell"
+description = "Space a*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter a"'
+
+[[keys.command]]
+key = "cmd+alt+shift+b"
+type = "shell"
+description = "Space b*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter b"'
+
+[[keys.command]]
+key = "cmd+alt+shift+c"
+type = "shell"
+description = "Space c*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter c"'
+
+[[keys.command]]
+key = "cmd+alt+shift+d"
+type = "shell"
+description = "Space d*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter d"'
+
+[[keys.command]]
+key = "cmd+alt+shift+e"
+type = "shell"
+description = "Space e*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter e"'
+
+[[keys.command]]
+key = "cmd+alt+shift+f"
+type = "shell"
+description = "Space f*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter f"'
+
+[[keys.command]]
+key = "cmd+alt+shift+g"
+type = "shell"
+description = "Space g*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter g"'
+
+[[keys.command]]
+key = "cmd+alt+shift+h"
+type = "shell"
+description = "Space h*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter h"'
+
+[[keys.command]]
+key = "cmd+alt+shift+i"
+type = "shell"
+description = "Space i*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter i"'
+
+[[keys.command]]
+key = "cmd+alt+shift+j"
+type = "shell"
+description = "Space j*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter j"'
+
+[[keys.command]]
+key = "cmd+alt+shift+k"
+type = "shell"
+description = "Space k*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter k"'
+
+[[keys.command]]
+key = "cmd+alt+shift+l"
+type = "shell"
+description = "Space l*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter l"'
+
+[[keys.command]]
+key = "cmd+alt+shift+m"
+type = "shell"
+description = "Space m*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter m"'
+
+[[keys.command]]
+key = "cmd+alt+shift+n"
+type = "shell"
+description = "Space n*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter n"'
+
+[[keys.command]]
+key = "cmd+alt+shift+o"
+type = "shell"
+description = "Space o*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter o"'
+
+[[keys.command]]
+key = "cmd+alt+shift+p"
+type = "shell"
+description = "Space p*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter p"'
+
+[[keys.command]]
+key = "cmd+alt+shift+q"
+type = "shell"
+description = "Space q*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter q"'
+
+[[keys.command]]
+key = "cmd+alt+shift+r"
+type = "shell"
+description = "Space r*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter r"'
+
+[[keys.command]]
+key = "cmd+alt+shift+s"
+type = "shell"
+description = "Space s*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter s"'
+
+[[keys.command]]
+key = "cmd+alt+shift+t"
+type = "shell"
+description = "Space t*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter t"'
+
+[[keys.command]]
+key = "cmd+alt+shift+u"
+type = "shell"
+description = "Space u*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter u"'
+
+[[keys.command]]
+key = "cmd+alt+shift+v"
+type = "shell"
+description = "Space v*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter v"'
+
+[[keys.command]]
+key = "cmd+alt+shift+w"
+type = "shell"
+description = "Space w*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter w"'
+
+[[keys.command]]
+key = "cmd+alt+shift+x"
+type = "shell"
+description = "Space x*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter x"'
+
+[[keys.command]]
+key = "cmd+alt+shift+y"
+type = "shell"
+description = "Space y*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter y"'
+
+[[keys.command]]
+key = "cmd+alt+shift+z"
+type = "shell"
+description = "Space z*"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter z"'
 
 # ctrl+alt+; -- new tab already running the agent I pressed from, same cwd, same
 # flags. ctrl+alt+n's shell-tab sibling: ';' sits right of 'l', so it lands in
