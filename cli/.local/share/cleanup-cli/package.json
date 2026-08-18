@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "ink": "^5.1.0",
-    "react": "^18.3.1"
+    "@dotfiles/opentui-cli": "file:../opentui-cli",
+    "react": "^19.2.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/react": "^18.3.18"
+    "@types/react": "^19.2.0"
   }
 }

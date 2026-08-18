@@ -5,8 +5,14 @@ script_dir="${HOME}/.local/share/claude-usage-cli"
 # bun resolves symlinks, so node_modules must be next to the real index.tsx
 real_script="$(readlink -f "${script_dir}/index.tsx")"
 real_dir="$(dirname "${real_script}")"
+opentui_dir="$(cd -P "${real_dir}/../opentui-cli" && pwd)"
 
-if [ ! -d "${real_dir}/node_modules" ]; then
+if [ ! -e "${opentui_dir}/node_modules/@opentui/core" ]; then
+  echo "Installing OpenTUI..." >&2
+  (cd "${opentui_dir}" && bun install --frozen-lockfile)
+fi
+
+if [ ! -e "${real_dir}/node_modules/@dotfiles/opentui-cli" ]; then
   echo "Installing dependencies..." >&2
   (cd "${real_dir}" && bun install --frozen-lockfile)
 fi

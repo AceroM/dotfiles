@@ -1,7 +1,16 @@
 #!/usr/bin/env bun
 
-import React, { useCallback, useEffect, useState, type ReactNode } from "react";
-import { render, Box, Text, useApp, useInput } from "ink";
+import React, {
+  useCallback,
+  useEffect,
+  useState,
+  type ReactNode,
+  render,
+  Box,
+  Text,
+  useApp,
+  useInput,
+} from "@dotfiles/opentui-cli";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -660,4 +669,4 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 }
 
 const target = process.argv[2];
-render(<App target={target} />);
+await render(<App target={target} />);

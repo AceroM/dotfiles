@@ -1,7 +1,18 @@
 #!/usr/bin/env bun
 
-import React, { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
-import { render, Box, Text, useInput, useApp, useStdout } from "ink";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  type ReactNode,
+  render,
+  Box,
+  Text,
+  useInput,
+  useApp,
+  useStdout,
+} from "@dotfiles/opentui-cli";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -890,4 +901,4 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
   process.exit(1);
 }
 
-render(<App />);
+await render(<App />);

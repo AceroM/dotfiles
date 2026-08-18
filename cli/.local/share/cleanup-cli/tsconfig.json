@@ -3,8 +3,10 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "preserveSymlinks": true,
     "jsx": "react-jsx",
     "strict": true,
+    "skipLibCheck": true,
     "noEmit": true,
     "types": ["bun-types"]
   }

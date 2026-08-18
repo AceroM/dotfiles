@@ -93,6 +93,18 @@ toggle_sidebar = "ctrl+alt+b"
 # answers in CSI-u (ctrl+alt+1 -> CSI 49;7u), so the chord arrives intact.
 switch_tab = "ctrl+alt+1..9"
 
+# --- Indexed spaces -----------------------------------------------------
+# cmd+alt+shift+1..9 jumps straight to the Nth space in the sidebar: the indexed
+# sibling of ctrl+alt+j/k (one row at a time) and ctrl+alt+u/i (the two ends).
+# Tabs already own the ctrl+alt+digit chord, so the space axis moves to the cmd
+# side of the keyboard rather than stacking a fourth modifier on top of it.
+#
+# Ghostty keeps bare cmd+1..9 for its own goto_tab, but leaves cmd+alt+shift+digit
+# unbound, and its kitty-protocol encoding carries the super bit
+# (cmd+alt+shift+1 -> CSI 49;12u), so the chord arrives intact -- the same
+# mechanism switch_tab above relies on.
+switch_workspace = "cmd+alt+shift+1..9"
+
 # ctrl+alt+u/i -- jump to the first/last space in the sidebar. ctrl+alt+j/k walk
 # the list one row at a time; these are the two ends of that same axis, and u/i
 # sit directly above j/k on the home row, so the "one row" and "all the way"

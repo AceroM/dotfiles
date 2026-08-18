@@ -2,7 +2,7 @@
 # Default server: a / l / k / r          bg server: bg / ba / bl / bk / bgr / bgn
 
 # stale aliases from older versions of this file shadow the functions below on re-source
-unalias l a k r t tb bg ba bl bk bgr bgn sk 2>/dev/null
+unalias l a k r t tb bg ba bl bk bgr bgn 2>/dev/null
 
 function _tm() {
   local sock="$1"
@@ -187,11 +187,6 @@ function bgn() {
     _tm bg new-session -ds "$name" -c "$PWD"
   fi
   echo "started bg:$name"
-}
-
-# send a line to the repl session on the bg server, then show its output
-function sk() {
-  tmux -L bg send-keys -t repl "$1" C-m && tmux -L bg capture-pane -pS -30 -t repl
 }
 
 # ── completion: complete existing session names ─────────────────────

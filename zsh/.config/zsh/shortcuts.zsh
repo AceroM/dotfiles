@@ -17,6 +17,7 @@ alias pn="pnpm"
 alias sp="git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E '\\.(ts|tsx|js|jsx|json|css|md)$' | xargs -0 bunx prettier --write && git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E '\\.(ts|tsx|js|jsx)$' | xargs -0 env NODE_OPTIONS=--max-old-space-size=8192 bunx eslint --fix"
 alias y="yazi"
 alias lg="lazygit"
+alias sk="stacks"
 alias ob="obsidian"
 alias rnd="openssl rand -base64 32"
 alias kc='pkill -i "Google Chrome"; pkill -i "chrome"; echo "Done"'

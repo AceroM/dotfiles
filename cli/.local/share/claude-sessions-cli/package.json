@@ -3,12 +3,12 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "ink": "^5.1.0",
-    "react": "^18.3.1"
+    "@dotfiles/opentui-cli": "file:../opentui-cli",
+    "react": "^19.2.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/react": "^18.3.18",
-    "typescript": "^6.0.3"
+    "@types/react": "^19.2.0",
+    "typescript": "^5.9.3"
   }
 }

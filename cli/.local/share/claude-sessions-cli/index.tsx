@@ -6,8 +6,13 @@ import React, {
   useMemo,
   useCallback,
   type ReactNode,
-} from "react";
-import { render, Box, Text, useApp, useInput, useStdout } from "ink";
+  render,
+  Box,
+  Text,
+  useApp,
+  useInput,
+  useStdout,
+} from "@dotfiles/opentui-cli";
 import { readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -952,7 +957,7 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 }
 
 const postExit: PostExit = {};
-const { waitUntilExit } = render(<App postExit={postExit} />);
+const { waitUntilExit } = await render(<App postExit={postExit} />);
 await waitUntilExit();
 
 if (postExit.error) {

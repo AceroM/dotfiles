@@ -10,10 +10,10 @@ function jd() {
   gh pr diff "$@"
 }
 function jk() {
-  gh pr diff "$@" | DELTA_FEATURES=+side-by-side delta
+  gh pr diff "$@" | delta --side-by-side
 }
 function js() {
-  gh pr diff "$@" | DELTA_FEATURES='' delta
+  gh pr diff "$@" | delta
 }
 function jc() {
   gh pr checkout "$@"
@@ -133,6 +133,7 @@ function gs() { git show "$@" }
 function sa() { git stash "$@" }
 function di() { git diff "$@" }
 alias dl="delta"
+function dr() { DELTA_FEATURES=raw-view git diff "$@" }
 function ns() {
   if [[ -f ./scripts/ns.sh ]]; then
     ./scripts/ns.sh "$@"

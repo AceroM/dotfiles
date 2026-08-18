@@ -1,7 +1,18 @@
 #!/usr/bin/env bun
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, render, useApp, useInput, useStdout } from "ink";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  Box,
+  Text,
+  render,
+  useApp,
+  useInput,
+  useStdout,
+} from "@dotfiles/opentui-cli";
 import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename } from "node:path";
@@ -1516,4 +1527,4 @@ function App({ args }: { args: Args }) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-render(<App args={args} />);
+await render(<App args={args} />);

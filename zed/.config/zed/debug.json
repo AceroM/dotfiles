@@ -80,6 +80,19 @@
     "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
   },
   {
+    // Server-side breakpoints (tRPC routers, API routes, middleware, getServerSideProps) in a
+    // dev server started with NODE_OPTIONS=--inspect=9239. Next runs route handlers in a
+    // next-server CHILD process, which node gives inspect port + 1 → attach to 9240, not 9239.
+    "label": "Attach to Next.js server on :9240",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "attach",
+    "port": 9240,
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "autoAttachChildProcesses": true,
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
     // Client-side debugging of an ALREADY-RUNNING dev server (th replica → :3001, th dev2 → :3002).
     // Launches Chrome only; it does not start Next.js.
     "label": "Launch web app in Chrome (:3001 replica)",

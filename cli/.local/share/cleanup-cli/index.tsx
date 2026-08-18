@@ -6,8 +6,13 @@ import React, {
   useCallback,
   useRef,
   type ReactNode,
-} from "react";
-import { render, Box, Text, useInput, useApp, useStdout } from "ink";
+  render,
+  Box,
+  Text,
+  useInput,
+  useApp,
+  useStdout,
+} from "@dotfiles/opentui-cli";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -919,4 +924,4 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
   process.exit(1);
 }
 
-render(<App />);
+await render(<App />);

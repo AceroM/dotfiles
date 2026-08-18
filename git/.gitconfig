@@ -36,6 +36,12 @@
 
 [delta]
   navigate = true
+  side-by-side = false
+
+[delta "raw-view"]
+  file-decoration-style = none
+  hunk-header-style = omit
+  line-numbers = false
 
 [merge]
   conflictstyle = diff3

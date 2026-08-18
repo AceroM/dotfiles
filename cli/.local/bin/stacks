@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_dir="${HOME}/.local/share/tmux-nav-cli"
-if [ ! -f "${script_dir}/index.tsx" ]; then
-  script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../share/tmux-nav-cli" && pwd)"
-fi
-
+script_dir="${HOME}/.local/share/stacks-cli"
 # bun resolves symlinks, so node_modules must be next to the real index.tsx
-real_dir="$(cd -P "$(dirname "${script_dir}/index.tsx")" && pwd)"
+real_script="$(readlink -f "${script_dir}/index.tsx")"
+real_dir="$(dirname "${real_script}")"
 opentui_dir="$(cd -P "${real_dir}/../opentui-cli" && pwd)"
 
 if [ ! -e "${opentui_dir}/node_modules/@opentui/core" ]; then

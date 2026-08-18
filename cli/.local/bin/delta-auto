@@ -1,0 +1,4 @@
+#!/bin/sh
+# Compatibility shim for shells that loaded the former delta-auto alias.
+# Delta now defaults to unified output; explicit flags still pass through.
+exec delta "$@"
