@@ -73,6 +73,25 @@ type PendingAction = {
   cmd: string[];
 };
 
+// Where a comment is headed: the Herdr tab holding the ticket's agent, resolved
+// once when the dialog opens so the destination is on screen before anything is
+// sent to it.
+type CommentTarget = {
+  tabLabel: string;
+  agent: string; // herdr agent target: its name when it has one, else its pane
+  status: string;
+};
+
+type CommentDraft = {
+  ticket: string;
+  branch: string;
+  prNumber: number | null;
+  text: string;
+  target: CommentTarget | null;
+  error: string | null;
+  sending: boolean;
+};
+
 // ---------------------------------------------------------------------------
 // gh helpers
 // ---------------------------------------------------------------------------
@@ -540,6 +559,114 @@ async function fetchDiff(prNumber: number): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// herdr: hand a comment to the agent working this branch's Linear ticket
+// ---------------------------------------------------------------------------
+
+// herdr reports a failure as a JSON envelope, and prints it on stdout — dig the
+// message out rather than dropping a line of JSON into the footer.
+function herdrError(r: { code: number; out: string; err: string }): string {
+  const raw = (r.err || r.out).trim();
+  try {
+    const m = (JSON.parse(raw) as { error?: { message?: string } }).error?.message;
+    if (m) return m;
+  } catch {
+    // not JSON — fall through to the raw first line
+  }
+  return firstLine(raw) || `exit ${r.code}`;
+}
+
+// miguel/prod-3083-hide-officer-ssn -> PROD-3083. Branch names put the ticket
+// straight after the miguel/ prefix, so anchor there and only fall back to a
+// loose scan for branches that were named some other way.
+function ticketFor(branch: string): string | null {
+  const tail = branch.slice(branch.lastIndexOf("/") + 1);
+  const m =
+    /^([a-z]{2,10})-(\d+)/i.exec(tail) ?? /([a-z]{2,10})-(\d+)/i.exec(branch);
+  return m ? `${m[1].toUpperCase()}-${m[2]}` : null;
+}
+
+// PROD-3083 must not match a tab for PROD-30831, so the character after the ID
+// has to be something other than another digit.
+function labelIsTicket(label: string, ticket: string): boolean {
+  const l = label.trim().toUpperCase();
+  return (
+    l === ticket ||
+    (l.startsWith(ticket) && !/\d/.test(l.charAt(ticket.length)))
+  );
+}
+
+// A ticket's work lives in one Herdr tab per workspace, labeled with the
+// uppercase ticket ID first ("PROD-3083 · slot 1"), hosting one agent — see the
+// Herdr section of ~/.claude/CLAUDE.md. Ambiguity is an error rather than a coin
+// flip: the wrong guess prompts an agent that is working on something else.
+async function resolveCommentTarget(
+  ticket: string,
+): Promise<{ target?: CommentTarget; error?: string }> {
+  if (process.env.HERDR_ENV !== "1")
+    return { error: "not inside a Herdr pane (HERDR_ENV unset)" };
+  const workspace = process.env.HERDR_WORKSPACE_ID;
+  if (!workspace) return { error: "HERDR_WORKSPACE_ID unset" };
+
+  const tabs = await run(["herdr", "tab", "list", "--workspace", workspace]);
+  if (tabs.code !== 0)
+    return { error: `herdr tab list failed — ${herdrError(tabs)}` };
+  const listed = (
+    JSON.parse(tabs.out) as {
+      result?: { tabs?: Array<{ tab_id: string; label?: string | null }> };
+    }
+  ).result?.tabs ?? [];
+  const hits = listed.filter((t) => labelIsTicket(t.label ?? "", ticket));
+  if (hits.length === 0)
+    return { error: `no tab in this workspace is labeled ${ticket}` };
+  if (hits.length > 1)
+    return {
+      error: `${ticket} matches ${hits.length} tabs: ${hits
+        .map((t) => (t.label ?? t.tab_id).trim())
+        .join(", ")}`,
+    };
+  const tab = hits[0];
+  const tabLabel = (tab.label ?? tab.tab_id).trim();
+
+  const agents = await run(["herdr", "agent", "list"]);
+  if (agents.code !== 0)
+    return { error: `herdr agent list failed — ${herdrError(agents)}` };
+  const inTab = (
+    (
+      JSON.parse(agents.out) as {
+        result?: {
+          agents?: Array<{
+            tab_id: string;
+            pane_id: string;
+            name?: string | null;
+            agent?: string | null;
+            agent_status?: string | null;
+          }>;
+        };
+      }
+    ).result?.agents ?? []
+  ).filter((a) => a.tab_id === tab.tab_id);
+  if (inTab.length === 0) return { error: `${tabLabel} has no agent running` };
+  if (inTab.length > 1)
+    return { error: `${tabLabel} hosts ${inTab.length} agents — ambiguous` };
+
+  const a = inTab[0];
+  return {
+    target: {
+      tabLabel,
+      agent: a.name || a.pane_id,
+      status: a.agent_status ?? "",
+    },
+  };
+}
+
+// What the agent over there actually receives. It has no idea the text came out
+// of a diff viewer, so name the PR and branch ahead of the comment itself.
+function commentBody(c: CommentDraft): string {
+  const what = c.prNumber != null ? `PR #${c.prNumber}` : `branch ${c.branch}`;
+  return `Comment on ${what} (${c.branch}): ${c.text.trim()}`;
+}
+
+// ---------------------------------------------------------------------------
 // Presentation helpers
 // ---------------------------------------------------------------------------
 
@@ -658,6 +785,12 @@ function App() {
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<Badge | null>(null);
+  const [comment, setComment] = useState<CommentDraft | null>(null);
+  // A keyboard burst — fast typing, or a paste that arrives as separate key
+  // events — delivers many keys before React re-renders, so the draft lives in
+  // a ref and state only mirrors it for display. Editing off the last render
+  // would keep nothing but the final keystroke.
+  const commentRef = useRef<CommentDraft | null>(null);
 
   // display order: top of stack first, like the GitHub stack UI
   const entries = useMemo(
@@ -776,12 +909,80 @@ function App() {
     });
   }, [screen, sel]);
 
+  // ----- comment --------------------------------------------------------
+  const putComment = useCallback((c: CommentDraft | null) => {
+    commentRef.current = c;
+    setComment(c);
+  }, []);
+
+  const editComment = useCallback(
+    (edit: (text: string) => string) => {
+      const c = commentRef.current;
+      if (!c || c.sending) return;
+      putComment({ ...c, text: edit(c.text) });
+    },
+    [putComment],
+  );
+
+  // Open the dialog immediately and resolve the Herdr tab behind it, so typing
+  // can start while the lookup runs and the destination shows up when it lands.
+  const openComment = useCallback(() => {
+    const branch = sel?.branch ?? stack?.currentBranch ?? "";
+    const ticket = branch ? ticketFor(branch) : null;
+    if (!ticket) {
+      setActionMsg({
+        text: branch
+          ? `no Linear ticket in "${branch}" — nothing to comment on`
+          : "no branch to read a ticket off",
+        color: "red",
+      });
+      return;
+    }
+    putComment({
+      ticket,
+      branch,
+      prNumber: sel?.prNumber ?? null,
+      text: "",
+      target: null,
+      error: null,
+      sending: false,
+    });
+    resolveCommentTarget(ticket).then(({ target, error }) => {
+      const c = commentRef.current;
+      if (!c || c.ticket !== ticket) return; // dialog closed or reopened since
+      putComment({ ...c, target: target ?? null, error: error ?? null });
+    });
+  }, [sel, stack, putComment]);
+
+  const submitComment = useCallback(() => {
+    const c = commentRef.current;
+    if (!c || c.sending || !c.target || !c.text.trim()) return;
+    const { target } = c;
+    const body = commentBody(c);
+    putComment({ ...c, sending: true });
+    run(["herdr", "agent", "prompt", target.agent, body])
+      .then((r) => {
+        putComment(null);
+        setActionMsg(
+          r.code === 0
+            ? { text: `comment sent to ${target.tabLabel}`, color: "green" }
+            : { text: `comment failed — ${herdrError(r)}`, color: "red" },
+        );
+      })
+      .catch((e: Error) => {
+        putComment(null);
+        setActionMsg({ text: `comment failed — ${e.message}`, color: "red" });
+      });
+  }, [putComment]);
+
   // ----- layout ---------------------------------------------------------
   const sidebarW = Math.max(28, Math.min(46, Math.floor(cols * 0.34)));
   // OpenTUI reserves the terminal's first line and Yoga needs room for the
   // header, footer, and their separating rows. Keep the visible diff within
   // the actual flex body so its title rows never collapse under line content.
-  const bodyH = Math.max(4, rows - 5);
+  // border rows plus destination / input / hint, when the dialog is up
+  const commentH = comment ? 5 : 0;
+  const bodyH = Math.max(4, rows - 5 - commentH);
   const diffViewH = Math.max(1, bodyH - 2); // pane title line + meta line
 
   // sidebar windowing: 2 rows per entry, plus the trunk row
@@ -822,6 +1023,7 @@ function App() {
 
   const onMouse = useRef<(button: number, x: number, y: number) => void>(() => {});
   onMouse.current = (button, x, y) => {
+    if (comment) return; // the dialog owns the screen while it is open
     if (button === 64 || button === 65) {
       // wheel: over the sidebar it moves the selection, elsewhere it scrolls
       const dir = button === 64 ? -1 : 1;
@@ -868,6 +1070,24 @@ function App() {
   useInput((input, key) => {
     if (input.includes("[<")) return; // mouse reports, handled above
 
+    // The comment dialog owns the keyboard while it is open: every printable
+    // key is text, so nothing here may fall through to the keys below — "q"
+    // types a q rather than quitting, and escape closes the dialog only.
+    const draft = commentRef.current;
+    if (draft) {
+      if (key.escape) putComment(null);
+      else if (draft.sending) return; // in flight; only escape gets out
+      else if (key.return) submitComment();
+      else if (key.backspace || key.delete) editComment((t) => t.slice(0, -1));
+      else if (key.ctrl && input === "u") editComment(() => "");
+      else if (key.ctrl && input === "w")
+        editComment((t) => t.replace(/\s*\S+\s*$/, ""));
+      else if (input && !key.ctrl && !key.meta)
+        // a paste arrives as one chunk; flatten it onto the single input line
+        editComment((t) => t + input.replace(/\s+/g, " "));
+      return;
+    }
+
     // A staged rebase/merge swallows every key until it is answered, so a
     // stray keystroke can't trigger it and can't be lost behind it either.
     if (pending) {
@@ -895,16 +1115,16 @@ function App() {
 
     if (screen !== "main") return;
 
-    if (key.upArrow || input === "h" || (key.tab && key.shift))
+    // j/k move between PRs. Line-at-a-time diff scrolling is gone on purpose:
+    // the diff moves by half a page (d/u) or a whole one (space/b).
+    if (key.upArrow || input === "k" || (key.tab && key.shift))
       setSelected((i) => Math.max(0, i - 1));
-    else if (key.downArrow || input === "l" || key.tab)
+    else if (key.downArrow || input === "j" || key.tab)
       setSelected((i) => Math.min(entries.length - 1, i + 1));
     else if (/^[1-9]$/.test(input)) {
       const n = parseInt(input, 10) - 1;
       if (n < entries.length) setSelected(n);
-    } else if (input === "j") setScrollFor((v) => v + 1);
-    else if (input === "k") setScrollFor((v) => v - 1);
-    else if (key.pageDown || input === " ") setScrollFor((v) => v + diffViewH);
+    } else if (key.pageDown || input === " ") setScrollFor((v) => v + diffViewH);
     else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH);
     else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2));
     else if (input === "u") setScrollFor((v) => v - Math.ceil(diffViewH / 2));
@@ -914,6 +1134,7 @@ function App() {
       setScrollFor((v) => fileMarks.find((m) => m > v) ?? v);
     else if (input === "p")
       setScrollFor((v) => [...fileMarks].reverse().find((m) => m < v) ?? 0);
+    else if (input === "c") openComment();
     else if (input === "o" && sel?.prNumber != null)
       Bun.spawn(["gh", "pr", "view", String(sel.prNumber), "--web"], {
         stdout: "ignore",
@@ -1018,6 +1239,13 @@ function App() {
   const pct =
     maxScroll === 0 ? 100 : Math.round((Math.min(scroll, maxScroll) / maxScroll) * 100);
   const visible = (diffLines ?? []).slice(scroll, scroll + diffViewH);
+
+  // The Text shim truncates at the end, so window the draft by hand and keep
+  // the tail — where the cursor is — visible on a long comment.
+  const inputW = Math.max(12, cols - 8);
+  const draft = comment?.text ?? "";
+  const shownDraft =
+    draft.length > inputW ? `…${draft.slice(-(inputW - 1))}` : draft;
 
   return (
     <Box flexDirection="column" width={cols} height={rows} overflow="hidden">
@@ -1175,6 +1403,55 @@ function App() {
         </Box>
       </Box>
 
+      {/* comment dialog: esc closes, enter hands the text to the ticket's agent */}
+      {comment ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={comment.error ? "red" : "cyan"}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color="cyan">
+              comment
+            </Text>
+            <Text dimColor>
+              {" "}
+              {comment.ticket}
+              {comment.prNumber != null ? ` · #${comment.prNumber}` : ""}
+              {" → "}
+            </Text>
+            {comment.target ? (
+              <Text>
+                {comment.target.tabLabel}
+                <Text dimColor>
+                  {" · "}
+                  {comment.target.agent}
+                  {comment.target.status ? ` (${comment.target.status})` : ""}
+                </Text>
+              </Text>
+            ) : comment.error ? (
+              <Text color="red">{comment.error}</Text>
+            ) : (
+              <Text dimColor>finding the herdr tab…</Text>
+            )}
+          </Text>
+          <Text wrap="truncate-end">
+            <Text color="cyan">{"❯ "}</Text>
+            <Text>{shownDraft}</Text>
+            {comment.sending ? null : <Text inverse>{" "}</Text>}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {comment.sending
+              ? "sending…"
+              : comment.target
+                ? "enter send · esc cancel · ctrl+w word · ctrl+u clear"
+                : "esc cancel"}
+          </Text>
+        </Box>
+      ) : null}
+
       {/* footer: confirmation and action status take over the key hints */}
       <Box paddingX={1} flexShrink={0}>
         {pending ? (
@@ -1199,7 +1476,7 @@ function App() {
           </Text>
         ) : (
           <Text dimColor wrap="truncate-end">
-            ↑↓/h/l/click pr · j/k/wheel scroll · d/u half · g/G top/bot · n/p file · o open · R rebase · M merge · r refresh · q quit
+            ↑↓/j/k/click pr · space/b page · d/u half · g/G top/bot · n/p file · c comment · o open · R rebase · M merge · r refresh · q quit
           </Text>
         )}
       </Box>
@@ -1236,11 +1513,18 @@ if (argv.includes("-h") || argv.includes("--help")) {
 
 usage: stacks [--dump]
 
-keys: ↑↓/h/l/tab pick PR · j/k scroll · d/u half page · space/b page ·
-      g/G top/bottom · n/p next/prev file · 1-9 jump · o open in browser ·
-      R rebase stack · M squash-merge stack · r refresh · q quit
+keys: ↑↓/j/k/tab pick PR · space/b page · d/u half page · g/G top/bottom ·
+      n/p next/prev file · 1-9 jump · c comment to the ticket's agent ·
+      o open in browser · R rebase stack · M squash-merge stack · r refresh · q quit
 mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
        moves the selection)
+
+c opens a comment box for the selected PR. The Linear ticket comes off the
+branch name (miguel/prod-3083-hide-officer-ssn -> PROD-3083), the Herdr tab
+labeled with that ticket is looked up in the current workspace, and enter hands
+the text to the agent running in it via \`herdr agent prompt\`. esc closes the box
+without sending. Needs a Herdr pane (HERDR_ENV=1) and exactly one matching tab
+with one agent in it — anything else is reported in the box instead of guessed.
 
 sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the same
       condition as GitHub's "This stack is out-of-date"), and whether the local
