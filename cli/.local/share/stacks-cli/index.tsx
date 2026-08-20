@@ -42,6 +42,8 @@ type StackBranch = {
   base: string;
 };
 
+type CheckItem = { name: string; status: "pass" | "fail" | "pending" };
+
 type PrDetails = {
   title: string;
   state: string;
@@ -50,6 +52,7 @@ type PrDetails = {
   additions: number;
   deletions: number;
   checks: { pass: number; fail: number; pending: number };
+  checkList: CheckItem[];
 };
 
 type StackData = {
@@ -61,16 +64,20 @@ type StackData = {
   // on a stack created by `gh stack link` (no local tracking is written).
   stackNumber: number | null;
   branches: StackBranch[]; // bottom -> top (closest to trunk first)
+  // Sync annotation (fetch + rebase/drift detection) is the slow, network-bound
+  // part of loading, so it runs behind the first paint. False until it lands.
+  synced?: boolean;
 };
 
 type Screen = "loading" | "pick" | "main" | "fatal";
 
 // Rebase rewrites history and merge is irreversible, so neither fires on a bare
 // keypress — both stage a PendingAction that a second key has to confirm.
+// rebase spawns a Claude agent in a new Herdr pane; merge runs gh directly.
 type PendingAction = {
   kind: "rebase" | "merge";
   prompt: string;
-  cmd: string[];
+  exec: () => Promise<{ code: number; out: string; err: string }>;
 };
 
 // Where a comment is headed: the Herdr tab holding the ticket's agent, resolved
@@ -275,11 +282,6 @@ async function isAncestor(branch: string, of: string): Promise<boolean> {
   return code === 0;
 }
 
-async function refExists(ref: string): Promise<boolean> {
-  const { code } = await run(["git", "rev-parse", "--verify", "--quiet", ref]);
-  return code === 0;
-}
-
 // Update the remote-tracking refs so "out of date" means out of date with what
 // GitHub actually has. Without this the whole panel can be confidently wrong —
 // a stale origin/main makes every branch look current. Read-only: no merge, no
@@ -295,17 +297,34 @@ async function fetchRefs(): Promise<void> {
 //      Measured on the REMOTE refs, because that's what the PR page compares.
 //   2. Has the local checkout drifted from origin? A "Rebase stack" click in
 //      the web UI force-pushes, leaving every worktree silently behind.
+// Batches every ref-existence lookup annotateSync needs into a single spawn
+// instead of up to 3 per branch — this runs on every load, so for a stack of
+// any size that's the difference between one git call and a burst of them.
+async function existingRefNames(): Promise<Set<string>> {
+  const { code, out } = await run([
+    "git",
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/heads",
+    "refs/remotes/origin",
+  ]);
+  if (code !== 0) return new Set();
+  return new Set(out.trim().split("\n").filter(Boolean));
+}
+
 async function annotateSync(data: StackData): Promise<StackData> {
+  const refs = await existingRefNames();
+  const hasLocalRef = (name: string) => refs.has(`refs/heads/${name}`);
+  const hasRemoteRef = (name: string) => refs.has(`refs/remotes/origin/${name}`);
+
   const branches = await Promise.all(
     data.branches.map(async (b, i) => {
       // bottom branch measures against the trunk; the rest against the one below
       const base = i === 0 ? data.trunk : data.branches[i - 1].branch;
 
-      const [hasLocal, hasRemote, hasRemoteBase] = await Promise.all([
-        refExists(b.branch),
-        refExists(`origin/${b.branch}`),
-        refExists(`origin/${base}`),
-      ]);
+      const hasLocal = hasLocalRef(b.branch);
+      const hasRemote = hasRemoteRef(b.branch);
+      const hasRemoteBase = hasRemoteRef(base);
 
       // Prefer remote-vs-remote; fall back to local refs when a branch hasn't
       // been pushed yet, so an unpushed top-of-stack still reports honestly.
@@ -338,7 +357,7 @@ async function annotateSync(data: StackData): Promise<StackData> {
       return { ...b, base, hasLocal, needsRebase, localAhead, localBehind };
     }),
   );
-  return { ...data, branches };
+  return { ...data, branches, synced: true };
 }
 
 // A merged branch can't be rebased and doesn't need it, so ignore those when
@@ -452,23 +471,16 @@ async function resolveStacks(): Promise<{
   source: "tracked" | "github" | "file" | "none";
   error?: string;
 }> {
-  await fetchRefs();
-
+  // No fetch, no sync annotation here: this is the critical path to first
+  // paint. openStack() runs fetchRefs + annotateSync in the background.
   const view = await run(["gh", "stack", "view", "--json"]);
   if (view.code === 0) {
-    return {
-      stacks: [await annotateSync(parseViewJson(view.out))],
-      source: "tracked",
-    };
+    return { stacks: [parseViewJson(view.out)], source: "tracked" };
   }
   const remote = await readRemoteStack();
-  if (remote) return { stacks: [await annotateSync(remote)], source: "github" };
+  if (remote) return { stacks: [remote], source: "github" };
   const tracked = await readTrackingFile();
-  if (tracked.length > 0)
-    return {
-      stacks: await Promise.all(tracked.map(annotateSync)),
-      source: "file",
-    };
+  if (tracked.length > 0) return { stacks: tracked, source: "file" };
   return {
     stacks: [],
     source: "none",
@@ -478,19 +490,30 @@ async function resolveStacks(): Promise<{
   };
 }
 
-function summarizeChecks(rollup: unknown): PrDetails["checks"] {
+function parseChecks(rollup: unknown): {
+  checks: PrDetails["checks"];
+  checkList: CheckItem[];
+} {
   const checks = { pass: 0, fail: 0, pending: 0 };
-  if (!Array.isArray(rollup)) return checks;
+  const checkList: CheckItem[] = [];
+  if (!Array.isArray(rollup)) return { checks, checkList };
   for (const c of rollup as Array<Record<string, string>>) {
     const s = (c.conclusion || c.state || c.status || "").toUpperCase();
-    if (s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED") checks.pass++;
+    let status: CheckItem["status"];
+    if (s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED") status = "pass";
     else if (
       ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].includes(s)
     )
-      checks.fail++;
-    else checks.pending++;
+      status = "fail";
+    else status = "pending";
+    checks[status]++;
+    checkList.push({ name: c.name || c.context || "check", status });
   }
-  return checks;
+  // Failures first, then pending, so the checks that need eyes surface at the
+  // top of an expanded PR row.
+  const rank = { fail: 0, pending: 1, pass: 2 } as const;
+  checkList.sort((a, b) => rank[a.status] - rank[b.status]);
+  return { checks, checkList };
 }
 
 async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
@@ -504,6 +527,7 @@ async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
   ]);
   if (code !== 0) return null;
   const j = JSON.parse(out) as Record<string, unknown>;
+  const { checks, checkList } = parseChecks(j.statusCheckRollup);
   return {
     title: String(j.title ?? ""),
     state: String(j.state ?? ""),
@@ -511,7 +535,8 @@ async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
     reviewDecision: String(j.reviewDecision ?? ""),
     additions: Number(j.additions ?? 0),
     deletions: Number(j.deletions ?? 0),
-    checks: summarizeChecks(j.statusCheckRollup),
+    checks,
+    checkList,
   };
 }
 
@@ -666,6 +691,75 @@ function commentBody(c: CommentDraft): string {
   return `Comment on ${what} (${c.branch}): ${c.text.trim()}`;
 }
 
+// R doesn't run the rebase here: it splits a sibling pane on the right, starts
+// a Claude agent in it, and hands it the whole job — including resolving merge
+// conflicts — so the human reviews a finished rebase instead of babysitting one.
+function rebaseTask(s: StackData): string {
+  const branches = s.branches.filter((b) => !b.isMerged).map((b) => b.branch);
+  return [
+    `Rebase my gh stack onto ${s.trunk}.`,
+    `Branches, bottom to top: ${branches.join(", ")}.`,
+    "Try `gh stack rebase` first; if it stops on merge conflicts (or the stack has no local tracking), rebase each branch onto the one below it manually, bottom first.",
+    "Resolve every merge conflict yourself — keep both sides' intent, reading the surrounding code when unsure. Do not leave conflicts for me.",
+    "Force-push each rebased branch with --force-with-lease.",
+    "Do not merge or close any PRs. When done, summarize what was rebased and how each conflict was resolved so I can review.",
+  ].join(" ");
+}
+
+async function launchRebaseAgent(
+  s: StackData,
+): Promise<{ code: number; out: string; err: string }> {
+  if (process.env.HERDR_ENV !== "1")
+    return { code: 1, out: "", err: "not inside a Herdr pane (HERDR_ENV unset)" };
+
+  const split = await run([
+    "herdr",
+    "pane",
+    "split",
+    "--current",
+    "--direction",
+    "right",
+    "--cwd",
+    process.cwd(),
+    "--no-focus",
+  ]);
+  if (split.code !== 0)
+    return { code: 1, out: "", err: `pane split failed — ${herdrError(split)}` };
+  let paneId: string | undefined;
+  try {
+    paneId = (
+      JSON.parse(split.out) as { result?: { pane?: { pane_id?: string } } }
+    ).result?.pane?.pane_id;
+  } catch {
+    // fall through to the missing-id error
+  }
+  if (!paneId)
+    return { code: 1, out: "", err: "pane split returned no pane_id" };
+
+  const name = `rebase-${Date.now().toString(36)}`;
+  const start = await run([
+    "herdr",
+    "agent",
+    "start",
+    name,
+    "--kind",
+    "claude",
+    "--pane",
+    paneId,
+  ]);
+  if (start.code !== 0)
+    return { code: 1, out: "", err: `agent start failed — ${herdrError(start)}` };
+
+  const prompt = await run(["herdr", "agent", "prompt", name, rebaseTask(s)]);
+  if (prompt.code !== 0)
+    return { code: 1, out: "", err: `agent prompt failed — ${herdrError(prompt)}` };
+  return {
+    code: 0,
+    out: `handed to claude (${name}, pane ${paneId}) — review there, then r to refresh`,
+    err: "",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Presentation helpers
 // ---------------------------------------------------------------------------
@@ -706,10 +800,13 @@ function dotFor(b: StackBranch, d: PrDetails | undefined): Badge {
 //   "↓2"         local checkout is 2 commits behind origin (someone force-pushed)
 //   "↑1"         1 unpushed commit
 //   "local only" never pushed
-function syncTags(b: StackBranch): Badge[] {
+function syncTags(b: StackBranch, synced: boolean): Badge[] {
   const tags: Badge[] = [];
   if (b.isMerged) return tags;
   if (b.needsRebase) tags.push({ text: "⚠ rebase", color: "yellow" });
+  // hasLocal/ahead/behind are only meaningful once annotateSync has run;
+  // before that every branch would falsely read "no local".
+  if (!synced) return tags;
   if (b.localBehind > 0) tags.push({ text: `↓${b.localBehind}`, color: "red" });
   if (b.localAhead > 0) tags.push({ text: `↑${b.localAhead}`, color: "cyan" });
   if (b.hasLocal && b.prNumber != null && b.localAhead === 0 && b.localBehind === 0)
@@ -717,6 +814,25 @@ function syncTags(b: StackBranch): Badge[] {
   if (!b.hasLocal && b.prNumber != null)
     tags.push({ text: "no local", color: "gray" });
   return tags;
+}
+
+// Rows shown under an expanded PR: one per failing/pending check (the ones
+// worth expanding for), passes rolled up into a single line.
+type CheckRow = { icon: string; color?: string; dim?: boolean; text: string };
+
+function checkRowsFor(d: PrDetails | undefined): CheckRow[] {
+  if (!d) return [{ icon: "◌", dim: true, text: "loading checks…" }];
+  const rows: CheckRow[] = d.checkList
+    .filter((c) => c.status !== "pass")
+    .map((c) => ({
+      icon: c.status === "fail" ? "✗" : "◌",
+      color: c.status === "fail" ? "red" : "yellow",
+      text: c.name,
+    }));
+  if (d.checks.pass > 0)
+    rows.push({ icon: "✓", color: "green", text: `${d.checks.pass} passed` });
+  if (rows.length === 0) rows.push({ icon: "–", dim: true, text: "no checks" });
+  return rows;
 }
 
 function firstLine(s: string): string {
@@ -799,37 +915,59 @@ function App() {
   );
 
   const [selected, setSelected] = useState(0);
+  // branch names whose sidebar row is expanded to show individual CI checks
+  const [expandedPrs, setExpandedPrs] = useState<Set<string>>(new Set());
   const [diffLines, setDiffLines] = useState<string[] | null>(null);
   const [scroll, setScroll] = useState(0);
 
   const diffCache = useRef(new Map<number, string[]>());
+  // in-flight diff fetches, so a prefetch and a selection never fetch twice
+  const diffPromises = useRef(new Map<number, Promise<string[]>>());
   const scrollMemo = useRef(new Map<number, number>());
   const diffSeq = useRef(0);
+  const syncSeq = useRef(0);
 
-  const openStack = useCallback((s: StackData) => {
-    setStack(s);
-    const rev = [...s.branches].reverse();
-    const cur = rev.findIndex((b) => b.isCurrent);
-    setSelected(cur >= 0 ? cur : 0);
-    setScreen("main");
-    // enrich each PR with title/state/checks in parallel
-    for (const b of s.branches) {
-      if (b.prNumber == null) continue;
-      fetchPrDetails(b.prNumber).then((d) => {
-        if (!d) return;
-        setDetails((m) => {
-          const next = new Map(m);
-          next.set(b.prNumber!, d);
-          return next;
-        });
+  const refreshDetails = useCallback((prNumber: number) => {
+    fetchPrDetails(prNumber).then((d) => {
+      if (!d) return;
+      setDetails((m) => {
+        const next = new Map(m);
+        next.set(prNumber, d);
+        return next;
       });
-    }
+    });
   }, []);
+
+  const openStack = useCallback(
+    (s: StackData) => {
+      setStack(s);
+      const rev = [...s.branches].reverse();
+      const cur = rev.findIndex((b) => b.isCurrent);
+      setSelected(cur >= 0 ? cur : 0);
+      setScreen("main");
+      // enrich each PR with title/state/checks in parallel
+      for (const b of s.branches) {
+        if (b.prNumber != null) refreshDetails(b.prNumber);
+      }
+      // Fetch + sync detection is the slow, network-bound part of loading, so
+      // it runs behind the first paint and patches the stack when it lands.
+      const seq = ++syncSeq.current;
+      fetchRefs()
+        .then(() => annotateSync(s))
+        .then((annotated) => {
+          if (syncSeq.current === seq) setStack(annotated);
+        })
+        .catch(() => {});
+    },
+    [refreshDetails],
+  );
 
   const load = useCallback(() => {
     setScreen("loading");
     setDetails(new Map());
     diffCache.current.clear();
+    diffPromises.current.clear();
+    syncSeq.current++;
     setDiffLines(null);
     resolveStacks()
       .then(({ stacks, error }) => {
@@ -852,14 +990,18 @@ function App() {
 
   useEffect(load, [load]);
 
-  // Run a confirmed rebase/merge, then reload so the panel reflects reality
-  // rather than what we hoped happened.
+  // Run a confirmed action. A merge finishes here, so reload after it; a
+  // rebase only *starts* here (the agent in the new pane does the work), so
+  // reloading immediately would just show the pre-rebase state.
   const runAction = useCallback(
     (action: PendingAction) => {
       setPending(null);
       setActionMsg(null);
-      setBusy(action.kind === "rebase" ? "rebasing stack…" : "merging stack…");
-      run(action.cmd)
+      setBusy(
+        action.kind === "rebase" ? "starting rebase agent…" : "merging stack…",
+      );
+      action
+        .exec()
         .then(({ code, out, err }) => {
           setBusy(null);
           if (code === 0) {
@@ -867,12 +1009,9 @@ function App() {
               text: `${action.kind} ok — ${firstLine(out) || "done"}`,
               color: "green",
             });
-            load();
+            if (action.kind === "merge") load();
             return;
           }
-          // `gh stack rebase` needs local tracking, which `gh stack link`
-          // never writes — so a linked stack fails here. Say so plainly
-          // instead of leaving a bare non-zero exit.
           setActionMsg({
             text: `${action.kind} failed — ${firstLine(err) || firstLine(out) || `exit ${code}`}`,
             color: "red",
@@ -886,6 +1025,18 @@ function App() {
     [load],
   );
 
+  const ensureDiff = useCallback((num: number): Promise<string[]> => {
+    let p = diffPromises.current.get(num);
+    if (!p) {
+      p = fetchDiff(num).then((lines) => {
+        diffCache.current.set(num, lines);
+        return lines;
+      });
+      diffPromises.current.set(num, p);
+    }
+    return p;
+  }, []);
+
   // load the diff for the selected PR (cached per PR number)
   const sel = entries[selected];
   useEffect(() => {
@@ -893,21 +1044,24 @@ function App() {
     setScroll(sel.prNumber != null ? (scrollMemo.current.get(sel.prNumber) ?? 0) : 0);
     if (sel.prNumber == null) {
       setDiffLines(["(no PR for this branch yet — nothing to diff)"]);
-      return;
+    } else {
+      const cached = diffCache.current.get(sel.prNumber);
+      if (cached) {
+        setDiffLines(cached);
+      } else {
+        setDiffLines(null);
+        const seq = ++diffSeq.current;
+        ensureDiff(sel.prNumber).then((lines) => {
+          if (diffSeq.current === seq) setDiffLines(lines);
+        });
+      }
     }
-    const cached = diffCache.current.get(sel.prNumber);
-    if (cached) {
-      setDiffLines(cached);
-      return;
+    // prefetch the neighbors so j/k lands on an already-loaded diff
+    for (const nb of [entries[selected + 1], entries[selected - 1]]) {
+      if (nb?.prNumber != null && !diffCache.current.has(nb.prNumber))
+        ensureDiff(nb.prNumber);
     }
-    setDiffLines(null);
-    const seq = ++diffSeq.current;
-    const num = sel.prNumber;
-    fetchDiff(num).then((lines) => {
-      diffCache.current.set(num, lines);
-      if (diffSeq.current === seq) setDiffLines(lines);
-    });
-  }, [screen, sel]);
+  }, [screen, sel, entries, selected, ensureDiff]);
 
   // ----- comment --------------------------------------------------------
   const putComment = useCallback((c: CommentDraft | null) => {
@@ -985,16 +1139,38 @@ function App() {
   const bodyH = Math.max(4, rows - 5 - commentH);
   const diffViewH = Math.max(1, bodyH - 2); // pane title line + meta line
 
-  // sidebar windowing: 2 rows per entry, plus the trunk row
-  const slots = Math.max(1, Math.floor((bodyH - 1) / 2));
-  let winStart = 0;
-  if (entries.length > slots) {
-    winStart = Math.min(
-      Math.max(0, selected - Math.floor(slots / 2)),
-      entries.length - slots,
-    );
+  // sidebar windowing: 2 rows per entry, plus its check rows when expanded,
+  // plus the trunk row. Heights vary, so grow the window outward from the
+  // selection until the row budget is spent.
+  const isExpanded = (b: StackBranch) =>
+    b.prNumber != null && expandedPrs.has(b.branch);
+  const entryHeights = entries.map(
+    (b) =>
+      2 + (isExpanded(b) ? checkRowsFor(details.get(b.prNumber!)).length : 0),
+  );
+  const rowBudget = Math.max(2, bodyH - 1);
+  let winStart = Math.min(selected, Math.max(0, entries.length - 1));
+  let winEnd = entries.length === 0 ? 0 : winStart + 1;
+  {
+    let used = entryHeights[winStart] ?? 0;
+    let up = winStart - 1;
+    let down = winEnd;
+    let grew = true;
+    while (grew) {
+      grew = false;
+      if (up >= 0 && used + entryHeights[up] <= rowBudget) {
+        used += entryHeights[up];
+        winStart = up--;
+        grew = true;
+      }
+      if (down < entries.length && used + entryHeights[down] <= rowBudget) {
+        used += entryHeights[down];
+        winEnd = ++down;
+        grew = true;
+      }
+    }
   }
-  const winEntries = entries.slice(winStart, winStart + slots);
+  const winEntries = entries.slice(winStart, winEnd);
 
   const fileMarks = useMemo(() => {
     if (!diffLines) return [] as number[];
@@ -1046,8 +1222,15 @@ function App() {
     if (screen !== "main" || x >= sidebarW) return;
     // header row + border row, plus the "↑ N more" line when windowed
     const top = 2 + (winStart > 0 ? 1 : 0);
-    const wi = Math.floor((y - top) / 2);
-    if (y >= top && wi < winEntries.length) setSelected(winStart + wi);
+    let rem = y - top;
+    if (rem < 0) return;
+    for (let i = winStart; i < winEnd; i++) {
+      rem -= entryHeights[i];
+      if (rem < 0) {
+        setSelected(i);
+        return;
+      }
+    }
   };
 
   useEffect(() => {
@@ -1124,6 +1307,27 @@ function App() {
     else if (/^[1-9]$/.test(input)) {
       const n = parseInt(input, 10) - 1;
       if (n < entries.length) setSelected(n);
+    } else if (input === "l" || key.rightArrow) {
+      // expand the selected PR into its CI checks
+      const b = sel;
+      if (b?.prNumber != null) {
+        setExpandedPrs((s) => {
+          if (s.has(b.branch)) return s;
+          const next = new Set(s);
+          next.add(b.branch);
+          return next;
+        });
+        // re-fetch so the check list reflects CI right now, not load time
+        refreshDetails(b.prNumber);
+      }
+    } else if (input === "h" || key.leftArrow) {
+      const b = sel;
+      if (b && expandedPrs.has(b.branch))
+        setExpandedPrs((s) => {
+          const next = new Set(s);
+          next.delete(b.branch);
+          return next;
+        });
     } else if (key.pageDown || input === " ") setScrollFor((v) => v + diffViewH);
     else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH);
     else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2));
@@ -1142,8 +1346,10 @@ function App() {
       });
     else if (input === "r") load();
     else if (input === "R") {
-      const stale = stack ? staleBranches(stack) : [];
-      const drift = stack ? driftedBranches(stack) : [];
+      const s = stack;
+      if (!s) return;
+      const stale = staleBranches(s);
+      const drift = driftedBranches(s);
       const what =
         stale.length > 0
           ? `${stale.length} branch${stale.length === 1 ? "" : "es"} behind their base`
@@ -1151,24 +1357,25 @@ function App() {
       setPending({
         kind: "rebase",
         prompt:
-          `Rebase the whole stack onto ${stack?.trunk ?? "trunk"}? (${what}` +
+          `Hand the rebase to a Claude agent in a new pane on the right? (${what}` +
           (drift.length > 0 ? `; ${drift.length} with local drift` : "") +
-          ") — rewrites history and force-pushes each branch.",
-        cmd: ["gh", "stack", "rebase"],
+          `) — it rebases onto ${s.trunk}, resolves conflicts itself, and force-pushes for review.`,
+        exec: () => launchRebaseAgent(s),
       });
     } else if (input === "M") {
       const n = stack?.stackNumber;
       const open = stack ? stack.branches.filter((b) => !b.isMerged).length : 0;
+      // Pass the stack number when we have it so this also works for a
+      // linked stack with no local tracking.
+      const cmd = n
+        ? ["gh", "stack", "merge", String(n), "--yes", "--squash"]
+        : ["gh", "stack", "merge", "--yes", "--squash"];
       setPending({
         kind: "merge",
         prompt:
           `Squash-merge ${open} PR${open === 1 ? "" : "s"} in ${stack?.label ?? "this stack"} into ${stack?.trunk ?? "trunk"}? ` +
           "This is irreversible.",
-        // Pass the stack number when we have it so this also works for a
-        // linked stack with no local tracking.
-        cmd: n
-          ? ["gh", "stack", "merge", String(n), "--yes", "--squash"]
-          : ["gh", "stack", "merge", "--yes", "--squash"],
+        exec: () => run(cmd),
       });
     }
   });
@@ -1177,7 +1384,7 @@ function App() {
   if (screen === "loading") {
     return (
       <Box padding={1}>
-        <Text color="cyan">loading stack… (fetching refs)</Text>
+        <Text color="cyan">loading stack…</Text>
       </Box>
     );
   }
@@ -1272,7 +1479,11 @@ function App() {
             </Text>
           ) : null}
           {stale.length === 0 && drift.length === 0 ? (
-            <Text color="green">{"  "}✓ in sync</Text>
+            stack.synced ? (
+              <Text color="green">{"  "}✓ in sync</Text>
+            ) : (
+              <Text dimColor>{"  "}⟳ checking sync…</Text>
+            )
           ) : null}
         </Text>
       </Box>
@@ -1299,7 +1510,7 @@ function App() {
             const innerW = sidebarW - 4; // border + padding
             const titleW = Math.max(4, innerW - 3 - badge.text.length - 1);
             const title = truncate(d?.title ?? b.branch, titleW).padEnd(titleW);
-            const tags = syncTags(b);
+            const tags = syncTags(b, stack.synced ?? false);
             const tagW = tags.reduce((n, t) => n + t.text.length + 1, 0);
             const meta = truncate(
               `${b.prNumber != null ? `#${b.prNumber} · ` : ""}${b.branch}${b.isCurrent ? " ✦" : ""}`,
@@ -1327,11 +1538,21 @@ function App() {
                     </Text>
                   ))}
                 </Text>
+                {isExpanded(b)
+                  ? checkRowsFor(d).map((r, ri) => (
+                      <Text key={ri} wrap="truncate-end">
+                        <Text dimColor>{"  │  "}</Text>
+                        <Text color={r.color} dimColor={r.dim}>
+                          {r.icon} {truncate(r.text, Math.max(4, innerW - 7))}
+                        </Text>
+                      </Text>
+                    ))
+                  : null}
               </Box>
             );
           })}
-          {winStart + slots < entries.length ? (
-            <Text dimColor>↓ {entries.length - winStart - slots} more</Text>
+          {winEnd < entries.length ? (
+            <Text dimColor>↓ {entries.length - winEnd} more</Text>
           ) : null}
           <Text dimColor> ○ {stack.trunk}</Text>
         </Box>
@@ -1476,7 +1697,7 @@ function App() {
           </Text>
         ) : (
           <Text dimColor wrap="truncate-end">
-            ↑↓/j/k/click pr · space/b page · d/u half · g/G top/bot · n/p file · c comment · o open · R rebase · M merge · r refresh · q quit
+            ↑↓/j/k/click pr · l/h checks · space/b page · d/u half · g/G top/bot · n/p file · c comment · o open · R rebase · M merge · r refresh · q quit
           </Text>
         )}
       </Box>
@@ -1491,13 +1712,15 @@ function App() {
 const argv = process.argv.slice(2);
 
 if (argv.includes("--dump")) {
-  // headless mode for debugging: print resolved stack data as JSON
+  // headless mode for debugging: print resolved stack data as JSON, with the
+  // sync annotation the TUI defers to the background applied inline
+  await fetchRefs();
   const { stacks, source, error } = await resolveStacks();
   if (error) {
     console.error(error);
     process.exit(1);
   }
-  const first = stacks[0];
+  const first = await annotateSync(stacks[0]);
   const enriched = await Promise.all(
     first.branches.map(async (b) => ({
       ...b,
@@ -1513,9 +1736,10 @@ if (argv.includes("-h") || argv.includes("--help")) {
 
 usage: stacks [--dump]
 
-keys: ↑↓/j/k/tab pick PR · space/b page · d/u half page · g/G top/bottom ·
-      n/p next/prev file · 1-9 jump · c comment to the ticket's agent ·
-      o open in browser · R rebase stack · M squash-merge stack · r refresh · q quit
+keys: ↑↓/j/k/tab pick PR · l/h (or ←→) expand/collapse a PR's CI checks ·
+      space/b page · d/u half page · g/G top/bottom · n/p next/prev file ·
+      1-9 jump · c comment to the ticket's agent · o open in browser ·
+      R rebase via a claude agent · M squash-merge stack · r refresh · q quit
 mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
        moves the selection)
 
@@ -1526,16 +1750,23 @@ the text to the agent running in it via \`herdr agent prompt\`. esc closes the b
 without sending. Needs a Herdr pane (HERDR_ENV=1) and exactly one matching tab
 with one agent in it — anything else is reported in the box instead of guessed.
 
+l expands the selected PR into its CI checks — failures and pending ones get a
+row each (worst first), passes roll up into a single "✓ N passed" line, and
+expanding re-fetches the PR so the list reflects CI right now. h collapses.
+
 sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the same
       condition as GitHub's "This stack is out-of-date"), and whether the local
       checkout has drifted from origin ("↓N" behind — e.g. after someone hit
-      Rebase stack in the web UI, "↑N" unpushed). Refs are fetched on load so
-      those answers reflect the remote, not a stale origin/*.
+      Rebase stack in the web UI, "↑N" unpushed). The stack renders immediately;
+      the ref fetch + drift detection run behind it ("⟳ checking sync…" in the
+      header until they land), so the answers still reflect the remote.
 
-R and M both stage a confirmation first and only run on "y". R runs
-\`gh stack rebase\`, which needs gh's local stack tracking — a stack created with
-\`gh stack link\` has none, and the error says so. M runs
-\`gh stack merge <n> --yes --squash\`, which works by stack number either way.`);
+R and M both stage a confirmation first and only run on "y". R splits a new
+Herdr pane on the right and hands the whole rebase to a Claude agent there —
+rebase onto the trunk, resolve merge conflicts itself, force-push with
+--force-with-lease — so you review a finished rebase instead of the conflicts
+(needs HERDR_ENV=1). M runs \`gh stack merge <n> --yes --squash\`, which works by
+stack number either way.`);
   process.exit(0);
 }
 
