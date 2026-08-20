@@ -27,7 +27,19 @@ type StackBranch = {
   isCurrent: boolean;
   isMerged: boolean;
   isQueued: boolean;
+  // True when this branch's base (the branch below it, or the trunk for the
+  // bottom one) has moved on without it — i.e. GitHub's "out-of-date with its
+  // base branch". Computed from the remote refs so it matches what the PR page
+  // shows, not just what happens to be checked out.
   needsRebase: boolean;
+  // Local checkout vs origin/<branch>. A force-push from the GitHub UI leaves
+  // the worktree behind; unpushed work leaves it ahead. Either one silently
+  // breaks the next push, so surface both.
+  hasLocal: boolean;
+  localAhead: number;
+  localBehind: number;
+  // Base this branch is measured against (branch below it, or the trunk).
+  base: string;
 };
 
 type PrDetails = {
@@ -44,10 +56,22 @@ type StackData = {
   label: string;
   trunk: string;
   currentBranch: string | null;
+  // GitHub's stack number, when we know it. `gh stack rebase` works off local
+  // tracking, but `gh stack merge` accepts this, which is the only way to act
+  // on a stack created by `gh stack link` (no local tracking is written).
+  stackNumber: number | null;
   branches: StackBranch[]; // bottom -> top (closest to trunk first)
 };
 
 type Screen = "loading" | "pick" | "main" | "fatal";
+
+// Rebase rewrites history and merge is irreversible, so neither fires on a bare
+// keypress — both stage a PendingAction that a second key has to confirm.
+type PendingAction = {
+  kind: "rebase" | "merge";
+  prompt: string;
+  cmd: string[];
+};
 
 // ---------------------------------------------------------------------------
 // gh helpers
@@ -64,6 +88,15 @@ async function run(
   ]);
   return { code, out, err };
 }
+
+// Placeholder sync fields. Every stack source fills these in later via
+// annotateSync(), which is the one place that talks to git about ref positions.
+const NO_SYNC = {
+  hasLocal: false,
+  localAhead: 0,
+  localBehind: 0,
+  base: "",
+} satisfies Pick<StackBranch, "hasLocal" | "localAhead" | "localBehind" | "base">;
 
 function parseViewJson(raw: string): StackData {
   const j = JSON.parse(raw) as {
@@ -82,6 +115,7 @@ function parseViewJson(raw: string): StackData {
     label: "current stack",
     trunk: j.trunk,
     currentBranch: j.currentBranch,
+    stackNumber: null,
     branches: j.branches.map((b) => ({
       branch: b.name,
       prNumber: b.pr?.number ?? null,
@@ -91,6 +125,7 @@ function parseViewJson(raw: string): StackData {
       isMerged: b.isMerged,
       isQueued: b.isQueued,
       needsRebase: b.needsRebase,
+      ...NO_SYNC,
     })),
   };
 }
@@ -98,7 +133,14 @@ function parseViewJson(raw: string): StackData {
 // Fallback when the current branch isn't part of a stack: read gh's local
 // tracking file so any tracked stack in the repo can still be browsed.
 async function readTrackingFile(): Promise<StackData[]> {
-  const { code, out } = await run(["git", "rev-parse", "--git-common-dir"]);
+  // Bare --git-common-dir answers "\.git" in the primary worktree, which only
+  // resolves when the cwd happens to be the repo root.
+  const { code, out } = await run([
+    "git",
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
   if (code !== 0) return [];
   const path = `${out.trim()}/gh-stack`;
   const file = Bun.file(path);
@@ -117,6 +159,7 @@ async function readTrackingFile(): Promise<StackData[]> {
     label: s.number ? `stack #${s.number}` : "untracked stack",
     trunk: s.trunk.branch,
     currentBranch: null,
+    stackNumber: s.number ?? null,
     branches: s.branches.map((b) => ({
       branch: b.branch,
       prNumber: b.pullRequest?.number ?? null,
@@ -126,24 +169,290 @@ async function readTrackingFile(): Promise<StackData[]> {
       isMerged: false,
       isQueued: false,
       needsRebase: false,
+      ...NO_SYNC,
     })),
   }));
 }
 
+// `gh stack link` registers a stack on GitHub *without* writing local tracking,
+// and `gh stack view` reads nothing but that local file — so a linked stack is
+// invisible to both it and the .git/gh-stack fallback. Resolve those over the API.
+type RemoteStackRef = { id: string; number: number };
+
+async function currentBranch(): Promise<string | null> {
+  const { code, out } = await run(["git", "branch", "--show-current"]);
+  const name = out.trim();
+  return code === 0 && name ? name : null;
+}
+
+async function prForBranch(branch: string): Promise<number | null> {
+  const { code, out } = await run(["gh", "pr", "view", branch, "--json", "number"]);
+  if (code !== 0) return null;
+  const n = (JSON.parse(out) as { number?: number }).number;
+  return typeof n === "number" ? n : null;
+}
+
+// Branch tips along HEAD's first-parent ancestry, nearest first. The branch you
+// are writing on may have no PR yet, so anchor the lookup on the closest
+// ancestor branch that does have one.
+async function ancestorBranches(current: string | null): Promise<string[]> {
+  const [revs, refs] = await Promise.all([
+    run(["git", "rev-list", "--first-parent", "--max-count=50", "HEAD"]),
+    run([
+      "git",
+      "for-each-ref",
+      "--format=%(objectname) %(refname:short)",
+      "refs/heads",
+      "refs/remotes/origin",
+    ]),
+  ]);
+  if (revs.code !== 0 || refs.code !== 0) return [];
+
+  const byCommit = new Map<string, string[]>();
+  for (const line of refs.out.trim().split("\n")) {
+    const [sha, ref] = line.split(" ");
+    if (!sha || !ref) continue;
+    const name = ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
+    if (!name || name === current || name === "HEAD") continue;
+    const names = byCommit.get(sha) ?? [];
+    if (!names.includes(name)) names.push(name);
+    byCommit.set(sha, names);
+  }
+
+  const ordered: string[] = [];
+  for (const sha of revs.out.trim().split("\n")) {
+    for (const name of byCommit.get(sha) ?? []) {
+      if (!ordered.includes(name)) ordered.push(name);
+    }
+  }
+  return ordered;
+}
+
+async function remoteStackRef(prNumber: number): Promise<RemoteStackRef | null> {
+  const { code, out } = await run([
+    "gh",
+    "api",
+    "graphql",
+    "-F",
+    "owner={owner}",
+    "-F",
+    "name={repo}",
+    "-F",
+    `number=${prNumber}`,
+    "-f",
+    "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){stack{id number}}}}",
+  ]);
+  if (code !== 0) return null;
+  const stack = (
+    JSON.parse(out) as {
+      data?: { repository?: { pullRequest?: { stack?: RemoteStackRef | null } } };
+    }
+  ).data?.repository?.pullRequest?.stack;
+  return stack?.id ? stack : null;
+}
+
+async function isAncestor(branch: string, of: string): Promise<boolean> {
+  const { code } = await run(["git", "merge-base", "--is-ancestor", branch, of]);
+  return code === 0;
+}
+
+async function refExists(ref: string): Promise<boolean> {
+  const { code } = await run(["git", "rev-parse", "--verify", "--quiet", ref]);
+  return code === 0;
+}
+
+// Update the remote-tracking refs so "out of date" means out of date with what
+// GitHub actually has. Without this the whole panel can be confidently wrong —
+// a stale origin/main makes every branch look current. Read-only: no merge, no
+// checkout, nothing touched in the working tree.
+async function fetchRefs(): Promise<void> {
+  await run(["git", "fetch", "--quiet", "origin"]);
+}
+
+// Fill in needsRebase + local drift for every branch in the stack.
+//
+// Two independent questions, both of which have bitten this repo:
+//   1. Is the branch behind its base? (GitHub's "This stack is out-of-date")
+//      Measured on the REMOTE refs, because that's what the PR page compares.
+//   2. Has the local checkout drifted from origin? A "Rebase stack" click in
+//      the web UI force-pushes, leaving every worktree silently behind.
+async function annotateSync(data: StackData): Promise<StackData> {
+  const branches = await Promise.all(
+    data.branches.map(async (b, i) => {
+      // bottom branch measures against the trunk; the rest against the one below
+      const base = i === 0 ? data.trunk : data.branches[i - 1].branch;
+
+      const [hasLocal, hasRemote, hasRemoteBase] = await Promise.all([
+        refExists(b.branch),
+        refExists(`origin/${b.branch}`),
+        refExists(`origin/${base}`),
+      ]);
+
+      // Prefer remote-vs-remote; fall back to local refs when a branch hasn't
+      // been pushed yet, so an unpushed top-of-stack still reports honestly.
+      let needsRebase = b.needsRebase;
+      if (hasRemote && hasRemoteBase) {
+        needsRebase =
+          needsRebase || !(await isAncestor(`origin/${base}`, `origin/${b.branch}`));
+      } else if (hasLocal && hasRemoteBase) {
+        needsRebase =
+          needsRebase || !(await isAncestor(`origin/${base}`, b.branch));
+      }
+
+      let localAhead = 0;
+      let localBehind = 0;
+      if (hasLocal && hasRemote) {
+        const { code, out } = await run([
+          "git",
+          "rev-list",
+          "--left-right",
+          "--count",
+          `origin/${b.branch}...${b.branch}`,
+        ]);
+        if (code === 0) {
+          const [behind, ahead] = out.trim().split(/\s+/).map(Number);
+          localBehind = Number.isFinite(behind) ? behind : 0;
+          localAhead = Number.isFinite(ahead) ? ahead : 0;
+        }
+      }
+
+      return { ...b, base, hasLocal, needsRebase, localAhead, localBehind };
+    }),
+  );
+  return { ...data, branches };
+}
+
+// A merged branch can't be rebased and doesn't need it, so ignore those when
+// deciding whether the stack as a whole is stale.
+function staleBranches(data: StackData): StackBranch[] {
+  return data.branches.filter((b) => b.needsRebase && !b.isMerged);
+}
+
+function driftedBranches(data: StackData): StackBranch[] {
+  return data.branches.filter((b) => b.localAhead > 0 || b.localBehind > 0);
+}
+
+async function readRemoteStack(): Promise<StackData | null> {
+  const current = await currentBranch();
+  const candidates = [
+    ...(current ? [current] : []),
+    ...(await ancestorBranches(current)),
+  ].slice(0, 12);
+
+  let ref: RemoteStackRef | null = null;
+  for (const branch of candidates) {
+    const pr = await prForBranch(branch);
+    if (pr == null) continue;
+    ref = await remoteStackRef(pr);
+    if (ref) break;
+  }
+  if (!ref) return null;
+
+  const { code, out } = await run([
+    "gh",
+    "api",
+    "graphql",
+    "-F",
+    `id=${ref.id}`,
+    "-f",
+    "query=query($id:ID!){node(id:$id){... on PullRequestStack{number baseRefName entries(first:50){nodes{position pullRequest{number url headRefName state}}}}}}",
+  ]);
+  if (code !== 0) return null;
+
+  type Entry = {
+    position: number;
+    pullRequest: {
+      number: number;
+      url: string;
+      headRefName: string;
+      state: string;
+    } | null;
+  };
+  const node = (
+    JSON.parse(out) as {
+      data?: {
+        node?: {
+          number: number;
+          baseRefName: string;
+          entries?: { nodes?: Entry[] };
+        } | null;
+      };
+    }
+  ).data?.node;
+  if (!node) return null;
+
+  const branches: StackBranch[] = [...(node.entries?.nodes ?? [])]
+    .filter((e): e is Entry & { pullRequest: NonNullable<Entry["pullRequest"]> } =>
+      e.pullRequest != null,
+    )
+    .sort((a, b) => a.position - b.position)
+    .map((e) => ({
+      branch: e.pullRequest.headRefName,
+      prNumber: e.pullRequest.number,
+      prUrl: e.pullRequest.url,
+      prState: e.pullRequest.state,
+      isCurrent: e.pullRequest.headRefName === current,
+      isMerged: e.pullRequest.state === "MERGED",
+      isQueued: false,
+      needsRebase: false,
+      ...NO_SYNC,
+    }));
+  if (branches.length === 0) return null;
+
+  // A PR-less branch stacked on top of the topmost PR still belongs to the
+  // stack from the author's point of view. Only append it when it really does
+  // sit on top — a branch forked off the middle would be shown in the wrong place.
+  const top = branches[branches.length - 1].branch;
+  if (current && !branches.some((b) => b.branch === current)) {
+    if (await isAncestor(top, "HEAD")) {
+      branches.push({
+        branch: current,
+        prNumber: null,
+        prUrl: null,
+        prState: null,
+        isCurrent: true,
+        isMerged: false,
+        isQueued: false,
+        needsRebase: false,
+        ...NO_SYNC,
+      });
+    }
+  }
+
+  return {
+    label: `stack #${node.number} · on github`,
+    trunk: node.baseRefName,
+    currentBranch: current,
+    stackNumber: node.number,
+    branches,
+  };
+}
+
 async function resolveStacks(): Promise<{
   stacks: StackData[];
-  viaFile: boolean;
+  source: "tracked" | "github" | "file" | "none";
   error?: string;
 }> {
+  await fetchRefs();
+
   const view = await run(["gh", "stack", "view", "--json"]);
   if (view.code === 0) {
-    return { stacks: [parseViewJson(view.out)], viaFile: false };
+    return {
+      stacks: [await annotateSync(parseViewJson(view.out))],
+      source: "tracked",
+    };
   }
+  const remote = await readRemoteStack();
+  if (remote) return { stacks: [await annotateSync(remote)], source: "github" };
   const tracked = await readTrackingFile();
-  if (tracked.length > 0) return { stacks: tracked, viaFile: true };
+  if (tracked.length > 0)
+    return {
+      stacks: await Promise.all(tracked.map(annotateSync)),
+      source: "file",
+    };
   return {
     stacks: [],
-    viaFile: false,
+    source: "none",
     error:
       (view.err || view.out).trim() ||
       "No stack found. Run this from a branch that is part of a gh stack.",
@@ -265,6 +574,33 @@ function dotFor(b: StackBranch, d: PrDetails | undefined): Badge {
   return { text: "●", color: "yellow" };
 }
 
+// Compact per-branch sync marker for the sidebar's meta line, e.g.
+//   "⚠ rebase"   base moved on without this branch
+//   "↓2"         local checkout is 2 commits behind origin (someone force-pushed)
+//   "↑1"         1 unpushed commit
+//   "local only" never pushed
+function syncTags(b: StackBranch): Badge[] {
+  const tags: Badge[] = [];
+  if (b.isMerged) return tags;
+  if (b.needsRebase) tags.push({ text: "⚠ rebase", color: "yellow" });
+  if (b.localBehind > 0) tags.push({ text: `↓${b.localBehind}`, color: "red" });
+  if (b.localAhead > 0) tags.push({ text: `↑${b.localAhead}`, color: "cyan" });
+  if (b.hasLocal && b.prNumber != null && b.localAhead === 0 && b.localBehind === 0)
+    return tags;
+  if (!b.hasLocal && b.prNumber != null)
+    tags.push({ text: "no local", color: "gray" });
+  return tags;
+}
+
+function firstLine(s: string): string {
+  return (
+    s
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? ""
+  );
+}
+
 function truncate(s: string, max: number): string {
   if (max <= 0) return "";
   return s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
@@ -319,6 +655,9 @@ function App() {
   const [pickIdx, setPickIdx] = useState(0);
   const [stack, setStack] = useState<StackData | null>(null);
   const [details, setDetails] = useState<Map<number, PrDetails>>(new Map());
+  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<Badge | null>(null);
 
   // display order: top of stack first, like the GitHub stack UI
   const entries = useMemo(
@@ -379,6 +718,40 @@ function App() {
   }, [openStack]);
 
   useEffect(load, [load]);
+
+  // Run a confirmed rebase/merge, then reload so the panel reflects reality
+  // rather than what we hoped happened.
+  const runAction = useCallback(
+    (action: PendingAction) => {
+      setPending(null);
+      setActionMsg(null);
+      setBusy(action.kind === "rebase" ? "rebasing stack…" : "merging stack…");
+      run(action.cmd)
+        .then(({ code, out, err }) => {
+          setBusy(null);
+          if (code === 0) {
+            setActionMsg({
+              text: `${action.kind} ok — ${firstLine(out) || "done"}`,
+              color: "green",
+            });
+            load();
+            return;
+          }
+          // `gh stack rebase` needs local tracking, which `gh stack link`
+          // never writes — so a linked stack fails here. Say so plainly
+          // instead of leaving a bare non-zero exit.
+          setActionMsg({
+            text: `${action.kind} failed — ${firstLine(err) || firstLine(out) || `exit ${code}`}`,
+            color: "red",
+          });
+        })
+        .catch((e: Error) => {
+          setBusy(null);
+          setActionMsg({ text: `${action.kind} failed — ${e.message}`, color: "red" });
+        });
+    },
+    [load],
+  );
 
   // load the diff for the selected PR (cached per PR number)
   const sel = entries[selected];
@@ -494,6 +867,19 @@ function App() {
   // ----- input ----------------------------------------------------------
   useInput((input, key) => {
     if (input.includes("[<")) return; // mouse reports, handled above
+
+    // A staged rebase/merge swallows every key until it is answered, so a
+    // stray keystroke can't trigger it and can't be lost behind it either.
+    if (pending) {
+      if (input === "y" || input === "Y") runAction(pending);
+      else setPending(null);
+      return;
+    }
+    if (busy) return; // an action is in flight; ignore input until it settles
+    // Clear a finished action's result on the next key, but still let that key
+    // do its job — dismissing shouldn't cost a keystroke.
+    if (actionMsg) setActionMsg(null);
+
     if (input === "q" || key.escape) {
       exit();
       return;
@@ -509,9 +895,9 @@ function App() {
 
     if (screen !== "main") return;
 
-    if (key.upArrow || (key.tab && key.shift))
+    if (key.upArrow || input === "h" || (key.tab && key.shift))
       setSelected((i) => Math.max(0, i - 1));
-    else if (key.downArrow || key.tab)
+    else if (key.downArrow || input === "l" || key.tab)
       setSelected((i) => Math.min(entries.length - 1, i + 1));
     else if (/^[1-9]$/.test(input)) {
       const n = parseInt(input, 10) - 1;
@@ -534,13 +920,43 @@ function App() {
         stderr: "ignore",
       });
     else if (input === "r") load();
+    else if (input === "R") {
+      const stale = stack ? staleBranches(stack) : [];
+      const drift = stack ? driftedBranches(stack) : [];
+      const what =
+        stale.length > 0
+          ? `${stale.length} branch${stale.length === 1 ? "" : "es"} behind their base`
+          : "nothing looks stale";
+      setPending({
+        kind: "rebase",
+        prompt:
+          `Rebase the whole stack onto ${stack?.trunk ?? "trunk"}? (${what}` +
+          (drift.length > 0 ? `; ${drift.length} with local drift` : "") +
+          ") — rewrites history and force-pushes each branch.",
+        cmd: ["gh", "stack", "rebase"],
+      });
+    } else if (input === "M") {
+      const n = stack?.stackNumber;
+      const open = stack ? stack.branches.filter((b) => !b.isMerged).length : 0;
+      setPending({
+        kind: "merge",
+        prompt:
+          `Squash-merge ${open} PR${open === 1 ? "" : "s"} in ${stack?.label ?? "this stack"} into ${stack?.trunk ?? "trunk"}? ` +
+          "This is irreversible.",
+        // Pass the stack number when we have it so this also works for a
+        // linked stack with no local tracking.
+        cmd: n
+          ? ["gh", "stack", "merge", String(n), "--yes", "--squash"]
+          : ["gh", "stack", "merge", "--yes", "--squash"],
+      });
+    }
   });
 
   // ----- screens --------------------------------------------------------
   if (screen === "loading") {
     return (
       <Box padding={1}>
-        <Text color="cyan">loading stack…</Text>
+        <Text color="cyan">loading stack… (fetching refs)</Text>
       </Box>
     );
   }
@@ -560,7 +976,7 @@ function App() {
         <Text bold color="cyan">
           Pick a stack
         </Text>
-        <Text dimColor>current branch isn't in a stack — tracked stacks in this repo:</Text>
+        <Text dimColor>current branch isn't in any stack — tracked stacks in this repo:</Text>
         <Box flexDirection="column" marginTop={1}>
           {stackChoices.map((s, i) => (
             <Box key={i} flexDirection="column">
@@ -593,7 +1009,8 @@ function App() {
   if (!stack || !sel) return null;
 
   // ----- main -----------------------------------------------------------
-  const needsRebase = entries.some((b) => b.needsRebase);
+  const stale = staleBranches(stack);
+  const drift = driftedBranches(stack);
   const selDetails = sel.prNumber != null ? details.get(sel.prNumber) : undefined;
   const baseBranch =
     stack.branches[stack.branches.indexOf(sel) - 1]?.branch ?? stack.trunk;
@@ -614,7 +1031,21 @@ function App() {
             {" "}
             · {entries.length} PR{entries.length === 1 ? "" : "s"} · trunk {stack.trunk}
           </Text>
-          {needsRebase ? <Text color="yellow">  ⚠ out-of-date with {stack.trunk}</Text> : null}
+          {stale.length > 0 ? (
+            <Text color="yellow">
+              {"  "}⚠ {stale.length} behind base ({stale
+                .map((b) => (b.prNumber != null ? `#${b.prNumber}` : b.branch))
+                .join(" ")}) — R to rebase
+            </Text>
+          ) : null}
+          {drift.length > 0 ? (
+            <Text color="red">
+              {"  "}⇅ {drift.length} local drift
+            </Text>
+          ) : null}
+          {stale.length === 0 && drift.length === 0 ? (
+            <Text color="green">{"  "}✓ in sync</Text>
+          ) : null}
         </Text>
       </Box>
 
@@ -640,9 +1071,11 @@ function App() {
             const innerW = sidebarW - 4; // border + padding
             const titleW = Math.max(4, innerW - 3 - badge.text.length - 1);
             const title = truncate(d?.title ?? b.branch, titleW).padEnd(titleW);
+            const tags = syncTags(b);
+            const tagW = tags.reduce((n, t) => n + t.text.length + 1, 0);
             const meta = truncate(
               `${b.prNumber != null ? `#${b.prNumber} · ` : ""}${b.branch}${b.isCurrent ? " ✦" : ""}`,
-              innerW - 4,
+              Math.max(4, innerW - 4 - tagW),
             );
             return (
               <Box key={b.branch} flexDirection="column">
@@ -654,9 +1087,17 @@ function App() {
                   </Text>{" "}
                   <Text color={badge.color}>{badge.text}</Text>
                 </Text>
-                <Text dimColor wrap="truncate-end">
-                  {"  │ "}
-                  {meta}
+                <Text wrap="truncate-end">
+                  <Text dimColor>
+                    {"  │ "}
+                    {meta}
+                  </Text>
+                  {tags.map((t, ti) => (
+                    <Text key={ti} color={t.color}>
+                      {" "}
+                      {t.text}
+                    </Text>
+                  ))}
                 </Text>
               </Box>
             );
@@ -702,6 +1143,15 @@ function App() {
             ) : null}
             {" · "}
             {pct}%
+            {sel.needsRebase && !sel.isMerged ? (
+              <Text color="yellow"> · ⚠ behind {baseBranch}</Text>
+            ) : null}
+            {sel.localBehind > 0 ? (
+              <Text color="red"> · local ↓{sel.localBehind} behind origin</Text>
+            ) : null}
+            {sel.localAhead > 0 ? (
+              <Text color="cyan"> · local ↑{sel.localAhead} unpushed</Text>
+            ) : null}
           </Text>
           {diffLines === null ? (
             <Text dimColor>loading diff…</Text>
@@ -725,11 +1175,33 @@ function App() {
         </Box>
       </Box>
 
-      {/* footer */}
+      {/* footer: confirmation and action status take over the key hints */}
       <Box paddingX={1} flexShrink={0}>
-        <Text dimColor wrap="truncate-end">
-          ↑↓/click pr · j/k/wheel scroll · d/u half · g/G top/bot · n/p file · o open · r refresh · q quit
-        </Text>
+        {pending ? (
+          <Text wrap="truncate-end">
+            <Text bold color={pending.kind === "merge" ? "red" : "yellow"}>
+              {pending.kind === "merge" ? "MERGE" : "REBASE"}
+            </Text>
+            <Text> {pending.prompt} </Text>
+            <Text bold color="white">
+              y
+            </Text>
+            <Text dimColor>/any other key cancels</Text>
+          </Text>
+        ) : busy ? (
+          <Text color="cyan" wrap="truncate-end">
+            {busy}
+          </Text>
+        ) : actionMsg ? (
+          <Text color={actionMsg.color} wrap="truncate-end">
+            {actionMsg.text}
+            <Text dimColor> · any key to dismiss</Text>
+          </Text>
+        ) : (
+          <Text dimColor wrap="truncate-end">
+            ↑↓/h/l/click pr · j/k/wheel scroll · d/u half · g/G top/bot · n/p file · o open · R rebase · M merge · r refresh · q quit
+          </Text>
+        )}
       </Box>
     </Box>
   );
@@ -743,7 +1215,7 @@ const argv = process.argv.slice(2);
 
 if (argv.includes("--dump")) {
   // headless mode for debugging: print resolved stack data as JSON
-  const { stacks, viaFile, error } = await resolveStacks();
+  const { stacks, source, error } = await resolveStacks();
   if (error) {
     console.error(error);
     process.exit(1);
@@ -755,7 +1227,7 @@ if (argv.includes("--dump")) {
       details: b.prNumber != null ? await fetchPrDetails(b.prNumber) : null,
     })),
   );
-  console.log(JSON.stringify({ viaFile, stackCount: stacks.length, ...first, branches: enriched }, null, 2));
+  console.log(JSON.stringify({ source, stackCount: stacks.length, ...first, branches: enriched }, null, 2));
   process.exit(0);
 }
 
@@ -764,11 +1236,22 @@ if (argv.includes("-h") || argv.includes("--help")) {
 
 usage: stacks [--dump]
 
-keys: ↑↓/tab pick PR · j/k scroll · d/u half page · space/b page ·
+keys: ↑↓/h/l/tab pick PR · j/k scroll · d/u half page · space/b page ·
       g/G top/bottom · n/p next/prev file · 1-9 jump · o open in browser ·
-      r refresh · q quit
+      R rebase stack · M squash-merge stack · r refresh · q quit
 mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
-       moves the selection)`);
+       moves the selection)
+
+sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the same
+      condition as GitHub's "This stack is out-of-date"), and whether the local
+      checkout has drifted from origin ("↓N" behind — e.g. after someone hit
+      Rebase stack in the web UI, "↑N" unpushed). Refs are fetched on load so
+      those answers reflect the remote, not a stale origin/*.
+
+R and M both stage a confirmation first and only run on "y". R runs
+\`gh stack rebase\`, which needs gh's local stack tracking — a stack created with
+\`gh stack link\` has none, and the error says so. M runs
+\`gh stack merge <n> --yes --squash\`, which works by stack number either way.`);
   process.exit(0);
 }
 
