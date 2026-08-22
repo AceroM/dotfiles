@@ -37,12 +37,6 @@
     }
   },
   {
-    "context": "AssistantPanel",
-    "bindings": {
-      "ctrl-e": "project_panel::ToggleFocus"
-    }
-  },
-  {
     "context": "Editor",
     "bindings": {
       "alt-d": "editor::SelectNext",
@@ -64,7 +58,6 @@
       "shift-enter": "editor::NewlineBelow",
       "alt-a": "editor::SelectAll",
       "alt-z": "editor::Undo",
-      "alt-k": "assistant::InlineAssist",
       "alt-shift-g": "search::SelectPreviousMatch",
       "alt-g": "search::SelectNextMatch",
       "alt-h": "editor::Hover",
@@ -244,11 +237,6 @@
   {
     "bindings": {
       "cmd-shift-.": "editor::ToggleFocus"
-    }
-  },
-  {
-    "bindings": {
-      "alt-cmd-n": "agent::NewThread"
     }
   },
   {
