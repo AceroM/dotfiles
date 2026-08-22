@@ -154,7 +154,6 @@ alias tz='tx'
 function a() { _t_attach "" first "$@" }
 function l() { _t_list "" }
 function k() { _t_kill "" "$@" }
-function r() { _t_read "" "$@" }
 
 # ── bg server (tmux -L bg) ──────────────────────────────────────────
 # no args: attach to the first session; with args: same as `a` but on the bg server

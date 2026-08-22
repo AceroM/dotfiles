@@ -12,7 +12,7 @@
 #   hspawn <name> [cmd]    new labeled pane      hkill <t>         close a pane
 #   hx   <t> <cmd>         run + capture stdout/stderr + exit code
 #   hask <agent> <prompt>  prompt an agent, wait, print its reply
-#   hrc                    reload config.toml    eh                edit config.toml
+#   hc                     reload config.toml    eh                edit config.toml
 #
 # <target> is, in resolution order:
 #
@@ -40,12 +40,39 @@
 # Everything requires running inside Herdr (HERDR_ENV=1).
 
 # stale aliases from older versions of this file shadow the functions below
-unalias hd hl hr hrc hs hls hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
+unalias hd hl hr hc hrc hs hls hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
 
 alias h="herdr"
-# hr used to be reload-config; it reads panes now, so the reload moved to hrc.
-alias hrc="herdr server reload-config"
 alias eh="nvim ~/.config/herdr/config.toml"
+
+# hc — push config.toml into the running server.
+#
+# The server parses config.toml once, at startup, and never looks at it again:
+# a session that has been up for a week is still running whatever it read back
+# then, so edits sit in the file changing nothing. Every edit ends here.
+#
+# hr was this command once; it reads panes now, and hrc still works as a second
+# name. Diagnostics come back as plain strings next to a status of
+# applied/partial/failed — a partial reload keeps the old value for whatever it
+# rejected, so they get printed. The silent case is a config that looks live
+# and isn't.
+function hc() {
+  # not "status": zsh keeps that one read-only as an alias for $?
+  local out state
+  out="$(herdr server reload-config 2>&1)" || { print -u2 -- "$out"; return 1 }
+
+  state="$(print -r -- "$out" | jq -r '.result.status // empty' 2>/dev/null)"
+  print -r -- "$out" | jq -r '.result.diagnostics[]?' 2>/dev/null |
+    while IFS= read -r line; do print -u2 -- "  $line"; done
+
+  case "$state" in
+    applied) print -r -- "config reloaded" ;;
+    partial) print -u2 -- "config partly reloaded — everything above kept its old value"; return 1 ;;
+    "")      print -u2 -- "unexpected reply from herdr:"; print -u2 -- "$out"; return 1 ;;
+    *)       print -u2 -- "config reload failed ($state)"; return 1 ;;
+  esac
+}
+alias hrc="hc"
 
 function _h_guard() {
   if [[ "${HERDR_ENV:-}" != 1 ]]; then

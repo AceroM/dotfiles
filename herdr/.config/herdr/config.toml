@@ -3,7 +3,9 @@ onboarding = false
 # Stowed with: stow herdr  ->  ~/.config/herdr/config.toml
 #
 # See `herdr --default-config` for the full annotated reference.
-# Apply edits to the running server with `herdr server reload-config` (or `hrc`).
+# Apply edits to the running server with `hc` (herdr server reload-config).
+# The server parses this file only at startup, so nothing here is live until
+# that runs.
 #
 # Binding syntax:
 #   "prefix+n"      -> requires the prefix key first (default ctrl+b)

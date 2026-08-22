@@ -32,38 +32,6 @@ function pm() {
   _cl_tag "$s" "$sid" bg
 }
 
-function j() {
-  local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
-  local -a nouns=("${SESSION_NAME_NOUNS[@]}")
-
-  typeset -A used_letters
-  local existing cmd
-  for existing in $(_cl_tmux bg list-sessions -F '#S' 2>/dev/null); do
-    cmd=$(_cl_tmux bg display-message -p -t "$existing:0.0" '#{pane_current_command}' 2>/dev/null)
-    if [[ "$cmd" == *claude* || "$cmd" == *node* || "$cmd" =~ ^[0-9]+\.[0-9]+ ]]; then
-      used_letters[${existing:0:1}]=1
-    fi
-  done
-
-  local name first_letter attempts=0
-  while true; do
-    name="${adjectives[RANDOM % ${#adjectives[@]} + 1]}-${nouns[RANDOM % ${#nouns[@]} + 1]}"
-    first_letter="${name:0:1}"
-    if ! _cl_tmux bg has-session -t "$name" 2>/dev/null; then
-      if [[ -z "${used_letters[$first_letter]}" ]] || (( attempts > 50 )); then
-        break
-      fi
-    fi
-    ((attempts++))
-  done
-  local sid=$(_cl_sid)
-  _cl_tmux bg new-session -ds "$name" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid"
-  _cl_tag "$name" "$sid" bg
-  sleep 1
-  _cl_tmux bg send-keys -t "$name:0.0" "$1" C-m
-  _cl_tmux bg send-keys -t "$name:0.0" C-m
-}
-
 function p() {
   local input=""
   if [[ ! -t 0 ]]; then

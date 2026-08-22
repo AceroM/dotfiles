@@ -62,3 +62,8 @@
 [credential "https://gist.github.com"]
 	helper = 
 	helper = !/opt/homebrew/bin/gh auth git-credential
+
+# Repos under ~/Code get extra config from an untracked, machine-local file.
+# Must stay last: it resets credential helper lists set above.
+[includeIf "gitdir/i:~/Code/"]
+	path = ~/.config/git/code.gitconfig
