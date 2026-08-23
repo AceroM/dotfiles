@@ -31,22 +31,25 @@
   },
   "languages": {
     "TypeScript": {
-      "language_servers": ["vtsls", "!tsgo", "!typescript-language-server", "oxfmt"],
+      "language_servers": ["typescript-ls", "!vtsls", "!typescript-language-server", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }]
     },
     "TSX": {
-      "language_servers": ["vtsls", "!tsgo", "!typescript-language-server", "oxfmt"],
+      "language_servers": ["typescript-ls", "!vtsls", "!typescript-language-server", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }]
     },
     "JavaScript": {
-      "language_servers": ["...", "!eslint", "oxfmt"],
+      "language_servers": ["typescript-ls", "!vtsls", "!typescript-language-server", "...", "!eslint", "oxfmt"],
       "format_on_save": "on",
       "prettier": { "allowed": false },
       "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "JSX": {
+      "language_servers": ["typescript-ls", "!vtsls", "!typescript-language-server", "...", "!eslint", "oxfmt"]
     },
     "JSON": {
       "format_on_save": "on",
@@ -60,9 +63,9 @@
     }
   },
   "lsp": {
-    "tsgo": {
+    "typescript-ls": {
       "settings": {
-        "package_version": "7.0.0-dev.20251029.1"
+        "package_version": "7.0.2"
       }
     }
   },
