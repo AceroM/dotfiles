@@ -169,12 +169,95 @@
       "ctrl-;": ["terminal::SendText", "\u001b[59;5u"],
       "cmd-;": ["workspace::SendKeystrokes", "cmd-i alt-/ cmd-i cmd-v"],
       "cmd-'": ["workspace::SendKeystrokes", "cmd-i cmd-; cmd-i cmd-v"],
-      "ctrl-alt-down": null,
       "ctrl-r": ["terminal::SendKeystroke", "ctrl-r"],
       "ctrl-a": null,
       "ctrl-e": null,
       "alt-backspace": ["terminal::SendKeystroke", "ctrl-w"],
-      "ctrl-alt-k": "terminal_panel::ToggleFocus"
+
+      // Herdr enables the kitty keyboard protocol, but Zed's terminal does not
+      // currently encode character chords with their full modifier set. Send
+      // the CSI-u sequences Herdr would receive from Ghostty explicitly.
+
+      // ctrl+alt direct actions (CSI-u modifier 7)
+      "ctrl-alt-b": ["terminal::SendText", "\u001b[98;7u"],
+      "ctrl-alt-h": ["terminal::SendText", "\u001b[104;7u"],
+      "ctrl-alt-i": ["terminal::SendText", "\u001b[105;7u"],
+      "ctrl-alt-j": ["terminal::SendText", "\u001b[106;7u"],
+      "ctrl-alt-k": ["terminal::SendText", "\u001b[107;7u"],
+      "ctrl-alt-l": ["terminal::SendText", "\u001b[108;7u"],
+      "ctrl-alt-n": ["terminal::SendText", "\u001b[110;7u"],
+      "ctrl-alt-r": ["terminal::SendText", "\u001b[114;7u"],
+      "ctrl-alt-u": ["terminal::SendText", "\u001b[117;7u"],
+      "ctrl-alt-v": ["terminal::SendText", "\u001b[118;7u"],
+      "ctrl-alt-w": ["terminal::SendText", "\u001b[119;7u"],
+      "ctrl-alt-x": ["terminal::SendText", "\u001b[120;7u"],
+      "ctrl-alt-z": ["terminal::SendText", "\u001b[122;7u"],
+      "ctrl-alt--": ["terminal::SendText", "\u001b[45;7u"],
+      "ctrl-alt-;": ["terminal::SendText", "\u001b[59;7u"],
+
+      // ctrl+alt pane focus uses the modified xterm/kitty arrow encoding.
+      "ctrl-alt-left": ["terminal::SendText", "\u001b[1;7D"],
+      "ctrl-alt-down": ["terminal::SendText", "\u001b[1;7B"],
+      "ctrl-alt-up": ["terminal::SendText", "\u001b[1;7A"],
+      "ctrl-alt-right": ["terminal::SendText", "\u001b[1;7C"],
+
+      // ctrl+alt+1..9 switches Herdr tabs.
+      "ctrl-alt-1": ["terminal::SendText", "\u001b[49;7u"],
+      "ctrl-alt-2": ["terminal::SendText", "\u001b[50;7u"],
+      "ctrl-alt-3": ["terminal::SendText", "\u001b[51;7u"],
+      "ctrl-alt-4": ["terminal::SendText", "\u001b[52;7u"],
+      "ctrl-alt-5": ["terminal::SendText", "\u001b[53;7u"],
+      "ctrl-alt-6": ["terminal::SendText", "\u001b[54;7u"],
+      "ctrl-alt-7": ["terminal::SendText", "\u001b[55;7u"],
+      "ctrl-alt-8": ["terminal::SendText", "\u001b[56;7u"],
+      "ctrl-alt-9": ["terminal::SendText", "\u001b[57;7u"],
+
+      // ctrl+alt+shift direct actions (CSI-u modifier 8)
+      "ctrl-alt-shift-j": ["terminal::SendText", "\u001b[106;8u"],
+      "ctrl-alt-shift-k": ["terminal::SendText", "\u001b[107;8u"],
+      "ctrl-alt-shift-n": ["terminal::SendText", "\u001b[110;8u"],
+      "ctrl-alt-shift-r": ["terminal::SendText", "\u001b[114;8u"],
+      "ctrl-alt-shift-w": ["terminal::SendText", "\u001b[119;8u"],
+
+      // cmd+alt+shift+a..z focuses a Herdr space by its initial.
+      "cmd-alt-shift-a": ["terminal::SendText", "\u001b[97;12u"],
+      "cmd-alt-shift-b": ["terminal::SendText", "\u001b[98;12u"],
+      "cmd-alt-shift-c": ["terminal::SendText", "\u001b[99;12u"],
+      "cmd-alt-shift-d": ["terminal::SendText", "\u001b[100;12u"],
+      "cmd-alt-shift-e": ["terminal::SendText", "\u001b[101;12u"],
+      "cmd-alt-shift-f": ["terminal::SendText", "\u001b[102;12u"],
+      "cmd-alt-shift-g": ["terminal::SendText", "\u001b[103;12u"],
+      "cmd-alt-shift-h": ["terminal::SendText", "\u001b[104;12u"],
+      "cmd-alt-shift-i": ["terminal::SendText", "\u001b[105;12u"],
+      "cmd-alt-shift-j": ["terminal::SendText", "\u001b[106;12u"],
+      "cmd-alt-shift-k": ["terminal::SendText", "\u001b[107;12u"],
+      "cmd-alt-shift-l": ["terminal::SendText", "\u001b[108;12u"],
+      "cmd-alt-shift-m": ["terminal::SendText", "\u001b[109;12u"],
+      "cmd-alt-shift-n": ["terminal::SendText", "\u001b[110;12u"],
+      "cmd-alt-shift-o": ["terminal::SendText", "\u001b[111;12u"],
+      "cmd-alt-shift-p": ["terminal::SendText", "\u001b[112;12u"],
+      "cmd-alt-shift-q": ["terminal::SendText", "\u001b[113;12u"],
+      "cmd-alt-shift-r": ["terminal::SendText", "\u001b[114;12u"],
+      "cmd-alt-shift-s": ["terminal::SendText", "\u001b[115;12u"],
+      "cmd-alt-shift-t": ["terminal::SendText", "\u001b[116;12u"],
+      "cmd-alt-shift-u": ["terminal::SendText", "\u001b[117;12u"],
+      "cmd-alt-shift-v": ["terminal::SendText", "\u001b[118;12u"],
+      "cmd-alt-shift-w": ["terminal::SendText", "\u001b[119;12u"],
+      "cmd-alt-shift-x": ["terminal::SendText", "\u001b[120;12u"],
+      "cmd-alt-shift-y": ["terminal::SendText", "\u001b[121;12u"],
+      "cmd-alt-shift-z": ["terminal::SendText", "\u001b[122;12u"],
+
+      // Zed represents Shift+digit as its punctuation character. Reattach the
+      // shift bit in the bytes sent to Herdr (CSI-u modifier 12).
+      "cmd-alt-!": ["terminal::SendText", "\u001b[49;12u"],
+      "cmd-alt-@": ["terminal::SendText", "\u001b[50;12u"],
+      "cmd-alt-#": ["terminal::SendText", "\u001b[51;12u"],
+      "cmd-alt-$": ["terminal::SendText", "\u001b[52;12u"],
+      "cmd-alt-%": ["terminal::SendText", "\u001b[53;12u"],
+      "cmd-alt-^": ["terminal::SendText", "\u001b[54;12u"],
+      "cmd-alt-&": ["terminal::SendText", "\u001b[55;12u"],
+      "cmd-alt-*": ["terminal::SendText", "\u001b[56;12u"],
+      "cmd-alt-(": ["terminal::SendText", "\u001b[57;12u"]
     }
   },
   {

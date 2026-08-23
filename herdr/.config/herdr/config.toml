@@ -15,34 +15,13 @@ onboarding = false
 # the direct chords below.
 
 [theme]
-# Herdr defaults to catppuccin (base #1e1e2e, a cool purple-black). Ghostty
-# here runs its stock theme, whose background is #282c34 -- warm neutral gray,
-# i.e. One Dark. Stacking the two made herdr's chrome read as a differently
-# tinted sheet laid over the terminal. one-dark shares Ghostty's exact
-# background, so the panel stops looking like a separate surface.
+# Match Zed's system-aware theme pair. Herdr re-queries the host terminal when
+# focus returns, so macOS appearance changes switch both layers together.
+# `name` is the fallback if the host does not report its appearance.
 name = "one-dark"
-
-[theme.custom]
-# --- Tabs ---------------------------------------------------------------
-# The active tab is a solid fill of the theme's blue/accent, so a saturated
-# accent turns it into the loudest element on screen. #81a2be is Ghostty's own
-# ANSI blue (palette 4), so the active tab now agrees with every other blue the
-# terminal draws instead of competing with it.
-# Want more pop back? Delete these two lines to fall back to One Dark's #61afef.
-accent = "#81a2be"
-blue = "#81a2be"
-
-# --- Active highlights --------------------------------------------------
-# Selected space/agent rows are painted with the surface tokens. The stock
-# values sit only a couple of steps off panel_bg, which is close to invisible
-# on a dark background. These are One Dark's real surface/selection greys, so
-# a selected row actually reads as selected.
-panel_bg = "#21252b"
-surface_dim = "#23272e"
-surface0 = "#2c313c"
-surface1 = "#3e4451"
-overlay0 = "#5c6370"
-overlay1 = "#7f848e"
+auto_switch = true
+dark_name = "one-dark"
+light_name = "rose-pine-dawn"
 
 [keys]
 # --- Tabs ---------------------------------------------------------------
