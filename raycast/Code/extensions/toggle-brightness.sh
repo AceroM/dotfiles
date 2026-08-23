@@ -14,40 +14,27 @@
 
 set -euo pipefail
 
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-brightness_bin="$(command -v brightness || true)"
+lunar_bin="$(command -v lunar || true)"
 
-if [[ -z "$brightness_bin" ]]; then
-  echo "brightness not found. Install it with: brew install brightness"
-  exit 1
-fi
-
-brightness_output="$("$brightness_bin" -l 2>/dev/null)"
-main_display="$(
-  printf '%s\n' "$brightness_output" |
-    awk '$1 == "display" && $3 ~ /^main,?$/ {
-      sub(/:$/, "", $2)
-      print $2
-      exit
-    }'
-)"
-
-if [[ -z "$main_display" ]]; then
-  echo "Unable to find the main display"
+if [[ -n "$lunar_bin" ]]; then
+  lunar_command=("$lunar_bin")
+elif [[ -x "/Applications/Lunar.app/Contents/MacOS/Lunar" ]]; then
+  lunar_command=("/Applications/Lunar.app/Contents/MacOS/Lunar" @)
+else
+  echo "Lunar not found. Install it with: brew install --cask lunar"
   exit 1
 fi
 
 current_brightness="$(
-  printf '%s\n' "$brightness_output" |
-    awk -v target="$main_display" '
-      $1 == "display" && $3 == "brightness" {
-        sub(/:$/, "", $2)
-        if ($2 == target) {
-          print $4
-          exit
-        }
-      }'
+  "${lunar_command[@]}" displays main brightness 2>/dev/null |
+    awk '
+      $1 == "brightness:" {
+        print $2
+        exit
+      }
+    '
 )"
 
 if [[ ! "$current_brightness" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -57,7 +44,7 @@ fi
 
 target_brightness="$(
   awk -v value="$current_brightness" \
-    'BEGIN { print (value <= 0.001 ? "0.8" : "0") }'
+    'BEGIN { print (value <= 0.5 ? "80" : "0") }'
 )"
 
-"$brightness_bin" -m "$target_brightness"
+"${lunar_command[@]}" displays main brightness "$target_brightness" >/dev/null
