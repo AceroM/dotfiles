@@ -1,6 +1,7 @@
 tap "koekeishiya/formulae"
 
 brew "bat"
+brew "brightness"
 brew "cloudflared"
 brew "fd"
 brew "ffmpeg"

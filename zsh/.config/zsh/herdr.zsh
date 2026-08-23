@@ -5,7 +5,7 @@
 # capture/send verbs, and a real request/response call between panes (hx).
 #
 #   hd  <t>                resolve a target      hs    <t> <text>  type text / keys
-#   hr  <t> [n]            read output           hsend <t> <text>  type text, no Enter
+#   j   <t> [n]            read output           hsend <t> <text>  type text, no Enter
 #   hl                     spaces > tabs > panes hkeys <t> <key>   send key presses
 #   hls                    list panes            hrun  <t> <cmd>   type cmd + Enter
 #   hname [<t>] <name>     label a pane          hwait <t> <pat>   wait for output
@@ -31,8 +31,8 @@
 # flip, since the next command would mutate the wrong pane.
 #
 #   hl                                  the whole tree, with the IDs below
-#   hr self_serve:posthog_events        read that tab's focused pane
-#   hr -a self_serve:posthog_events     read its agent pane instead
+#   j  self_serve:posthog_events        read that tab's focused pane
+#   j  -a self_serve:posthog_events     read its agent pane instead
 #   hd self_serve:posthog_events        just print the pane ID
 #   hs w10:p12 hello enter              type into a pane by ID and submit
 #   hx servers:dev6_3001 "git status"   run a command over there
@@ -40,7 +40,7 @@
 # Everything requires running inside Herdr (HERDR_ENV=1).
 
 # stale aliases from older versions of this file shadow the functions below
-unalias hd hl hr hc hrc hs hls hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
+unalias hd hl j hc hrc hs hls hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
 
 alias h="herdr"
 alias eh="nvim ~/.config/herdr/config.toml"
@@ -51,8 +51,9 @@ alias eh="nvim ~/.config/herdr/config.toml"
 # a session that has been up for a week is still running whatever it read back
 # then, so edits sit in the file changing nothing. Every edit ends here.
 #
-# hr was this command once; it reads panes now, and hrc still works as a second
-# name. Diagnostics come back as plain strings next to a status of
+# hr was this command once; it attaches to the remote box now (see
+# herdr-private.zsh), and hrc still works as a second name for this one.
+# Diagnostics come back as plain strings next to a status of
 # applied/partial/failed — a partial reload keeps the old value for whatever it
 # rejected, so they get printed. The silent case is a config that looks live
 # and isn't.
@@ -421,7 +422,7 @@ function hrun() {
   herdr pane run "$id" "$*"
 }
 
-# hr self_serve:posthog_events [lines]   — capture-pane equivalent.
+# j self_serve:posthog_events [lines]   — capture-pane equivalent.
 #
 # Read in full and tail locally: herdr's own --lines N returns the last N *raw
 # rows* including trailing blanks, then trims them, so a screen that isn't full
@@ -429,7 +430,7 @@ function hrun() {
 #
 # -a reads the tab's agent pane instead of whichever pane it has focused, which
 # is what I want whenever I left the shell half of a split selected.
-function hr() {
+function j() {
   local -a hdflags=()
   while [[ "${1:-}" == -?* ]]; do hdflags+=("$1"); shift; done
   local target="${1:-}" lines="${2:-50}"
@@ -437,7 +438,7 @@ function hr() {
   herdr pane read "$id" --source recent-unwrapped | tail -n "$lines"
 }
 
-function hcap() { hr "$@" }
+function hcap() { j "$@" }
 
 # hwait build "Compiled successfully" [timeout_ms]
 # Matches against output that already exists, so it is safe to call after the fact.
@@ -561,5 +562,5 @@ function _h_complete_targets() {
   compadd -a targets
 }
 if (( $+functions[compdef] )); then
-  compdef _h_complete_targets hd hid hr hcap hs hsend hkeys hrun hwait hx hask hkill hname
+  compdef _h_complete_targets hd hid j hcap hs hsend hkeys hrun hwait hx hask hkill hname
 fi
