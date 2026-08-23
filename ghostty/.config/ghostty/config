@@ -8,6 +8,15 @@ confirm-close-surface = false
 # Font size in points. Ghostty's default is 13; bump it up by 2.
 font-size = 14
 
+# Follow the macOS appearance instead of pinning a dark palette. Ghostty swaps
+# between the two halves of this pair as the system flips light/dark, and herdr
+# rides along: it has auto_switch on in ~/.config/herdr/config.toml and picks its
+# theme from the background color the host terminal reports, so the terminal and
+# the multiplexer chrome change together. The pair mirrors herdr's own
+# dark_name/light_name (one-dark / rose-pine-dawn) -- "Atom One Dark" is
+# Ghostty's name for the same palette.
+theme = light:Rose Pine Dawn,dark:Atom One Dark
+
 # Keep the macOS titlebar (so the close/minimize/zoom buttons stay), but
 # blend it into the terminal background instead of removing it.
 macos-titlebar-style = transparent
