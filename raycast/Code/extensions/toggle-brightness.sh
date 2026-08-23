@@ -56,8 +56,8 @@ if [[ ! "$current_brightness" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
 fi
 
 target_brightness="$(
-  awk -v current="$current_brightness" \
-    'BEGIN { print current <= 0.001 ? "0.8" : "0" }'
+  awk -v value="$current_brightness" \
+    'BEGIN { print (value <= 0.001 ? "0.8" : "0") }'
 )"
 
 "$brightness_bin" -m "$target_brightness"
