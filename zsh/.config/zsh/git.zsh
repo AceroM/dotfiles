@@ -59,7 +59,7 @@ function gnv() { gh pr diff "$@" | nvim; }
 # scope as `git diff`/`dg`): unstaged files under "Changes", staged ones under
 # "Staged changes". Pass a rev (e.g. HEAD, main) to diff against something else.
 function gnw() { nvim -c "DiffviewOpen $*"; }
-function gb() { gh browse "$@" }
+function gb() { gh browse "$@"; }
 function gu() {
   git remote get-url origin | sed -E 's#git@github\.com:#https://github.com/#; s#\.git$##'
 }
@@ -97,17 +97,17 @@ function cn() {
 
   comments="$(cat)"
 
-  pr=$(gh pr view --json number      -q .number)      || return 1
-  sha=$(gh pr view --json headRefOid -q .headRefOid)  || return 1
+  pr=$(gh pr view --json number -q .number) || return 1
+  sha=$(gh pr view --json headRefOid -q .headRefOid) || return 1
 
   jq -n \
-    --arg     body "$body" \
-    --arg     sha "$sha" \
-    --arg     event "$event" \
+    --arg body "$body" \
+    --arg sha "$sha" \
+    --arg event "$event" \
     --argjson comments "$comments" \
     '{commit_id:$sha, event:$event, comments:$comments}
-     + (if $body == "" then {} else {body:$body} end)' \
-  | gh api --method POST "repos/{owner}/{repo}/pulls/$pr/reviews" --input -
+     + (if $body == "" then {} else {body:$body} end)' |
+    gh api --method POST "repos/{owner}/{repo}/pulls/$pr/reviews" --input -
 }
 function gl() {
   local n=""
@@ -126,13 +126,13 @@ function gl() {
 }
 alias gm='git log --author="$(git config user.name)"'
 # gh pr paths
-function hp() { gh pr view --json files --jq '.files[].path' }
-function gs() { git show "$@" }
-function sa() { git stash "$@" }
-function di() { git diff "$@" }
+function hp() { gh pr view --json files --jq '.files[].path'; }
+function gs() { git show "$@"; }
+function sa() { git stash "$@"; }
+function di() { git diff "$@"; }
 alias dl="delta"
 # same diff as `d`, through delta's full view (line numbers, hunk headers)
-function dr() { _d_diff "$@" }
+# function dr() { _d_diff "$@" }
 function ns() {
   if [[ -f ./scripts/ns.sh ]]; then
     ./scripts/ns.sh "$@"
@@ -148,7 +148,7 @@ function nss() {
   git diff --numstat "${1:-main}...HEAD" | awk 'NF {printf "+%-5s -%-5s %s\n", $1, $2, $3}'
 }
 # nd <path...> — full patch for one or more files from the PR (base defaults to main, override with ND_BASE)
-function nd() { git diff "${ND_BASE:-main}...HEAD" -- "$@" }
+function nd() { git diff "${ND_BASE:-main}...HEAD" -- "$@"; }
 function dg() {
   if [[ -f ./scripts/dg.sh ]]; then
     ./scripts/dg.sh "$@"
@@ -156,15 +156,15 @@ function dg() {
   fi
   git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@"
 }
-function did() { git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@" }
-function si() { git diff --staged }
-function gr() { git reset --hard HEAD }
-function sap() { git stash apply "$@" }
-function ap() { git apply "$@" }
-function fe() { git fetch --all --prune }
-function rc() { git rebase --continue }
-function in() { git init }
-function ad() { git add "$@" }
+function did() { git --no-pager -c core.pager=cat -c pager.diff=false -c delta.features= diff "$@"; }
+function si() { git diff --staged; }
+function gr() { git reset --hard HEAD; }
+function sap() { git stash apply "$@"; }
+function ap() { git apply "$@"; }
+function fe() { git fetch --all --prune; }
+function rc() { git rebase --continue; }
+function in() { git init; }
+function ad() { git add "$@"; }
 function st() {
   if [[ -f ./scripts/status.sh ]]; then
     ./scripts/status.sh "$@"
@@ -172,18 +172,18 @@ function st() {
     git status "$@"
   fi
 }
-function co() { git checkout "$@" }
-function cb() { git checkout -b "$@" }
+function co() { git checkout "$@"; }
+function cb() { git checkout -b "$@"; }
 alias c-='git checkout -'
-function rb() { git rebase "$@" }
-function sc() { git branch --show-current }
+function rb() { git rebase "$@"; }
+function sc() { git branch --show-current; }
 function cm() { git commit -m "$@" --no-verify; }
 # wl (worktree list) lives in worktrees.zsh now
 function gc() {
-    local current_branch=$(git branch --show-current)
-    local base_branch=${1:-main}
-    local repo_url=$(gh repo view --json url -q .url)
-    open "${repo_url}/compare/${base_branch}...${current_branch}"
+  local current_branch=$(git branch --show-current)
+  local base_branch=${1:-main}
+  local repo_url=$(gh repo view --json url -q .url)
+  open "${repo_url}/compare/${base_branch}...${current_branch}"
 }
 function gj() {
   local target="$1"
