@@ -311,6 +311,14 @@ key = "ctrl+alt+semicolon"
 type = "shell"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-agent-tab"'
 
+[[keys.command]]
+key = "ctrl+alt+shift+f"
+type = "popup"
+description = "Space subtitle"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-folder"'
+width = "60%"
+height = "20%"
+
 [ui]
 # Borders and navigate-mode UI default to cyan, which would be a third hue
 # alongside the tab blue and the grey chrome. Pin it to the same steel blue.
@@ -323,3 +331,6 @@ prompt_new_tab_name = false
 # Workspaces are long-lived and picked by name (ctrl+alt+shift+w), so always
 # ask for one on ctrl+alt+shift+n instead of taking a generated name.
 prompt_new_workspace_name = true
+
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["$folder", "git_status"]]

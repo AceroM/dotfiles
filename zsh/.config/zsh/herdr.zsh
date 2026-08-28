@@ -9,6 +9,7 @@
 #   hl                     spaces > tabs > panes hkeys <t> <key>   send key presses
 #   hls                    list panes            hrun  <t> <cmd>   type cmd + Enter
 #   hname [<t>] <name>     label a pane          hwait <t> <pat>   wait for output
+#   hfolder [<text>|-]     space subtitle        (ctrl+alt+shift+f prompts)
 #   hspawn <name> [cmd]    new labeled pane      hkill <t>         close a pane
 #   hx   <t> <cmd>         run + capture stdout/stderr + exit code
 #   hask <agent> <prompt>  prompt an agent, wait, print its reply
@@ -564,3 +565,39 @@ function _h_complete_targets() {
 if (( $+functions[compdef] )); then
   compdef _h_complete_targets hd hid j hcap hs hsend hkeys hrun hwait hx hask hkill hname
 fi
+
+typeset -g _h_folder_reported=""
+
+function _h_report_folder() {
+  [[ "${HERDR_ENV:-}" == 1 && -n "${HERDR_WORKSPACE_ID:-}" ]] || return
+  local override="$HOME/.local/state/herdr-space-folder/$HERDR_WORKSPACE_ID"
+  local folder
+  folder="$(<"$override")" 2>/dev/null
+  [[ -n "$folder" ]] || folder="${PWD:t}"
+  [[ "$folder" == "$_h_folder_reported" ]] && return
+  _h_folder_reported="$folder"
+  herdr workspace report-metadata "$HERDR_WORKSPACE_ID" \
+    --source space-folder --token folder="$folder" >/dev/null 2>&1 &!
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook chpwd _h_report_folder
+_h_report_folder
+
+# hfolder — type a subtitle for this space, the way hname labels a pane.
+#
+# herdr-space-folder does the work (and backs the popup chord); this is just the
+# short name, and it passes the space explicitly so an agent pane in a
+# background space edits its own row rather than the focused one. Bare `hfolder`
+# prints what the row shows; `hfolder -` goes back to following the folder.
+function hfolder() {
+  _h_guard || return 1
+  if [[ $# -eq 0 ]]; then
+    herdr-space-folder --show
+    return
+  fi
+  # Drop the cache so the next cd re-reports rather than seeing "no change"
+  # against a value this call replaced.
+  _h_folder_reported=""
+  herdr-space-folder "$@"
+}

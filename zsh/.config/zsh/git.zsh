@@ -231,14 +231,6 @@ function ao() {
   fi
   git remote add origin "git@github.com:AceroM/$1.git"
 }
-function nr() {
-  if [[ $# -ne 1 ]]; then
-    echo "Usage: nr <repo-name>"
-    return 1
-  fi
-
-  gh repo create "AceroM/$1" --private
-}
 function checkpoint() {
   local msg="${1:-checkpoint}"
   git stash push -m "$msg" && git stash apply
