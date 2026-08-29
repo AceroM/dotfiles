@@ -334,3 +334,6 @@ prompt_new_workspace_name = true
 
 [ui.sidebar.spaces]
 rows = [["state_icon", "workspace"], ["$folder", "git_status"]]
+
+[update]
+channel = "stable"
