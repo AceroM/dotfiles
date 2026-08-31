@@ -41,6 +41,15 @@ function pu() {
   fi
   git push origin $(sc) "$@"
 }
+# pf — like pu, but force-push the current branch (lease-protected, so it
+# refuses if someone else pushed since your last fetch).
+function pf() {
+  if [[ -f ./scripts/pf.sh ]]; then
+    ./scripts/pf.sh "$@"
+    return
+  fi
+  git push origin $(sc) --force-with-lease "$@"
+}
 function gd() { gh pr diff "$@"; }
 # gn [pr] — open a PR's full diff in nvim with real per-file syntax highlighting
 # (via diffview). Fetches the PR head into a local pr-<n> ref; does NOT switch

@@ -183,11 +183,6 @@ function _claude_new_here() {
   fi
 }
 
-# like p, but fast: default opus 4.8 with 1m context + fast mode
-function pf() {
-  p --model claude-opus-4-8 "$@"
-}
-
 # like p, but bypasses Claude permissions
 function pb() {
   p --dangerously-skip-permissions "$@"
