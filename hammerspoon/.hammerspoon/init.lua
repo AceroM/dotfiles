@@ -3,7 +3,8 @@ require("hs.ipc") -- enables the `hs` CLI (hs -c "...") and config reloads
 toast = require("toast")
 notifications = require("notifications")
 
--- Mirror native banners (Slack, per notifications.rules) as centered cards.
+-- Toast Slack notifications straight from the notification database, Focus or
+-- not (needs Full Disk Access; see notifications.lua). Also feeds `sn`.
 notifications.start()
 
 -- Generic toast entry point for scripts:
