@@ -10,6 +10,7 @@
 //   j/k or arrows  move
 //   enter or l     open the message in Slack
 //   c              reply from here, as you (see slack.ts)
+//   r              same, but threaded onto the message
 //   q / esc        quit
 
 import React, {
@@ -160,16 +161,21 @@ function App() {
 
   // Open the box straight away and resolve credentials behind it, so typing can
   // start while the Keychain and Slack round-trips run.
-  const openDraft = (row: Notif) => {
+  //
+  // "reply" answers where the message already lives — inside its thread when it
+  // is threaded, in the channel otherwise. "thread" always answers in a thread,
+  // opening one on a top-level message. The two only differ on a top-level row.
+  const openDraft = (row: Notif, mode: "reply" | "thread") => {
     if (!row.channel || !row.ts) {
       setFlash("no channel on this row — open it in Slack instead")
       return
     }
+    const thread_ts = mode === "thread" ? (row.thread_ts ?? row.ts) : row.thread_ts
     const where = row.subtitle || row.title || row.channel
     putDraft({
       iden: row.iden,
-      target: { channel: row.channel, ts: row.ts, thread_ts: row.thread_ts },
-      where: row.thread_ts ? `${where} · thread` : where,
+      target: { channel: row.channel, ts: row.ts, thread_ts },
+      where: thread_ts ? `${where} · thread` : where,
       text: "",
       sending: false,
       error: null,
@@ -220,7 +226,9 @@ function App() {
     const row = rows[clampedCursor]
 
     if (input === "c") {
-      openDraft(row)
+      openDraft(row, "reply")
+    } else if (input === "r") {
+      openDraft(row, "thread")
     } else if (input === "j" || key.downArrow) {
       // functional update: key repeats can land within one render frame
       setCursor((c) => Math.min(c + 1, rows.length - 1))
@@ -333,7 +341,10 @@ function App() {
           </Text>
         </Box>
       ) : null}
-      <Text dimColor> j/k move · enter/l open in slack · c reply · q quit</Text>
+      <Text dimColor wrap="truncate-end">
+        {" "}
+        j/k move · enter/l open in slack · c reply · r thread · q quit
+      </Text>
     </Box>
   )
 }

@@ -179,9 +179,10 @@ export function creds(): Promise<SlackCreds> {
 }
 
 /**
- * Post `text` as a reply to the notification's message. Threaded replies stay in
- * their thread; a top-level message is answered in the channel, matching what
- * clicking through to Slack and typing would do.
+ * Post `text` as a reply to the notification's message. `thread_ts` decides
+ * where it lands: set, it goes into that thread (and opens one when it is the
+ * message's own ts); null, it is a plain channel message. The caller picks —
+ * `c` answers in place, `r` always threads.
  */
 export async function reply(target: ReplyTarget, text: string): Promise<void> {
   const c = await creds()

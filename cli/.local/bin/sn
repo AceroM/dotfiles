@@ -10,6 +10,8 @@
 #   enter/l  open the message in Slack
 #   c        reply inline — posts as you, reusing the Slack app's own session
 #            (see slack.ts); `sn auth --token xoxc-…` if that ever goes stale
+#   r        same, but always in a thread on the message — opens one when the
+#            message is top-level, instead of answering in the channel
 set -euo pipefail
 
 script_dir="${HOME}/.local/share/sn-cli"
