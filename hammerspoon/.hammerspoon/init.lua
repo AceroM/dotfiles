@@ -25,4 +25,10 @@ hs.urlevent.bind("claudedone", function(_, params)
   })
 end)
 
+-- Voice → herdr: hotkey opens a capture box and starts Wispr Flow hands-free;
+-- press again (or ⏎) to send the transcript as an agent prompt to the
+-- coordinator (agent named "coordinator", else the one sitting in ~/Numeral).
+wispr = require("wispr")
+wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
+
 hs.alert.show("Hammerspoon loaded")
