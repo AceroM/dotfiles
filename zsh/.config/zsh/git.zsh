@@ -245,3 +245,7 @@ function checkpoint() {
   git stash push -m "$msg" && git stash apply
 }
 alias ch="checkpoint"
+# ISO 8601 timestamp (UTC) of a commit. Defaults to HEAD.
+function sm() {
+  TZ=UTC git log -1 --format=%cd --date=iso-strict-local "${1:-HEAD}"
+}

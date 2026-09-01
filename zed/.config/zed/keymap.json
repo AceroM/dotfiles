@@ -283,10 +283,8 @@
   {
     "context": "Editor",
     "bindings": {
-      "alt-up": "vim::ScrollUp",
-      "alt-down": "vim::ScrollDown",
-      "alt-shift-up": "editor::MoveLineUp",
-      "alt-shift-down": "editor::MoveLineDown"
+      "alt-up": "editor::MoveLineUp",
+      "alt-down": "editor::MoveLineDown"
     }
   },
   {
