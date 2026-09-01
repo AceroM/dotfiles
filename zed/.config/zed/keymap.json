@@ -2,7 +2,40 @@
   {
     "context": "ProjectPanel && not_editing",
     "bindings": {
-      "n": "project_panel::NewFile"
+      "n": "project_panel::NewFile",
+      // Preview the file in a tab but keep the cursor here in the tree, unlike
+      // enter/OpenPermanent which focuses the editor. On a directory this
+      // toggles it open/closed.
+      "l": "project_panel::Open",
+
+      // Scroll the open file instead of the tree. vim::Scroll* live on the
+      // editor, so we hop focus there, scroll, and hop back -- SendKeystrokes
+      // redraws and yields whenever a keystroke moves focus, so each step lands
+      // in the right context. See the helpers below.
+      "ctrl-d": [
+        "workspace::SendKeystrokes",
+        "ctrl-alt-cmd-shift-f ctrl-alt-cmd-shift-d ctrl-alt-cmd-shift-f"
+      ],
+      "ctrl-u": [
+        "workspace::SendKeystrokes",
+        "ctrl-alt-cmd-shift-f ctrl-alt-cmd-shift-u ctrl-alt-cmd-shift-f"
+      ]
+    }
+  },
+  // Helpers for the project panel ctrl-d/ctrl-u above; not meant to be pressed
+  // directly. The focus hop is global so it fires from either side; the scrolls
+  // are bound to the actions rather than the raw keys so a buffer sitting in
+  // insert mode doesn't outdent or delete instead.
+  {
+    "bindings": {
+      "ctrl-alt-cmd-shift-f": "project_panel::ToggleFocus"
+    }
+  },
+  {
+    "context": "Editor && mode == full",
+    "bindings": {
+      "ctrl-alt-cmd-shift-d": "vim::ScrollDown",
+      "ctrl-alt-cmd-shift-u": "vim::ScrollUp"
     }
   },
   {
