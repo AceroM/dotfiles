@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# sn — live Slack notification inbox (OpenTUI).
+#
+# Rows come from ~/.local/state/slack-notifications.jsonl, the feed
+# Hammerspoon's notifications.lua appends to for every Slack notification
+# macOS records — Focus mode or not. Hammerspoon is the only process that
+# needs Full Disk Access; this tool just tails the feed.
+#
+#   j/k      move down/up
+#   enter/l  open the message in Slack
+#   c        reply inline — posts as you, reusing the Slack app's own session
+#            (see slack.ts); `sn auth --token xoxc-…` if that ever goes stale
+set -euo pipefail
+
+script_dir="${HOME}/.local/share/sn-cli"
+# bun resolves symlinks, so node_modules must be next to the real index.tsx
+real_script="$(readlink -f "${script_dir}/index.tsx")"
+real_dir="$(dirname "${real_script}")"
+opentui_dir="$(cd -P "${real_dir}/../opentui-cli" && pwd)"
+
+if [ ! -e "${opentui_dir}/node_modules/@opentui/core" ]; then
+  echo "Installing OpenTUI..." >&2
+  (cd "${opentui_dir}" && bun install --frozen-lockfile)
+fi
+
+if [ ! -e "${real_dir}/node_modules/@dotfiles/opentui-cli" ]; then
+  echo "Installing dependencies..." >&2
+  (cd "${real_dir}" && bun install --frozen-lockfile)
+fi
+
+exec bun run "${script_dir}/index.tsx" "$@"
