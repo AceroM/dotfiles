@@ -65,7 +65,6 @@
       "alt-i": "workspace::ActivateNextPane",
       "alt-[": "pane::ActivatePreviousItem",
       "alt-]": "pane::ActivateNextItem",
-      "alt-w": "pane::CloseActiveItem",
       "ctrl-shift-w": "pane::CloseAllItems"
     }
   },
@@ -94,7 +93,8 @@
       "alt-shift-g": "search::SelectPreviousMatch",
       "alt-g": "search::SelectNextMatch",
       "alt-h": "editor::Hover",
-      "alt-enter": "editor::ToggleCodeActions"
+      "alt-enter": "editor::ToggleCodeActions",
+      "alt-w": "editor::ToggleSoftWrap"
     }
   },
   {
