@@ -86,6 +86,8 @@
       "alt-j": "editor::SelectLargerSyntaxNode",
       "alt-shift-d": "editor::FindAllReferences",
       "alt-m": "editor::GoToDefinitionSplit",
+      // Takes cmd-d off SelectNext, which alt-d above already covers.
+      "cmd-d": "editor::GoToDefinition",
       "ctrl-alt-enter": "editor::NewlineAbove",
       "shift-enter": "editor::NewlineBelow",
       "alt-a": "editor::SelectAll",

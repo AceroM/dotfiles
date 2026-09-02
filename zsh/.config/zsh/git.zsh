@@ -134,8 +134,6 @@ function gl() {
   fi
 }
 alias gm='git log --author="$(git config user.name)"'
-# gh pr paths
-function hp() { gh pr view --json files --jq '.files[].path'; }
 function gs() { git show "$@"; }
 function sa() { git stash "$@"; }
 function di() { git diff "$@"; }

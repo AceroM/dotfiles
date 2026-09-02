@@ -5,12 +5,13 @@
 # capture/send verbs, and a real request/response call between panes (hx).
 #
 #   hd  <t>                resolve a target      hs    <t> <text>  type text / keys
-#   j   <t> [n]            read output           hsend <t> <text>  type text, no Enter
+#   j   <t> [n]            read output (= hr)    hsend <t> <text>  type text, no Enter
 #   hl                     spaces > tabs > panes hkeys <t> <key>   send key presses
-#   hls                    list panes            hrun  <t> <cmd>   type cmd + Enter
-#   hname [<t>] <name>     label a pane          hwait <t> <pat>   wait for output
+#   hls                    every pane, flat      hrun  <t> <cmd>   type cmd + Enter
+#   hp   [<t>]             panes in one tab      hwait <t> <pat>   wait for output
+#   hname [<t>] <name>     label a pane          hkill <t>         close a pane
 #   hfolder [<text>|-]     space subtitle        (ctrl+alt+shift+f prompts)
-#   hspawn <name> [cmd]    new labeled pane      hkill <t>         close a pane
+#   hspawn <name> [cmd]    new labeled pane
 #   hx   <t> <cmd>         run + capture stdout/stderr + exit code
 #   hask <agent> <prompt>  prompt an agent, wait, print its reply
 #   hc                     reload config.toml    eh                edit config.toml
@@ -41,7 +42,7 @@
 # Everything requires running inside Herdr (HERDR_ENV=1).
 
 # stale aliases from older versions of this file shadow the functions below
-unalias hd hl j hc hrc hs hls hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
+unalias hd hl j hr hc hrc hs hls hp hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
 
 alias h="herdr"
 alias eh="nvim ~/.config/herdr/config.toml"
@@ -52,8 +53,10 @@ alias eh="nvim ~/.config/herdr/config.toml"
 # a session that has been up for a week is still running whatever it read back
 # then, so edits sit in the file changing nothing. Every edit ends here.
 #
-# hr was this command once; it attaches to the remote box now (see
-# herdr-private.zsh), and hrc still works as a second name for this one.
+# hr was this command once. It reads panes again now (a second name for j,
+# next to hcap) — the remote-box attach that briefly held the name lives in
+# herdr-private.zsh, which this file is sourced after, so this definition wins
+# wherever that file exists. hrc still works as a second name for this one.
 # Diagnostics come back as plain strings next to a status of
 # applied/partial/failed — a partial reload keeps the old value for whatever it
 # rejected, so they get printed. The silent case is a config that looks live
@@ -319,6 +322,59 @@ function hls() {
     | @tsv' | column -t -s $'\t'
 }
 
+# hp — just the panes sharing one tab, in layout order, with their IDs. Bare
+# `hp` is the tab I'm sitting in; a <target> ({space}:{tab}, a tab name, or a
+# tab/pane ID) is any other one. hls is the same columns for every pane in the
+# app, which is the wrong question when I only want my neighbours.
+#
+# Layout order (left to right, top to bottom) is the reading order of the
+# split, and only `pane layout` knows it — but it answers in bare pane IDs, so
+# the details are joined back on from `pane list`. One call each: layout takes
+# any pane in the tab as its seed.
+#
+# > marks the calling pane, * the pane this tab has focused — per-tab, unlike
+# pane list's focused, which is true for exactly one pane app-wide.
+function hp() {
+  _h_guard || return 1
+  local target="${1:-}" tab panes seed layout
+
+  panes="$(herdr pane list 2>/dev/null)" || { print -u2 "hp: pane list failed"; return 1 }
+
+  if [[ -z "$target" || "$target" == "." || "$target" == self ]]; then
+    tab="$HERDR_TAB_ID"
+  elif [[ "$target" =~ '^w[0-9A-Za-z]+:t[0-9A-Za-z]+$' ]]; then
+    tab="$target"
+  elif [[ "$target" =~ '^w[0-9A-Za-z]+:p[0-9A-Za-z]+$' ]]; then
+    tab="$(print -r -- "$panes" |
+      jq -r --arg p "$target" '.result.panes[] | select(.pane_id == $p) | .tab_id')"
+    [[ -n "$tab" ]] || { print -u2 "hp: no pane '$target'"; return 1 }
+  else
+    # _h_addr is quiet when nothing matches, and a bare name is the one form
+    # that can plausibly be a typo
+    tab="$(_h_addr "$target")" || { print -u2 "hp: no tab or space named '$target'"; return 1 }
+  fi
+
+  seed="$(print -r -- "$panes" |
+    jq -r --arg t "$tab" '[.result.panes[] | select(.tab_id == $t) | .pane_id][0] // empty')"
+  [[ -n "$seed" ]] || { print -u2 "hp: no panes in tab '$tab'"; return 1 }
+  layout="$(herdr pane layout --pane "$seed" 2>/dev/null)" ||
+    { print -u2 "hp: pane layout failed"; return 1 }
+
+  jq -rn --argjson p "$panes" --argjson l "$layout" \
+         --arg self "$HERDR_PANE_ID" --arg home "$HOME" '
+    def tilde: if startswith($home) then "~" + .[($home | length):] else . end;
+    ($p.result.panes | map({key: .pane_id, value: .}) | from_entries) as $by
+    | $l.result.layout.focused_pane_id as $focus
+    | $l.result.layout.panes[].pane_id
+    | ($by[.] // {pane_id: .}) as $pane
+    | [ (if $pane.pane_id == $self then ">" elif $pane.pane_id == $focus then "*" else " " end),
+        $pane.pane_id,
+        ($pane.label // $pane.agent // "-"),
+        ($pane.agent_status // "-"),
+        ($pane.terminal_title_stripped // (($pane.cwd // "-") | tilde)) ]
+    | @tsv' | column -t -s $'\t'
+}
+
 # label the calling pane, or another one: hname build   /   hname w1:p5 build
 function hname() {
   local target name
@@ -440,6 +496,7 @@ function j() {
 }
 
 function hcap() { j "$@" }
+function hr()   { j "$@" }
 
 # hwait build "Compiled successfully" [timeout_ms]
 # Matches against output that already exists, so it is safe to call after the fact.
@@ -563,7 +620,7 @@ function _h_complete_targets() {
   compadd -a targets
 }
 if (( $+functions[compdef] )); then
-  compdef _h_complete_targets hd hid j hcap hs hsend hkeys hrun hwait hx hask hkill hname
+  compdef _h_complete_targets hd hid j hr hcap hp hs hsend hkeys hrun hwait hx hask hkill hname
 fi
 
 typeset -g _h_folder_reported=""
