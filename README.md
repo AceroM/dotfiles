@@ -17,10 +17,22 @@ For a fresh Linux VPS, run the interactive bootstrap:
 ./vps/setup.sh
 ```
 
+### Chat transcript reader
+
+The `cxp` package requires Bun 1.3 or newer and opens local Codex or Claude
+JSONL chats in an OpenTUI reader. Its dependencies install automatically the
+first time it runs.
+
+```sh
+stow cxp
+cxp <session-id>
+```
+
 ## Structure
 
 ```
 .
+└── cxp # OpenTUI reader for Codex and Claude JSONL chats
 └── zsh # my zsh configuration
 └── pi # my pi-agent configuration
 └── vps # Linux VPS bootstrap

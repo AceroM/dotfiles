@@ -27,6 +27,9 @@ function x() {
   local msg="${1:-changes}"
   git add . && git commit -m "$msg" --no-verify && git push
 }
+function xd() {
+  x "$@" && bun run deploy
+}
 function pl() {
   if [[ -f ./scripts/pl.sh ]]; then
     ./scripts/pl.sh "$@"
