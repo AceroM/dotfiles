@@ -14,6 +14,7 @@ import React, {
   useStdin,
   useStdout,
 } from "@dotfiles/opentui-cli";
+import { realpathSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -71,13 +72,15 @@ type StackData = {
 
 type Screen = "loading" | "pick" | "main" | "fatal";
 
-// Rebase rewrites history and merge is irreversible, so neither fires on a bare
-// keypress — both stage a PendingAction that a second key has to confirm.
-// rebase spawns a Claude agent in a new Herdr pane; merge runs gh directly.
+// Rebase rewrites history, merge is irreversible, and an approval goes out to
+// the PR's author and reviewers, so none fires on a bare keypress — each stages
+// a PendingAction that a second key has to confirm. rebase spawns a Claude
+// agent in a new Herdr pane; merge and approve run gh directly.
 type PendingAction = {
-  kind: "rebase" | "merge";
+  kind: "rebase" | "merge" | "approve";
   prompt: string;
   exec: () => Promise<{ code: number; out: string; err: string }>;
+  after?: () => void; // on success, once the footer has the result
 };
 
 // Where a comment is headed: the Herdr tab holding the ticket's agent, resolved
@@ -97,6 +100,19 @@ type CommentDraft = {
   target: CommentTarget | null;
   error: string | null;
   sending: boolean;
+};
+
+// The description dialog (space): the PR body plus its conversation, fetched
+// once per PR and re-rendered to the dialog width. Modal like the comment box.
+type DescDialog = {
+  prNumber: number;
+  data: Discussion | null;
+  error: string | null;
+  loading: boolean;
+  scroll: number;
+  // Resolved threads and known-noisy bots (Vercel, Linear) fold to one line
+  // by default; x unfolds everything.
+  showAll: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -885,6 +901,757 @@ function useTermSize() {
 }
 
 // ---------------------------------------------------------------------------
+// zed: check the branch out and open its worktree
+// ---------------------------------------------------------------------------
+
+type Worktree = { path: string; branch: string | null };
+
+async function listWorktrees(): Promise<Worktree[]> {
+  const { code, out } = await run(["git", "worktree", "list", "--porcelain"]);
+  if (code !== 0) return [];
+  const trees: Worktree[] = [];
+  let cur: Worktree | null = null;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      cur = { path: line.slice("worktree ".length), branch: null };
+      trees.push(cur);
+    } else if (line.startsWith("branch ") && cur) {
+      cur.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+    }
+  }
+  return trees;
+}
+
+function realPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+function shortPath(p: string): string {
+  const home = process.env.HOME;
+  return home && p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+// Put `branch` in a working tree and open that tree in Zed. Git refuses to
+// check a branch out twice, so one that already lives in another worktree
+// (a ~/Numeral slot, say) is opened where it is instead of being fought over.
+// Nothing is stashed or forced: a checkout git rejects is reported as-is.
+async function openInZed(
+  branch: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const top = await run(["git", "rev-parse", "--show-toplevel"]);
+  if (top.code !== 0)
+    return { code: 1, out: "", err: "not inside a git worktree" };
+  const here = realPath(top.out.trim());
+  const holder = (await listWorktrees()).find((w) => w.branch === branch);
+
+  let dir = here;
+  let did: string;
+  if (holder && realPath(holder.path) !== here) {
+    dir = realPath(holder.path);
+    did = `${branch} lives in ${shortPath(dir)}`;
+  } else if (holder) {
+    did = `already on ${branch}`;
+  } else {
+    // Never checked out here means no local ref; make sure the remote one is
+    // present so checkout can create the tracking branch from it.
+    const refs = await existingRefNames();
+    if (
+      !refs.has(`refs/heads/${branch}`) &&
+      !refs.has(`refs/remotes/origin/${branch}`)
+    )
+      await run(["git", "fetch", "--quiet", "origin", branch]);
+    const co = await run(["git", "checkout", "--quiet", branch]);
+    if (co.code !== 0)
+      return {
+        code: co.code,
+        out: "",
+        err: (co.err || co.out).trim() || `git checkout exited ${co.code}`,
+      };
+    did = `checked out ${branch}`;
+  }
+
+  // The zed CLI is a symlink into Zed.app; fall back to Launch Services when
+  // it isn't on PATH.
+  const zed = await run(
+    Bun.which("zed") ? ["zed", dir] : ["open", "-a", "Zed", dir],
+  );
+  if (zed.code !== 0)
+    return {
+      code: zed.code,
+      out: "",
+      err: (zed.err || zed.out).trim() || `zed exited ${zed.code}`,
+    };
+  return { code: 0, out: `${did} — opened ${shortPath(dir)} in zed`, err: "" };
+}
+
+// ---------------------------------------------------------------------------
+// PR discussion: description + comments, rendered as terminal markdown
+// ---------------------------------------------------------------------------
+
+type Reply = { author: string; when: string; body: string };
+
+type DiscussionItem = {
+  kind: "comment" | "review" | "thread";
+  author: string;
+  when: string; // ISO timestamp; items sort on it
+  body: string;
+  state?: string; // review: APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED
+  path?: string; // thread: file the inline comment is anchored to
+  line?: number | null;
+  resolved?: boolean;
+  outdated?: boolean;
+  replies: Reply[];
+};
+
+type Discussion = {
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  createdAt: string;
+  body: string;
+  items: DiscussionItem[]; // chronological
+};
+
+// One round trip for everything the dialog shows. `gh pr view --json` has no
+// inline review comments, which is where Greptile puts its findings, so this
+// goes through GraphQL; gh fills {owner}/{repo} from the cwd's remote.
+const DISCUSSION_QUERY = `query($owner: String!, $repo: String!, $n: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $n) {
+      number title body url createdAt author { login }
+      comments(first: 100) { nodes { author { login } body createdAt } }
+      reviews(first: 100) { nodes { author { login } body state submittedAt } }
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved isOutdated path line originalLine
+          comments(first: 50) { nodes { author { login } body createdAt } }
+        }
+      }
+    }
+  }
+}`;
+
+type GqlAuthor = { login?: string } | null;
+type GqlComment = { author: GqlAuthor; body: string; createdAt: string };
+type GqlPr = {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  createdAt: string;
+  author: GqlAuthor;
+  comments: { nodes: GqlComment[] };
+  reviews: {
+    nodes: Array<{
+      author: GqlAuthor;
+      body: string;
+      state: string;
+      submittedAt: string | null;
+    }>;
+  };
+  reviewThreads: {
+    nodes: Array<{
+      isResolved: boolean;
+      isOutdated: boolean;
+      path: string;
+      line: number | null;
+      originalLine: number | null;
+      comments: { nodes: GqlComment[] };
+    }>;
+  };
+};
+
+async function fetchDiscussion(
+  n: number,
+): Promise<{ data?: Discussion; error?: string }> {
+  const r = await run([
+    "gh",
+    "api",
+    "graphql",
+    "-F",
+    "owner={owner}",
+    "-F",
+    "repo={repo}",
+    "-F",
+    `n=${n}`,
+    "-f",
+    `query=${DISCUSSION_QUERY}`,
+  ]);
+  if (r.code !== 0)
+    return { error: firstLine(r.err || r.out) || `gh api exited ${r.code}` };
+  let pr: GqlPr | null | undefined;
+  try {
+    pr = (
+      JSON.parse(r.out) as {
+        data?: { repository?: { pullRequest?: GqlPr | null } };
+      }
+    ).data?.repository?.pullRequest;
+  } catch (e) {
+    return { error: `unreadable gh api response — ${(e as Error).message}` };
+  }
+  if (!pr) return { error: `PR #${n} not found` };
+
+  const login = (a: GqlAuthor) => a?.login || "ghost";
+  const items: DiscussionItem[] = [];
+  for (const c of pr.comments.nodes)
+    items.push({
+      kind: "comment",
+      author: login(c.author),
+      when: c.createdAt,
+      body: c.body,
+      replies: [],
+    });
+  for (const rv of pr.reviews.nodes) {
+    // A bodiless COMMENTED review is just the container for inline threads
+    // (Greptile's shape); the threads carry the content.
+    if (
+      !rv.body.trim() &&
+      rv.state !== "APPROVED" &&
+      rv.state !== "CHANGES_REQUESTED"
+    )
+      continue;
+    items.push({
+      kind: "review",
+      author: login(rv.author),
+      when: rv.submittedAt ?? "",
+      body: rv.body,
+      state: rv.state,
+      replies: [],
+    });
+  }
+  for (const t of pr.reviewThreads.nodes) {
+    const [first, ...rest] = t.comments.nodes;
+    if (!first) continue;
+    items.push({
+      kind: "thread",
+      author: login(first.author),
+      when: first.createdAt,
+      body: first.body,
+      path: t.path,
+      line: t.line ?? t.originalLine ?? null,
+      resolved: t.isResolved,
+      outdated: t.isOutdated,
+      replies: rest.map((c) => ({
+        author: login(c.author),
+        when: c.createdAt,
+        body: c.body,
+      })),
+    });
+  }
+  items.sort((a, b) => a.when.localeCompare(b.when));
+  return {
+    data: {
+      number: pr.number,
+      title: pr.title,
+      author: login(pr.author),
+      url: pr.url,
+      createdAt: pr.createdAt,
+      body: pr.body,
+      items,
+    },
+  };
+}
+
+function ago(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// ----- markdown → styled lines -----------------------------------------
+//
+// PR bodies are GitHub-flavored markdown with HTML mixed in (Greptile's
+// badges, <details> blocks, Vercel's deployment tables). OpenTUI owns
+// terminal styling, so this renders to spans rather than ANSI: the HTML is
+// rewritten to the markdown it stands for, each line gets its block shape
+// (GitHub treats a newline in a comment as a hard break, so lines never
+// merge), inline marks are parsed within it, and the result is word-wrapped
+// to the dialog width. Images come out as a labeled "⧉ alt" placeholder: the
+// terminal renderer can't take GitHub's private attachments or SVG badges.
+
+type Span = {
+  text: string;
+  color?: string;
+  bold?: boolean;
+  dim?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+};
+type Style = Omit<Span, "text">;
+type StyledLine = Span[];
+
+const MD_HEADING_COLOR = "#79C0FF";
+const MD_CODE_COLOR = "#E3B341";
+const MD_IMAGE_COLOR = "magenta";
+const MD_MARK_COLOR = "#A7B1C2";
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+// Rewrite the HTML GitHub allows in comments into the markdown it stands for,
+// so one inline parser handles both. Inline code is masked first: a literal
+// `Array<string>` has to survive the tag stripping.
+function htmlToMarkdown(text: string): string {
+  const codes: string[] = [];
+  const masked = text.replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (m) => {
+    codes.push(m);
+    return `@@code${codes.length - 1}@@`;
+  });
+  const out = masked
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(?:picture|source)\b[^>]*>|<\/picture>/gi, "")
+    .replace(/<img\b[^>]*>/gi, (tag) => {
+      const alt = /\balt="([^"]*)"/i.exec(tag)?.[1] ?? "";
+      const src = /\bsrc="([^"]*)"/i.exec(tag)?.[1] ?? "";
+      return `![${alt}](${src || "#"})`;
+    })
+    // a linked image becomes [![alt](src)](href), which the inline pass reads
+    // as a badge and renders as its label
+    .replace(/<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, "[$2]($1)")
+    .replace(/<summary\b[^>]*>([\s\S]*?)<\/summary>/gi, "\n▸ $1\n")
+    .replace(/<(b|strong)\b[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**")
+    .replace(/<(i|em)\b[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*")
+    .replace(/<(code|kbd)\b[^>]*>([\s\S]*?)<\/\1>/gi, "`$2`")
+    .replace(/<li\b[^>]*>/gi, "\n- ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?(?:p|div|details|ul|ol|li|table|thead|tbody|tr|h[1-6])\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
+  return decodeEntities(out).replace(
+    /@@code(\d+)@@/g,
+    (_m, i: string) => codes[Number(i)] ?? "",
+  );
+}
+
+// Run the HTML rewrite over everything outside fenced code, which is kept
+// byte-for-byte: a `<T>` in a code sample is code, not a tag.
+function preprocessMarkdown(body: string): string {
+  const out: string[] = [];
+  let prose: string[] = [];
+  let fence: string | null = null;
+  const flush = () => {
+    if (prose.length) out.push(htmlToMarkdown(prose.join("\n")));
+    prose = [];
+  };
+  for (const line of body.replace(/\r/g, "").split("\n")) {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      out.push(line);
+      if (m && m[1][0] === fence[0] && m[1].length >= fence.length) fence = null;
+    } else if (m) {
+      flush();
+      fence = m[1];
+      out.push(line);
+    } else {
+      prose.push(line);
+    }
+  }
+  flush();
+  return out.join("\n");
+}
+
+// Inline marks, tried in this order at each position. Groups:
+//   1-2 code   3 badge link ([![alt](img)](href))   4-5 image   6-7 link
+//   8-9 bold   10 strike   11-12 emphasis   13 bare url
+const INLINE_RE =
+  /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\[!\[([^\]]*)\]\([^)]*\)\]\([^)]*\)|!\[([^\]]*)\]\(([^)\s]*)(?:\s+"[^"]*")?\)|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|(?<![\w`*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])|(?<![\w`])_(?!\s)(.+?)(?<!\s)_(?!\w)|<?(https?:\/\/[^\s<>)\]]+)>?/g;
+
+function inline(text: string, base: Style): Span[] {
+  const spans: Span[] = [];
+  const push = (t: string, st: Style) => {
+    if (t) spans.push({ ...st, text: t });
+  };
+  const re = new RegExp(INLINE_RE.source, "g");
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    push(text.slice(last, m.index), base);
+    last = m.index + m[0].length;
+    if (m[2] != null) push(m[2].trim(), { ...base, color: MD_CODE_COLOR });
+    else if (m[3] != null) {
+      // a linked badge (Greptile's P1 / security tags) reads as its label
+      if (m[3].trim()) push(`[${m[3].trim()}]`, { ...base, color: MD_IMAGE_COLOR });
+    } else if (m[4] != null) {
+      // an inline image with no alt is decoration (Vercel's avatars): drop it.
+      // Screenshots sit on their own line and are handled as a block.
+      if (m[4].trim()) push(`⧉ ${m[4].trim()}`, { ...base, color: MD_IMAGE_COLOR });
+    } else if (m[6] != null) spans.push(...inline(m[6], { ...base, underline: true }));
+    else if (m[8] != null || m[9] != null)
+      spans.push(...inline((m[8] ?? m[9])!, { ...base, bold: true }));
+    else if (m[10] != null) spans.push(...inline(m[10], { ...base, strike: true }));
+    else if (m[11] != null || m[12] != null)
+      spans.push(...inline((m[11] ?? m[12])!, { ...base, italic: true }));
+    else if (m[13] != null) push(m[13], { ...base, underline: true, dim: true });
+  }
+  push(text.slice(last), base);
+  return spans;
+}
+
+// Width in terminal cells as the renderer measures it: East-Asian-ambiguous
+// characters (em dash, arrows, ●) count as two cells there, and a line that
+// only fits by string length comes back truncated.
+function cellWidth(text: string): number {
+  return Bun.stringWidth(text, { ambiguousIsNarrow: false });
+}
+
+function spanWidth(spans: Span[]): number {
+  return spans.reduce((n, s) => n + cellWidth(s.text), 0);
+}
+
+// Word-wrap spans to `width`. `first` prefixes the first line (a bullet), and
+// `hang` every continuation. Adjacent non-space text is one word even when it
+// crosses a style boundary — "(`code`)" never breaks after the paren — and a
+// word wider than the room left is hard-broken, so a long URL or hash still
+// lands inside the box.
+function wrapSpans(
+  spans: Span[],
+  width: number,
+  first: Span[],
+  hang: Span[],
+): StyledLine[] {
+  type Piece = { span: Span; text: string };
+  type Token = { pieces: Piece[]; width: number; space: boolean };
+  const tokens: Token[] = [];
+  for (const sp of spans) {
+    for (const part of sp.text.match(/\s+|\S+/g) ?? []) {
+      const space = /^\s+$/.test(part);
+      const last = tokens[tokens.length - 1];
+      if (!space && last && !last.space) {
+        last.pieces.push({ span: sp, text: part });
+        last.width += cellWidth(part);
+      } else {
+        tokens.push({ pieces: [{ span: sp, text: part }], width: cellWidth(part), space });
+      }
+    }
+  }
+
+  const out: StyledLine[] = [];
+  let cur: Span[] = [...first];
+  let curW = spanWidth(first);
+  let lineStart = true;
+  // trailing whitespace would hang past the width and get the line truncated
+  const trimEnd = (line: Span[]) => {
+    while (line.length && /^\s*$/.test(line[line.length - 1].text)) line.pop();
+    const last = line[line.length - 1];
+    if (last) last.text = last.text.replace(/\s+$/, "");
+    return line;
+  };
+  const flush = () => {
+    out.push(trimEnd(cur));
+    cur = [...hang];
+    curW = spanWidth(hang);
+    lineStart = true;
+  };
+  const put = (sp: Span, text: string) => {
+    cur.push({ ...sp, text });
+    curW += cellWidth(text);
+  };
+  for (const tok of tokens) {
+    if (tok.space) {
+      if (!lineStart) put(tok.pieces[0].span, tok.pieces[0].text); // none after a wrap
+      continue;
+    }
+    if (curW + tok.width > width && !lineStart) flush();
+    for (const piece of tok.pieces) {
+      let text = piece.text;
+      while (cellWidth(text) > width - curW && width > curW) {
+        const take = width - curW; // by char; only ASCII-long words (urls) get here
+        put(piece.span, text.slice(0, take));
+        text = text.slice(take);
+        flush();
+      }
+      put(piece.span, text);
+      lineStart = false;
+    }
+  }
+  if (!lineStart || out.length === 0) out.push(trimEnd(cur));
+  return out;
+}
+
+function renderMarkdown(body: string, width: number): StyledLine[] {
+  const lines: StyledLine[] = [];
+  let fence: string | null = null;
+  let blankPending = false; // runs of blank lines collapse to one
+  const emit = (l: StyledLine) => {
+    if (blankPending && lines.length) lines.push([]);
+    blankPending = false;
+    lines.push(l);
+  };
+  const emitWrapped = (spans: Span[], first: Span[], hang: Span[]) => {
+    for (const l of wrapSpans(spans, width, first, hang)) emit(l);
+  };
+  const gutter: Span = { text: "  │ ", dim: true };
+  const src = preprocessMarkdown(body).split("\n");
+
+  for (let i = 0; i < src.length; i++) {
+    const line = src[i].replace(/\t/g, "    ");
+    const fm = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (fm && fm[1][0] === fence[0] && fm[1].length >= fence.length) fence = null;
+      else emit([gutter, { text: line, color: MD_CODE_COLOR }]); // truncated, never wrapped
+      continue;
+    }
+    if (fm) {
+      fence = fm[1];
+      continue;
+    }
+    if (!line.trim()) {
+      blankPending = true;
+      continue;
+    }
+    // reference-style link definition (Vercel's "[vc]: #…" marker) — invisible
+    // in rendered markdown
+    if (/^\[[^\]]+\]:\s+\S+/.test(line)) continue;
+
+    let m: RegExpExecArray | null;
+    if ((m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
+      blankPending = blankPending || lines.length > 0; // room above a heading
+      const color = m[1].length <= 2 ? MD_HEADING_COLOR : undefined;
+      emitWrapped(inline(m[2], { bold: true, color }), [], []);
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      emit([{ text: "─".repeat(Math.min(width, 40)), dim: true }]);
+      continue;
+    }
+    if ((m = /^\s*!\[([^\]]*)\]\(([^)\s]+)[^)]*\)\s*$/.exec(line))) {
+      // a block-level image is usually a screenshot: keep its address in view
+      emit([
+        { text: `⧉ ${m[1].trim() || "image"}`, color: MD_IMAGE_COLOR },
+        { text: `  ${m[2]}`, dim: true },
+      ]);
+      continue;
+    }
+    if ((m = /^▸ (.*)$/.exec(line))) {
+      // a <details> summary: bold, with the disclosure mark as its bullet
+      emitWrapped(
+        inline(m[1], { bold: true }),
+        [{ text: "▸ ", color: MD_MARK_COLOR }],
+        [{ text: "  " }],
+      );
+      continue;
+    }
+    if ((m = /^\s*>\s?(.*)$/.exec(line))) {
+      const bar: Span = { text: "▎ ", dim: true };
+      emitWrapped(inline(m[1], { dim: true }), [bar], [bar]);
+      continue;
+    }
+    if ((m = /^(\s*)([-*+]|\d+[.)])\s+(?:\[([ xX])\]\s+)?(.*)$/.exec(line))) {
+      const depth = Math.floor(m[1].length / 2);
+      const pad = "  ".repeat(depth);
+      const marker =
+        m[3] != null
+          ? m[3] === " "
+            ? "☐"
+            : "☑"
+          : /^\d/.test(m[2])
+            ? m[2]
+            : ["•", "◦", "▪"][depth % 3];
+      const hang = " ".repeat(pad.length + marker.length + 1);
+      emitWrapped(
+        inline(m[4], {}),
+        [{ text: pad }, { text: marker, color: MD_MARK_COLOR }, { text: " " }],
+        [{ text: hang }],
+      );
+      continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      if (/^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(line)) continue; // alignment row
+      const header = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(src[i + 1] ?? "");
+      const cells = line.trim().slice(1, -1).split("|");
+      const spans: Span[] = [];
+      cells.forEach((c, ci) => {
+        if (ci > 0) spans.push({ text: " │ ", dim: true });
+        spans.push(...inline(c.trim(), { bold: header }));
+      });
+      emit(spans); // rows keep their columns: truncated, never wrapped
+      continue;
+    }
+    if ((m = /^(\s{2,})(.*)$/.exec(line))) {
+      // indented continuation of a list item or nested block
+      const pad: Span = { text: "  ".repeat(Math.min(4, Math.floor(m[1].length / 2))) };
+      emitWrapped(inline(m[2], {}), [pad], [pad]);
+      continue;
+    }
+    emitWrapped(inline(line, {}), [], []);
+  }
+  return lines;
+}
+
+// First readable line of a body, marks and tags stripped — the one-line peek
+// a folded thread shows.
+function plainText(md: string): string {
+  return (
+    preprocessMarkdown(md)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !/^(```|~~~|\[[^\]]+\]:)/.test(l))
+      .map((l) =>
+        l
+          .replace(/\[!\[([^\]]*)\]\([^)]*\)\]\([^)]*\)/g, "[$1]")
+          .replace(/!\[([^\]]*)\]\([^)]*\)/g, "[$1]")
+          .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+          .replace(/[*_`~#>]+/g, "")
+          .trim(),
+      )
+      .find(Boolean) ?? ""
+  );
+}
+
+function reviewVerb(state: string | undefined): { text: string; color?: string } {
+  if (state === "APPROVED") return { text: "approved", color: "green" };
+  if (state === "CHANGES_REQUESTED") return { text: "requested changes", color: "red" };
+  if (state === "DISMISSED") return { text: "review dismissed" };
+  return { text: "reviewed" };
+}
+
+// Bots whose comments are deployment tables and link-backs, not review. They
+// fold to a header line unless the dialog is unfolded (x).
+const NOISY_BOTS = new Set([
+  "vercel",
+  "linear",
+  "github-actions",
+  "codecov",
+  "dependabot",
+  "renovate",
+  "netlify",
+]);
+
+function indentLines(ls: StyledLine[], pad: string): StyledLine[] {
+  return ls.map((l) => (l.length ? [{ text: pad }, ...l] : l));
+}
+
+// The whole dialog body as lines, plus the line index where each comment
+// starts (n/p jump between them).
+function renderDiscussion(
+  d: Discussion,
+  width: number,
+  showAll: boolean,
+): { lines: StyledLine[]; marks: number[] } {
+  const lines: StyledLine[] = [];
+  const marks: number[] = [];
+
+  lines.push(
+    ...(d.body.trim()
+      ? renderMarkdown(d.body, width)
+      : [[{ text: "(no description)", dim: true }]]),
+  );
+
+  const unresolved = d.items.filter((i) => i.kind === "thread" && !i.resolved).length;
+  lines.push([]);
+  marks.push(lines.length);
+  lines.push([{ text: "─".repeat(Math.min(width, 40)), dim: true }]);
+  const head: Span[] = [
+    {
+      text: `${d.items.length} comment${d.items.length === 1 ? "" : "s"}`,
+      bold: true,
+      color: MD_HEADING_COLOR,
+    },
+  ];
+  if (unresolved)
+    head.push({
+      text: ` · ${unresolved} unresolved thread${unresolved === 1 ? "" : "s"}`,
+      color: "yellow",
+    });
+  lines.push(head);
+  if (d.items.length === 0) lines.push([{ text: "(none yet)", dim: true }]);
+
+  for (const it of d.items) {
+    lines.push([]);
+    marks.push(lines.length);
+    const noisy = NOISY_BOTS.has(it.author) && !showAll;
+    const folded = noisy || (it.kind === "thread" && it.resolved && !showAll);
+
+    const row: Span[] = [];
+    if (it.kind === "thread")
+      row.push(
+        it.resolved ? { text: "✓ ", color: "green" } : { text: "● ", color: "yellow" },
+      );
+    else if (it.kind === "review")
+      row.push(
+        it.state === "APPROVED"
+          ? { text: "✓ ", color: "green" }
+          : it.state === "CHANGES_REQUESTED"
+            ? { text: "✗ ", color: "red" }
+            : { text: "● ", color: "cyan" },
+      );
+    else row.push({ text: "● ", color: noisy ? "gray" : "cyan" });
+    row.push({ text: it.author, bold: !folded, dim: folded });
+    if (it.kind === "review") {
+      const v = reviewVerb(it.state);
+      row.push({ text: ` ${v.text}`, color: v.color, dim: !v.color });
+    }
+    if (it.kind === "thread" && it.path)
+      row.push({
+        text: ` · ${it.path}${it.line != null ? `:${it.line}` : ""}`,
+        dim: true,
+      });
+    if (it.resolved) row.push({ text: " · resolved", color: "green" });
+    if (it.outdated) row.push({ text: " · outdated", dim: true });
+    row.push({ text: ` · ${ago(it.when)}`, dim: true });
+    if (it.replies.length)
+      row.push({
+        text: ` · ${it.replies.length} repl${it.replies.length === 1 ? "y" : "ies"}`,
+        dim: true,
+      });
+    if (folded)
+      row.push({
+        text: noisy ? "  (bot · x to show)" : "  (x to unfold)",
+        dim: true,
+        italic: true,
+      });
+    // a long path would otherwise be truncated out of the header
+    lines.push(...wrapSpans(row, width, [], [{ text: "  " }]));
+
+    if (folded) {
+      // one dim line keeps a resolved thread findable without reading it
+      const peek = noisy ? "" : plainText(it.body);
+      if (peek)
+        lines.push(
+          ...wrapSpans(
+            [{ text: peek, dim: true }],
+            width,
+            [{ text: "  " }],
+            [{ text: "  " }],
+          ).slice(0, 1),
+        );
+      continue;
+    }
+    lines.push(...indentLines(renderMarkdown(it.body, width - 2), "  "));
+    for (const r of it.replies) {
+      lines.push([]);
+      lines.push([
+        { text: "  ↳ ", dim: true },
+        { text: r.author, bold: true },
+        { text: ` · ${ago(r.when)}`, dim: true },
+      ]);
+      lines.push(...indentLines(renderMarkdown(r.body, width - 4), "    "));
+    }
+  }
+  return { lines, marks };
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
@@ -907,6 +1674,10 @@ function App() {
   // a ref and state only mirrors it for display. Editing off the last render
   // would keep nothing but the final keystroke.
   const commentRef = useRef<CommentDraft | null>(null);
+  // space: the selected PR's description + conversation. Fetched once per PR
+  // (r inside the dialog refreshes), cached for the session.
+  const [desc, setDesc] = useState<DescDialog | null>(null);
+  const discussionCache = useRef(new Map<number, Discussion>());
 
   // display order: top of stack first, like the GitHub stack UI
   const entries = useMemo(
@@ -998,7 +1769,11 @@ function App() {
       setPending(null);
       setActionMsg(null);
       setBusy(
-        action.kind === "rebase" ? "starting rebase agent…" : "merging stack…",
+        action.kind === "rebase"
+          ? "starting rebase agent…"
+          : action.kind === "merge"
+            ? "merging stack…"
+            : "approving…",
       );
       action
         .exec()
@@ -1010,6 +1785,7 @@ function App() {
               color: "green",
             });
             if (action.kind === "merge") load();
+            action.after?.();
             return;
           }
           setActionMsg({
@@ -1129,6 +1905,141 @@ function App() {
       });
   }, [putComment]);
 
+  // ----- description dialog ---------------------------------------------
+  const loadDiscussion = useCallback((prNumber: number) => {
+    setDesc((d) => (d && d.prNumber === prNumber ? { ...d, loading: true } : d));
+    fetchDiscussion(prNumber).then(({ data, error }) => {
+      if (data) discussionCache.current.set(prNumber, data);
+      setDesc((d) =>
+        d && d.prNumber === prNumber
+          ? { ...d, data: data ?? d.data, error: error ?? null, loading: false }
+          : d,
+      );
+    });
+  }, []);
+
+  const openDesc = useCallback(
+    (b: StackBranch, showAll = false) => {
+      if (b.prNumber == null) {
+        setActionMsg({
+          text: `no PR for ${b.branch} yet — nothing to describe`,
+          color: "red",
+        });
+        return;
+      }
+      const cached = discussionCache.current.get(b.prNumber) ?? null;
+      setDesc({
+        prNumber: b.prNumber,
+        data: cached,
+        error: null,
+        loading: !cached,
+        scroll: 0,
+        showAll,
+      });
+      if (!cached) loadDiscussion(b.prNumber);
+    },
+    [loadDiscussion],
+  );
+
+  // ----- zed ------------------------------------------------------------
+  // z: check the selected branch out (when it isn't already) and open its
+  // worktree in Zed. Runs as a busy action so a second z can't race the
+  // checkout; the sidebar's ✦ follows HEAD once git has answered.
+  const openZed = useCallback((b: StackBranch) => {
+    setActionMsg(null);
+    setBusy(`opening ${b.branch} in zed…`);
+    openInZed(b.branch)
+      .then(async (r) => {
+        if (r.code !== 0) {
+          setBusy(null);
+          setActionMsg({
+            text: `zed failed — ${firstLine(r.err) || `exit ${r.code}`}`,
+            color: "red",
+          });
+          return;
+        }
+        // the checkout may have moved HEAD; re-read it rather than assume
+        const cur = await currentBranch();
+        setStack(
+          (s) =>
+            s && {
+              ...s,
+              currentBranch: cur,
+              branches: s.branches.map((x) => ({
+                ...x,
+                isCurrent: x.branch === cur,
+                hasLocal: x.hasLocal || x.branch === cur,
+              })),
+            },
+        );
+        setBusy(null);
+        setActionMsg({ text: r.out, color: "green" });
+      })
+      .catch((e: Error) => {
+        setBusy(null);
+        setActionMsg({ text: `zed failed — ${e.message}`, color: "red" });
+      });
+  }, []);
+
+  // ----- approve --------------------------------------------------------
+  // a: stage an approval of the selected PR; y submits `gh pr review
+  // --approve`. GitHub refuses to approve your own PR, which surfaces as the
+  // failure text in the footer.
+  const approvePr = useCallback(
+    (b: StackBranch) => {
+      if (b.prNumber == null) {
+        setActionMsg({
+          text: `no PR for ${b.branch} yet — nothing to approve`,
+          color: "red",
+        });
+        return;
+      }
+      const n = b.prNumber;
+      setPending({
+        kind: "approve",
+        prompt: `Approve #${n} (${details.get(n)?.title ?? b.branch})?`,
+        exec: () => run(["gh", "pr", "review", String(n), "--approve"]),
+        after: () => refreshDetails(n),
+      });
+    },
+    [details, refreshDetails],
+  );
+
+  // A: the same, for every PR in the stack that is still open. One
+  // confirmation, then the approvals run in order; a refusal on one (your own
+  // PR, say) is reported without stopping the rest.
+  const approveAll = useCallback(() => {
+    if (!stack) return;
+    const open = stack.branches.filter((b) => {
+      if (b.prNumber == null || b.isMerged) return false;
+      const state = details.get(b.prNumber)?.state ?? b.prState ?? "";
+      return state !== "MERGED" && state !== "CLOSED";
+    });
+    if (open.length === 0) {
+      setActionMsg({ text: "no open PRs in this stack to approve", color: "red" });
+      return;
+    }
+    const nums = open.map((b) => b.prNumber!);
+    setPending({
+      kind: "approve",
+      prompt: `Approve ${nums.length} open PR${nums.length === 1 ? "" : "s"} in ${stack.label} (${nums.map((n) => `#${n}`).join(" ")})?`,
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        for (const n of nums) {
+          const r = await run(["gh", "pr", "review", String(n), "--approve"]);
+          if (r.code === 0) ok.push(n);
+          else failed.push(`#${n}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+        }
+        const done = `${ok.length}/${nums.length} approved`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => nums.forEach(refreshDetails),
+    });
+  }, [stack, details, refreshDetails]);
+
   // ----- layout ---------------------------------------------------------
   const sidebarW = Math.max(28, Math.min(46, Math.floor(cols * 0.34)));
   // OpenTUI reserves the terminal's first line and Yoga needs room for the
@@ -1194,6 +2105,28 @@ function App() {
     [maxScroll, sel],
   );
 
+  // The description dialog replaces the body: border rows plus its two header
+  // rows. Prose wraps at a readable measure; code and table rows keep the
+  // full width and truncate.
+  const descViewH = Math.max(1, bodyH - 4 - (desc?.error ? 1 : 0));
+  const descTextW = Math.max(20, Math.min(100, cols - 4));
+  const descRender = useMemo(
+    () =>
+      desc?.data
+        ? renderDiscussion(desc.data, descTextW, desc.showAll)
+        : { lines: [] as StyledLine[], marks: [] as number[] },
+    [desc?.data, desc?.showAll, descTextW],
+  );
+  const descMax = Math.max(0, descRender.lines.length - descViewH);
+  const scrollDesc = useCallback(
+    (updater: (v: number) => number) =>
+      setDesc(
+        (d) =>
+          d && { ...d, scroll: Math.max(0, Math.min(descMax, updater(d.scroll))) },
+      ),
+    [descMax],
+  );
+
   // ----- mouse ----------------------------------------------------------
   const { stdin } = useStdin();
 
@@ -1203,7 +2136,8 @@ function App() {
     if (button === 64 || button === 65) {
       // wheel: over the sidebar it moves the selection, elsewhere it scrolls
       const dir = button === 64 ? -1 : 1;
-      if (screen === "pick")
+      if (desc) scrollDesc((v) => v + dir * 3);
+      else if (screen === "pick")
         setPickIdx((i) => Math.max(0, Math.min(stackChoices.length - 1, i + dir)));
       else if (screen !== "main") return;
       else if (x < sidebarW)
@@ -1212,6 +2146,7 @@ function App() {
       return;
     }
     if (button !== 0) return; // left click only
+    if (desc) return; // nothing to click in the description dialog
 
     if (screen === "pick") {
       // padding row + title + subtitle + margin row, then 2 rows per stack
@@ -1283,6 +2218,48 @@ function App() {
     // do its job — dismissing shouldn't cost a keystroke.
     if (actionMsg) setActionMsg(null);
 
+    // The description dialog is modal: it reads like the diff pane (same
+    // scroll keys), adds a few of its own, and nothing falls through to the
+    // main view — q closes it rather than quitting.
+    if (desc) {
+      if (key.escape || input === "q") setDesc(null);
+      else if (key.upArrow || input === "k") scrollDesc((v) => v - 1);
+      else if (key.downArrow || input === "j") scrollDesc((v) => v + 1);
+      else if (key.pageDown || input === " " || input === "f")
+        scrollDesc((v) => v + descViewH);
+      else if (key.pageUp || input === "b") scrollDesc((v) => v - descViewH);
+      else if (input === "d") scrollDesc((v) => v + Math.ceil(descViewH / 2));
+      else if (input === "u") scrollDesc((v) => v - Math.ceil(descViewH / 2));
+      else if (input === "g") scrollDesc(() => 0);
+      else if (input === "G") scrollDesc(() => descMax);
+      else if (input === "n")
+        scrollDesc((v) => descRender.marks.find((m) => m > v) ?? v);
+      else if (input === "p")
+        scrollDesc((v) => [...descRender.marks].reverse().find((m) => m < v) ?? 0);
+      else if (input === "x") setDesc((d) => d && { ...d, showAll: !d.showAll });
+      else if (key.tab || input === "J" || input === "K") {
+        // step to the neighboring PR without leaving the dialog
+        const dir = (key.tab && key.shift) || input === "K" ? -1 : 1;
+        for (let i = selected + dir; i >= 0 && i < entries.length; i += dir) {
+          if (entries[i].prNumber != null) {
+            setSelected(i);
+            openDesc(entries[i], desc.showAll);
+            break;
+          }
+        }
+      } else if (input === "c") openComment();
+      else if (input === "o")
+        Bun.spawn(["gh", "pr", "view", String(desc.prNumber), "--web"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+      else if (input === "r") loadDiscussion(desc.prNumber);
+      else if (input === "z" && sel) openZed(sel);
+      else if (input === "a" && sel) approvePr(sel);
+      else if (input === "A") approveAll();
+      return;
+    }
+
     if (input === "q" || key.escape) {
       exit();
       return;
@@ -1328,7 +2305,7 @@ function App() {
           next.delete(b.branch);
           return next;
         });
-    } else if (key.pageDown || input === " ") setScrollFor((v) => v + diffViewH);
+    } else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH);
     else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH);
     else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2));
     else if (input === "u") setScrollFor((v) => v - Math.ceil(diffViewH / 2));
@@ -1338,6 +2315,10 @@ function App() {
       setScrollFor((v) => fileMarks.find((m) => m > v) ?? v);
     else if (input === "p")
       setScrollFor((v) => [...fileMarks].reverse().find((m) => m < v) ?? 0);
+    else if (input === " " && sel) openDesc(sel);
+    else if (input === "z" && sel) openZed(sel);
+    else if (input === "a" && sel) approvePr(sel);
+    else if (input === "A") approveAll();
     else if (input === "c") openComment();
     else if (input === "o" && sel?.prNumber != null)
       Bun.spawn(["gh", "pr", "view", String(sel.prNumber), "--web"], {
@@ -1445,6 +2426,8 @@ function App() {
 
   const pct =
     maxScroll === 0 ? 100 : Math.round((Math.min(scroll, maxScroll) / maxScroll) * 100);
+  const descPct =
+    descMax === 0 ? 100 : Math.round((Math.min(desc?.scroll ?? 0, descMax) / descMax) * 100);
   const visible = (diffLines ?? []).slice(scroll, scroll + diffViewH);
 
   // The Text shim truncates at the end, so window the draft by hand and keep
@@ -1488,6 +2471,72 @@ function App() {
         </Text>
       </Box>
 
+      {desc ? (
+        /* description dialog: the PR body and its conversation, in place of
+           the sidebar + diff. esc closes. */
+        <Box
+          flexDirection="column"
+          flexGrow={1}
+          minHeight={0}
+          borderStyle="round"
+          borderColor="cyan"
+          paddingX={1}
+          overflow="hidden"
+        >
+          <Text wrap="truncate-end" flexShrink={0}>
+            <Text bold color="cyan">
+              #{desc.prNumber}{" "}
+            </Text>
+            <Text bold>{desc.data?.title ?? selDetails?.title ?? sel.branch}</Text>
+          </Text>
+          <Text dimColor wrap="truncate-end" flexShrink={0}>
+            {desc.data
+              ? `${desc.data.author} · opened ${ago(desc.data.createdAt)} · ${desc.data.items.length} comment${desc.data.items.length === 1 ? "" : "s"}`
+              : sel.branch}
+            {desc.loading ? " · ⟳ loading…" : ""}
+            {desc.showAll ? " · unfolded" : ""}
+            {" · "}
+            {descPct}%
+          </Text>
+          {desc.error ? (
+            <Text color="red" wrap="truncate-end" flexShrink={0}>
+              {desc.error}
+            </Text>
+          ) : null}
+          {!desc.data && !desc.error ? (
+            <Text dimColor>loading description…</Text>
+          ) : (
+            descRender.lines
+              .slice(desc.scroll, desc.scroll + descViewH)
+              .map((line, i) => (
+                <Box
+                  key={desc.scroll + i}
+                  width="100%"
+                  flexShrink={0}
+                  overflow="hidden"
+                >
+                  <Text wrap="truncate-end">
+                    {line.length === 0
+                      ? " "
+                      : line.map((s, si) => (
+                          <Text
+                            key={si}
+                            color={s.color}
+                            bold={s.bold}
+                            dimColor={s.dim}
+                            italic={s.italic}
+                            underline={s.underline}
+                            strikethrough={s.strike}
+                          >
+                            {s.text}
+                          </Text>
+                        ))}
+                  </Text>
+                </Box>
+              ))
+          )}
+        </Box>
+      ) : (
       <Box flexDirection="row" flexGrow={1} minHeight={0} overflow="hidden">
         {/* sidebar */}
         <Box
@@ -1623,6 +2672,7 @@ function App() {
           )}
         </Box>
       </Box>
+      )}
 
       {/* comment dialog: esc closes, enter hands the text to the ticket's agent */}
       {comment ? (
@@ -1677,8 +2727,17 @@ function App() {
       <Box paddingX={1} flexShrink={0}>
         {pending ? (
           <Text wrap="truncate-end">
-            <Text bold color={pending.kind === "merge" ? "red" : "yellow"}>
-              {pending.kind === "merge" ? "MERGE" : "REBASE"}
+            <Text
+              bold
+              color={
+                pending.kind === "merge"
+                  ? "red"
+                  : pending.kind === "approve"
+                    ? "green"
+                    : "yellow"
+              }
+            >
+              {pending.kind.toUpperCase()}
             </Text>
             <Text> {pending.prompt} </Text>
             <Text bold color="white">
@@ -1695,9 +2754,13 @@ function App() {
             {actionMsg.text}
             <Text dimColor> · any key to dismiss</Text>
           </Text>
+        ) : desc ? (
+          <Text dimColor wrap="truncate-end">
+            ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c comment · o open · z zed · r refresh · esc close
+          </Text>
         ) : (
           <Text dimColor wrap="truncate-end">
-            ↑↓/j/k/click pr · l/h checks · space/b page · d/u half · g/G top/bot · n/p file · c comment · o open · R rebase · M merge · r refresh · q quit
+            ↑↓/j/k/click pr · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · q quit
           </Text>
         )}
       </Box>
@@ -1731,17 +2794,74 @@ if (argv.includes("--dump")) {
   process.exit(0);
 }
 
+if (argv.includes("--zed")) {
+  // headless z: check the branch out and open its worktree in Zed from the
+  // shell, and the way the key's checkout logic gets exercised without a TTY
+  const branch = argv[argv.indexOf("--zed") + 1];
+  if (!branch) {
+    console.error("usage: stacks --zed <branch>");
+    process.exit(2);
+  }
+  const r = await openInZed(branch);
+  if (r.code !== 0) {
+    console.error(r.err);
+    process.exit(r.code || 1);
+  }
+  console.log(r.out);
+  process.exit(0);
+}
+
+if (argv.includes("--discussion")) {
+  // headless mode for the description dialog: render a PR's body + comments
+  // as plain text, at the given width, so the markdown pass can be checked
+  // without a terminal
+  const n = Number(argv[argv.indexOf("--discussion") + 1]);
+  const width = Number(argv[argv.indexOf("--width") + 1]) || 80;
+  if (!Number.isInteger(n)) {
+    console.error("usage: stacks --discussion <pr-number> [--width N] [--all]");
+    process.exit(2);
+  }
+  const { data, error } = await fetchDiscussion(n);
+  if (!data) {
+    console.error(error);
+    process.exit(1);
+  }
+  const { lines, marks } = renderDiscussion(data, width, argv.includes("--all"));
+  lines.forEach((l, i) =>
+    console.log(`${marks.includes(i) ? "▶" : " "} ${l.map((s) => s.text).join("")}`),
+  );
+  process.exit(0);
+}
+
 if (argv.includes("-h") || argv.includes("--help")) {
   console.log(`stacks — browse a gh stack: PRs on the left, gh pr diff on the right
 
-usage: stacks [--dump]
+usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
 
-keys: ↑↓/j/k/tab pick PR · l/h (or ←→) expand/collapse a PR's CI checks ·
-      space/b page · d/u half page · g/G top/bottom · n/p next/prev file ·
-      1-9 jump · c comment to the ticket's agent · o open in browser ·
-      R rebase via a claude agent · M squash-merge stack · r refresh · q quit
+keys: ↑↓/j/k/tab pick PR · space PR description + comments · l/h (or ←→)
+      expand/collapse a PR's CI checks · f/b page · d/u half page · g/G
+      top/bottom · n/p next/prev file · 1-9 jump · a approve · A approve every
+      open PR in the stack · z check out + open in Zed · c comment to the
+      ticket's agent · o open in browser · R rebase via a claude agent ·
+      M squash-merge stack · r refresh · q quit
 mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
        moves the selection)
+
+space opens the selected PR's description with its whole conversation under
+it: issue comments, reviews, and inline review threads (where Greptile leaves
+its findings), oldest first, rendered as terminal markdown. Inside it: j/k,
+space/b, d/u, g/G scroll like the diff · n/p jump between comments · tab /
+shift-tab step to the next/previous PR · x unfolds resolved threads and bot
+comments (Vercel, Linear), which fold to one line by default · a approves ·
+c comments to the ticket's agent · o opens the PR in the browser · z opens it
+in Zed · r re-fetches · esc closes. Images show as a "⧉ alt" placeholder (o for the real
+thing).
+
+z checks the selected branch out — creating the local tracking branch from
+origin when it has never been checked out here — and opens the worktree in
+Zed. A branch already checked out in another worktree opens there instead
+(git won't check it out twice), and a checkout git refuses (dirty tree) is
+reported, never stashed or forced.
 
 c opens a comment box for the selected PR. The Linear ticket comes off the
 branch name (miguel/prod-3083-hide-officer-ssn -> PROD-3083), the Herdr tab
@@ -1761,7 +2881,11 @@ sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the sam
       the ref fetch + drift detection run behind it ("⟳ checking sync…" in the
       header until they land), so the answers still reflect the remote.
 
-R and M both stage a confirmation first and only run on "y". R splits a new
+a, A, R and M all stage a confirmation first and only run on "y". a submits
+\`gh pr review <n> --approve\` for the selected PR (from the main view or the
+description dialog) and refreshes its badge; A does the same for every PR in
+the stack that is still open, in order, and reports any that GitHub refused
+(your own, for one) without stopping on them. R splits a new
 Herdr pane on the right and hands the whole rebase to a Claude agent there —
 rebase onto the trunk, resolve merge conflicts itself, force-push with
 --force-with-lease — so you review a finished rebase instead of the conflicts
