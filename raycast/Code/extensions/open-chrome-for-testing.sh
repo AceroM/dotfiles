@@ -12,7 +12,7 @@
 # Documentation:
 # @raycast.author AceroM
 # @raycast.authorURL https://raycast.com/AceroM
-# @raycast.description Brings the running Google Chrome for Testing to the front (launches the newest cached build if none is running)
+# @raycast.description Silently brings the running Google Chrome for Testing to the front (launches the newest cached build if none is running)
 
 set -uo pipefail
 
@@ -22,7 +22,6 @@ running="$(ps -axo comm= | grep -F 'Google Chrome for Testing.app/Contents/MacOS
 if [[ -n "$running" ]]; then
   app="${running%/Contents/MacOS/*}"
   open -a "$app"
-  echo "Focused $(basename "$(dirname "$(dirname "$app")")")"
   exit 0
 fi
 
@@ -40,4 +39,3 @@ if [[ -z "$app" ]]; then
 fi
 
 open -a "$app"
-echo "Launched $(basename "$(dirname "$(dirname "$app")")")"
