@@ -12,6 +12,13 @@
 --
 --   System Settings -> Privacy & Security -> Full Disk Access -> Hammerspoon
 --
+-- Muting (raycast/Code/extensions/toggle-notification-toasts.sh drives this):
+--
+--   hs -c "notifications.toggleMuted()"     -- returns the new state
+--
+-- Muting only silences the toasts. Polling and M.feed keep going, so `sn` still
+-- has everything that arrived while the cards were off.
+--
 -- Debugging:
 --
 --   hs -c "notifications.debug = true"      -- log each poll to the console
@@ -40,6 +47,7 @@ M.lastError = nil
 
 local APPLE_EPOCH = 978307200 -- 2001-01-01 in unix seconds
 local SETTINGS_KEY = "notifications.watermark"
+local MUTE_KEY = "notifications.muted"
 local DB = os.getenv("HOME") .. "/Library/Group Containers/group.com.apple.usernoted/db2/db"
 local SCRIPT = hs.configdir .. "/notifdb.py"
 local PYTHON = "/usr/bin/python3"
@@ -96,7 +104,9 @@ local function handleOutput(exitCode, stdOut, stdErr)
         end
         local rule = M.rules[row.bundle]
         if rule then
-          showToast(row, rule)
+          if not M.muted() then
+            showToast(row, rule)
+          end
           appendFeed(line)
         end
       end
@@ -173,6 +183,34 @@ function M.stop()
     task:terminate()
     task = nil
   end
+end
+
+-- --- muting ------------------------------------------------------------------
+-- Persisted in hs.settings, so it survives hs.reload() and restarts. Nothing
+-- here touches the poll timer or the feed: a muted session still records every
+-- notification, it just doesn't draw the cards.
+
+--- Are the toasts currently silenced?
+function M.muted()
+  return hs.settings.get(MUTE_KEY) == true
+end
+
+--- Silence (or un-silence) the toasts. Returns the state it settled on.
+function M.setMuted(muted)
+  muted = muted and true or false
+  hs.settings.set(MUTE_KEY, muted)
+  if muted then
+    -- Clear the cards already on screen; nobody mutes to keep looking at them.
+    for _, rule in pairs(M.rules) do
+      toast.dismissAll(rule.placement or "topright")
+    end
+  end
+  return muted
+end
+
+--- Flip the mute. Returns the new state — this is what the raycast script reads.
+function M.toggleMuted()
+  return M.setMuted(not M.muted())
 end
 
 --- Move the watermark back and re-poll: replays recent notifications through

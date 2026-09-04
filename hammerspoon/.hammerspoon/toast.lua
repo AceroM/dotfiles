@@ -294,10 +294,13 @@ function M.show(text, opts)
   return toast
 end
 
-function M.dismissAll()
+--- Dismiss every visible toast, or only those in one placement.
+function M.dismissAll(placement)
   for name, stack in pairs(stacks) do
-    for i = #stack, 1, -1 do
-      removeToast(name, stack[i])
+    if not placement or name == placement then
+      for i = #stack, 1, -1 do
+        removeToast(name, stack[i])
+      end
     end
   end
 end

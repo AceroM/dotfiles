@@ -419,5 +419,13 @@
     "unbind": {
       "alt-cmd-f": "text_finder::Toggle"
     }
+  },
+  // Vim H/L switch tabs instead of jumping to the top/bottom of the viewport.
+  {
+    "context": "Editor && VimControl && !VimWaiting && !menu",
+    "bindings": {
+      "shift-h": "pane::ActivatePreviousItem",
+      "shift-l": "pane::ActivateNextItem"
+    }
   }
 ]
