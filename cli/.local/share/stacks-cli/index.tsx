@@ -851,6 +851,41 @@ function checkRowsFor(d: PrDetails | undefined): CheckRow[] {
   return rows;
 }
 
+// One glyph per viewport row for a vertical scrollbar, or null when the
+// content fits and no bar is due. The thumb is the viewport's share of the
+// content, never under one row, so a long diff still shows where you are.
+function scrollbar(
+  total: number,
+  viewH: number,
+  scroll: number,
+): Array<"thumb" | "track"> | null {
+  if (viewH <= 0 || total <= viewH) return null;
+  const size = Math.max(1, Math.round((viewH * viewH) / total));
+  const maxScroll = total - viewH;
+  const start = Math.round((Math.min(scroll, maxScroll) / maxScroll) * (viewH - size));
+  return Array.from({ length: viewH }, (_, i) =>
+    i >= start && i < start + size ? "thumb" : "track",
+  );
+}
+
+const SCROLL_THUMB_COLOR = "#C9D1D9";
+
+function ScrollCell({
+  bar,
+  row,
+}: {
+  bar: Array<"thumb" | "track"> | null;
+  row: number;
+}) {
+  if (!bar) return null;
+  const thumb = bar[row] === "thumb";
+  return (
+    <Text flexShrink={0} color={thumb ? SCROLL_THUMB_COLOR : undefined} dimColor={!thumb}>
+      {thumb ? "┃" : "│"}
+    </Text>
+  );
+}
+
 function firstLine(s: string): string {
   return (
     s
@@ -1679,11 +1714,9 @@ function App() {
   const [desc, setDesc] = useState<DescDialog | null>(null);
   const discussionCache = useRef(new Map<number, Discussion>());
 
-  // display order: top of stack first, like the GitHub stack UI
-  const entries = useMemo(
-    () => (stack ? [...stack.branches].reverse() : []),
-    [stack],
-  );
+  // display order: trunk on top, then the stack bottom-up — the oldest PR
+  // (closest to trunk) first, the newest last — so the list reads in merge order
+  const entries = useMemo(() => stack?.branches ?? [], [stack]);
 
   const [selected, setSelected] = useState(0);
   // branch names whose sidebar row is expanded to show individual CI checks
@@ -1712,8 +1745,7 @@ function App() {
   const openStack = useCallback(
     (s: StackData) => {
       setStack(s);
-      const rev = [...s.branches].reverse();
-      const cur = rev.findIndex((b) => b.isCurrent);
+      const cur = s.branches.findIndex((b) => b.isCurrent);
       setSelected(cur >= 0 ? cur : 0);
       setScreen("main");
       // enrich each PR with title/state/checks in parallel
@@ -2109,7 +2141,7 @@ function App() {
   // rows. Prose wraps at a readable measure; code and table rows keep the
   // full width and truncate.
   const descViewH = Math.max(1, bodyH - 4 - (desc?.error ? 1 : 0));
-  const descTextW = Math.max(20, Math.min(100, cols - 4));
+  const descTextW = Math.max(20, Math.min(100, cols - 5)); // border, padding, bar
   const descRender = useMemo(
     () =>
       desc?.data
@@ -2145,8 +2177,44 @@ function App() {
       else setScrollFor((v) => v + dir * 3);
       return;
     }
+    // Geometry, 0-based like x/y and measured with injected clicks rather than
+    // assumed: OpenTUI draws with a one-cell margin, so terminal row 0 and
+    // column 0 stay blank, the header is row 1, the body starts at row 2
+    // (sidebar border / diff title / dialog border), and the rightmost drawn
+    // column is cols - 2. A scrollbar is one column wide, so its hit zone is
+    // widened by a column either side.
+    const DIFF_TOP = 4; // body + diff title + meta
+    const DIFF_BAR_X = cols - 2; // last drawn column
+    const DESC_BAR_X = cols - 4; // inside the dialog's border + padding
+    // a click (or left drag, 32) on a scrollbar column jumps to that spot
+    if ((button === 0 || button === 32) && screen === "main") {
+      if (desc) {
+        const top = 5 + (desc.error ? 1 : 0); // body + border + title + meta[, error]
+        if (
+          Math.abs(x - DESC_BAR_X) <= 1 &&
+          y >= top &&
+          y < top + descViewH &&
+          descMax > 0
+        ) {
+          scrollDesc(() =>
+            Math.round(((y - top) / Math.max(1, descViewH - 1)) * descMax),
+          );
+          return;
+        }
+      } else if (
+        Math.abs(x - DIFF_BAR_X) <= 1 &&
+        y >= DIFF_TOP &&
+        y < DIFF_TOP + diffViewH &&
+        maxScroll > 0
+      ) {
+        setScrollFor(() =>
+          Math.round(((y - DIFF_TOP) / Math.max(1, diffViewH - 1)) * maxScroll),
+        );
+        return;
+      }
+    }
     if (button !== 0) return; // left click only
-    if (desc) return; // nothing to click in the description dialog
+    if (desc) return; // nothing else to click in the description dialog
 
     if (screen === "pick") {
       // padding row + title + subtitle + margin row, then 2 rows per stack
@@ -2155,8 +2223,8 @@ function App() {
       return;
     }
     if (screen !== "main" || x >= sidebarW) return;
-    // header row + border row, plus the "↑ N more" line when windowed
-    const top = 2 + (winStart > 0 ? 1 : 0);
+    // blank row, header, border, trunk row, plus the "↑ N more" line when windowed
+    const top = 4 + (winStart > 0 ? 1 : 0);
     let rem = y - top;
     if (rem < 0) return;
     for (let i = winStart; i < winEnd; i++) {
@@ -2426,6 +2494,8 @@ function App() {
 
   const pct =
     maxScroll === 0 ? 100 : Math.round((Math.min(scroll, maxScroll) / maxScroll) * 100);
+  const diffBar = scrollbar(diffLines?.length ?? 0, diffViewH, scroll);
+  const descBar = desc ? scrollbar(descRender.lines.length, descViewH, desc.scroll) : null;
   const descPct =
     descMax === 0 ? 100 : Math.round((Math.min(desc?.scroll ?? 0, descMax) / descMax) * 100);
   const visible = (diffLines ?? []).slice(scroll, scroll + diffViewH);
@@ -2439,9 +2509,9 @@ function App() {
 
   return (
     <Box flexDirection="column" width={cols} height={rows} overflow="hidden">
-      {/* header */}
+      {/* header: one row always — the mouse math below counts on it */}
       <Box paddingX={1} flexShrink={0}>
-        <Text>
+        <Text wrap="truncate-end">
           <Text bold color="cyan">
             {stack.label}
           </Text>
@@ -2512,26 +2582,30 @@ function App() {
                 <Box
                   key={desc.scroll + i}
                   width="100%"
+                  flexDirection="row"
                   flexShrink={0}
                   overflow="hidden"
                 >
-                  <Text wrap="truncate-end">
-                    {line.length === 0
-                      ? " "
-                      : line.map((s, si) => (
-                          <Text
-                            key={si}
-                            color={s.color}
-                            bold={s.bold}
-                            dimColor={s.dim}
-                            italic={s.italic}
-                            underline={s.underline}
-                            strikethrough={s.strike}
-                          >
-                            {s.text}
-                          </Text>
-                        ))}
-                  </Text>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+                    <Text wrap="truncate-end">
+                      {line.length === 0
+                        ? " "
+                        : line.map((s, si) => (
+                            <Text
+                              key={si}
+                              color={s.color}
+                              bold={s.bold}
+                              dimColor={s.dim}
+                              italic={s.italic}
+                              underline={s.underline}
+                              strikethrough={s.strike}
+                            >
+                              {s.text}
+                            </Text>
+                          ))}
+                    </Text>
+                  </Box>
+                  <ScrollCell bar={descBar} row={i} />
                 </Box>
               ))
           )}
@@ -2549,6 +2623,7 @@ function App() {
           paddingX={1}
           overflow="hidden"
         >
+          <Text dimColor> ○ {stack.trunk}</Text>
           {winStart > 0 ? <Text dimColor>↑ {winStart} more</Text> : null}
           {winEntries.map((b, wi) => {
             const i = winStart + wi;
@@ -2603,7 +2678,6 @@ function App() {
           {winEnd < entries.length ? (
             <Text dimColor>↓ {entries.length - winEnd} more</Text>
           ) : null}
-          <Text dimColor> ○ {stack.trunk}</Text>
         </Box>
 
         {/* diff pane */}
@@ -2660,12 +2734,16 @@ function App() {
                 <Box
                   key={scroll + i}
                   width="100%"
+                  flexDirection="row"
                   flexShrink={0}
                   overflow="hidden"
                 >
-                  <Text color={s.color} bold={s.bold} dimColor={s.dim} wrap="truncate-end">
-                    {line.length ? line : " "}
-                  </Text>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+                    <Text color={s.color} bold={s.bold} dimColor={s.dim} wrap="truncate-end">
+                      {line.length ? line : " "}
+                    </Text>
+                  </Box>
+                  <ScrollCell bar={diffBar} row={i} />
                 </Box>
               );
             })
@@ -2845,7 +2923,7 @@ keys: ↑↓/j/k/tab pick PR · space PR description + comments · l/h (or ←�
       ticket's agent · o open in browser · R rebase via a claude agent ·
       M squash-merge stack · r refresh · q quit
 mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
-       moves the selection)
+       moves the selection) · click the scrollbar to jump
 
 space opens the selected PR's description with its whole conversation under
 it: issue comments, reviews, and inline review threads (where Greptile leaves
