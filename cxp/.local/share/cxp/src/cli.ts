@@ -8,6 +8,7 @@ import {
   compactText,
   itemSearchText,
   loadTranscript,
+  listRecentConversations,
   resolveTranscript,
   truncateText,
 } from "./model"
@@ -26,7 +27,8 @@ interface CliOptions {
 const HELP = `cxp ${VERSION} — inspect local Codex and Claude chats
 
 Usage:
-  cxp [options] <session-id-or-jsonl-path>
+  cxp [options] [session-id-or-jsonl-path]
+  No session: browse recent conversations, newest first.
 
 Examples:
   cxp 01a067a2-3807-7571-97cb-b5dd4a13cab9
@@ -91,7 +93,6 @@ function parseArgs(args: string[]): CliOptions {
     }
   }
 
-  if (!options.query) throw new SessionNotFoundError("Give cxp a session ID or JSONL path.")
   return options
 }
 
@@ -163,7 +164,8 @@ function printPlain(transcript: Transcript, options: CliOptions): void {
   process.stdout.write(`${output.join("\n").trimEnd()}\n`)
 }
 
-async function runTui(transcript: Transcript, options: CliOptions): Promise<void> {
+async function runTui(transcript: Transcript, options: CliOptions, fromPicker = false): Promise<boolean> {
+  let backToList = false
   const {
     BoxRenderable,
     CliRenderEvents,
@@ -441,7 +443,7 @@ async function runTui(transcript: Transcript, options: CliOptions): Promise<void
     }
     if (content === lastFooter) return
     lastFooter = content
-    footerText.content = state.mode === "search" ? t`${fg(palette.match)(content)}` : t`${fg(palette.muted)(content)}`
+    footerText.content = state.mode === "search" ? t`${fg(palette.match)(content)}` : t`${fg(palette.muted)(`${fromPicker ? "Esc list  " : ""}${content}`)}`
   }
 
   updateHeader()
@@ -539,6 +541,10 @@ async function runTui(transcript: Transcript, options: CliOptions): Promise<void
       recomputeMatches()
       renderTranscript()
       handled(key)
+    } else if (keyName === "escape" && fromPicker) {
+      backToList = true
+      handled(key)
+      renderer.destroy()
     }
   })
 
@@ -551,10 +557,36 @@ async function runTui(transcript: Transcript, options: CliOptions): Promise<void
     clearInterval(footerTimer)
     syntaxStyle.destroy()
   })
+  return await new Promise((resolve) => renderer.once(CliRenderEvents.DESTROY, () => resolve(backToList)))
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))
+  if (!options.query) {
+    const conversations = await listRecentConversations({ provider: options.provider })
+    if (options.plain || !process.stdout.isTTY || !process.stdin.isTTY) {
+      process.stdout.write(conversations.length
+        ? `${conversations.map((c) => `${new Date(c.modifiedAt).toISOString()}\t${c.provider}\t${c.id}\t${c.title}\t${c.cwd ?? ""}\t${c.path}`).join("\n")}\n`
+        : "No JSONL conversations found.\n")
+      return
+    }
+    const { pickConversation } = await import("./picker")
+    const state = { query: "" }
+    let error = ""
+    while (true) {
+      const candidate = await pickConversation(conversations, state, error)
+      if (!candidate) return
+      let transcript: Transcript
+      try {
+        transcript = await loadTranscript(candidate)
+        error = ""
+      } catch (cause) {
+        error = `Could not open conversation: ${cause instanceof Error ? cause.message : String(cause)}`
+        continue
+      }
+      if (!await runTui(transcript, options, true)) return
+    }
+  }
   const candidate = await resolveTranscript(options.query!, { provider: options.provider })
   const transcript = await loadTranscript(candidate)
   if (options.plain || !process.stdout.isTTY || !process.stdin.isTTY) printPlain(transcript, options)

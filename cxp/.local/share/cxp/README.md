@@ -4,6 +4,7 @@
 
 ```sh
 stow cxp
+cxp
 cxp 01a067a2-3807-7571-97cb-b5dd4a13cab9
 cxp claude:88ba459a
 cxp ~/.claude/projects/example/session.jsonl
@@ -16,6 +17,14 @@ It searches `~/.codex/sessions` and `~/.claude/projects` by default. Set
 `CODEX_HOME` or `CLAUDE_CONFIG_DIR` to use another local data directory.
 Injected `AGENTS.md` instruction and environment envelopes are omitted from
 user turns; genuine tool calls that read those files remain in the transcript.
+
+With no session argument, `cxp` lists local conversations from both providers,
+sorted by JSONL modification time (newest first). Each row shows the title or
+first user prompt, provider, project directory, timestamp, and session ID.
+Use `j`/`k` or arrows to select, `d`/`u` to page, `g`/`G` for the ends,
+`/` to filter, and Enter to open. Escape returns from the reader to the list
+(after clearing any active search); `q` quits. `--provider claude` or
+`--provider codex` limits the list. `cxp --plain` prints the list instead.
 
 ## Keys
 

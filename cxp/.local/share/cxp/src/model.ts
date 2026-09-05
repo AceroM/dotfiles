@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs"
-import { readdir, stat } from "node:fs/promises"
+import { open, readdir, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { createInterface } from "node:readline"
@@ -253,6 +253,63 @@ async function detectProvider(filePath: string): Promise<Provider> {
 
 function extractId(filePath: string): string {
   return basename(filePath).match(UUID_PATTERN)?.[0] ?? basename(filePath, ".jsonl")
+}
+
+export interface RecentConversation {
+  path: string
+  provider: Provider
+  id: string
+  modifiedAt: number
+  title: string
+  cwd?: string
+}
+
+export async function listRecentConversations(options: ResolveOptions = {}): Promise<RecentConversation[]> {
+  const codexRoot = options.codexRoot ?? join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions")
+  const claudeRoot = options.claudeRoot ?? join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects")
+  const candidates = (await Promise.all([
+    options.provider === "claude" ? [] : findJsonl(codexRoot, "", "codex"),
+    options.provider === "codex" ? [] : findJsonl(claudeRoot, "", "claude"),
+  ])).flat()
+  const results: RecentConversation[] = []
+  let next = 0
+  // Bound both open files and bytes read: histories can contain enormous tool outputs.
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (next < candidates.length) {
+      const candidate = candidates[next++]!
+      try {
+        const file = await open(candidate.path, "r")
+        try {
+          const info = await file.stat()
+          const buffer = Buffer.alloc(Math.min(info.size, 128 * 1024))
+          const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
+          const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n")
+          if (bytesRead < info.size) lines.pop()
+          const records: JsonObject[] = []
+          for (const line of lines) {
+            try {
+              const record: unknown = JSON.parse(line)
+              if (isObject(record)) records.push(record)
+            } catch { /* Ignore incomplete or malformed records in live files. */ }
+          }
+          const transcript = candidate.provider === "codex"
+            ? normalizeCodex(candidate.path, records, lines.length, 0)
+            : normalizeClaude(candidate.path, records, lines.length, 0)
+          results.push({
+            path: candidate.path,
+            provider: candidate.provider,
+            id: transcript.id,
+            modifiedAt: info.mtimeMs,
+            title: compactText(transcript.title || transcript.items.find((item) => item.kind === "user")?.content || basename(candidate.path), 180),
+            cwd: transcript.cwd ? compactText(transcript.cwd, 300) : undefined,
+          })
+        } finally {
+          await file.close()
+        }
+      } catch { /* A conversation may disappear or be unreadable while scanning. */ }
+    }
+  }))
+  return results.sort((a, b) => b.modifiedAt - a.modifiedAt || a.path.localeCompare(b.path))
 }
 
 export async function resolveTranscript(query: string, options: ResolveOptions = {}): Promise<Candidate> {

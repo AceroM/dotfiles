@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, utimes } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   AmbiguousSessionError,
   loadTranscript,
+  listRecentConversations,
   resolveTranscript,
   sanitizeText,
   stripInjectedUserContext,
@@ -28,6 +29,32 @@ async function fixtureDirectory() {
 }
 
 describe("session resolution", () => {
+  test("lists nested conversations across providers by modification time with useful titles", async () => {
+    const roots = await fixtureDirectory()
+    const nested = join(roots.codexRoot, "2026", "09")
+    await mkdir(nested, { recursive: true })
+    const codex = join(nested, "rollout-older.jsonl")
+    const claude = join(roots.claudeRoot, "newer.jsonl")
+    await Bun.write(codex, [
+      { type: "session_meta", payload: { id: "older", cwd: "/code/project" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: "# AGENTS.md instructions for /code\n<INSTRUCTIONS>\nhidden\n</INSTRUCTIONS>\nFix the picker" } },
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n")
+    await Bun.write(claude, JSON.stringify({ type: "user", sessionId: "newer", cwd: "/code/other", message: { role: "user", content: "Review the change" } }) + "\n{partial")
+    await utimes(codex, 100, 100)
+    await utimes(claude, 200, 200)
+    const recent = await listRecentConversations(roots)
+    expect(recent.map((c) => c.id)).toEqual(["newer", "older"])
+    expect(recent[1]?.title).toBe("Fix the picker")
+    expect(recent[1]?.cwd).toBe("/code/project")
+    expect(recent[0]?.title).toBe("Review the change")
+    expect((await listRecentConversations({ ...roots, provider: "codex" })).map((c) => c.id)).toEqual(["older"])
+  })
+
+  test("returns an empty list when session directories are absent", async () => {
+    const { directory } = await fixtureDirectory()
+    expect(await listRecentConversations({ codexRoot: join(directory, "missing"), claudeRoot: join(directory, "also-missing") })).toEqual([])
+  })
+
   test("finds Codex rollout names and Claude UUID names", async () => {
     const { codexRoot, claudeRoot } = await fixtureDirectory()
     const codexId = "01a067a2-3807-7571-97cb-b5dd4a13cab9"
