@@ -28,6 +28,18 @@ stow cxp
 cxp <session-id>
 ```
 
+### Tailscale Serve TUI
+
+The `tsui` command opens a read-only OpenTUI dashboard for the current
+machine's Tailscale Serve routes, listener ports, and local upstream health.
+
+```sh
+stow tailscale-ui
+tsui
+```
+
+Use `j`/`k` to select a route, `r` to refresh, and `q` to quit.
+
 ## Structure
 
 ```
