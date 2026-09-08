@@ -22,9 +22,16 @@ With no session argument, `cxp` lists local conversations from both providers,
 sorted by JSONL modification time (newest first). Each row shows the title or
 first user prompt, provider, project directory, timestamp, and session ID.
 Use `j`/`k` or arrows to select, `d`/`u` to page, `g`/`G` for the ends,
-`/` to filter, and Enter to open. Escape returns from the reader to the list
+`/` to filter, and Enter or `l` to open. Escape returns from the reader to the list
 (after clearing any active search); `q` quits. `--provider claude` or
 `--provider codex` limits the list. `cxp --plain` prints the list instead.
+
+The list shows relative row numbers above and below the selection, and the
+selected row's absolute number. Type `3j` to move down three conversations or
+`2k` to move up two. In the transcript reader, these move by terminal lines.
+Counts also work with arrows and `d`/`u` paging, including multiple digits
+(e.g. `12j`). The pending count appears in the footer; Escape cancels it.
+Search and filter input still accept digits normally.
 
 ## Keys
 

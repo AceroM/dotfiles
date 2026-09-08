@@ -2,6 +2,7 @@
 
 import { basename } from "node:path"
 import { copySessionId } from "./clipboard"
+import { NavigationCount } from "./navigation"
 import type { Provider, Transcript, TranscriptItem } from "./model"
 import {
   AmbiguousSessionError,
@@ -423,6 +424,7 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
   }
 
   let lastFooter = ""
+  const navigationCount = new NavigationCount()
   let copyStatus = ""
   let copyStatusUntil = 0
   const updateFooter = () => {
@@ -441,10 +443,11 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
       const modes = `tools:${state.detailedTools ? "full" : "summary"}  reasoning:${reasoningMode}  context:${state.showSystem ? "on" : "off"}`
       content =
         renderer.width >= 104
-          ? `j/k scroll  d/u page  g/G ends  / find  n/N match  t/r/s views  y copy ID  q quit   ${modes}${match ? `  ·  ${match}` : ""}  ·  ${progress}%`
-          : `j/k d/u g/G  / n/N  t/r/s views  y copy ID  q${match ? `  ${match}` : ""}  ${progress}%`
+          ? `[count]j/k scroll  d/u page  g/G ends  / find  n/N match  t/r/s views  y copy ID  q quit   ${modes}${match ? `  ·  ${match}` : ""}  ·  ${progress}%`
+          : `[count]j/k d/u g/G  / n/N  t/r/s views  y copy ID  q${match ? `  ${match}` : ""}  ${progress}%`
     }
     if (state.mode !== "search" && Date.now() < copyStatusUntil) content = copyStatus
+    if (navigationCount.pending) content = `${navigationCount.pending}…  ${content}`
     if (content === lastFooter) return
     lastFooter = content
     footerText.content = state.mode === "search" ? t`${fg(palette.match)(content)}` : t`${fg(palette.muted)(`${fromPicker ? "Esc list  " : ""}${content}`)}`
@@ -494,6 +497,12 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
       return
     }
 
+    const count = navigationCount.read(key)
+    if (count === undefined) {
+      handled(key)
+      return
+    }
+
     if (keyName === "y" && !key.ctrl && !key.meta && !key.shift && !key.super && !key.option) {
       copyStatus = copySessionId(transcript.id, (text) => renderer.copyToClipboardOSC52(text))
       copyStatusUntil = Date.now() + 3000
@@ -505,17 +514,17 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
       state.mode = "search"
       state.searchDraft = state.query
       handled(key)
-    } else if (keyName === "j") {
-      scroll.scrollBy(1)
+    } else if (keyName === "j" || keyName === "down") {
+      scroll.scrollBy(count)
       handled(key)
-    } else if (keyName === "k") {
-      scroll.scrollBy(-1)
+    } else if (keyName === "k" || keyName === "up") {
+      scroll.scrollBy(-count)
       handled(key)
-    } else if (keyName === "d") {
-      scroll.scrollBy(0.5, "viewport")
+    } else if (keyName === "d" || keyName === "pagedown") {
+      scroll.scrollBy(0.5 * count, "viewport")
       handled(key)
-    } else if (keyName === "u") {
-      scroll.scrollBy(-0.5, "viewport")
+    } else if (keyName === "u" || keyName === "pageup") {
+      scroll.scrollBy(-0.5 * count, "viewport")
       handled(key)
     } else if (keyName === "g" && (key.shift || key.sequence === "G")) {
       scroll.scrollTo(scroll.scrollHeight)

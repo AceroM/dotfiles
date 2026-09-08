@@ -1,6 +1,7 @@
 import { BoxRenderable, CliRenderEvents, TextRenderable, bold, createCliRenderer, fg, t } from "@opentui/core"
 import type { RecentConversation } from "./model"
 import { copySessionId } from "./clipboard"
+import { NavigationCount } from "./navigation"
 
 export interface PickerState { selectedPath?: string; query: string }
 
@@ -28,6 +29,7 @@ export async function pickConversation(
   let filtered: RecentConversation[] = []
   let selected = 0
   let searching = false
+  const navigationCount = new NavigationCount()
   let draft = state.query
   let result: RecentConversation | undefined
   const pageSize = () => Math.max(1, Math.floor((renderer.height - 6) / 2))
@@ -43,10 +45,12 @@ export async function pickConversation(
     for (const child of list.getChildren()) child.destroyRecursively()
     const size = pageSize()
     const start = Math.floor(selected / size) * size
+    const numberWidth = String(Math.max(size, selected + 1)).length
     for (const [offset, conversation] of filtered.slice(start, start + size).entries()) {
       const active = start + offset === selected
+      const rowNumber = String(active ? selected + 1 : Math.abs(start + offset - selected)).padStart(numberWidth)
       const row = new BoxRenderable(renderer, { height: 2, flexShrink: 0, flexDirection: "column", backgroundColor: active ? "#3a4b5f" : "#282c34" })
-      row.add(new TextRenderable(renderer, { height: 1, truncate: true, content: t`${fg(active ? "#74ade8" : "#636d83")(active ? "❯ " : "  ")}${fg(conversation.provider === "codex" ? "#98c379" : "#c678dd")(conversation.provider.padEnd(6))}  ${fg("#abb2bf")(conversation.title)}` }))
+      row.add(new TextRenderable(renderer, { height: 1, truncate: true, content: t`${fg(active ? "#74ade8" : "#636d83")(`${active ? "❯" : " "} ${rowNumber} `)}${fg(conversation.provider === "codex" ? "#98c379" : "#c678dd")(conversation.provider.padEnd(6))}  ${fg("#abb2bf")(conversation.title)}` }))
       row.add(new TextRenderable(renderer, { height: 1, truncate: true, fg: "#636d83", content: `    ${new Date(conversation.modifiedAt).toLocaleString()} · ${conversation.cwd || "unknown project"} · ${conversation.id}` }))
       list.add(row)
     }
@@ -54,9 +58,9 @@ export async function pickConversation(
     detailTitle.content = error || current?.title || ""
     detailPath.content = current?.path || ""
     const keys = renderer.width < 100
-      ? "j/k ↑/↓  Enter open  y copy ID  / filter  Esc clear  q quit"
-      : "j/k ↑/↓ select  d/u page  g/G ends  Enter open  y copy ID  / filter  Esc clear  q quit"
-    footer.content = searching ? `/${draft}█  Enter apply · Esc cancel` : `${keys}  ${filtered.length ? `${selected + 1}/${filtered.length}` : ""}${state.query ? ` · /${state.query}` : ""}`
+      ? "[count]j/k ↑/↓  Enter/l open  y copy ID  / filter  Esc clear  q quit"
+      : "[count]j/k ↑/↓ select  d/u page  g/G ends  Enter/l open  y copy ID  / filter  Esc clear  q quit"
+    footer.content = searching ? `/${draft}█  Enter apply · Esc cancel` : `${navigationCount.pending ? `${navigationCount.pending}…  ` : ""}${keys}  ${filtered.length ? `${selected + 1}/${filtered.length}` : ""}${state.query ? ` · /${state.query}` : ""}`
   }
   filter()
   draw()
@@ -68,6 +72,11 @@ export async function pickConversation(
       if (key.ctrl && name === "c") return
       key.preventDefault()
       key.stopPropagation()
+      const count = searching ? 1 : navigationCount.read(key)
+      if (count === undefined) {
+        draw()
+        return
+      }
       if (searching) {
         if (name === "escape") searching = false
         else if (name === "return" || name === "enter") {
@@ -82,7 +91,7 @@ export async function pickConversation(
       } else if (name === "y" && !key.ctrl && !key.meta && !key.shift && !key.super && !key.option) {
         const current = filtered[selected]
         if (current) error = copySessionId(current.id, (text) => renderer.copyToClipboardOSC52(text))
-      } else if (name === "return" || name === "enter") {
+      } else if (name === "return" || name === "enter" || name === "l") {
         if (!filtered[selected]) return
         result = filtered[selected]
         renderer.destroy()
@@ -93,10 +102,10 @@ export async function pickConversation(
       } else if (name === "escape") {
         state.query = ""
         filter()
-      } else if (name === "j" || name === "down") selected++
-      else if (name === "k" || name === "up") selected--
-      else if (name === "d" || name === "pagedown") selected += pageSize()
-      else if (name === "u" || name === "pageup") selected -= pageSize()
+      } else if (name === "j" || name === "down") selected += count
+      else if (name === "k" || name === "up") selected -= count
+      else if (name === "d" || name === "pagedown") selected += pageSize() * count
+      else if (name === "u" || name === "pageup") selected -= pageSize() * count
       else if (name === "g") selected = key.shift || key.sequence === "G" ? filtered.length - 1 : 0
       selected = Math.max(0, Math.min(selected, filtered.length - 1))
       draw()
