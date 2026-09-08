@@ -203,7 +203,7 @@
       "shift-enter": ["terminal::SendText", "\u001b[13;2u"],
       "ctrl-;": ["terminal::SendText", "\u001b[59;5u"],
       "cmd-;": ["workspace::SendKeystrokes", "cmd-i alt-/ cmd-i cmd-v"],
-      "cmd-'": ["workspace::SendKeystrokes", "cmd-i cmd-; cmd-i cmd-v"],
+      "cmd-'": ["workspace::SendKeystrokes", "cmd-1 cmd-; cmd-2 cmd-v"],
       "ctrl-r": ["terminal::SendKeystroke", "ctrl-r"],
       "ctrl-a": null,
       "ctrl-e": null,

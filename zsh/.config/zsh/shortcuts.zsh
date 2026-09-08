@@ -14,6 +14,7 @@ function 'c!'() {
 alias ca="claude --permission-mode plan"
 alias cx="codex --yolo --model gpt-5.6-sol --config model_reasoning_effort=xhigh"
 alias cxm="codex --yolo --model gpt-5.6-terra --config model_reasoning_effort=medium"
+alias cxl="codex --yolo --model gpt-5.6-luna --config model_reasoning_effort=medium"
 alias pn="pnpm"
 alias sp="git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E '\\.(ts|tsx|js|jsx|json|css|md)$' | xargs -0 bunx prettier --write && git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E '\\.(ts|tsx|js|jsx)$' | xargs -0 env NODE_OPTIONS=--max-old-space-size=8192 bunx eslint --fix"
 alias y="yazi"

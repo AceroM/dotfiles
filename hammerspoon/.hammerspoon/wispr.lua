@@ -57,6 +57,10 @@ M.micMatch = "Wireless Mic Rx"
 M.triggerKey = "SOUND_UP"
 M.debounce = 0.35 -- seconds to ignore repeat trigger events
 M.watchdogInterval = 10 -- macOS sometimes silently disables event taps
+-- Set false to drive dictation with the keyboard's volume-up key when the
+-- receiver isn't around: hs -c 'wispr.requireMic = false'
+M.requireMic = true
+M.log = hs.logger.new("wispr", "info")
 
 local tap, watchdog
 local lastFire = 0
@@ -69,7 +73,12 @@ end
 local function handleSystemKey(event)
   local key = event:systemKey()
   if not (key and key.key == M.triggerKey) then return false end
-  if not micIsDefaultInput() then return false end
+  if M.requireMic and not micIsDefaultInput() then
+    local dev = hs.audiodevice.defaultInputDevice()
+    M.log.f("%s ignored: default input is %s, not %s", M.triggerKey,
+      dev and dev:name() or "none", M.micMatch)
+    return false
+  end
 
   -- Ours from here on, so swallow the key-up half too.
   if not key.down then return true end
@@ -79,8 +88,20 @@ local function handleSystemKey(event)
   lastFire = now
 
   if state == "idle" then viaButton = true end
+  M.log.f("mic button: %s dictation", state == "idle" and "starting" or "stopping")
   M.toggle()
   return true
+end
+
+-- Readiness check from a terminal: hs -c 'print(wispr.check())'
+function M.check()
+  local dev = hs.audiodevice.defaultInputDevice()
+  return string.format("tap=%s input=%q micGate=%s requireMic=%s state=%s",
+    (tap and tap:isEnabled()) and "enabled" or "DISABLED",
+    dev and dev:name() or "none",
+    micIsDefaultInput() and "pass" or "fail",
+    tostring(M.requireMic),
+    state)
 end
 
 local function startButton()
