@@ -321,8 +321,11 @@ height = "20%"
 
 [ui]
 # Borders and navigate-mode UI default to cyan, which would be a third hue
-# alongside the tab blue and the grey chrome. Pin it to the same steel blue.
-accent = "#81a2be"
+# alongside the tab blue and the grey chrome. Pin it to Zed's One Dark accent
+# (its `text.accent` / player-1 blue), which is also what ghostty's
+# themes/zed-one-dark uses for the cursor -- so the border, the cursor and Zed's
+# own highlights are one blue rather than three neighboring ones.
+accent = "#74ade8"
 
 # ctrl+alt+n should feel like a browser new-tab, so skip the name prompt.
 # Flip to true to be asked for a tab name on every create.

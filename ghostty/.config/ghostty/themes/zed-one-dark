@@ -1,0 +1,49 @@
+# Zed "One Dark" -- the terminal half of Zed's default dark theme, verbatim.
+#
+# Ghostty ships an "Atom One Dark" that is close but not the same: it sits on
+# #21252b (One Dark Pro's darker chrome) instead of One Dark's #282c34, and it
+# collapses the bright half of the palette onto the normal half. Both matter
+# here, because herdr paints its own one-dark chrome at #282c34 and Zed renders
+# its panels there too -- an #21252b terminal is a visible seam between the
+# three. These values are read straight out of Zed's One Dark
+# `terminal.ansi.*` keys, so the terminal, the multiplexer and the editor all
+# land on one palette.
+#
+# Lives at ~/.config/ghostty/themes/zed-one-dark, which is where Ghostty looks
+# for user themes; referenced by name from the `theme` line in ../config.
+
+background = #282c34
+foreground = #abb2bf
+
+# Normal
+palette = 0=#282c34
+palette = 1=#e06c75
+palette = 2=#98c379
+palette = 3=#e5c07b
+palette = 4=#61afef
+palette = 5=#c678dd
+palette = 6=#56b6c2
+palette = 7=#abb2bf
+
+# Bright. Ghostty's Atom One Dark repeats the normal colors here, so bold text
+# gained no contrast; Zed defines a genuinely lighter set, which is what these
+# are.
+palette = 8=#636d83
+palette = 9=#ea858b
+palette = 10=#aad581
+palette = 11=#ffd885
+palette = 12=#85c1ff
+palette = 13=#d398eb
+palette = 14=#6ed5de
+palette = 15=#fafafa
+
+# Zed draws the terminal cursor in its accent blue (the "player 1" color),
+# not in the foreground grey. With cursor-style = block in ../config, the text
+# under it needs the background color to stay readable.
+cursor-color = #74ade8
+cursor-text = #282c34
+
+# Zed's selection is that same accent at 24% alpha. Ghostty wants an opaque
+# color, so this is #74ade8 composited over the #282c34 background.
+selection-background = #3a4b5f
+selection-foreground = #dce0e5

@@ -143,10 +143,15 @@
       "cmd-0": "git_panel::ToggleFocus"
     }
   },
+  // Herdr lives in the right-docked terminal panel. ToggleFocus round-trips
+  // between that panel and the last center pane without depending on pane
+  // numbers; the cmd-; and cmd-' chains below use it for the same reason.
   {
     "bindings": {
       "cmd-i": "terminal_panel::ToggleFocus",
-      "ctrl-alt-j": "terminal_panel::ToggleFocus"
+      "ctrl-alt-j": "terminal_panel::ToggleFocus",
+      // Explicit escape hatch for opening Herdr as a center-pane terminal.
+      "ctrl-alt-cmd-i": "workspace::NewCenterTerminal"
     }
   },
   {
@@ -203,7 +208,7 @@
       "shift-enter": ["terminal::SendText", "\u001b[13;2u"],
       "ctrl-;": ["terminal::SendText", "\u001b[59;5u"],
       "cmd-;": ["workspace::SendKeystrokes", "cmd-i alt-/ cmd-i cmd-v"],
-      "cmd-'": ["workspace::SendKeystrokes", "cmd-1 cmd-; cmd-2 cmd-v"],
+      "cmd-'": ["workspace::SendKeystrokes", "cmd-i cmd-; cmd-i cmd-v"],
       "ctrl-r": ["terminal::SendKeystroke", "ctrl-r"],
       "ctrl-a": null,
       "ctrl-e": null,

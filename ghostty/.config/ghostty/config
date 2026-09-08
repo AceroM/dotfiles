@@ -13,9 +13,16 @@ font-size = 14
 # rides along: it has auto_switch on in ~/.config/herdr/config.toml and picks its
 # theme from the background color the host terminal reports, so the terminal and
 # the multiplexer chrome change together. The pair mirrors herdr's own
-# dark_name/light_name (one-dark / rose-pine-dawn) -- "Atom One Dark" is
-# Ghostty's name for the same palette.
-theme = light:Rose Pine Dawn,dark:Atom One Dark
+# dark_name/light_name (one-dark / rose-pine-dawn) and Zed's own theme pair
+# (One Dark / Rosé Pine Dawn, see work/.config/zed/settings.json).
+#
+# The dark half is a local theme file, themes/zed-one-dark, rather than the
+# bundled "Atom One Dark". They are not the same palette: Atom One Dark sits on
+# #21252b and repeats the normal colors in the bright slots, while Zed's One
+# Dark -- and therefore herdr's one-dark chrome next to it -- sits on #282c34
+# with a real bright set. Run `ghostty +list-themes` to see the bundled ones;
+# user themes in themes/ shadow them by name.
+theme = light:Rose Pine Dawn,dark:zed-one-dark
 
 # Keep the macOS titlebar (so the close/minimize/zoom buttons stay), but
 # blend it into the terminal background instead of removing it.

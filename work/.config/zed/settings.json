@@ -1,5 +1,5 @@
 {
-  "diff_view_style": "unified",
+  "diff_view_style": "split",
   "icon_theme": {
     "mode": "system",
     "light": "Zed (Default)",
@@ -8,16 +8,16 @@
   "cli_default_open_behavior": "new_window",
   "close_panel_on_toggle": false,
   "project_panel": {
-    "dock": "right"
+    "dock": "left"
   },
   "outline_panel": {
-    "dock": "right"
+    "dock": "left"
   },
   "collaboration_panel": {
-    "dock": "right"
+    "dock": "left"
   },
   "git_panel": {
-    "dock": "right"
+    "dock": "left"
   },
   "autosave": "on_focus_change",
   "git": {
@@ -76,7 +76,17 @@
   },
   "terminal": {
     "option_as_meta": true,
-    "minimum_contrast": 0
+    "minimum_contrast": 0,
+    "dock": "right",
+    "default_width": 720,
+    "shell": { "program": "herdr" },
+    "env": {
+      "HERDR_ENV": "",
+      "HERDR_PANE_ID": "",
+      "HERDR_TAB_ID": "",
+      "HERDR_WORKSPACE_ID": "",
+      "HERDR_CLIENT_SOCKET_PATH": ""
+    }
   },
   "vim_mode": true,
   "ui_font_size": 14,
