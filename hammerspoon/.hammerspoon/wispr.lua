@@ -1,165 +1,44 @@
--- Voice prompts to the herdr coordinator via Wispr Flow.
+-- DJI mic button → Wispr Flow dictation.
 --
--- Trigger it with the hotkey or the DJI mic button: a small capture box
--- (hs.chooser) grabs keyboard focus and Wispr Flow hands-free dictation
--- starts, so whatever you say lands in the box instead of your frontmost app.
--- Trigger again to stop talking — once the transcript settles it is sent as
--- `herdr agent prompt` to the coordinator. ⏎ sends immediately, Esc cancels.
+-- The button on the DJI transmitter toggles Wispr Flow hands-free dictation:
+-- press once to start talking, again to stop. The text lands in whatever app
+-- is frontmost — Wispr's normal behaviour, just driven from the mic.
 --
--- The coordinator is resolved at send time: the live agent named
--- "coordinator" if there is one, otherwise the agent whose cwd is exactly
--- ~/Numeral (the orchestrator session; worktree slots like tax-holiday.3
--- deliberately don't match).
+-- The coordination flow this used to do (a capture box that fed the transcript
+-- to `herdr agent prompt` for the coordinator agent) is shelved; it's in git
+-- history at 10a5124 if it comes back.
 --
 --   wispr = require("wispr")
 --   wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 
-local toast = require("toast")
-
 local M = {}
 
-local HERDR = os.getenv("HOME") .. "/.local/bin/herdr"
-local COORDINATOR_CWD = os.getenv("HOME") .. "/Numeral"
-
--- Wispr Flow commits the final transcript asynchronously after hands-free
--- stops, so we wait until the box has been unchanged this long before sending.
-M.flushStable = 1.0
-M.flushTimeout = 8 -- give up waiting for the flush after this many seconds
-
-local chooser
-local state = "idle" -- idle | listening (dictating) | flushing (waiting on Wispr)
+local state = "idle" -- idle | listening
 local viaButton = false -- current session was started by the mic button
-local flushTimer
 
 local function dictation(on)
-  -- -g keeps Wispr Flow from activating and stealing focus from the chooser.
+  -- -g keeps Wispr Flow from activating and stealing focus from whatever
+  -- you're dictating into.
   hs.execute(string.format('open -g "wispr-flow://%s-hands-free"', on and "start" or "stop"))
 end
 
-local function stopFlushTimer()
-  if flushTimer then
-    flushTimer:stop()
-    flushTimer = nil
-  end
-end
-
-local function fail(msg)
-  toast.show(msg, { title = "wispr → coordinator" })
-end
-
--- Find the coordinator and fire the prompt at it. Public so the wiring can be
--- exercised from a terminal: /opt/homebrew/bin/hs -c 'wispr.send("hello")'
-function M.send(text)
-  hs.task.new(HERDR, function(code, stdout, stderr)
-    if code ~= 0 then
-      return fail(stderr ~= "" and stderr or "herdr agent list failed")
-    end
-    local ok, resp = pcall(hs.json.decode, stdout)
-    local agents = ok and resp and resp.result and resp.result.agents
-    if not agents then
-      return fail("could not parse herdr agent list")
-    end
-    local target
-    for _, a in ipairs(agents) do
-      if a.name == "coordinator" then
-        target = a
-        break
-      end
-      if not target and a.cwd == COORDINATOR_CWD then
-        target = a
-      end
-    end
-    if not target then
-      return fail("no coordinator agent (none named coordinator or in ~/Numeral)")
-    end
-    hs.task.new(HERDR, function(pcode, _, pstderr)
-      if pcode == 0 then
-        toast.show(text, { title = "→ coordinator", placement = "center" })
-      else
-        fail(pstderr ~= "" and pstderr or "agent prompt failed")
-      end
-    end, { "agent", "prompt", target.pane_id, text }):start()
-  end, { "agent", "list" }):start()
-end
-
-local function finishFlush()
-  stopFlushTimer()
-  local text = chooser:query() or ""
-  state = "idle" -- before hide(), so a callback fired by hiding no-ops
-  chooser:hide()
-  if text ~= "" then
-    M.send(text)
-  else
-    fail("nothing heard")
-  end
-end
-
-local function beginFlushWait()
-  local last = chooser:query() or ""
-  local stableSince = hs.timer.secondsSinceEpoch()
-  local deadline = stableSince + M.flushTimeout
-  flushTimer = hs.timer.doEvery(0.25, function()
-    local q = chooser:query() or ""
-    local now = hs.timer.secondsSinceEpoch()
-    if q ~= last then
-      last, stableSince = q, now
-    end
-    if (q ~= "" and now - stableSince >= M.flushStable) or now >= deadline then
-      finishFlush()
-    end
-  end)
-end
-
-local function makeChooser()
-  local c = hs.chooser.new(function(choice)
-    -- ⏎ arrives with the mirrored choice; Esc / click-away with nil. Either
-    -- way dictation must not be left running.
-    if state == "idle" then return end
-    stopFlushTimer()
-    dictation(false)
-    state = "idle"
-    if choice and choice.text and choice.text ~= "" then
-      M.send(choice.text)
-    end
-  end)
-  c:placeholderText("🎙 talk to the coordinator…")
-  c:rows(1)
-  c:width(35)
-  -- Mirror the query as the single choice so ⏎ submits it.
-  c:queryChangedCallback(function(q)
-    if q == "" then
-      c:choices({})
-    else
-      c:choices({ { text = q, subText = "⏎ send to coordinator" } })
-    end
-  end)
-  return c
-end
-
+-- Wispr has no toggle URL, so the state here is ours, not Wispr's: starting
+-- dictation with Wispr's own hotkey and then stopping it with the button (or
+-- vice versa) can leave the two out of step for one press.
 function M.toggle()
   if state == "idle" then
-    chooser = chooser or makeChooser()
-    chooser:query("")
-    chooser:choices({})
-    chooser:show()
     dictation(true)
     state = "listening"
-  elseif state == "listening" then
+  else
     dictation(false)
-    state = "flushing"
-    beginFlushWait()
-  else -- flushing; impatient extra press sends whatever is there right now
-    finishFlush()
+    state = "idle"
   end
 end
 
--- Abandon the current session without sending anything.
-function M.cancel()
+function M.stop()
   if state == "idle" then return end
-  stopFlushTimer()
   dictation(false)
   state = "idle"
-  if chooser then chooser:hide() end
 end
 
 function M.state()
@@ -211,12 +90,13 @@ local function startButton()
     if tap and not tap:isEnabled() then tap:start() end
   end)
   -- If the receiver stops being the input mid-session, the button can no
-  -- longer stop dictation — bail out. Hotkey-started sessions are unaffected.
+  -- longer stop dictation — stop it here. Hotkey-started sessions are
+  -- unaffected.
   -- NOTE: hs.audiodevice.watcher is a process-wide singleton; nothing else in
   -- this config uses it.
   hs.audiodevice.watcher.setCallback(function()
     if state ~= "idle" and viaButton and not micIsDefaultInput() then
-      M.cancel()
+      M.stop()
     end
   end)
   hs.audiodevice.watcher.start()
@@ -224,11 +104,13 @@ end
 
 function M.start(opts)
   opts = opts or {}
-  local key = opts.hotkey or { { "ctrl", "alt", "cmd" }, "h" }
-  hs.hotkey.bind(key[1], key[2], function()
-    if state == "idle" then viaButton = false end
-    M.toggle()
-  end)
+  local key = opts.hotkey
+  if key then
+    hs.hotkey.bind(key[1], key[2], function()
+      if state == "idle" then viaButton = false end
+      M.toggle()
+    end)
+  end
   startButton()
   return M
 end
