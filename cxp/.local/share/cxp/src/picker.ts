@@ -1,5 +1,6 @@
 import { BoxRenderable, CliRenderEvents, TextRenderable, bold, createCliRenderer, fg, t } from "@opentui/core"
 import type { RecentConversation } from "./model"
+import { copySessionId } from "./clipboard"
 
 export interface PickerState { selectedPath?: string; query: string }
 
@@ -8,17 +9,17 @@ export async function pickConversation(
   state: PickerState,
   error = "",
 ): Promise<RecentConversation | undefined> {
-  const renderer = await createCliRenderer({ exitOnCtrlC: true, clearOnShutdown: true, backgroundColor: "#0B1016" })
+  const renderer = await createCliRenderer({ exitOnCtrlC: true, clearOnShutdown: true, backgroundColor: "#282c34" })
   renderer.setTerminalTitle("cxp · recent conversations")
   const app = new BoxRenderable(renderer, { width: "100%", height: "100%", flexDirection: "column", paddingX: 1 })
   const header = new TextRenderable(renderer, { height: 1, truncate: true })
-  const list = new BoxRenderable(renderer, { flexGrow: 1, minHeight: 0, flexDirection: "column", border: true, borderStyle: "rounded", borderColor: "#405064", paddingX: 1 })
+  const list = new BoxRenderable(renderer, { flexGrow: 1, minHeight: 0, flexDirection: "column", border: true, borderStyle: "rounded", borderColor: "#464b57", paddingX: 1 })
   const detail = new BoxRenderable(renderer, { height: 2, flexShrink: 0, flexDirection: "column" })
-  const detailTitle = new TextRenderable(renderer, { height: 1, truncate: true, fg: "#718096" })
-  const detailPath = new TextRenderable(renderer, { height: 1, truncate: true, fg: "#718096" })
+  const detailTitle = new TextRenderable(renderer, { height: 1, truncate: true, fg: "#636d83" })
+  const detailPath = new TextRenderable(renderer, { height: 1, truncate: true, fg: "#636d83" })
   detail.add(detailTitle)
   detail.add(detailPath)
-  const footer = new TextRenderable(renderer, { height: 1, truncate: true, fg: "#718096" })
+  const footer = new TextRenderable(renderer, { height: 1, truncate: true, fg: "#636d83" })
   app.add(header)
   app.add(list)
   app.add(detail)
@@ -38,23 +39,23 @@ export async function pickConversation(
   const draw = () => {
     const current = filtered[selected]
     state.selectedPath = current?.path
-    header.content = t`${bold(fg("#64D2FF")("cxp"))}  recent conversations · ${filtered.length}/${conversations.length} · newest first`
+    header.content = t`${bold(fg("#74ade8")("cxp"))}  recent conversations · ${filtered.length}/${conversations.length} · newest first`
     for (const child of list.getChildren()) child.destroyRecursively()
     const size = pageSize()
     const start = Math.floor(selected / size) * size
     for (const [offset, conversation] of filtered.slice(start, start + size).entries()) {
       const active = start + offset === selected
-      const row = new BoxRenderable(renderer, { height: 2, flexShrink: 0, flexDirection: "column", backgroundColor: active ? "#17202B" : "#0B1016" })
-      row.add(new TextRenderable(renderer, { height: 1, truncate: true, content: t`${fg(active ? "#64D2FF" : "#718096")(active ? "❯ " : "  ")}${fg(conversation.provider === "codex" ? "#9BE9A8" : "#C7A7FF")(conversation.provider.padEnd(6))}  ${fg("#D7DEE7")(conversation.title)}` }))
-      row.add(new TextRenderable(renderer, { height: 1, truncate: true, fg: "#718096", content: `    ${new Date(conversation.modifiedAt).toLocaleString()} · ${conversation.cwd || "unknown project"} · ${conversation.id}` }))
+      const row = new BoxRenderable(renderer, { height: 2, flexShrink: 0, flexDirection: "column", backgroundColor: active ? "#3a4b5f" : "#282c34" })
+      row.add(new TextRenderable(renderer, { height: 1, truncate: true, content: t`${fg(active ? "#74ade8" : "#636d83")(active ? "❯ " : "  ")}${fg(conversation.provider === "codex" ? "#98c379" : "#c678dd")(conversation.provider.padEnd(6))}  ${fg("#abb2bf")(conversation.title)}` }))
+      row.add(new TextRenderable(renderer, { height: 1, truncate: true, fg: "#636d83", content: `    ${new Date(conversation.modifiedAt).toLocaleString()} · ${conversation.cwd || "unknown project"} · ${conversation.id}` }))
       list.add(row)
     }
     if (!filtered.length) list.add(new TextRenderable(renderer, { content: conversations.length ? "No conversations match this filter." : "No JSONL conversations found." }))
     detailTitle.content = error || current?.title || ""
     detailPath.content = current?.path || ""
     const keys = renderer.width < 100
-      ? "↑/↓ j/k  d/u  g/G  Enter open  / filter  Esc clear  q quit"
-      : "j/k ↑/↓ select  d/u page  g/G ends  Enter open  / filter  Esc clear  q quit"
+      ? "j/k ↑/↓  Enter open  y copy ID  / filter  Esc clear  q quit"
+      : "j/k ↑/↓ select  d/u page  g/G ends  Enter open  y copy ID  / filter  Esc clear  q quit"
     footer.content = searching ? `/${draft}█  Enter apply · Esc cancel` : `${keys}  ${filtered.length ? `${selected + 1}/${filtered.length}` : ""}${state.query ? ` · /${state.query}` : ""}`
   }
   filter()
@@ -78,6 +79,9 @@ export async function pickConversation(
       } else if (name === "q") {
         renderer.destroy()
         return
+      } else if (name === "y" && !key.ctrl && !key.meta && !key.shift && !key.super && !key.option) {
+        const current = filtered[selected]
+        if (current) error = copySessionId(current.id, (text) => renderer.copyToClipboardOSC52(text))
       } else if (name === "return" || name === "enter") {
         if (!filtered[selected]) return
         result = filtered[selected]

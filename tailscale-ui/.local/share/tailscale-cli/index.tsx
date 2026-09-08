@@ -27,18 +27,18 @@ type Snapshot = {
 type CommandResult = { code: number; out: string; err: string }
 
 const colors = {
-  bg: "#0B1016",
-  panel: "#111821",
-  selected: "#1B2A38",
-  border: "#34485C",
-  text: "#D7DEE7",
-  muted: "#7D8FA3",
-  faint: "#526273",
-  cyan: "#64D2FF",
-  green: "#9BE9A8",
-  yellow: "#F2C97D",
-  red: "#FF7B72",
-  purple: "#C7A7FF",
+  bg: "#282c34",
+  panel: "#21252b",
+  selected: "#3a4b5f",
+  border: "#464b57",
+  text: "#abb2bf",
+  muted: "#636d83",
+  faint: "#636d83",
+  cyan: "#74ade8",
+  green: "#98c379",
+  yellow: "#e5c07b",
+  red: "#e06c75",
+  purple: "#c678dd",
 } as const
 
 async function run(command: string[]): Promise<CommandResult> {

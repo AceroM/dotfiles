@@ -38,7 +38,11 @@ Use `j`/`k` or arrows to select, `d`/`u` to page, `g`/`G` for the ends,
 | `t` | Toggle detailed tool input and output |
 | `r` | Toggle reasoning summaries |
 | `s` | Toggle system and developer messages |
+| `y` | Copy the full session ID (selected row or open conversation) |
 | `q` | Quit |
 
 Use `--plain` to print a normalized transcript instead of opening the TUI. Output
 also switches to plain mode automatically when stdout is redirected.
+
+Colors match Zed One Dark and the dotfiles Ghostty/Herdr dark theme. Copy uses
+`pbcopy` on macOS and the terminal's OSC 52 clipboard support elsewhere.

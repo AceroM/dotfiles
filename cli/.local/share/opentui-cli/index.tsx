@@ -7,6 +7,8 @@ import {
   useTerminalDimensions,
 } from "@opentui/react";
 import React, { createContext, useContext, type ReactNode } from "react";
+import { theme, themeColor } from "./theme";
+export { theme } from "./theme";
 
 // Hooks must come from the same React instance as OpenTUI's reconciler. Re-export
 // React so file-linked consumers do not accidentally load a second module copy.
@@ -76,6 +78,8 @@ function textAttributes(props: TextProps): number | undefined {
 export function Box({
   children,
   borderStyle,
+  borderColor,
+  backgroundColor,
   flexDirection = "row",
   ...props
 }: BoxProps) {
@@ -83,6 +87,8 @@ export function Box({
     "box",
     {
       ...props,
+      borderColor: themeColor(borderColor as string | undefined),
+      backgroundColor: themeColor(backgroundColor as string | undefined),
       flexDirection,
       borderStyle: borderStyle === "round" ? "rounded" : borderStyle,
     },
@@ -115,8 +121,8 @@ export function Text({
   });
   const style = {
     ...props,
-    fg: color,
-    bg: backgroundColor,
+    fg: themeColor(color) ?? (nested ? undefined : theme.text),
+    bg: themeColor(backgroundColor),
     attributes,
     wrapMode: wrap && wrap !== "wrap" ? "none" : undefined,
     truncate: wrap ? wrap !== "wrap" : undefined,
@@ -214,6 +220,7 @@ export async function render(node: ReactNode): Promise<RenderInstance> {
   });
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
+    backgroundColor: theme.background,
     screenMode: "alternate-screen",
     useMouse: true,
     onDestroy: finish,

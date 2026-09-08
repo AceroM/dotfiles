@@ -783,10 +783,10 @@ async function launchRebaseAgent(
 type Badge = { text: string; color: string };
 
 // High-contrast diff colors tuned for dark terminal backgrounds.
-const DIFF_ADD_COLOR = "#7EE787";
-const DIFF_DELETE_COLOR = "#FFA198";
-const DIFF_META_COLOR = "#79C0FF";
-const DIFF_MUTED_COLOR = "#A7B1C2";
+const DIFF_ADD_COLOR = "#98c379";
+const DIFF_DELETE_COLOR = "#e06c75";
+const DIFF_META_COLOR = "#74ade8";
+const DIFF_MUTED_COLOR = "#636d83";
 
 function badgeFor(b: StackBranch, d: PrDetails | undefined): Badge {
   if (b.prNumber == null) return { text: "no PR", color: "gray" };
@@ -868,7 +868,7 @@ function scrollbar(
   );
 }
 
-const SCROLL_THUMB_COLOR = "#C9D1D9";
+const SCROLL_THUMB_COLOR = "#abb2bf";
 
 function ScrollCell({
   bar,
@@ -1229,10 +1229,10 @@ type Span = {
 type Style = Omit<Span, "text">;
 type StyledLine = Span[];
 
-const MD_HEADING_COLOR = "#79C0FF";
-const MD_CODE_COLOR = "#E3B341";
+const MD_HEADING_COLOR = "#74ade8";
+const MD_CODE_COLOR = "#e5c07b";
 const MD_IMAGE_COLOR = "magenta";
-const MD_MARK_COLOR = "#A7B1C2";
+const MD_MARK_COLOR = "#636d83";
 
 function decodeEntities(s: string): string {
   return s

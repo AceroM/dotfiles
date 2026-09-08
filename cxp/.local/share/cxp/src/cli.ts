@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { basename } from "node:path"
+import { copySessionId } from "./clipboard"
 import type { Provider, Transcript, TranscriptItem } from "./model"
 import {
   AmbiguousSessionError,
@@ -46,7 +47,7 @@ Options:
 
 Inside the TUI:
   j/k or arrows scroll   d/u page   g/G ends   / search   n/N matches
-  t tool detail          r reasoning   s system   q quit`
+  t tool detail          r reasoning   s system   y copy session ID   q quit`
 
 function parseArgs(args: string[]): CliOptions {
   const options: CliOptions = {
@@ -181,19 +182,19 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
   } = await import("@opentui/core")
 
   const palette = {
-    background: "#0B1016",
-    panel: "#111821",
-    panelRaised: "#17202B",
-    text: "#D7DEE7",
-    muted: "#718096",
-    faint: "#405064",
-    user: "#64D2FF",
-    assistant: "#9BE9A8",
-    tool: "#F2C97D",
-    reasoning: "#C7A7FF",
-    system: "#8B9AAF",
-    danger: "#FF7B72",
-    match: "#FFD866",
+    background: "#282c34",
+    panel: "#21252b",
+    panelRaised: "#3a4b5f",
+    text: "#abb2bf",
+    muted: "#636d83",
+    faint: "#464b57",
+    user: "#74ade8",
+    assistant: "#98c379",
+    tool: "#e5c07b",
+    reasoning: "#c678dd",
+    system: "#abb2bf",
+    danger: "#e06c75",
+    match: "#ffd885",
   } as const
 
   const renderer = await createCliRenderer({
@@ -422,6 +423,8 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
   }
 
   let lastFooter = ""
+  let copyStatus = ""
+  let copyStatusUntil = 0
   const updateFooter = () => {
     const maxScroll = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
     const progress = maxScroll === 0 ? 100 : Math.round((scroll.scrollTop / maxScroll) * 100)
@@ -438,9 +441,10 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
       const modes = `tools:${state.detailedTools ? "full" : "summary"}  reasoning:${reasoningMode}  context:${state.showSystem ? "on" : "off"}`
       content =
         renderer.width >= 104
-          ? `j/k scroll  d/u page  g/G ends  / find  n/N match  t/r/s views  q quit   ${modes}${match ? `  ·  ${match}` : ""}  ·  ${progress}%`
-          : `j/k d/u g/G  / n/N  t:${state.detailedTools ? "full" : "sum"} r:${hasReadableReasoning ? (state.showReasoning ? "on" : "off") : "enc"} s:${state.showSystem ? "on" : "off"} q${match ? `  ${match}` : ""}  ${progress}%`
+          ? `j/k scroll  d/u page  g/G ends  / find  n/N match  t/r/s views  y copy ID  q quit   ${modes}${match ? `  ·  ${match}` : ""}  ·  ${progress}%`
+          : `j/k d/u g/G  / n/N  t/r/s views  y copy ID  q${match ? `  ${match}` : ""}  ${progress}%`
     }
+    if (state.mode !== "search" && Date.now() < copyStatusUntil) content = copyStatus
     if (content === lastFooter) return
     lastFooter = content
     footerText.content = state.mode === "search" ? t`${fg(palette.match)(content)}` : t`${fg(palette.muted)(`${fromPicker ? "Esc list  " : ""}${content}`)}`
@@ -490,7 +494,11 @@ async function runTui(transcript: Transcript, options: CliOptions, fromPicker = 
       return
     }
 
-    if (keyName === "q") {
+    if (keyName === "y" && !key.ctrl && !key.meta && !key.shift && !key.super && !key.option) {
+      copyStatus = copySessionId(transcript.id, (text) => renderer.copyToClipboardOSC52(text))
+      copyStatusUntil = Date.now() + 3000
+      handled(key)
+    } else if (keyName === "q") {
       handled(key)
       renderer.destroy()
     } else if (keyName === "/" || keyName === "slash") {

@@ -31,9 +31,9 @@ import { creds, reply, saveToken, type ReplyTarget } from "./slack"
 
 const FEED = join(homedir(), ".local/state/slack-notifications.jsonl")
 const MAX_ROWS = 400
-const ACCENT = "#4aae8c" // same green as the Hammerspoon toast accent
+const ACCENT = "#74ade8" // Zed One Dark accent
 const DANGER = "#e06c75"
-const SELECTED_BG = "#39455a" // explicit slate; terminal-default `inverse` is unreliable
+const SELECTED_BG = "#3a4b5f" // Zed One Dark selection, composited over its background
 
 interface Notif {
   date: number // unix seconds
@@ -290,7 +290,7 @@ function App() {
             // Explicit colors throughout: `inverse` swaps whatever the terminal's
             // defaults happen to be and renders inconsistently span to span.
             const bg = selected ? SELECTED_BG : undefined
-            const fg = selected ? "#ffffff" : undefined
+            const fg = selected ? "#dce0e5" : undefined
             return (
               <Text key={row.iden} wrap="truncate-end" backgroundColor={bg}>
                 <Text color={ACCENT} backgroundColor={bg}>
