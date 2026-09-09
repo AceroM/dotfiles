@@ -30,15 +30,18 @@ cxp <session-id>
 
 ### Tailscale Serve TUI
 
-The `tsui` command opens a read-only OpenTUI dashboard for the current
-machine's Tailscale Serve routes, listener ports, and local upstream health.
+The `tsui` command opens an OpenTUI dashboard for the current machine's
+Tailscale Serve and Funnel routes, listener ports, and local upstream health.
 
 ```sh
 stow tailscale-ui
 tsui
 ```
 
-Use `j`/`k` to select a route, `r` to refresh, and `q` to quit.
+Use `j`/`k` to select a route, `a` to add an HTTPS proxy, `d` to remove the
+selected route, `f` to switch it between Serve and Funnel, `x` to reset all
+routes, `r` to refresh, and `q` to quit. Destructive and public-access changes
+ask for confirmation.
 
 ## Structure
 
