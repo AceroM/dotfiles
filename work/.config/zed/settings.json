@@ -80,12 +80,22 @@
     "dock": "right",
     "default_width": 720,
     "shell": { "program": "herdr" },
+    // Zed inherits HERDR_* when it is launched from a Herdr pane, which would
+    // make this nested client think it is already inside one. Blanking the
+    // identity vars is enough: the gate is HERDR_ENV == "1", and the ids are
+    // only read when that passes.
+    //
+    // Do NOT add a socket path here. Zed's terminal.env has no "unset", and
+    // herdr does not treat an empty socket var as absent -- it connects to ""
+    // (EINVAL) and the client just waits out its 15s server-ready timeout:
+    //   herdr: server did not become ready within 15s (socket: )
+    // With the var absent, herdr derives both socket paths from the config dir
+    // (or from an inherited HERDR_SOCKET_PATH) and connects normally.
     "env": {
       "HERDR_ENV": "",
       "HERDR_PANE_ID": "",
       "HERDR_TAB_ID": "",
-      "HERDR_WORKSPACE_ID": "",
-      "HERDR_CLIENT_SOCKET_PATH": ""
+      "HERDR_WORKSPACE_ID": ""
     }
   },
   "vim_mode": true,
