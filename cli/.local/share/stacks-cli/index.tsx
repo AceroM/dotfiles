@@ -54,6 +54,7 @@ type PrDetails = {
   deletions: number;
   checks: { pass: number; fail: number; pending: number };
   checkList: CheckItem[];
+  labels: string[];
 };
 
 type StackData = {
@@ -72,12 +73,13 @@ type StackData = {
 
 type Screen = "loading" | "pick" | "main" | "fatal";
 
-// Rebase rewrites history, merge is irreversible, and an approval goes out to
-// the PR's author and reviewers, so none fires on a bare keypress — each stages
-// a PendingAction that a second key has to confirm. rebase spawns a Claude
-// agent in a new Herdr pane; merge and approve run gh directly.
+// Rebase rewrites history, merge is irreversible, and an approval or a status
+// flip goes out to the PR's author and its reviewers, so none fires on a bare
+// keypress — each stages a PendingAction that a second key has to confirm.
+// rebase spawns a Claude agent in a new Herdr pane; merge, approve, status and
+// tags run gh directly.
 type PendingAction = {
-  kind: "rebase" | "merge" | "approve";
+  kind: "rebase" | "merge" | "approve" | "status" | "tags";
   prompt: string;
   exec: () => Promise<{ code: number; out: string; err: string }>;
   after?: () => void; // on success, once the footer has the result
@@ -114,6 +116,42 @@ type DescDialog = {
   // by default; x unfolds everything.
   showAll: boolean;
 };
+
+// The status dialog (s): the four PR states gh can actually set. It acts on
+// every marked row at once — J/K build that selection — so a whole stack can
+// go ready-for-review under one confirmation instead of one PR at a time.
+type StatusAction = "ready" | "draft" | "close" | "reopen";
+
+type StatusOption = {
+  action: StatusAction;
+  icon: string;
+  label: string;
+  cmd: string; // spelled out in the dialog, so what runs is never a guess
+};
+
+type StatusDialog = {
+  // Resolved when the dialog opens, so the rows it names can't drift under it
+  // while it is up. Only rows that actually have a PR get in here.
+  targets: StackBranch[];
+  idx: number;
+};
+
+type RepoLabel = { name: string; description: string | null };
+type TagDialog = {
+  targets: StackBranch[];
+  labels: RepoLabel[] | null;
+  error: string | null;
+  query: string;
+  idx: number;
+  chosen: Set<string>;
+};
+
+function matchingLabels(dialog: TagDialog): RepoLabel[] {
+  const query = dialog.query.trim().toLowerCase();
+  return (dialog.labels ?? []).filter((label) =>
+    `${label.name} ${label.description ?? ""}`.toLowerCase().includes(query),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // gh helpers
@@ -539,7 +577,7 @@ async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
     "view",
     String(prNumber),
     "--json",
-    "title,state,isDraft,reviewDecision,additions,deletions,statusCheckRollup",
+    "title,state,isDraft,reviewDecision,additions,deletions,statusCheckRollup,labels",
   ]);
   if (code !== 0) return null;
   const j = JSON.parse(out) as Record<string, unknown>;
@@ -553,7 +591,29 @@ async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
     deletions: Number(j.deletions ?? 0),
     checks,
     checkList,
+    labels: ((j.labels ?? []) as RepoLabel[]).map((label) => label.name),
   };
+}
+
+async function fetchRepoLabels(): Promise<RepoLabel[]> {
+  const r = await run([
+    "gh", "api", "repos/{owner}/{repo}/labels?per_page=100", "--paginate", "--slurp",
+  ]);
+  if (r.code !== 0)
+    throw new Error(firstLine(r.err || r.out) || `exit ${r.code}`);
+  return (JSON.parse(r.out) as RepoLabel[][])
+    .flat()
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function addPrLabels(prNumber: number, labels: string[]) {
+  // POST adds to the existing labels. Raw array fields preserve names with
+  // commas, spaces, or @ prefixes without CSV parsing or file interpolation.
+  return run([
+    "gh", "api", `repos/{owner}/{repo}/issues/${prNumber}/labels`,
+    "--method", "POST", "--silent",
+    ...labels.flatMap((name) => ["--raw-field", `labels[]=${name}`]),
+  ]);
 }
 
 function pathFromDiffHeader(header: string): string {
@@ -597,6 +657,66 @@ async function fetchDiff(prNumber: number): Promise<string[]> {
   // OpenTUI owns terminal styling. Passing Delta's ANSI stream through a text
   // renderable exposes escape-code fragments and background-color runs.
   return formatDiff(out);
+}
+
+// The states GitHub lets the CLI set, in the order the dialog lists them. Each
+// option carries its own invocation because `gh pr ready --undo` is the only
+// way back to draft, which is worth reading off the screen rather than
+// remembering.
+const STATUS_OPTIONS: StatusOption[] = [
+  { action: "ready", icon: "⚑", label: "Ready for review", cmd: "gh pr ready" },
+  { action: "draft", icon: "✎", label: "Convert to draft", cmd: "gh pr ready --undo" },
+  { action: "close", icon: "✕", label: "Close", cmd: "gh pr close" },
+  { action: "reopen", icon: "⟲", label: "Reopen", cmd: "gh pr reopen" },
+];
+
+function statusArgs(action: StatusAction, prNumber: number): string[] {
+  const n = String(prNumber);
+  switch (action) {
+    case "ready":
+      return ["gh", "pr", "ready", n];
+    case "draft":
+      return ["gh", "pr", "ready", n, "--undo"];
+    case "close":
+      return ["gh", "pr", "close", n];
+    case "reopen":
+      return ["gh", "pr", "reopen", n];
+  }
+}
+
+// Where the dialog's cursor lands when it opens: on the option that moves the
+// PR under the cursor off where it currently is — a draft wants to be ready, a
+// closed PR wants reopening, anything else is presumably being pulled back to
+// draft. It is only a starting highlight; nothing runs without enter and y.
+function defaultStatusIdx(
+  b: StackBranch | undefined,
+  d: PrDetails | undefined,
+): number {
+  const state = d?.state ?? b?.prState ?? "";
+  const want: StatusAction =
+    state === "CLOSED" ? "reopen" : d?.isDraft ? "ready" : "draft";
+  return Math.max(
+    0,
+    STATUS_OPTIONS.findIndex((o) => o.action === want),
+  );
+}
+
+// The N-th mark past `from` (or before it, walking back), so a count works on
+// n/p the way it does on every other motion. A count larger than the number of
+// marks left lands on the last one rather than nowhere.
+function nthMark(
+  marks: number[],
+  from: number,
+  n: number,
+  dir: 1 | -1,
+  fallback: number,
+): number {
+  const ahead =
+    dir === 1
+      ? marks.filter((m) => m > from)
+      : [...marks].reverse().filter((m) => m < from);
+  if (ahead.length === 0) return fallback;
+  return ahead[Math.min(n, ahead.length) - 1];
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,6 +1839,39 @@ function App() {
   const entries = useMemo(() => stack?.branches ?? [], [stack]);
 
   const [selected, setSelected] = useState(0);
+  // Multi-select, vim's visual-line mode: J/K drop an anchor where the cursor
+  // is and then walk its far end. The cursor is always one end of the range,
+  // so the marked rows are derived from it rather than stored — nothing can
+  // drift out of step with `selected`, and plain j/k drops the anchor.
+  const [markAnchor, setMarkAnchor] = useState<number | null>(null);
+  // s: set the GitHub state of every marked row at once.
+  const [status, setStatus] = useState<StatusDialog | null>(null);
+  const [tags, setTags] = useState<TagDialog | null>(null);
+  // Search and toggle events can arrive before React renders the previous key.
+  const tagsRef = useRef<TagDialog | null>(null);
+  const putTags = useCallback((dialog: TagDialog | null) => {
+    tagsRef.current = dialog;
+    setTags(dialog);
+  }, []);
+  // vim counts — 3j, 3J, 5d, 12G. A digit burst can outrun a React render the
+  // same way a pasted comment can, so the count lives in a ref and state only
+  // mirrors it for the footer; reading it off the last render would drop keys.
+  const countRef = useRef<number | null>(null);
+  const [countShown, setCountShown] = useState<number | null>(null);
+  const setCount = useCallback((v: number | null) => {
+    countRef.current = v;
+    setCountShown(v);
+  }, []);
+
+  const markedIdx = useMemo(() => {
+    const marks = new Set<number>();
+    if (markAnchor === null || entries.length === 0) return marks;
+    const lo = Math.max(0, Math.min(markAnchor, selected));
+    const hi = Math.min(entries.length - 1, Math.max(markAnchor, selected));
+    for (let i = lo; i <= hi; i++) marks.add(i);
+    return marks;
+  }, [markAnchor, selected, entries.length]);
+
   // branch names whose sidebar row is expanded to show individual CI checks
   const [expandedPrs, setExpandedPrs] = useState<Set<string>>(new Set());
   const [diffLines, setDiffLines] = useState<string[] | null>(null);
@@ -1747,6 +1900,7 @@ function App() {
       setStack(s);
       const cur = s.branches.findIndex((b) => b.isCurrent);
       setSelected(cur >= 0 ? cur : 0);
+      setMarkAnchor(null);
       setScreen("main");
       // enrich each PR with title/state/checks in parallel
       for (const b of s.branches) {
@@ -1767,6 +1921,7 @@ function App() {
 
   const load = useCallback(() => {
     setScreen("loading");
+    setMarkAnchor(null);
     setDetails(new Map());
     diffCache.current.clear();
     diffPromises.current.clear();
@@ -1805,7 +1960,11 @@ function App() {
           ? "starting rebase agent…"
           : action.kind === "merge"
             ? "merging stack…"
-            : "approving…",
+            : action.kind === "status"
+              ? "setting status…"
+              : action.kind === "tags"
+                ? "adding tags…"
+                : "approving…",
       );
       action
         .exec()
@@ -2072,14 +2231,156 @@ function App() {
     });
   }, [stack, details, refreshDetails]);
 
+  // ----- status ---------------------------------------------------------
+  // What a batch action acts on: the marked rows when J/K have built a
+  // selection, otherwise just the row under the cursor. The cursor is always
+  // inside the marked range, so these never disagree about the current PR.
+  const markedBranches = useMemo(
+    () =>
+      markedIdx.size > 0
+        ? entries.filter((_, i) => markedIdx.has(i))
+        : sel
+          ? [sel]
+          : [],
+    [entries, markedIdx, sel],
+  );
+
+  // s: open the state dropdown. Rows with no PR are dropped here rather than
+  // at apply time, so the count the dialog shows is the count it will touch.
+  const openStatus = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null);
+    if (targets.length === 0) {
+      setActionMsg({
+        text:
+          markedBranches.length > 1
+            ? "no PRs in the selection — nothing to set a status on"
+            : "no PR for this branch yet — nothing to set a status on",
+        color: "red",
+      });
+      return;
+    }
+    setStatus({
+      targets,
+      idx: defaultStatusIdx(
+        sel,
+        sel?.prNumber != null ? details.get(sel.prNumber) : undefined,
+      ),
+    });
+  }, [markedBranches, sel, details]);
+
+  // enter in the dialog doesn't run anything — it stages the same confirmation
+  // every other mutating key uses, which is the only place the whole batch is
+  // spelled out before it goes out to reviewers.
+  const applyStatus = useCallback(
+    (action: StatusAction) => {
+      if (!status) return;
+      const opt = STATUS_OPTIONS.find((o) => o.action === action)!;
+      const nums = status.targets.map((b) => b.prNumber!);
+      setStatus(null);
+      setPending({
+        kind: "status",
+        prompt: `${opt.label} — ${nums.map((n) => `#${n}`).join(" ")} (${opt.cmd})?`,
+        exec: async () => {
+          const ok: number[] = [];
+          const failed: string[] = [];
+          for (const n of nums) {
+            const r = await run(statusArgs(action, n));
+            // Badges come from the PR, not from us: re-read each one as it
+            // lands, so a batch that half-fails still shows what did change.
+            if (r.code === 0) {
+              ok.push(n);
+              refreshDetails(n);
+            } else {
+              failed.push(`#${n}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+            }
+          }
+          const done = `${ok.length}/${nums.length} → ${opt.label.toLowerCase()}`;
+          return failed.length === 0
+            ? { code: 0, out: done, err: "" }
+            : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+        },
+        // Only on a clean sweep: a partial failure keeps the selection so the
+        // ones GitHub refused can be retried without rebuilding it.
+        after: () => setMarkAnchor(null),
+      });
+    },
+    [status, refreshDetails],
+  );
+
+  // t: freeze the same targets as the status picker, then load all repo labels.
+  const openTags = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null);
+    if (targets.length === 0) {
+      setActionMsg({ text: "no PRs in the selection — nothing to tag", color: "red" });
+      return;
+    }
+    putTags({ targets, labels: null, error: null, query: "", idx: 0, chosen: new Set() });
+    fetchRepoLabels()
+      .then((labels) => {
+        const dialog = tagsRef.current;
+        if (dialog?.targets === targets) putTags({ ...dialog, labels });
+      })
+      .catch((e: Error) => {
+        const dialog = tagsRef.current;
+        if (dialog?.targets === targets) putTags({ ...dialog, error: e.message });
+      });
+  }, [markedBranches, putTags]);
+
+  const applyTags = useCallback(() => {
+    const dialog = tagsRef.current;
+    if (!dialog?.labels || dialog.error) return;
+    const highlighted = matchingLabels(dialog)[dialog.idx];
+    const labels = dialog.chosen.size > 0
+      ? [...dialog.chosen]
+      : highlighted ? [highlighted.name] : [];
+    if (labels.length === 0) return;
+    const nums = dialog.targets.map((b) => b.prNumber!);
+    putTags(null);
+    setPending({
+      kind: "tags",
+      prompt: `Add ${labels.map((name) => JSON.stringify(name)).join(", ")} to ${nums.map((n) => `#${n}`).join(" ")}?`,
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        for (const n of nums) {
+          try {
+            const r = await addPrLabels(n, labels);
+            if (r.code === 0) {
+              ok.push(n);
+              refreshDetails(n);
+            } else {
+              failed.push(`#${n}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+            }
+          } catch (e) {
+            failed.push(`#${n}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        const done = `${ok.length}/${nums.length} PRs tagged`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => setMarkAnchor(null),
+    });
+  }, [putTags, refreshDetails]);
+
   // ----- layout ---------------------------------------------------------
-  const sidebarW = Math.max(28, Math.min(46, Math.floor(cols * 0.34)));
+  // Three more columns than the rows strictly need: the relative-number gutter
+  // costs two, and the titles were already tight at the old minimum.
+  const sidebarW = Math.max(31, Math.min(49, Math.floor(cols * 0.34)));
   // OpenTUI reserves the terminal's first line and Yoga needs room for the
   // header, footer, and their separating rows. Keep the visible diff within
   // the actual flex body so its title rows never collapse under line content.
   // border rows plus destination / input / hint, when the dialog is up
   const commentH = comment ? 5 : 0;
-  const bodyH = Math.max(4, rows - 5 - commentH);
+  // border rows plus the target line, one row per option, and the hint
+  const statusH = status ? STATUS_OPTIONS.length + 4 : 0;
+  const tagMatches = tags ? matchingLabels(tags) : [];
+  const tagRows = Math.max(1, Math.min(6, rows - 16, tagMatches.length));
+  const tagStart = tags ? Math.max(0, tags.idx - tagRows + 1) : 0;
+  // Borders, target, search, chosen tags, hint, and the windowed label list.
+  const tagsH = tags ? tagRows + 6 : 0;
+  const bodyH = Math.max(4, rows - 5 - commentH - statusH - tagsH);
   const diffViewH = Math.max(1, bodyH - 2); // pane title line + meta line
 
   // sidebar windowing: 2 rows per entry, plus its check rows when expanded,
@@ -2091,7 +2392,9 @@ function App() {
     (b) =>
       2 + (isExpanded(b) ? checkRowsFor(details.get(b.prNumber!)).length : 0),
   );
-  const rowBudget = Math.max(2, bodyH - 1);
+  // Keep room for the borders, trunk, and both overflow indicators, including
+  // when a picker leaves only a few rows for the sidebar.
+  const rowBudget = Math.max(2, bodyH - 5);
   let winStart = Math.min(selected, Math.max(0, entries.length - 1));
   let winEnd = entries.length === 0 ? 0 : winStart + 1;
   {
@@ -2164,7 +2467,7 @@ function App() {
 
   const onMouse = useRef<(button: number, x: number, y: number) => void>(() => {});
   onMouse.current = (button, x, y) => {
-    if (comment) return; // the dialog owns the screen while it is open
+    if (comment || status || tagsRef.current) return; // a dialog owns the screen while it is open
     if (button === 64 || button === 65) {
       // wheel: over the sidebar it moves the selection, elsewhere it scrolls
       const dir = button === 64 ? -1 : 1;
@@ -2230,6 +2533,8 @@ function App() {
     for (let i = winStart; i < winEnd; i++) {
       rem -= entryHeights[i];
       if (rem < 0) {
+        // a click is a plain move: it drops any J/K selection, like j/k does
+        setMarkAnchor(null);
         setSelected(i);
         return;
       }
@@ -2274,6 +2579,47 @@ function App() {
       return;
     }
 
+    const tagDraft = tagsRef.current;
+    if (tagDraft) {
+      const matches = matchingLabels(tagDraft);
+      const editQuery = (query: string) => putTags({ ...tagDraft, query, idx: 0 });
+      if (key.escape) putTags(null);
+      else if (key.return) applyTags();
+      else if (key.upArrow || key.downArrow) {
+        const dir = key.upArrow ? -1 : 1;
+        putTags({ ...tagDraft, idx: Math.max(0, Math.min(matches.length - 1, tagDraft.idx + dir)) });
+      } else if (key.tab) {
+        const label = matches[tagDraft.idx];
+        if (label) {
+          const chosen = new Set(tagDraft.chosen);
+          if (chosen.has(label.name)) chosen.delete(label.name);
+          else chosen.add(label.name);
+          putTags({ ...tagDraft, chosen });
+        }
+      } else if (key.backspace || key.delete) editQuery(tagDraft.query.slice(0, -1));
+      else if (key.ctrl && input === "u") editQuery("");
+      else if (key.ctrl && input === "w") editQuery(tagDraft.query.replace(/\s*\S+\s*$/, ""));
+      else if (input && !key.ctrl && !key.meta)
+        editQuery(tagDraft.query + input.replace(/\s+/g, " "));
+      return;
+    }
+
+    // The status dropdown owns the keyboard while it is up: enter stages the
+    // change as a confirmation, esc backs out having touched nothing.
+    if (status) {
+      const last = STATUS_OPTIONS.length - 1;
+      if (key.escape || input === "q") setStatus(null);
+      else if (key.upArrow || input === "k" || (key.tab && key.shift))
+        setStatus((d) => d && { ...d, idx: Math.max(0, d.idx - 1) });
+      else if (key.downArrow || input === "j" || key.tab)
+        setStatus((d) => d && { ...d, idx: Math.min(last, d.idx + 1) });
+      else if (/^[1-9]$/.test(input)) {
+        const n = parseInt(input, 10) - 1;
+        if (n <= last) setStatus((d) => d && { ...d, idx: n });
+      } else if (key.return) applyStatus(STATUS_OPTIONS[status.idx].action);
+      return;
+    }
+
     // A staged rebase/merge swallows every key until it is answered, so a
     // stray keystroke can't trigger it and can't be lost behind it either.
     if (pending) {
@@ -2286,36 +2632,65 @@ function App() {
     // do its job — dismissing shouldn't cost a keystroke.
     if (actionMsg) setActionMsg(null);
 
+    // vim counts: a digit run prefixes the next motion — 3j moves three PRs,
+    // 3J takes three more into the selection, 5d scrolls five half-pages, 12G
+    // jumps to the 12th PR. 0 only ever extends a count that is already
+    // running; on its own it is not a motion here, so it does nothing rather
+    // than jumping somewhere surprising.
+    if (/^[0-9]$/.test(input) && !key.ctrl && !key.meta) {
+      const running = countRef.current;
+      if (input === "0" && running === null) return;
+      setCount(Math.min(9999, (running ?? 0) * 10 + parseInt(input, 10)));
+      return;
+    }
+    // Every other key consumes the pending count, whether or not it has any
+    // use for one — a count never survives into a later keystroke.
+    const rawCount = countRef.current;
+    if (rawCount !== null) setCount(null);
+    const N = rawCount ?? 1;
+
     // The description dialog is modal: it reads like the diff pane (same
     // scroll keys), adds a few of its own, and nothing falls through to the
     // main view — q closes it rather than quitting.
     if (desc) {
       if (key.escape || input === "q") setDesc(null);
-      else if (key.upArrow || input === "k") scrollDesc((v) => v - 1);
-      else if (key.downArrow || input === "j") scrollDesc((v) => v + 1);
+      else if (key.upArrow || input === "k") scrollDesc((v) => v - N);
+      else if (key.downArrow || input === "j") scrollDesc((v) => v + N);
       else if (key.pageDown || input === " " || input === "f")
-        scrollDesc((v) => v + descViewH);
-      else if (key.pageUp || input === "b") scrollDesc((v) => v - descViewH);
-      else if (input === "d") scrollDesc((v) => v + Math.ceil(descViewH / 2));
-      else if (input === "u") scrollDesc((v) => v - Math.ceil(descViewH / 2));
+        scrollDesc((v) => v + descViewH * N);
+      else if (key.pageUp || input === "b") scrollDesc((v) => v - descViewH * N);
+      else if (input === "d") scrollDesc((v) => v + Math.ceil(descViewH / 2) * N);
+      else if (input === "u") scrollDesc((v) => v - Math.ceil(descViewH / 2) * N);
       else if (input === "g") scrollDesc(() => 0);
       else if (input === "G") scrollDesc(() => descMax);
       else if (input === "n")
-        scrollDesc((v) => descRender.marks.find((m) => m > v) ?? v);
+        scrollDesc((v) => nthMark(descRender.marks, v, N, 1, v));
       else if (input === "p")
-        scrollDesc((v) => [...descRender.marks].reverse().find((m) => m < v) ?? 0);
+        scrollDesc((v) => nthMark(descRender.marks, v, N, -1, 0));
       else if (input === "x") setDesc((d) => d && { ...d, showAll: !d.showAll });
       else if (key.tab || input === "J" || input === "K") {
-        // step to the neighboring PR without leaving the dialog
+        // step to the neighboring PR without leaving the dialog — N of them
+        // with a count, stopping at whichever end of the stack comes first
         const dir = (key.tab && key.shift) || input === "K" ? -1 : 1;
-        for (let i = selected + dir; i >= 0 && i < entries.length; i += dir) {
-          if (entries[i].prNumber != null) {
-            setSelected(i);
-            openDesc(entries[i], desc.showAll);
-            break;
+        let at = selected;
+        for (let step = 0; step < N; step++) {
+          let next = -1;
+          for (let i = at + dir; i >= 0 && i < entries.length; i += dir) {
+            if (entries[i].prNumber != null) {
+              next = i;
+              break;
+            }
           }
+          if (next < 0) break;
+          at = next;
+        }
+        if (at !== selected) {
+          setSelected(at);
+          openDesc(entries[at], desc.showAll);
         }
       } else if (input === "c") openComment();
+      else if (input === "s") openStatus();
+      else if (input === "t") openTags();
       else if (input === "o")
         Bun.spawn(["gh", "pr", "view", String(desc.prNumber), "--web"], {
           stdout: "ignore",
@@ -2329,29 +2704,49 @@ function App() {
     }
 
     if (input === "q" || key.escape) {
+      // esc peels one layer at a time — a half-typed count, then the J/K
+      // selection, then the app — so it never quits out from under a selection
+      // you were about to act on. q always quits.
+      if (key.escape) {
+        if (rawCount !== null) return;
+        if (markAnchor !== null) {
+          setMarkAnchor(null);
+          return;
+        }
+      }
       exit();
       return;
     }
 
     if (screen === "pick") {
-      if (key.upArrow || input === "k") setPickIdx((i) => Math.max(0, i - 1));
+      if (key.upArrow || input === "k") setPickIdx((i) => Math.max(0, i - N));
       else if (key.downArrow || input === "j")
-        setPickIdx((i) => Math.min(stackChoices.length - 1, i + 1));
+        setPickIdx((i) => Math.min(stackChoices.length - 1, i + N));
       else if (key.return) openStack(stackChoices[pickIdx]);
       return;
     }
 
     if (screen !== "main") return;
 
-    // j/k move between PRs. Line-at-a-time diff scrolling is gone on purpose:
-    // the diff moves by half a page (d/u) or a whole one (space/b).
-    if (key.upArrow || input === "k" || (key.tab && key.shift))
-      setSelected((i) => Math.max(0, i - 1));
-    else if (key.downArrow || input === "j" || key.tab)
-      setSelected((i) => Math.min(entries.length - 1, i + 1));
-    else if (/^[1-9]$/.test(input)) {
-      const n = parseInt(input, 10) - 1;
-      if (n < entries.length) setSelected(n);
+    const move = (delta: number) =>
+      setSelected((i) => Math.max(0, Math.min(entries.length - 1, i + delta)));
+
+    // j/k move between PRs; shift is the select modifier, so J/K move the same
+    // way but drag a selection behind them and plain motion drops it.
+    // Line-at-a-time diff scrolling is gone on purpose: the diff moves by half
+    // a page (d/u) or a whole one (f/b).
+    if (key.upArrow || input === "k" || (key.tab && key.shift)) {
+      setMarkAnchor(null);
+      move(-N);
+    } else if (key.downArrow || input === "j" || key.tab) {
+      setMarkAnchor(null);
+      move(N);
+    } else if (input === "J" || input === "K") {
+      // The first shift-motion anchors where the cursor already is, so the row
+      // you started on is always part of the selection: from row 1, 3J marks
+      // rows 1 through 4 and leaves the cursor on 4.
+      setMarkAnchor((a) => (a === null ? selected : a));
+      move(input === "J" ? N : -N);
     } else if (input === "l" || key.rightArrow) {
       // expand the selected PR into its CI checks
       const b = sel;
@@ -2373,16 +2768,22 @@ function App() {
           next.delete(b.branch);
           return next;
         });
-    } else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH);
-    else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH);
-    else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2));
-    else if (input === "u") setScrollFor((v) => v - Math.ceil(diffViewH / 2));
+    } else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH * N);
+    else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH * N);
+    else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2) * N);
+    else if (input === "u") setScrollFor((v) => v - Math.ceil(diffViewH / 2) * N);
     else if (input === "g") setScrollFor(() => 0);
-    else if (input === "G") setScrollFor(() => maxScroll);
-    else if (input === "n")
-      setScrollFor((v) => fileMarks.find((m) => m > v) ?? v);
-    else if (input === "p")
-      setScrollFor((v) => [...fileMarks].reverse().find((m) => m < v) ?? 0);
+    else if (input === "G") {
+      // vim's NG, against the sidebar's own gutter: 12G selects the 12th PR.
+      // Bare G keeps meaning the bottom of the diff.
+      if (rawCount !== null) {
+        setMarkAnchor(null);
+        setSelected(Math.max(0, Math.min(entries.length - 1, N - 1)));
+      } else setScrollFor(() => maxScroll);
+    } else if (input === "n") setScrollFor((v) => nthMark(fileMarks, v, N, 1, v));
+    else if (input === "p") setScrollFor((v) => nthMark(fileMarks, v, N, -1, 0));
+    else if (input === "s") openStatus();
+    else if (input === "t") openTags();
     else if (input === " " && sel) openDesc(sel);
     else if (input === "z" && sel) openZed(sel);
     else if (input === "a" && sel) approvePr(sel);
@@ -2538,6 +2939,11 @@ function App() {
               <Text dimColor>{"  "}⟳ checking sync…</Text>
             )
           ) : null}
+          {markedIdx.size > 0 ? (
+            <Text color="magenta">
+              {"  "}▌{markedIdx.size} selected · s status · t tags
+            </Text>
+          ) : null}
         </Text>
       </Box>
 
@@ -2565,6 +2971,7 @@ function App() {
               : sel.branch}
             {desc.loading ? " · ⟳ loading…" : ""}
             {desc.showAll ? " · unfolded" : ""}
+            {selDetails?.labels.length ? ` · tags: ${selDetails.labels.join(", ")}` : ""}
             {" · "}
             {descPct}%
           </Text>
@@ -2623,27 +3030,48 @@ function App() {
           paddingX={1}
           overflow="hidden"
         >
-          <Text dimColor> ○ {stack.trunk}</Text>
+          <Text dimColor>{"   "}○ {stack.trunk}</Text>
           {winStart > 0 ? <Text dimColor>↑ {winStart} more</Text> : null}
           {winEntries.map((b, wi) => {
             const i = winStart + wi;
             const active = i === selected;
+            const marked = markedIdx.has(i);
             const d = b.prNumber != null ? details.get(b.prNumber) : undefined;
             const dot = dotFor(b, d);
             const badge = badgeFor(b, d);
             const innerW = sidebarW - 4; // border + padding
-            const titleW = Math.max(4, innerW - 3 - badge.text.length - 1);
+            // vim's hybrid relativenumber: the distance from the cursor on
+            // every other row, the row's own 1-based number on the cursor
+            // itself — which is what a count like 3j or 12G is counting.
+            const gutter = (
+              active ? String(i + 1) : String(Math.abs(i - selected))
+            )
+              .padStart(2)
+              .slice(-2);
+            const titleW = Math.max(4, innerW - 5 - badge.text.length - 1);
             const title = truncate(d?.title ?? b.branch, titleW).padEnd(titleW);
             const tags = syncTags(b, stack.synced ?? false);
             const tagW = tags.reduce((n, t) => n + t.text.length + 1, 0);
             const meta = truncate(
               `${b.prNumber != null ? `#${b.prNumber} · ` : ""}${b.branch}${b.isCurrent ? " ✦" : ""}`,
-              Math.max(4, innerW - 4 - tagW),
+              Math.max(4, innerW - 6 - tagW),
             );
             return (
-              <Box key={b.branch} flexDirection="column">
+              <Box key={b.branch} flexDirection="column" flexShrink={0}>
                 <Text wrap="truncate-end">
-                  <Text color="blue">{active ? "▎" : " "}</Text>
+                  <Text
+                    color={marked ? "magenta" : undefined}
+                    bold={marked}
+                    dimColor={!marked && !active}
+                  >
+                    {gutter}
+                  </Text>
+                  {/* one column carries both cursor and selection: the cursor
+                      is always an end of the range, so the bar it draws there
+                      wins and the magenta gutter says it is also marked */}
+                  <Text color={active ? "blue" : "magenta"}>
+                    {active ? "▎" : marked ? "▌" : " "}
+                  </Text>
                   <Text color={dot.color}>{dot.text}</Text>{" "}
                   <Text bold={active} color={active ? "white" : undefined}>
                     {title}
@@ -2652,7 +3080,7 @@ function App() {
                 </Text>
                 <Text wrap="truncate-end">
                   <Text dimColor>
-                    {"  │ "}
+                    {"    │ "}
                     {meta}
                   </Text>
                   {tags.map((t, ti) => (
@@ -2665,9 +3093,9 @@ function App() {
                 {isExpanded(b)
                   ? checkRowsFor(d).map((r, ri) => (
                       <Text key={ri} wrap="truncate-end">
-                        <Text dimColor>{"  │  "}</Text>
+                        <Text dimColor>{"    │  "}</Text>
                         <Text color={r.color} dimColor={r.dim}>
-                          {r.icon} {truncate(r.text, Math.max(4, innerW - 7))}
+                          {r.icon} {truncate(r.text, Math.max(4, innerW - 9))}
                         </Text>
                       </Text>
                     ))
@@ -2715,6 +3143,7 @@ function App() {
             ) : null}
             {" · "}
             {pct}%
+            {selDetails?.labels.length ? ` · tags: ${selDetails.labels.join(", ")}` : ""}
             {sel.needsRebase && !sel.isMerged ? (
               <Text color="yellow"> · ⚠ behind {baseBranch}</Text>
             ) : null}
@@ -2751,6 +3180,97 @@ function App() {
         </Box>
       </Box>
       )}
+
+      {/* status dialog: the PR states gh can set, over every marked row at
+          once. enter stages the confirmation, esc backs out. */}
+      {status ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor="magenta"
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color="magenta">
+              set status
+            </Text>
+            <Text dimColor>
+              {" "}
+              {status.targets.length} PR{status.targets.length === 1 ? "" : "s"} ·{" "}
+              {status.targets.map((b) => `#${b.prNumber}`).join(" ")}
+            </Text>
+          </Text>
+          {STATUS_OPTIONS.map((o, i) => {
+            const on = i === status.idx;
+            return (
+              <Text key={o.action} wrap="truncate-end">
+                <Text color="magenta">{on ? "❯ " : "  "}</Text>
+                <Text color={on ? "magenta" : undefined} dimColor={!on}>
+                  {o.icon}{" "}
+                </Text>
+                <Text bold={on} dimColor={!on}>
+                  {o.label.padEnd(18)}
+                </Text>
+                <Text dimColor>{o.cmd}</Text>
+              </Text>
+            );
+          })}
+          <Text dimColor wrap="truncate-end">
+            ↑↓/j/k pick · 1-4 jump · enter confirm · esc cancel
+          </Text>
+        </Box>
+      ) : null}
+
+      {tags ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={tags.error ? "red" : "magenta"}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color="magenta">add tags</Text>
+            <Text dimColor>
+              {" · "}{tags.targets.length} PR{tags.targets.length === 1 ? "" : "s"}
+              {" · "}{tags.targets.map((b) => `#${b.prNumber}`).join(" ")}
+            </Text>
+          </Text>
+          <Text wrap="truncate-end">
+            <Text color="magenta">{"❯ "}</Text>
+            {tags.query.length > inputW ? `…${tags.query.slice(-(inputW - 1))}` : tags.query}
+            <Text inverse>{" "}</Text>
+            <Text dimColor>{" · "}{tagMatches.length} matches</Text>
+          </Text>
+          {tags.error ? (
+            <Text color="red" wrap="truncate-end">{tags.error}</Text>
+          ) : tags.labels === null ? (
+            <Text dimColor>loading repository tags…</Text>
+          ) : tagMatches.length === 0 ? (
+            <Text dimColor>
+              {tags.labels.length === 0 ? "no tags in this repository" : "no matching tags"}
+            </Text>
+          ) : tagMatches.slice(tagStart, tagStart + tagRows).map((label, i) => {
+            const active = tagStart + i === tags.idx;
+            return (
+              <Text key={label.name} wrap="truncate-end">
+                <Text color="magenta">{active ? "❯ " : "  "}{tags.chosen.has(label.name) ? "☑ " : "☐ "}</Text>
+                <Text bold={active} color={active ? "magenta" : undefined}>{label.name}</Text>
+                <Text dimColor>{label.description ? ` · ${label.description}` : ""}</Text>
+              </Text>
+            );
+          })}
+          <Text dimColor wrap="truncate-end">
+            {tags.chosen.size > 0
+              ? `${tags.chosen.size} chosen: ${[...tags.chosen].join(", ")}`
+              : "enter adds the highlighted tag · tab selects multiple tags"}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            ↑↓ pick · type search · tab toggle · enter confirm · esc cancel
+          </Text>
+        </Box>
+      ) : null}
 
       {/* comment dialog: esc closes, enter hands the text to the ticket's agent */}
       {comment ? (
@@ -2812,7 +3332,9 @@ function App() {
                   ? "red"
                   : pending.kind === "approve"
                     ? "green"
-                    : "yellow"
+                    : pending.kind === "status" || pending.kind === "tags"
+                      ? "magenta"
+                      : "yellow"
               }
             >
               {pending.kind.toUpperCase()}
@@ -2834,11 +3356,21 @@ function App() {
           </Text>
         ) : desc ? (
           <Text dimColor wrap="truncate-end">
-            ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c comment · o open · z zed · r refresh · esc close
+            {countShown !== null ? (
+              <Text bold color="yellow">
+                {countShown}{" "}
+              </Text>
+            ) : null}
+            t tags · s status · ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c comment · o open · z zed · r refresh · esc close
           </Text>
         ) : (
           <Text dimColor wrap="truncate-end">
-            ↑↓/j/k/click pr · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · q quit
+            {countShown !== null ? (
+              <Text bold color="yellow">
+                {countShown}{" "}
+              </Text>
+            ) : null}
+            j/k/click pr · J/K select · t tags · s status · Nj counts · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -2916,12 +3448,18 @@ if (argv.includes("-h") || argv.includes("--help")) {
 
 usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
 
-keys: ↑↓/j/k/tab pick PR · space PR description + comments · l/h (or ←→)
-      expand/collapse a PR's CI checks · f/b page · d/u half page · g/G
-      top/bottom · n/p next/prev file · 1-9 jump · a approve · A approve every
-      open PR in the stack · z check out + open in Zed · c comment to the
-      ticket's agent · o open in browser · R rebase via a claude agent ·
-      M squash-merge stack · r refresh · q quit
+keys: ↑↓/j/k/tab pick PR · J/K extend the selection · space PR description +
+      comments · l/h (or ←→) expand/collapse a PR's CI checks · f/b page · d/u
+      half page · g/G top/bottom · n/p next/prev file · s set PR status · t add tags ·
+      a approve · A approve every open PR in the stack · z check out + open in
+      Zed · c comment to the ticket's agent · o open in browser · R rebase via
+      a claude agent · M squash-merge stack · r refresh · q quit
+counts: every motion takes a vim count — 3j moves three PRs down, 3J takes
+      three more rows into the selection, 5d scrolls five half-pages, 2n jumps
+      two files on, 12G selects the 12th PR. The sidebar's left gutter is a
+      hybrid relative-number column (distance from the cursor on every row, the
+      row's own number on the cursor), so the count to type is on screen. A
+      half-typed count shows in the footer; esc throws it away.
 mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
        moves the selection) · click the scrollbar to jump
 
@@ -2948,6 +3486,31 @@ the text to the agent running in it via \`herdr agent prompt\`. esc closes the b
 without sending. Needs a Herdr pane (HERDR_ENV=1) and exactly one matching tab
 with one agent in it — anything else is reported in the box instead of guessed.
 
+J and K extend a selection the way vim's visual line mode does: the first one
+anchors on the row the cursor is already on, and each further J/K (or count)
+walks the far end, so from row 1, 3J marks rows 1-4 and leaves the cursor on 4.
+Plain j/k/arrows/tab or a click drop the selection again, and esc peels one
+layer at a time — a half-typed count first, then the selection, then the app.
+The header says how many rows are marked while any are.
+
+s opens the status dropdown over the marked rows, or over the selected PR when
+nothing is marked: ready for review (\`gh pr ready\`), convert to draft
+(\`gh pr ready --undo\`), close, reopen. It opens on whichever option moves the
+PR under the cursor off where it is now, enter stages the change as the usual
+y-confirm naming every PR it will touch, and each PR's badge is re-read as it
+lands — so a batch GitHub half-refuses still shows what actually changed and
+keeps the selection for a retry. Rows with no PR are dropped before the dialog
+opens, so its count is the count it will act on.
+
+t opens the repository's GitHub labels as a searchable tag picker for the
+marked PRs, or just the current PR when nothing is marked. Type to filter by
+name or description, use arrows to move, and tab to toggle multiple tags.
+Selections survive filtering; ctrl+u clears the search. Enter stages the chosen
+tags (or the highlighted tag if none are checked), then y adds them to every
+target PR, preserving existing labels. Esc cancels the picker. Rows without a
+PR are skipped; a partial failure reports the failed PRs and keeps the range
+selected for a retry. For example: 3J, t, type a tag, enter, y tags four PRs.
+
 l expands the selected PR into its CI checks — failures and pending ones get a
 row each (worst first), passes roll up into a single "✓ N passed" line, and
 expanding re-fetches the PR so the list reflects CI right now. h collapses.
@@ -2959,7 +3522,7 @@ sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the sam
       the ref fetch + drift detection run behind it ("⟳ checking sync…" in the
       header until they land), so the answers still reflect the remote.
 
-a, A, R and M all stage a confirmation first and only run on "y". a submits
+a, A, s, t, R and M all stage a confirmation first and only run on "y". a submits
 \`gh pr review <n> --approve\` for the selected PR (from the main view or the
 description dialog) and refreshes its badge; A does the same for every PR in
 the stack that is still open, in order, and reports any that GitHub refused
