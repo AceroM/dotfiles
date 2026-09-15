@@ -19,6 +19,12 @@ import {
   changeTreeRows,
   type ChangedFile,
 } from "./change-tree";
+import {
+  groupDiffForDelta,
+  markDeltaFileHeaders,
+  parseAnsiDiff,
+  type DiffLine,
+} from "./delta-diff";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -167,6 +173,21 @@ async function run(
   cmd: string[],
 ): Promise<{ code: number; out: string; err: string }> {
   const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, out, err };
+}
+
+async function runWithInput(
+  cmd: string[],
+  input: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  proc.stdin.write(input);
+  proc.stdin.end();
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -665,12 +686,60 @@ function formatDiff(raw: string): string[] {
   return formatted;
 }
 
-async function fetchDiff(prNumber: number): Promise<string[]> {
-  const { code, out, err } = await run(["gh", "pr", "diff", String(prNumber)]);
-  if (code !== 0) return [`(gh pr diff failed: ${(err || out).trim()})`];
-  // OpenTUI owns terminal styling. Passing Delta's ANSI stream through a text
-  // renderable exposes escape-code fragments and background-color runs.
-  return formatDiff(out);
+function fallbackDiff(raw: string): DiffLine[] {
+  return formatDiff(raw).map((text) => ({
+    text,
+    spans: [],
+    ...(text.startsWith("Δ ") ? { filePath: text.slice(2) } : {}),
+  }));
+}
+
+async function fetchDiff(prNumber: number): Promise<DiffLine[]> {
+  const { code, out, err } = await run([
+    "gh",
+    "pr",
+    "diff",
+    String(prNumber),
+    "--color",
+    "never",
+  ]);
+  if (code !== 0)
+    return [{
+      text: `(gh pr diff failed: ${(err || out).trim()})`,
+      spans: [],
+    }];
+
+  const rendered: DiffLine[] = [];
+  for (const group of groupDiffForDelta(out)) {
+    const args = [
+      "delta",
+      "--paging",
+      "never",
+      "--detect-dark-light",
+      "never",
+      "--dark",
+      "--width",
+      "variable",
+      ...(group.defaultLanguage
+        ? ["--default-language", group.defaultLanguage]
+        : []),
+    ];
+    let result: Awaited<ReturnType<typeof runWithInput>>;
+    try {
+      result = await runWithInput(args, group.raw);
+    } catch {
+      return fallbackDiff(out);
+    }
+    if (result.code !== 0) return fallbackDiff(out);
+
+    const lines = markDeltaFileHeaders(parseAnsiDiff(result.out), group.paths);
+    while (lines[0]?.text === "") lines.shift();
+    while (lines[lines.length - 1]?.text === "") lines.pop();
+    if (rendered.length > 0 && rendered[rendered.length - 1]?.text !== "")
+      rendered.push({ text: "", spans: [] });
+    rendered.push(...lines);
+  }
+  return rendered.length > 0 ? rendered : fallbackDiff(out);
 }
 
 // The states GitHub lets the CLI set, in the order the dialog lists them. Each
@@ -921,6 +990,13 @@ const DIFF_ADD_COLOR = "#98c379";
 const DIFF_DELETE_COLOR = "#e06c75";
 const DIFF_META_COLOR = "#74ade8";
 const DIFF_MUTED_COLOR = "#636d83";
+const MIN_STACK_PANEL_W = 24;
+const MIN_CHANGES_PANEL_W = 22;
+const MIN_DIFF_PANEL_W = 24;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(Math.max(min, max), value));
+}
 
 function badgeFor(b: StackBranch, d: PrDetails | undefined): Badge {
   if (b.prNumber == null) return { text: "no PR", color: "gray" };
@@ -1890,13 +1966,21 @@ function App() {
   const [expandedPrs, setExpandedPrs] = useState<Set<string>>(new Set());
   // v: a compact file tree for the selected PR. Kept closed on startup so the
   // diff retains the full canvas until the summary is explicitly requested.
+  // V mirrors that interaction for the stack panel on the left.
+  const [stackOpen, setStackOpen] = useState(true);
   const [changesOpen, setChangesOpen] = useState(false);
-  const [diffLines, setDiffLines] = useState<string[] | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(null);
+  const [changesWidth, setChangesWidth] = useState<number | null>(null);
+  const [draggingPanel, setDraggingPanel] = useState<"left" | "right" | null>(
+    null,
+  );
+  const draggingPanelRef = useRef<"left" | "right" | null>(null);
+  const [diffLines, setDiffLines] = useState<DiffLine[] | null>(null);
   const [scroll, setScroll] = useState(0);
 
-  const diffCache = useRef(new Map<number, string[]>());
+  const diffCache = useRef(new Map<number, DiffLine[]>());
   // in-flight diff fetches, so a prefetch and a selection never fetch twice
-  const diffPromises = useRef(new Map<number, Promise<string[]>>());
+  const diffPromises = useRef(new Map<number, Promise<DiffLine[]>>());
   const scrollMemo = useRef(new Map<number, number>());
   const diffSeq = useRef(0);
   const syncSeq = useRef(0);
@@ -2009,7 +2093,7 @@ function App() {
     [load],
   );
 
-  const ensureDiff = useCallback((num: number): Promise<string[]> => {
+  const ensureDiff = useCallback((num: number): Promise<DiffLine[]> => {
     let p = diffPromises.current.get(num);
     if (!p) {
       p = fetchDiff(num).then((lines) => {
@@ -2032,7 +2116,9 @@ function App() {
     if (screen !== "main" || !sel) return;
     setScroll(sel.prNumber != null ? (scrollMemo.current.get(sel.prNumber) ?? 0) : 0);
     if (sel.prNumber == null) {
-      setDiffLines(["(no PR for this branch yet — nothing to diff)"]);
+      setDiffLines([
+        { text: "(no PR for this branch yet — nothing to diff)", spans: [] },
+      ]);
     } else {
       const cached = diffCache.current.get(sel.prNumber);
       if (cached) {
@@ -2389,12 +2475,34 @@ function App() {
   // ----- layout ---------------------------------------------------------
   // Three more columns than the rows strictly need: the relative-number gutter
   // costs two, and the titles were already tight at the old minimum.
-  const sidebarW = Math.max(31, Math.min(49, Math.floor(cols * 0.34)));
-  const changesW = Math.max(28, Math.min(42, Math.floor(cols * 0.28)));
+  const defaultSidebarW = Math.max(31, Math.min(49, Math.floor(cols * 0.34)));
+  const defaultChangesW = Math.max(28, Math.min(42, Math.floor(cols * 0.28)));
   // On a narrow terminal, opening the summary temporarily gives the left-hand
   // branch list's space to the diff. j/k still changes PRs and v restores it.
   const showStackSidebar =
-    !changesOpen || cols >= sidebarW + changesW + 24;
+    stackOpen &&
+    (!changesOpen ||
+      cols >= MIN_STACK_PANEL_W + MIN_CHANGES_PANEL_W + MIN_DIFF_PANEL_W);
+  let sidebarW = clamp(
+    sidebarWidth ?? defaultSidebarW,
+    MIN_STACK_PANEL_W,
+    cols - MIN_DIFF_PANEL_W - (changesOpen ? MIN_CHANGES_PANEL_W : 0),
+  );
+  let changesW = clamp(
+    changesWidth ?? defaultChangesW,
+    MIN_CHANGES_PANEL_W,
+    cols - MIN_DIFF_PANEL_W - (showStackSidebar ? MIN_STACK_PANEL_W : 0),
+  );
+  if (showStackSidebar && changesOpen) {
+    let overflow = sidebarW + changesW - (cols - MIN_DIFF_PANEL_W);
+    if (overflow > 0) {
+      const old = changesW;
+      changesW = Math.max(MIN_CHANGES_PANEL_W, changesW - overflow);
+      overflow -= old - changesW;
+      if (overflow > 0)
+        sidebarW = Math.max(MIN_STACK_PANEL_W, sidebarW - overflow);
+    }
+  }
   // OpenTUI reserves the terminal's first line and Yoga needs room for the
   // header, footer, and their separating rows. Keep the visible diff within
   // the actual flex body so its title rows never collapse under line content.
@@ -2449,8 +2557,8 @@ function App() {
   const fileMarks = useMemo(() => {
     if (!diffLines) return [] as number[];
     const marks: number[] = [];
-    diffLines.forEach((l, i) => {
-      if (l.startsWith("Δ ")) marks.push(i);
+    diffLines.forEach((line, i) => {
+      if (line.filePath) marks.push(i);
     });
     return marks;
   }, [diffLines]);
@@ -2458,7 +2566,7 @@ function App() {
   let activeDiffPath: string | null = null;
   for (const mark of fileMarks) {
     if (mark > scroll) break;
-    activeDiffPath = diffLines?.[mark]?.slice(2) ?? null;
+    activeDiffPath = diffLines?.[mark]?.filePath ?? null;
   }
   const activeChangeIdx = Math.max(
     0,
@@ -2517,8 +2625,36 @@ function App() {
   // ----- mouse ----------------------------------------------------------
   const { stdin } = useStdin();
 
-  const onMouse = useRef<(button: number, x: number, y: number) => void>(() => {});
-  onMouse.current = (button, x, y) => {
+  const onMouse = useRef<
+    (button: number, x: number, y: number, released: boolean) => void
+  >(() => {});
+  onMouse.current = (button, x, y, released) => {
+    if (released) {
+      draggingPanelRef.current = null;
+      setDraggingPanel(null);
+      return;
+    }
+    const activeDrag = draggingPanelRef.current;
+    if (button === 32 && activeDrag) {
+      if (activeDrag === "left") {
+        setSidebarWidth(
+          clamp(
+            x,
+            MIN_STACK_PANEL_W,
+            cols - MIN_DIFF_PANEL_W - (changesOpen ? changesW : 0),
+          ),
+        );
+      } else {
+        setChangesWidth(
+          clamp(
+            cols - x - 1,
+            MIN_CHANGES_PANEL_W,
+            cols - MIN_DIFF_PANEL_W - (showStackSidebar ? sidebarW : 0),
+          ),
+        );
+      }
+      return;
+    }
     if (comment || status || tagsRef.current) return; // a dialog owns the screen while it is open
     if (button === 64 || button === 65) {
       // wheel: over the sidebar it moves the selection, elsewhere it scrolls
@@ -2539,8 +2675,29 @@ function App() {
     // column is cols - 2. A scrollbar is one column wide, so its hit zone is
     // widened by a column either side.
     const DIFF_TOP = 4; // body + diff title + meta
+    const LEFT_DIVIDER_X = sidebarW;
+    const RIGHT_DIVIDER_X = cols - changesW - 1;
     const DIFF_BAR_X = changesOpen ? cols - changesW - 2 : cols - 2;
     const DESC_BAR_X = cols - 4; // inside the dialog's border + padding
+    if (
+      button === 0 &&
+      screen === "main" &&
+      !desc &&
+      y >= 2 &&
+      y < 2 + bodyH
+    ) {
+      const panel =
+        showStackSidebar && x === LEFT_DIVIDER_X
+          ? "left"
+          : changesOpen && x === RIGHT_DIVIDER_X
+            ? "right"
+            : null;
+      if (panel) {
+        draggingPanelRef.current = panel;
+        setDraggingPanel(panel);
+        return;
+      }
+    }
     // a click (or left drag, 32) on a scrollbar column jumps to that spot
     if ((button === 0 || button === 32) && screen === "main") {
       if (desc) {
@@ -2597,11 +2754,16 @@ function App() {
     if (!stdin) return;
     const onData = (data: Buffer | string) => {
       // SGR mouse reports: \x1b[<button;col;row then M (press) / m (release)
-      const re = /\x1b\[<(\d+);(\d+);(\d+)M/g;
+      const re = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
       const s = data.toString();
       let m: RegExpExecArray | null;
       while ((m = re.exec(s)))
-        onMouse.current(Number(m[1]), Number(m[2]) - 1, Number(m[3]) - 1);
+        onMouse.current(
+          Number(m[1]),
+          Number(m[2]) - 1,
+          Number(m[3]) - 1,
+          m[4] === "m",
+        );
     };
     stdin.on("data", onData);
     return () => {
@@ -2820,7 +2982,8 @@ function App() {
           next.delete(b.branch);
           return next;
         });
-    } else if (input === "v") setChangesOpen((open) => !open);
+    } else if (input === "V") setStackOpen((open) => !open);
+    else if (input === "v") setChangesOpen((open) => !open);
     else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH * N);
     else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH * N);
     else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2) * N);
@@ -3079,7 +3242,7 @@ function App() {
           height="100%"
           flexShrink={0}
           borderStyle="round"
-          borderColor="gray"
+          borderColor={draggingPanel === "left" ? "cyan" : "gray"}
           paddingX={1}
           overflow="hidden"
         >
@@ -3211,7 +3374,7 @@ function App() {
             <Text dimColor>loading diff…</Text>
           ) : (
             visible.map((line, i) => {
-              const s = diffLineStyle(line);
+              const s = line.spans.length > 0 ? {} : diffLineStyle(line.text);
               return (
                 <Box
                   key={scroll + i}
@@ -3222,7 +3385,25 @@ function App() {
                 >
                   <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
                     <Text color={s.color} bold={s.bold} dimColor={s.dim} wrap="truncate-end">
-                      {line.length ? line : " "}
+                      {line.spans.length > 0
+                        ? line.spans.map((span, si) => (
+                            <Text
+                              key={si}
+                              color={span.color}
+                              backgroundColor={span.backgroundColor}
+                              bold={span.bold}
+                              dimColor={span.dim}
+                              italic={span.italic}
+                              underline={span.underline}
+                              strikethrough={span.strike}
+                              inverse={span.inverse}
+                            >
+                              {span.text}
+                            </Text>
+                          ))
+                        : line.text.length
+                          ? line.text
+                          : " "}
                     </Text>
                   </Box>
                   <ScrollCell bar={diffBar} row={i} />
@@ -3242,7 +3423,7 @@ function App() {
             height="100%"
             flexShrink={0}
             borderStyle="round"
-            borderColor="gray"
+            borderColor={draggingPanel === "right" ? "cyan" : "gray"}
             paddingX={1}
             overflow="hidden"
           >
@@ -3519,7 +3700,7 @@ function App() {
                 {countShown}{" "}
               </Text>
             ) : null}
-            j/k/click pr · J/K select · v {changesOpen ? "hide changes" : "changes"} · t tags · s status · Nj counts · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
+            j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · t tags · s status · Nj counts · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -3597,8 +3778,8 @@ if (argv.includes("-h") || argv.includes("--help")) {
 
 usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
 
-keys: ↑↓/j/k/tab pick PR · J/K extend the selection · v toggle changed-files
-      tree · space PR description +
+keys: ↑↓/j/k/tab pick PR · J/K extend the selection · V toggle stack panel ·
+      v toggle changed-files tree · space PR description +
       comments · l/h (or ←→) expand/collapse a PR's CI checks · f/b page · d/u
       half page · g/G top/bottom · n/p next/prev file · s set PR status · t add tags ·
       a approve · A approve every open PR in the stack · z check out + open in
@@ -3611,7 +3792,8 @@ counts: every motion takes a vim count — 3j moves three PRs down, 3J takes
       row's own number on the cursor), so the count to type is on screen. A
       half-typed count shows in the footer; esc throws it away.
 mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
-       moves the selection) · click the scrollbar to jump
+       moves the selection) · click the scrollbar to jump · drag either panel
+       border to resize it
 
 space opens the selected PR's description with its whole conversation under
 it: issue comments, reviews, and inline review threads (where Greptile leaves
@@ -3665,11 +3847,14 @@ l expands the selected PR into its CI checks — failures and pending ones get a
 row each (worst first), passes roll up into a single "✓ N passed" line, and
 expanding re-fetches the PR so the list reflects CI right now. h collapses.
 
-v toggles a collapsed-by-default right panel for the selected PR. It groups
+V collapses/restores the stack panel on the left. v toggles a
+collapsed-by-default right panel for the selected PR. It groups
 changed files into a compact directory tree, shows per-folder and per-file
 addition/deletion totals, and follows the file currently visible in the diff.
 On narrow terminals it temporarily replaces the stack sidebar so the diff
 keeps enough width; j/k still switches PRs and v restores the normal layout.
+Drag either panel's border to resize it; the center diff keeps a readable
+minimum width.
 
 sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the same
       condition as GitHub's "This stack is out-of-date"), and whether the local
