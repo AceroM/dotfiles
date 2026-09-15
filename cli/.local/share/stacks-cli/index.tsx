@@ -15,6 +15,10 @@ import React, {
   useStdout,
 } from "@dotfiles/opentui-cli";
 import { realpathSync } from "node:fs";
+import {
+  changeTreeRows,
+  type ChangedFile,
+} from "./change-tree";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -52,6 +56,8 @@ type PrDetails = {
   reviewDecision: string; // APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | ""
   additions: number;
   deletions: number;
+  changedFiles: number;
+  files: ChangedFile[];
   checks: { pass: number; fail: number; pending: number };
   checkList: CheckItem[];
   labels: string[];
@@ -577,7 +583,7 @@ async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
     "view",
     String(prNumber),
     "--json",
-    "title,state,isDraft,reviewDecision,additions,deletions,statusCheckRollup,labels",
+    "title,state,isDraft,reviewDecision,additions,deletions,changedFiles,files,statusCheckRollup,labels",
   ]);
   if (code !== 0) return null;
   const j = JSON.parse(out) as Record<string, unknown>;
@@ -589,6 +595,14 @@ async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
     reviewDecision: String(j.reviewDecision ?? ""),
     additions: Number(j.additions ?? 0),
     deletions: Number(j.deletions ?? 0),
+    changedFiles: Number(j.changedFiles ?? 0),
+    files: ((j.files ?? []) as Array<Record<string, unknown>>)
+      .map((file) => ({
+        path: String(file.path ?? ""),
+        additions: Number(file.additions ?? 0),
+        deletions: Number(file.deletions ?? 0),
+      }))
+      .filter((file) => file.path.length > 0),
     checks,
     checkList,
     labels: ((j.labels ?? []) as RepoLabel[]).map((label) => label.name),
@@ -1874,6 +1888,9 @@ function App() {
 
   // branch names whose sidebar row is expanded to show individual CI checks
   const [expandedPrs, setExpandedPrs] = useState<Set<string>>(new Set());
+  // v: a compact file tree for the selected PR. Kept closed on startup so the
+  // diff retains the full canvas until the summary is explicitly requested.
+  const [changesOpen, setChangesOpen] = useState(false);
   const [diffLines, setDiffLines] = useState<string[] | null>(null);
   const [scroll, setScroll] = useState(0);
 
@@ -2006,6 +2023,11 @@ function App() {
 
   // load the diff for the selected PR (cached per PR number)
   const sel = entries[selected];
+  const selectedDetails = sel?.prNumber != null ? details.get(sel.prNumber) : undefined;
+  const changeRows = useMemo(
+    () => changeTreeRows(selectedDetails?.files ?? []),
+    [selectedDetails?.files],
+  );
   useEffect(() => {
     if (screen !== "main" || !sel) return;
     setScroll(sel.prNumber != null ? (scrollMemo.current.get(sel.prNumber) ?? 0) : 0);
@@ -2368,6 +2390,11 @@ function App() {
   // Three more columns than the rows strictly need: the relative-number gutter
   // costs two, and the titles were already tight at the old minimum.
   const sidebarW = Math.max(31, Math.min(49, Math.floor(cols * 0.34)));
+  const changesW = Math.max(28, Math.min(42, Math.floor(cols * 0.28)));
+  // On a narrow terminal, opening the summary temporarily gives the left-hand
+  // branch list's space to the diff. j/k still changes PRs and v restores it.
+  const showStackSidebar =
+    !changesOpen || cols >= sidebarW + changesW + 24;
   // OpenTUI reserves the terminal's first line and Yoga needs room for the
   // header, footer, and their separating rows. Keep the visible diff within
   // the actual flex body so its title rows never collapse under line content.
@@ -2382,6 +2409,7 @@ function App() {
   const tagsH = tags ? tagRows + 6 : 0;
   const bodyH = Math.max(4, rows - 5 - commentH - statusH - tagsH);
   const diffViewH = Math.max(1, bodyH - 2); // pane title line + meta line
+  const changesViewH = Math.max(1, bodyH - 4); // borders + title + totals
 
   // sidebar windowing: 2 rows per entry, plus its check rows when expanded,
   // plus the trunk row. Heights vary, so grow the window outward from the
@@ -2426,6 +2454,30 @@ function App() {
     });
     return marks;
   }, [diffLines]);
+
+  let activeDiffPath: string | null = null;
+  for (const mark of fileMarks) {
+    if (mark > scroll) break;
+    activeDiffPath = diffLines?.[mark]?.slice(2) ?? null;
+  }
+  const activeChangeIdx = Math.max(
+    0,
+    changeRows.findIndex(
+      (row) => row.kind === "file" && row.path === activeDiffPath,
+    ),
+  );
+  const changeStart = Math.max(
+    0,
+    Math.min(
+      Math.max(0, changeRows.length - changesViewH),
+      activeChangeIdx - Math.floor(changesViewH / 2),
+    ),
+  );
+  const visibleChanges = changeRows.slice(
+    changeStart,
+    changeStart + changesViewH,
+  );
+  const changesBar = scrollbar(changeRows.length, changesViewH, changeStart);
 
   const maxScroll = Math.max(0, (diffLines?.length ?? 0) - diffViewH);
 
@@ -2475,7 +2527,7 @@ function App() {
       else if (screen === "pick")
         setPickIdx((i) => Math.max(0, Math.min(stackChoices.length - 1, i + dir)));
       else if (screen !== "main") return;
-      else if (x < sidebarW)
+      else if (showStackSidebar && x < sidebarW)
         setSelected((i) => Math.max(0, Math.min(entries.length - 1, i + dir)));
       else setScrollFor((v) => v + dir * 3);
       return;
@@ -2487,7 +2539,7 @@ function App() {
     // column is cols - 2. A scrollbar is one column wide, so its hit zone is
     // widened by a column either side.
     const DIFF_TOP = 4; // body + diff title + meta
-    const DIFF_BAR_X = cols - 2; // last drawn column
+    const DIFF_BAR_X = changesOpen ? cols - changesW - 2 : cols - 2;
     const DESC_BAR_X = cols - 4; // inside the dialog's border + padding
     // a click (or left drag, 32) on a scrollbar column jumps to that spot
     if ((button === 0 || button === 32) && screen === "main") {
@@ -2525,7 +2577,7 @@ function App() {
       if (y >= 4 && i < stackChoices.length) openStack(stackChoices[i]);
       return;
     }
-    if (screen !== "main" || x >= sidebarW) return;
+    if (screen !== "main" || !showStackSidebar || x >= sidebarW) return;
     // blank row, header, border, trunk row, plus the "↑ N more" line when windowed
     const top = 4 + (winStart > 0 ? 1 : 0);
     let rem = y - top;
@@ -2768,7 +2820,8 @@ function App() {
           next.delete(b.branch);
           return next;
         });
-    } else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH * N);
+    } else if (input === "v") setChangesOpen((open) => !open);
+    else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH * N);
     else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH * N);
     else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2) * N);
     else if (input === "u") setScrollFor((v) => v - Math.ceil(diffViewH / 2) * N);
@@ -2889,7 +2942,7 @@ function App() {
   // ----- main -----------------------------------------------------------
   const stale = staleBranches(stack);
   const drift = driftedBranches(stack);
-  const selDetails = sel.prNumber != null ? details.get(sel.prNumber) : undefined;
+  const selDetails = selectedDetails;
   const baseBranch =
     stack.branches[stack.branches.indexOf(sel) - 1]?.branch ?? stack.trunk;
 
@@ -3020,7 +3073,7 @@ function App() {
       ) : (
       <Box flexDirection="row" flexGrow={1} minHeight={0} overflow="hidden">
         {/* sidebar */}
-        <Box
+        {showStackSidebar ? <Box
           flexDirection="column"
           width={sidebarW}
           height="100%"
@@ -3106,7 +3159,7 @@ function App() {
           {winEnd < entries.length ? (
             <Text dimColor>↓ {entries.length - winEnd} more</Text>
           ) : null}
-        </Box>
+        </Box> : null}
 
         {/* diff pane */}
         <Box
@@ -3178,6 +3231,102 @@ function App() {
             })
           )}
         </Box>
+
+        {/* v toggles this read-only overview of the selected PR. It tracks the
+            file currently at the top of the diff and windows long trees around
+            that row, making the panel useful without taking keyboard focus. */}
+        {changesOpen ? (
+          <Box
+            flexDirection="column"
+            width={changesW}
+            height="100%"
+            flexShrink={0}
+            borderStyle="round"
+            borderColor="gray"
+            paddingX={1}
+            overflow="hidden"
+          >
+            <Text wrap="truncate-end" flexShrink={0}>
+              <Text bold color="cyan">changes</Text>
+              <Text dimColor>
+                {" · "}
+                {selDetails?.changedFiles ?? selDetails?.files.length ?? 0} files
+              </Text>
+            </Text>
+            <Text dimColor wrap="truncate-end" flexShrink={0}>
+              {sel.prNumber != null ? `#${sel.prNumber}` : "no PR"}
+              {selDetails ? (
+                <>
+                  {" · "}
+                  <Text color={DIFF_ADD_COLOR}>+{selDetails.additions}</Text>{" "}
+                  <Text color={DIFF_DELETE_COLOR}>−{selDetails.deletions}</Text>
+                </>
+              ) : null}
+            </Text>
+            {sel.prNumber == null ? (
+              <Text dimColor>no PR yet — no change summary</Text>
+            ) : !selDetails ? (
+              <Text dimColor>loading changes…</Text>
+            ) : changeRows.length === 0 ? (
+              <Text dimColor>no changed files</Text>
+            ) : (
+              visibleChanges.map((row, i) => {
+                const active = row.kind === "file" && row.path === activeDiffPath;
+                const indent = "  ".repeat(row.depth);
+                const prefix = row.kind === "directory" ? "▾ " : "• ";
+                const additions = row.additions > 0 ? `+${row.additions}` : "";
+                const deletions = row.deletions > 0 ? `−${row.deletions}` : "";
+                const gap = additions && deletions ? " " : "";
+                const statW = additions.length + gap.length + deletions.length;
+                const labelW = Math.max(4, changesW - 5 - statW);
+                const label = truncate(`${indent}${prefix}${row.label}`, labelW).padEnd(
+                  labelW,
+                );
+                return (
+                  <Box
+                    key={`${row.kind}:${row.path}`}
+                    width="100%"
+                    flexDirection="row"
+                    flexShrink={0}
+                    overflow="hidden"
+                  >
+                    <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+                      <Text
+                        bold={active || row.kind === "directory"}
+                        color={
+                          active
+                            ? "white"
+                            : row.kind === "directory"
+                              ? "cyan"
+                              : undefined
+                        }
+                        backgroundColor={active ? "selected" : undefined}
+                        dimColor={!active && row.kind === "directory"}
+                        wrap="truncate-end"
+                      >
+                        {label}
+                        <Text
+                          color={DIFF_ADD_COLOR}
+                          dimColor={row.kind === "directory"}
+                        >
+                          {additions}
+                        </Text>
+                        {gap}
+                        <Text
+                          color={DIFF_DELETE_COLOR}
+                          dimColor={row.kind === "directory"}
+                        >
+                          {deletions}
+                        </Text>
+                      </Text>
+                    </Box>
+                    <ScrollCell bar={changesBar} row={i} />
+                  </Box>
+                );
+              })
+            )}
+          </Box>
+        ) : null}
       </Box>
       )}
 
@@ -3370,7 +3519,7 @@ function App() {
                 {countShown}{" "}
               </Text>
             ) : null}
-            j/k/click pr · J/K select · t tags · s status · Nj counts · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
+            j/k/click pr · J/K select · v {changesOpen ? "hide changes" : "changes"} · t tags · s status · Nj counts · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -3448,7 +3597,8 @@ if (argv.includes("-h") || argv.includes("--help")) {
 
 usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
 
-keys: ↑↓/j/k/tab pick PR · J/K extend the selection · space PR description +
+keys: ↑↓/j/k/tab pick PR · J/K extend the selection · v toggle changed-files
+      tree · space PR description +
       comments · l/h (or ←→) expand/collapse a PR's CI checks · f/b page · d/u
       half page · g/G top/bottom · n/p next/prev file · s set PR status · t add tags ·
       a approve · A approve every open PR in the stack · z check out + open in
@@ -3514,6 +3664,12 @@ selected for a retry. For example: 3J, t, type a tag, enter, y tags four PRs.
 l expands the selected PR into its CI checks — failures and pending ones get a
 row each (worst first), passes roll up into a single "✓ N passed" line, and
 expanding re-fetches the PR so the list reflects CI right now. h collapses.
+
+v toggles a collapsed-by-default right panel for the selected PR. It groups
+changed files into a compact directory tree, shows per-folder and per-file
+addition/deletion totals, and follows the file currently visible in the diff.
+On narrow terminals it temporarily replaces the stack sidebar so the diff
+keeps enough width; j/k still switches PRs and v restores the normal layout.
 
 sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the same
       condition as GitHub's "This stack is out-of-date"), and whether the local
