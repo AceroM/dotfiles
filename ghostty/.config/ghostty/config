@@ -54,6 +54,10 @@ shell-integration-features = no-cursor,ssh-env,ssh-terminfo
 # "right" if you want to keep the LEFT Option key for typing accents.
 macos-option-as-alt = true
 
+# Prevent Ghostty's automatic Secure Input detection from blocking global
+# shortcuts in apps such as Raycast when the macOS flag gets stuck.
+macos-auto-secure-input = false
+
 # Emit a distinct Shift+Enter sequence so TUIs can bind it separately from Enter.
 keybind = shift+enter=csi:13;2u
 
