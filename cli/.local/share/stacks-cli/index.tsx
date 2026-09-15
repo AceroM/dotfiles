@@ -1964,11 +1964,11 @@ function App() {
 
   // branch names whose sidebar row is expanded to show individual CI checks
   const [expandedPrs, setExpandedPrs] = useState<Set<string>>(new Set());
-  // v: a compact file tree for the selected PR. Kept closed on startup so the
-  // diff retains the full canvas until the summary is explicitly requested.
+  // v: a compact file tree for the selected PR. Open on startup so the file
+  // context is visible immediately; the center diff still gets most of the room.
   // V mirrors that interaction for the stack panel on the left.
   const [stackOpen, setStackOpen] = useState(true);
-  const [changesOpen, setChangesOpen] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState<number | null>(null);
   const [changesWidth, setChangesWidth] = useState<number | null>(null);
   const [draggingPanel, setDraggingPanel] = useState<"left" | "right" | null>(
@@ -2475,8 +2475,8 @@ function App() {
   // ----- layout ---------------------------------------------------------
   // Three more columns than the rows strictly need: the relative-number gutter
   // costs two, and the titles were already tight at the old minimum.
-  const defaultSidebarW = Math.max(31, Math.min(49, Math.floor(cols * 0.34)));
-  const defaultChangesW = Math.max(28, Math.min(42, Math.floor(cols * 0.28)));
+  const defaultSidebarW = Math.max(28, Math.min(40, Math.floor(cols * 0.28)));
+  const defaultChangesW = Math.max(24, Math.min(34, Math.floor(cols * 0.22)));
   // On a narrow terminal, opening the summary temporarily gives the left-hand
   // branch list's space to the diff. j/k still changes PRs and v restores it.
   const showStackSidebar =
@@ -2945,14 +2945,17 @@ function App() {
     const move = (delta: number) =>
       setSelected((i) => Math.max(0, Math.min(entries.length - 1, i + delta)));
 
-    // j/k move between PRs; shift is the select modifier, so J/K move the same
-    // way but drag a selection behind them and plain motion drops it.
-    // Line-at-a-time diff scrolling is gone on purpose: the diff moves by half
-    // a page (d/u) or a whole one (f/b).
-    if (key.upArrow || input === "k" || (key.tab && key.shift)) {
+    // Arrow keys belong to the diff and honor vim counts (10↓ / 4↑). j/k are
+    // the only sequential PR motions; shift is the select modifier, so J/K
+    // move the same way while dragging a selection behind them.
+    if (key.upArrow) {
+      setScrollFor((v) => v - N);
+    } else if (key.downArrow) {
+      setScrollFor((v) => v + N);
+    } else if (input === "k") {
       setMarkAnchor(null);
       move(-N);
-    } else if (key.downArrow || input === "j" || key.tab) {
+    } else if (input === "j") {
       setMarkAnchor(null);
       move(N);
     } else if (input === "J" || input === "K") {
@@ -3700,7 +3703,7 @@ function App() {
                 {countShown}{" "}
               </Text>
             ) : null}
-            j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · t tags · s status · Nj counts · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
+            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · t tags · s status · counts work on arrows/motions · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -3778,16 +3781,17 @@ if (argv.includes("-h") || argv.includes("--help")) {
 
 usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
 
-keys: ↑↓/j/k/tab pick PR · J/K extend the selection · V toggle stack panel ·
-      v toggle changed-files tree · space PR description +
+keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection ·
+      V toggle stack panel · v toggle changed-files tree · space PR description +
       comments · l/h (or ←→) expand/collapse a PR's CI checks · f/b page · d/u
       half page · g/G top/bottom · n/p next/prev file · s set PR status · t add tags ·
       a approve · A approve every open PR in the stack · z check out + open in
       Zed · c comment to the ticket's agent · o open in browser · R rebase via
       a claude agent · M squash-merge stack · r refresh · q quit
-counts: every motion takes a vim count — 3j moves three PRs down, 3J takes
-      three more rows into the selection, 5d scrolls five half-pages, 2n jumps
-      two files on, 12G selects the 12th PR. The sidebar's left gutter is a
+counts: every motion takes a vim count — 10↓ scrolls ten diff lines, 4↑ scrolls
+      four lines up, 3j moves three PRs down, 3J takes three more rows into the
+      selection, 5d scrolls five half-pages, 2n jumps two files on, and 12G
+      selects the 12th PR. The sidebar's left gutter is a
       hybrid relative-number column (distance from the cursor on every row, the
       row's own number on the cursor), so the count to type is on screen. A
       half-typed count shows in the footer; esc throws it away.
@@ -3847,8 +3851,8 @@ l expands the selected PR into its CI checks — failures and pending ones get a
 row each (worst first), passes roll up into a single "✓ N passed" line, and
 expanding re-fetches the PR so the list reflects CI right now. h collapses.
 
-V collapses/restores the stack panel on the left. v toggles a
-collapsed-by-default right panel for the selected PR. It groups
+V collapses/restores the stack panel on the left. v toggles the right panel,
+which starts open for the selected PR. It groups
 changed files into a compact directory tree, shows per-folder and per-file
 addition/deletion totals, and follows the file currently visible in the diff.
 On narrow terminals it temporarily replaces the stack sidebar so the diff
