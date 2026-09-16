@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Jump to the next agent that is waiting on me, anywhere in the session.
+#
+#   herdr-agent-attention              next blocked agent, else next done one
+#   herdr-agent-attention blocked      only agents sitting at an approval/question
+#   herdr-agent-attention done         only agents with unseen finished work
+#   herdr-agent-attention any          rotate through every agent, state ignored
+#
+# Bound in config.toml as ctrl+alt+shift+a -- the agent axis, the same
+# ctrl+alt+shift family as next_agent/previous_agent on j/k. Those two step the
+# sidebar one row at a time regardless of what the row is doing; this one skips
+# straight to whatever is actually waiting for an answer, across workspaces.
+#
+# Herdr has no built-in "focus the next blocked agent" action, so this reads
+# `agent list` and drives `agent focus`. Pressing it repeatedly rotates: the
+# target is the candidate *after* the pane the press came from, so two blocked
+# agents alternate rather than the first one swallowing every press. `done`
+# agents drain on their own -- focusing marks them seen, which turns them back
+# into plain idle, so they leave the queue once visited.
+#
+# Same constraints as herdr-space-edge and herdr-space-letter, which this
+# mirrors: `type = "shell"` bindings are spawned detached with no $PATH worth
+# trusting and no tty to print errors to, hence the explicit PATH and the log
+# file instead of stderr. Kept bash-3.2 clean: the shebang resolves against
+# whatever PATH the server hands us, which may well find /bin/bash rather than
+# homebrew's bash 5.
+set -uo pipefail
+
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
+# Fixed path on purpose: $TMPDIR is per-user-session on macOS, so the server's
+# detached spawn and a hand-run from a pane would otherwise log to two files.
+log_file="$HOME/.local/state/herdr-agent-attention.log"
+mkdir -p "$(dirname "$log_file")" 2>/dev/null
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; }
+die() { log "error: $*"; exit 1; }
+
+mode="${1:-attention}"
+case "$mode" in
+  attention|blocked|done|any) ;;
+  *) die "usage: herdr-agent-attention [attention|blocked|done|any] (got '$mode')" ;;
+esac
+
+# ── where the keypress came from ────────────────────────────────────────
+# HERDR_ACTIVE_PANE_ID is what herdr hands a custom command: the pane that was
+# active when the key was pressed. HERDR_PANE_ID covers running this by hand.
+# Neither being set is fine -- an unknown origin just starts the rotation at the
+# top of the queue instead of one past the current position.
+here="${HERDR_ACTIVE_PANE_ID:-${HERDR_PANE_ID:-}}"
+
+list_json="$(herdr agent list 2>/dev/null)" || die "agent list failed"
+if [ -z "$here" ]; then
+  here="$(jq -r 'first(.result.agents[] | select(.focused == true) | .pane_id) // ""' \
+    <<<"$list_json")"
+fi
+
+# ── which agent ─────────────────────────────────────────────────────────
+# blocked outranks done, and within a rank the server's own list order wins, so
+# the rotation matches the order the agent panel reads top to bottom. `ord`
+# carries that original index through the sort, since sort_by would otherwise be
+# free to reshuffle same-rank rows.
+#
+# Verdicts: `go` with a target, `none` when nothing matches the mode, `self`
+# when the only match is the pane already focused -- three outcomes rather than
+# a bare empty string, so the log can tell "nothing is waiting" apart from
+# "the thing waiting is right here".
+IFS=$'\t' read -r verdict target status label title < <(jq -r \
+  --arg mode "$mode" --arg here "$here" '
+  def rank: if . == "blocked" then 0 elif . == "done" then 1 else 2 end;
+
+  .result.agents
+  | to_entries
+  | map(.value + {ord: .key})
+  | map(select(
+      if   $mode == "any"       then true
+      elif $mode == "attention" then .agent_status == "blocked" or .agent_status == "done"
+      else .agent_status == $mode
+      end))
+  | if $mode == "attention" then sort_by((.agent_status | rank), .ord) else sort_by(.ord) end
+  | . as $c
+  | ($c | map(.pane_id) | index($here)) as $i
+  | if   ($c | length) == 0 then ["none", "", "", "", ""]
+    elif $i == null         then ($c[0] | ["go", .pane_id, .agent_status, (.name // .agent // "?"), (.terminal_title_stripped // "")])
+    elif ($c | length) == 1 then ["self", "", "", "", ""]
+    else ($c[($i + 1) % ($c | length)] | ["go", .pane_id, .agent_status, (.name // .agent // "?"), (.terminal_title_stripped // "")])
+    end
+  | @tsv' <<<"$list_json")
+
+# A chord that silently does nothing reads as a broken chord, and "nothing is
+# waiting on you" is the whole answer in that case -- so say it out loud. The
+# toast is herdr's own notification surface, which lands wherever
+# [ui.notifications] puts it and costs no layout.
+case "${verdict:-none}" in
+  none)
+    log "no $mode agent"
+    herdr notification show "No agent waiting" \
+      --body "Nothing is blocked or done right now." >/dev/null 2>&1
+    exit 0
+    ;;
+  self)
+    log "$mode: only $here matches, already focused"
+    exit 0
+    ;;
+esac
+
+herdr agent focus "$target" >/dev/null 2>&1 || die "agent focus $target failed"
+log "focused $status agent $target ($label) -- $title"

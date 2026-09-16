@@ -48,6 +48,11 @@ new_workspace = "ctrl+alt+shift+n"
 # Shift on the same j/k axis hops between agent rows instead of workspaces.
 next_agent = "ctrl+alt+shift+j"
 previous_agent = "ctrl+alt+shift+k"
+# ctrl+alt+shift+a -- jump to whichever agent is actually waiting on me -- is the
+# same axis one letter over. It lives in a [[keys.command]] block below rather
+# than up here: herdr has no action for it (next_agent steps one row regardless
+# of what that row is doing, focus_agent is an indexed 1..9 binding), so it goes
+# through a script.
 
 # --- Panes --------------------------------------------------------------
 # hjkl is already spent on tabs/workspaces, so pane focus uses the arrows.
@@ -55,6 +60,17 @@ focus_pane_left = "ctrl+alt+left"
 focus_pane_down = "ctrl+alt+down"
 focus_pane_up = "ctrl+alt+up"
 focus_pane_right = "ctrl+alt+right"
+# ctrl+alt+tab -- back to the pane I was in before this one, wherever it lives.
+# The arrows above walk the split geometry inside one tab; this is the alt-tab
+# motion instead, the way back to the other agent I am bouncing between even when
+# it sits in a different tab or space. Unset by default, and it does not displace
+# anything: the stock prefix+tab / prefix+shift+tab still cycle panes within the
+# tab.
+#
+# Ghostty claims ctrl+tab and ctrl+shift+tab for its own next_tab/previous_tab
+# but leaves ctrl+alt+tab alone, and the kitty-protocol encoding carries the
+# modifiers (ctrl+alt+tab -> CSI 9;7u), so the chord arrives intact.
+last_pane = "ctrl+alt+tab"
 split_vertical = "ctrl+alt+v"
 split_horizontal = "ctrl+alt+minus"
 # ctrl+alt+w closes the focused pane; the tab only goes away once its last
@@ -297,6 +313,28 @@ key = "cmd+alt+shift+z"
 type = "shell"
 description = "Space z*"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter z"'
+
+# ctrl+alt+shift+a -- focus the next agent that is waiting on me: the next blocked
+# one, else the next agent whose finished work I have not seen, across every
+# space. next_agent (ctrl+alt+shift+j) walks the agent panel a row at a time and
+# does not care what the row is doing; this is the attention queue instead, and
+# `a` is the same agent axis one letter over from j/k.
+#
+# Repeated presses rotate -- the target is the candidate after the pane the press
+# came from -- so two blocked agents alternate instead of the first one swallowing
+# every press, and done agents drop out on their own because focusing marks them
+# seen. Nothing waiting is a toast rather than a silent no-op, so a dead chord and
+# an empty queue do not look alike.
+#
+# cmd+alt+shift+a next door is "jump to the a* space"; only cmd+alt+shift+p ever
+# misfired that way, so these two coexist. `type = "shell"` gets spawned detached
+# with the server's environment, so the command is wrapped in an explicit /bin/sh
+# rather than trusting $PATH to contain ~/.local/bin.
+[[keys.command]]
+key = "ctrl+alt+shift+a"
+type = "shell"
+description = "Next agent waiting"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-agent-attention"'
 
 # ctrl+alt+; -- new tab already running the agent I pressed from, same cwd, same
 # flags. ctrl+alt+n's shell-tab sibling: ';' sits right of 'l', so it lands in
