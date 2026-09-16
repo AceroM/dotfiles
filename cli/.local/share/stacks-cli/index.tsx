@@ -2005,6 +2005,12 @@ function App() {
   const draggingPanelRef = useRef<"left" | "right" | null>(null);
   const [diffLines, setDiffLines] = useState<DiffLine[] | null>(null);
   const [scroll, setScroll] = useState(0);
+  // The wheel scrolls the side panels on their own. null means a panel is
+  // following: the stack list windows around the selection and the changes
+  // tree centers on the file at the top of the diff. A wheeled offset holds
+  // until what the panel was following moves off its rows.
+  const [stackScroll, setStackScroll] = useState<number | null>(null);
+  const [changesScroll, setChangesScroll] = useState<number | null>(null);
   // `/` searches the diff. The committed pattern is what n/N walk and what the
   // pane highlights; the draft is the pattern still being typed in the footer.
   // Both live in refs as well, because a fast-typed pattern (or a paste) can
@@ -2591,9 +2597,25 @@ function App() {
   // Keep room for the borders, trunk, and both overflow indicators, including
   // when a picker leaves only a few rows for the sidebar.
   const rowBudget = Math.max(2, bodyH - 5);
+  // The lowest the list can start and still fill the budget from the last
+  // entry, so a wheeled list stops at the bottom the way the diff does.
+  let maxStackStart = Math.max(0, entries.length - 1);
+  for (let i = entries.length - 1, used = 0; i >= 0; i--) {
+    used += entryHeights[i];
+    if (used > rowBudget) break;
+    maxStackStart = i;
+  }
   let winStart = Math.min(selected, Math.max(0, entries.length - 1));
   let winEnd = entries.length === 0 ? 0 : winStart + 1;
-  {
+  if (stackScroll != null) {
+    // wheeled: start where the wheel left the list and fill downward
+    winStart = Math.min(stackScroll, maxStackStart);
+    winEnd = entries.length === 0 ? 0 : winStart + 1;
+    let used = entryHeights[winStart] ?? 0;
+    while (winEnd < entries.length && used + entryHeights[winEnd] <= rowBudget)
+      used += entryHeights[winEnd++];
+  } else {
+    // following: grow outward from the selection until the budget is spent
     let used = entryHeights[winStart] ?? 0;
     let up = winStart - 1;
     let down = winEnd;
@@ -2634,18 +2656,39 @@ function App() {
       (row) => row.kind === "file" && row.path === activeDiffPath,
     ),
   );
-  const changeStart = Math.max(
-    0,
-    Math.min(
-      Math.max(0, changeRows.length - changesViewH),
-      activeChangeIdx - Math.floor(changesViewH / 2),
-    ),
-  );
+  const maxChangesScroll = Math.max(0, changeRows.length - changesViewH);
+  // following: the tree centers on the file at the top of the diff;
+  // wheeled: it stays where the wheel left it
+  const changeStart =
+    changesScroll != null
+      ? Math.min(changesScroll, maxChangesScroll)
+      : clamp(activeChangeIdx - Math.floor(changesViewH / 2), 0, maxChangesScroll);
   const visibleChanges = changeRows.slice(
     changeStart,
     changeStart + changesViewH,
   );
   const changesBar = scrollbar(changeRows.length, changesViewH, changeStart);
+
+  // A wheeled side panel is left alone while what it was following is still
+  // on its rows, and goes back to following once that moves off them: the
+  // cursor for the stack list (j/k, a count, a click), the file at the top of
+  // the diff for the changes tree. The windows are read through a ref so
+  // these fire on the change itself and not on every wheel notch.
+  const panelWin = useRef({ stack: [0, 0], changes: [0, 0] });
+  panelWin.current = {
+    stack: [winStart, winEnd],
+    changes: [changeStart, changeStart + changesViewH],
+  };
+  useEffect(() => {
+    const [lo, hi] = panelWin.current.stack;
+    if (selected < lo || selected >= hi) setStackScroll(null);
+  }, [selected]);
+  useEffect(() => {
+    const [lo, hi] = panelWin.current.changes;
+    if (activeChangeIdx < lo || activeChangeIdx >= hi) setChangesScroll(null);
+  }, [activeChangeIdx]);
+  // a different PR is a different tree, so it starts out following
+  useEffect(() => setChangesScroll(null), [sel?.prNumber]);
 
   const maxScroll = Math.max(0, (diffLines?.length ?? 0) - diffViewH);
 
@@ -2764,18 +2807,6 @@ function App() {
       return;
     }
     if (comment || status || tagsRef.current) return; // a dialog owns the screen while it is open
-    if (button === 64 || button === 65) {
-      // wheel: over the sidebar it moves the selection, elsewhere it scrolls
-      const dir = button === 64 ? -1 : 1;
-      if (desc) scrollDesc((v) => v + dir * 3);
-      else if (screen === "pick")
-        setPickIdx((i) => Math.max(0, Math.min(stackChoices.length - 1, i + dir)));
-      else if (screen !== "main") return;
-      else if (showStackSidebar && x < sidebarW)
-        setSelected((i) => Math.max(0, Math.min(entries.length - 1, i + dir)));
-      else setScrollFor((v) => v + dir * 3);
-      return;
-    }
     // Geometry, 0-based like x/y and measured with injected clicks rather than
     // assumed: OpenTUI draws with a one-cell margin, so terminal row 0 and
     // column 0 stay blank, the header is row 1, the body starts at row 2
@@ -2783,10 +2814,37 @@ function App() {
     // column is cols - 2. A scrollbar is one column wide, so its hit zone is
     // widened by a column either side.
     const DIFF_TOP = 4; // body + diff title + meta
+    const CHANGES_TOP = 5; // body + border + title + totals
     const LEFT_DIVIDER_X = sidebarW;
     const RIGHT_DIVIDER_X = cols - changesW - 1;
     const DIFF_BAR_X = changesOpen ? cols - changesW - 2 : cols - 2;
+    // The tree's bar sits inside its border + padding. Its rows end in the
+    // +/− counts, so the zone widens toward the border only, never over them.
+    const CHANGES_BAR_X = cols - 4;
     const DESC_BAR_X = cols - 4; // inside the dialog's border + padding
+    if (button === 64 || button === 65) {
+      // wheel: each panel scrolls on its own — the stack list and the changes
+      // tree under the pointer, the diff everywhere else
+      const dir = button === 64 ? -1 : 1;
+      if (desc) scrollDesc((v) => v + dir * 3);
+      else if (screen === "pick")
+        setPickIdx((i) => Math.max(0, Math.min(stackChoices.length - 1, i + dir)));
+      else if (screen !== "main") return;
+      else if (showStackSidebar && x < sidebarW)
+        setStackScroll((v) =>
+          clamp(Math.min(v ?? winStart, maxStackStart) + dir, 0, maxStackStart),
+        );
+      else if (changesOpen && x > RIGHT_DIVIDER_X)
+        setChangesScroll((v) =>
+          clamp(
+            Math.min(v ?? changeStart, maxChangesScroll) + dir * 3,
+            0,
+            maxChangesScroll,
+          ),
+        );
+      else setScrollFor((v) => v + dir * 3);
+      return;
+    }
     if (
       button === 0 &&
       screen === "main" &&
@@ -2831,6 +2889,20 @@ function App() {
           Math.round(((y - DIFF_TOP) / Math.max(1, diffViewH - 1)) * maxScroll),
         );
         return;
+      } else if (
+        changesOpen &&
+        x >= CHANGES_BAR_X &&
+        x <= cols - 2 &&
+        y >= CHANGES_TOP &&
+        y < CHANGES_TOP + changesViewH &&
+        maxChangesScroll > 0
+      ) {
+        setChangesScroll(() =>
+          Math.round(
+            ((y - CHANGES_TOP) / Math.max(1, changesViewH - 1)) * maxChangesScroll,
+          ),
+        );
+        return;
       }
     }
     if (button !== 0) return; // left click only
@@ -2846,7 +2918,6 @@ function App() {
     // the diff to that file's header, the way n/p walks them. A directory
     // lands on the first file under it, so no row is a dead click.
     if (screen === "main" && changesOpen && x > RIGHT_DIVIDER_X && x <= cols - 2) {
-      const CHANGES_TOP = 5; // body + border + title + totals
       if (y >= CHANGES_TOP && y < CHANGES_TOP + changesViewH) {
         const i = changeStart + (y - CHANGES_TOP);
         const row = changeRows[i];
@@ -3668,7 +3739,8 @@ function App() {
 
         {/* v toggles this read-only overview of the selected PR. It tracks the
             file currently at the top of the diff and windows long trees around
-            that row, making the panel useful without taking keyboard focus. */}
+            that row — or wherever the wheel last left them — making the panel
+            useful without taking keyboard focus. */}
         {changesOpen ? (
           <Box
             flexDirection="column"
@@ -4077,9 +4149,11 @@ counts: every motion takes a vim count — 10↓ scrolls ten diff lines, 4↑ sc
       row's own number on the cursor), so the count to type is on screen. A
       half-typed count shows in the footer; esc throws it away.
 mouse: click a PR to select it · click a row in the changes tree to jump the
-       diff to that file (a folder jumps to its first file) · wheel scrolls the
-       diff (over the sidebar it moves the selection) · click the scrollbar to
-       jump · drag either panel border to resize it
+       diff to that file (a folder jumps to its first file) · wheel scrolls
+       whatever it is over — the stack list, the diff, or the changes tree, each
+       on its own; a wheeled side panel follows the cursor / current file again
+       once that leaves its rows · click a scrollbar to jump · drag either panel
+       border to resize it
 
 / searches the diff the way vim does, with the pattern on the footer's command
 line: it matches as you type (the view walks to each hit and walks back as
