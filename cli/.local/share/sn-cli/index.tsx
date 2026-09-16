@@ -27,7 +27,7 @@ import React, {
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { creds, reply, saveToken, type ReplyTarget } from "./slack"
+import { creds, reply, saveToken, type ReplyTarget } from "@dotfiles/slack"
 
 const FEED = join(homedir(), ".local/state/slack-notifications.jsonl")
 const MAX_ROWS = 400

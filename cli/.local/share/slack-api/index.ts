@@ -1,8 +1,9 @@
-// Posting side of `sn` — everything the reply dialog needs to talk to Slack.
+// Talking to Slack as you — shared by `sn` (replying to a notification) and
+// `stacks` (stamping PRs at the bot in #bot-pr-stamper).
 //
-// There is no bot token here and nothing to configure: `sn` reuses the session
-// the Slack desktop app already holds, so a reply arrives as you, from the same
-// place the notification came from. Two halves have to line up:
+// There is no bot token here and nothing to configure: this reuses the session
+// the Slack desktop app already holds, so a message arrives as you, from the
+// same place the notification came from. Two halves have to line up:
 //
 //   cookie  `d=xoxd-…`, AES-128-CBC in Slack's Chromium cookie jar. The key is
 //           the Keychain item "Slack Safe Storage" (readable without a prompt,
@@ -14,7 +15,8 @@
 // only see fragments — so a token that works is cached in the Keychain and only
 // re-scanned when Slack rejects it. A freshly written token always lands in the
 // uncompressed write-ahead log first, which is exactly when the re-scan runs.
-// If both fail: `sn auth --token xoxc-…` stores one by hand.
+// If both fail: `sn auth --token xoxc-…` stores one by hand — one Keychain
+// entry, shared by every tool that imports this.
 
 import { Database } from "bun:sqlite"
 import { createDecipheriv, pbkdf2Sync } from "node:crypto"
@@ -190,4 +192,155 @@ export async function reply(target: ReplyTarget, text: string): Promise<void> {
   if (target.thread_ts) form.thread_ts = target.thread_ts
   const r = (await call("chat.postMessage", c, form)) as { ok?: boolean; error?: string }
   if (!r.ok) throw new Error(r.error ?? "chat.postMessage failed")
+}
+
+/** One API call with the resolved session, for callers outside this module. */
+export async function api(
+  method: string,
+  form: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  return (await call(method, await creds(), form)) as Record<string, unknown>
+}
+
+/** Post a top-level message to a channel. Returns its ts, so a caller can link it. */
+export async function post(channel: string, text: string): Promise<string> {
+  const r = (await api("chat.postMessage", { channel, text })) as {
+    ok?: boolean
+    error?: string
+    ts?: string
+  }
+  if (!r.ok) throw new Error(r.error ?? "chat.postMessage failed")
+  return r.ts ?? ""
+}
+
+// ---------------------------------------------------------------------------
+// Name -> id
+// ---------------------------------------------------------------------------
+//
+// This is an Enterprise Grid workspace, where a client token is refused
+// (`enterprise_is_restricted`) on the obvious lookups — conversations.list,
+// users.conversations, conversations.members. The two paths below are what the
+// desktop client itself uses, and they do answer. Both are slow enough that
+// callers should cache what they get back.
+
+/** Channel id for a `#name`, searched over the channels you are a member of. */
+export async function channelId(name: string): Promise<string> {
+  const want = name.replace(/^#/, "").toLowerCase()
+  const counts = (await api("client.counts", {})) as {
+    ok?: boolean
+    error?: string
+    channels?: Array<{ id: string }>
+  }
+  if (!counts.ok) throw new Error(`client.counts — ${counts.error ?? "failed"}`)
+  const ids = (counts.channels ?? []).map((c) => c.id)
+  if (ids.length === 0) throw new Error("you are not in any channels")
+
+  // genericInfo takes the "which of these have changed since" map the client
+  // syncs with; asking from 0 makes it describe all of them in one round trip.
+  const info = (await api("conversations.genericInfo", {
+    updated_channels: JSON.stringify(Object.fromEntries(ids.map((id) => [id, 0]))),
+  })) as {
+    ok?: boolean
+    error?: string
+    channels?: Array<{ id: string; name?: string }>
+  }
+  if (!info.ok)
+    throw new Error(`conversations.genericInfo — ${info.error ?? "failed"}`)
+  const hit = (info.channels ?? []).find((c) => (c.name ?? "").toLowerCase() === want)
+  if (!hit) throw new Error(`no channel named #${want} that you are a member of`)
+  return hit.id
+}
+
+/**
+ * User id for a display name, handle, or bot name ("Purple Rhino",
+ * "purple_rhino2"). users.list is the only member directory a client token
+ * gets, so this pages through it.
+ *
+ * Two apps can carry the same display name — a second install of the same bot,
+ * say — and picking either one would be a coin flip that pings something that
+ * never answers, so an ambiguous name is an error naming the candidates. Their
+ * handles are unique, so one of those is the way out.
+ */
+export async function userId(name: string): Promise<string> {
+  const want = name.trim().toLowerCase()
+  const hits: Array<{ id: string; handle: string }> = []
+  let cursor = ""
+  for (let page = 0; page < 20; page++) {
+    const r = (await api("users.list", {
+      limit: "1000",
+      ...(cursor ? { cursor } : {}),
+    })) as {
+      ok?: boolean
+      error?: string
+      members?: Array<{
+        id: string
+        name?: string
+        real_name?: string
+        deleted?: boolean
+        profile?: { display_name?: string; real_name?: string }
+      }>
+      response_metadata?: { next_cursor?: string }
+    }
+    if (!r.ok) throw new Error(`users.list — ${r.error ?? "failed"}`)
+    for (const u of r.members ?? []) {
+      if (u.deleted) continue
+      // An exact handle match is unambiguous by construction: take it and stop.
+      if ((u.name ?? "").toLowerCase() === want) return u.id
+      const names = [u.real_name, u.profile?.display_name, u.profile?.real_name]
+      if (names.some((n) => (n ?? "").trim().toLowerCase() === want))
+        hits.push({ id: u.id, handle: u.name ?? u.id })
+    }
+    cursor = r.response_metadata?.next_cursor ?? ""
+    if (!cursor) break
+  }
+  if (hits.length === 1) return hits[0].id
+  if (hits.length > 1)
+    throw new Error(
+      `"${name}" matches ${hits.length} accounts (${hits
+        .map((h) => `${h.handle} ${h.id}`)
+        .join(", ")}) — name one by its handle`,
+    )
+  throw new Error(`no Slack user named "${name}"`)
+}
+
+/**
+ * The same lookup, but asking the channel instead of the directory: who has
+ * posted there, then who has been @-mentioned there. A bot that already answers
+ * in this channel is the one meant by its name, whatever else in the workspace
+ * shares it.
+ */
+export async function userIdInChannel(
+  channel: string,
+  name: string,
+): Promise<string | null> {
+  const want = name.trim().toLowerCase()
+  const r = (await api("conversations.history", { channel, limit: "100" })) as {
+    ok?: boolean
+    messages?: Array<{ user?: string; bot_id?: string; text?: string }>
+  }
+  if (!r.ok) return null
+
+  const posted: string[] = []
+  const mentioned: string[] = []
+  for (const m of r.messages ?? []) {
+    if (m.bot_id && m.user && !posted.includes(m.user)) posted.push(m.user)
+    for (const [, id] of (m.text ?? "").matchAll(/<@(U[A-Z0-9]+)>/g))
+      if (!mentioned.includes(id)) mentioned.push(id)
+  }
+
+  for (const id of [...posted, ...mentioned.filter((i) => !posted.includes(i))]) {
+    const info = (await api("users.info", { user: id })) as {
+      ok?: boolean
+      user?: {
+        name?: string
+        real_name?: string
+        profile?: { display_name?: string; real_name?: string }
+      }
+    }
+    if (!info.ok || !info.user) continue
+    const u = info.user
+    const names = [u.real_name, u.name, u.profile?.display_name, u.profile?.real_name]
+    if (names.some((n) => (n ?? "").trim().toLowerCase() === want)) return id
+  }
+  return null
 }

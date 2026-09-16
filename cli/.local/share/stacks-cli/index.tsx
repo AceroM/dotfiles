@@ -27,6 +27,13 @@ import {
   type DiffSpan,
 } from "./delta-diff";
 import {
+  forgetStampTarget,
+  stampOne,
+  stampTarget,
+  stampText,
+  type StampTarget,
+} from "./stamp";
+import {
   findMatches,
   firstMatch,
   hOffsetFor,
@@ -100,9 +107,9 @@ type Screen = "loading" | "pick" | "main" | "fatal";
 // flip goes out to the PR's author and its reviewers, so none fires on a bare
 // keypress — each stages a PendingAction that a second key has to confirm.
 // rebase spawns a Claude agent in a new Herdr pane; merge, approve, status and
-// tags run gh directly.
+// tags run gh directly; stamp posts to Slack as you.
 type PendingAction = {
-  kind: "rebase" | "merge" | "approve" | "status" | "tags";
+  kind: "rebase" | "merge" | "approve" | "status" | "tags" | "stamp";
   prompt: string;
   exec: () => Promise<{ code: number; out: string; err: string }>;
   after?: () => void; // on success, once the footer has the result
@@ -157,6 +164,17 @@ type StatusDialog = {
   // while it is up. Only rows that actually have a PR get in here.
   targets: StackBranch[];
   idx: number;
+};
+
+// The stamp dialog (S): hand PRs to the review bot in Slack, one message per
+// PR. It batches over the marked rows the way the status dialog does, and takes
+// a line of text the way the comment box does — an optional note the bot reads
+// along with the request. The channel/bot lookup runs while you type.
+type StampDialog = {
+  targets: StackBranch[];
+  target: StampTarget | null;
+  error: string | null;
+  note: string;
 };
 
 type RepoLabel = { name: string; description: string | null };
@@ -1965,6 +1983,15 @@ function App() {
   // s: set the GitHub state of every marked row at once.
   const [status, setStatus] = useState<StatusDialog | null>(null);
   const [tags, setTags] = useState<TagDialog | null>(null);
+  // S: stamp every marked row at the Slack review bot.
+  const [stamp, setStamp] = useState<StampDialog | null>(null);
+  // The note is typed, so it lives in a ref for the same reason the comment
+  // draft does — a paste arrives faster than React re-renders.
+  const stampRef = useRef<StampDialog | null>(null);
+  const putStamp = useCallback((dialog: StampDialog | null) => {
+    stampRef.current = dialog;
+    setStamp(dialog);
+  }, []);
   // Search and toggle events can arrive before React renders the previous key.
   const tagsRef = useRef<TagDialog | null>(null);
   const putTags = useCallback((dialog: TagDialog | null) => {
@@ -2131,7 +2158,9 @@ function App() {
               ? "setting status…"
               : action.kind === "tags"
                 ? "adding tags…"
-                : "approving…",
+                : action.kind === "stamp"
+                  ? "stamping…"
+                  : "approving…",
       );
       action
         .exec()
@@ -2538,6 +2567,72 @@ function App() {
     });
   }, [putTags, refreshDetails]);
 
+  // ----- stamp ----------------------------------------------------------
+  // S: ask the Slack review bot to look at the marked PRs. Open the dialog
+  // first and resolve the channel/bot behind it, so a note can be typed while
+  // the lookup runs — the same shape as the comment box.
+  const openStamp = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null && b.prUrl);
+    if (targets.length === 0) {
+      setActionMsg({
+        text:
+          markedBranches.length > 1
+            ? "no PRs in the selection — nothing to stamp"
+            : "no PR for this branch yet — nothing to stamp",
+        color: "red",
+      });
+      return;
+    }
+    putStamp({ targets, target: null, error: null, note: "" });
+    stampTarget().then(
+      (target) => {
+        const d = stampRef.current;
+        if (d) putStamp({ ...d, target, error: null });
+      },
+      (e: Error) => {
+        const d = stampRef.current;
+        // A cached id that Slack no longer accepts would fail the same way
+        // every time, so drop the cache on the way out.
+        forgetStampTarget().catch(() => {});
+        if (d) putStamp({ ...d, error: e.message });
+      },
+    );
+  }, [markedBranches, putStamp]);
+
+  // One Slack message per PR, because the bot answers in a thread under each:
+  // a single message naming four PRs comes back as one tangled thread. They go
+  // out in stack order, and a failure part-way reports what did land.
+  const applyStamp = useCallback(() => {
+    const dialog = stampRef.current;
+    if (!dialog?.target) return;
+    const { target, note, targets } = dialog;
+    const nums = targets.map((b) => b.prNumber!);
+    putStamp(null);
+    setPending({
+      kind: "stamp",
+      prompt:
+        `Ask @${target.botName} to stamp ${nums.map((n) => `#${n}`).join(" ")} ` +
+        `in #${target.channelName}? ${nums.length} message${nums.length === 1 ? "" : "s"}, posted as you.`,
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        for (const b of targets) {
+          try {
+            await stampOne(target, b.prUrl!, note);
+            ok.push(b.prNumber!);
+          } catch (e) {
+            failed.push(`#${b.prNumber}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        const done = `${ok.length}/${nums.length} stamped in #${target.channelName}`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => setMarkAnchor(null),
+    });
+  }, [putStamp]);
+
   // ----- layout ---------------------------------------------------------
   // Three more columns than the rows strictly need: the relative-number gutter
   // costs two, and the titles were already tight at the old minimum.
@@ -2581,7 +2676,9 @@ function App() {
   const tagStart = tags ? Math.max(0, tags.idx - tagRows + 1) : 0;
   // Borders, target, search, chosen tags, hint, and the windowed label list.
   const tagsH = tags ? tagRows + 6 : 0;
-  const bodyH = Math.max(4, rows - 5 - commentH - statusH - tagsH);
+  // border rows plus destination / note / hint, the comment box's shape
+  const stampH = stamp ? 5 : 0;
+  const bodyH = Math.max(4, rows - 5 - commentH - statusH - tagsH - stampH);
   const diffViewH = Math.max(1, bodyH - 2); // pane title line + meta line
   const changesViewH = Math.max(1, bodyH - 4); // borders + title + totals
 
@@ -2806,7 +2903,7 @@ function App() {
       }
       return;
     }
-    if (comment || status || tagsRef.current) return; // a dialog owns the screen while it is open
+    if (comment || status || tagsRef.current || stampRef.current) return; // a dialog owns the screen while it is open
     // Geometry, 0-based like x/y and measured with injected clicks rather than
     // assumed: OpenTUI draws with a one-cell margin, so terminal row 0 and
     // column 0 stay blank, the header is row 1, the body starts at row 2
@@ -2995,6 +3092,22 @@ function App() {
       return;
     }
 
+    // The stamp dialog owns the keyboard the same way the comment box does:
+    // every printable key goes into the note, so nothing falls through.
+    const stampDraft = stampRef.current;
+    if (stampDraft) {
+      const editNote = (note: string) => putStamp({ ...stampDraft, note });
+      if (key.escape) putStamp(null);
+      else if (key.return) applyStamp();
+      else if (key.backspace || key.delete) editNote(stampDraft.note.slice(0, -1));
+      else if (key.ctrl && input === "u") editNote("");
+      else if (key.ctrl && input === "w")
+        editNote(stampDraft.note.replace(/\s*\S+\s*$/, ""));
+      else if (input && !key.ctrl && !key.meta)
+        editNote(stampDraft.note + input.replace(/\s+/g, " "));
+      return;
+    }
+
     const tagDraft = tagsRef.current;
     if (tagDraft) {
       const matches = matchingLabels(tagDraft);
@@ -3153,6 +3266,7 @@ function App() {
         }
       } else if (input === "c") openComment();
       else if (input === "s") openStatus();
+      else if (input === "S") openStamp();
       else if (input === "t") openTags();
       else if (input === "o")
         Bun.spawn(["gh", "pr", "view", String(desc.prNumber), "--web"], {
@@ -3277,6 +3391,7 @@ function App() {
     } else if (input === "p")
       setScrollFor((v) => nthMark(fileMarks, v, N, -1, 0));
     else if (input === "s") openStatus();
+    else if (input === "S") openStamp();
     else if (input === "t") openTags();
     else if (input === " " && sel) openDesc(sel);
     else if (input === "z" && sel) openZed(sel);
@@ -3414,6 +3529,9 @@ function App() {
   const draft = comment?.text ?? "";
   const shownDraft =
     draft.length > inputW ? `…${draft.slice(-(inputW - 1))}` : draft;
+  const stampNote = stamp?.note ?? "";
+  const shownNote =
+    stampNote.length > inputW ? `…${stampNote.slice(-(inputW - 1))}` : stampNote;
 
   return (
     <Box flexDirection="column" width={cols} height={rows} overflow="hidden">
@@ -3927,6 +4045,57 @@ function App() {
         </Box>
       ) : null}
 
+      {/* stamp dialog: the marked PRs, the Slack channel they are headed for,
+          and an optional note. enter stages the usual y-confirm. */}
+      {stamp ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={stamp.error ? "red" : "magenta"}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color="magenta">
+              stamp
+            </Text>
+            <Text dimColor>
+              {" · "}
+              {stamp.targets.length} PR{stamp.targets.length === 1 ? "" : "s"}
+              {" · "}
+              {stamp.targets.map((b) => `#${b.prNumber}`).join(" ")}
+              {" → "}
+            </Text>
+            {stamp.target ? (
+              <Text>
+                @{stamp.target.botName}
+                <Text dimColor>
+                  {" · #"}
+                  {stamp.target.channelName}
+                </Text>
+              </Text>
+            ) : stamp.error ? (
+              <Text color="red">{stamp.error}</Text>
+            ) : (
+              <Text dimColor>finding the channel…</Text>
+            )}
+          </Text>
+          <Text wrap="truncate-end">
+            <Text color="magenta">{"❯ "}</Text>
+            <Text>{shownNote}</Text>
+            <Text inverse>{" "}</Text>
+            {stampNote ? null : (
+              <Text dimColor> a note for the bot, or nothing</Text>
+            )}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {stamp.target
+              ? "enter stamp · esc cancel · ctrl+w word · ctrl+u clear"
+              : "esc cancel"}
+          </Text>
+        </Box>
+      ) : null}
+
       {/* comment dialog: esc closes, enter hands the text to the ticket's agent */}
       {comment ? (
         <Box
@@ -3987,7 +4156,9 @@ function App() {
                   ? "red"
                   : pending.kind === "approve"
                     ? "green"
-                    : pending.kind === "status" || pending.kind === "tags"
+                    : pending.kind === "status" ||
+                        pending.kind === "tags" ||
+                        pending.kind === "stamp"
                       ? "magenta"
                       : "yellow"
               }
@@ -4033,7 +4204,7 @@ function App() {
                 {countShown}{" "}
               </Text>
             ) : null}
-            t tags · s status · ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c comment · o open · z zed · r refresh · esc close
+            t tags · s status · S stamp · ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c comment · o open · z zed · r refresh · esc close
           </Text>
         ) : (
           <Text dimColor wrap="truncate-end">
@@ -4055,7 +4226,7 @@ function App() {
                 <Text dimColor> · </Text>
               </>
             ) : null}
-            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · counts work on arrows/motions · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
+            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -4128,16 +4299,73 @@ if (argv.includes("--discussion")) {
   process.exit(0);
 }
 
+if (argv.includes("--stamp")) {
+  // headless S: stamp the given PRs from the shell. Without --send it resolves
+  // the channel and the bot and prints the exact messages, which is how the
+  // whole path gets exercised without posting anything.
+  const send = argv.includes("--send");
+  const note = argv.includes("--note") ? (argv[argv.indexOf("--note") + 1] ?? "") : "";
+  const refs = argv
+    .slice(argv.indexOf("--stamp") + 1)
+    .filter((a) => !a.startsWith("--") && a !== note);
+  if (refs.length === 0) {
+    console.error(
+      "usage: stacks --stamp <pr-number|url>… [--note TEXT] [--send]",
+    );
+    process.exit(2);
+  }
+  let target: StampTarget;
+  try {
+    target = await stampTarget();
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
+  // A bare number needs the repo's own URL; anything URL-shaped is taken as is.
+  const urls: string[] = [];
+  for (const ref of refs) {
+    if (/^https?:/.test(ref)) {
+      urls.push(ref);
+      continue;
+    }
+    const r = await run(["gh", "pr", "view", ref, "--json", "url", "-q", ".url"]);
+    if (r.code !== 0) {
+      console.error(`#${ref}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+      process.exit(1);
+    }
+    urls.push(r.out.trim());
+  }
+  console.log(`#${target.channelName} (${target.channel}) · @${target.botName} (${target.bot})`);
+  let failed = 0;
+  for (const url of urls) {
+    const text = stampText(target, url, note);
+    if (!send) {
+      console.log(`would post: ${text}`);
+      continue;
+    }
+    try {
+      const ts = await stampOne(target, url, note);
+      console.log(`posted ${ts}: ${text}`);
+    } catch (e) {
+      failed++;
+      console.error(`failed: ${text} — ${(e as Error).message}`);
+    }
+  }
+  process.exit(failed === 0 ? 0 : 1);
+}
+
 if (argv.includes("-h") || argv.includes("--help")) {
   console.log(`stacks — browse a gh stack: PRs on the left, gh pr diff on the right
 
 usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
+       stacks --stamp <pr-number|url>… [--note TEXT] [--send]
 
 keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection ·
       V toggle stack panel · v toggle changed-files tree · space PR description +
       comments · l/h (or ←→) expand/collapse a PR's CI checks · f/b page · d/u
       half page · g/G top/bottom · / ? search the diff · n/N next/prev match ·
-      n/p next/prev file (with no search running) · s set PR status · t add tags ·
+      n/p next/prev file (with no search running) · s set PR status · S stamp
+      PRs at the Slack review bot · t add tags ·
       a approve · A approve every open PR in the stack · z check out + open in
       Zed · c comment to the ticket's agent · o open in browser · R rebase via
       a claude agent · M squash-merge stack · r refresh · q quit
@@ -4214,6 +4442,22 @@ lands — so a batch GitHub half-refuses still shows what actually changed and
 keeps the selection for a retry. Rows with no PR are dropped before the dialog
 opens, so its count is the count it will act on.
 
+S stamps the marked PRs — or just the selected one — at the review bot in
+Slack, which is the keyboard version of typing "@Purple Rhino stamp this <url>"
+into #bot-pr-stamper by hand. The dialog names the PRs and the channel they are
+headed for, takes an optional note the bot reads with the request, and enter
+stages the usual y-confirm. It posts one message per PR, in stack order,
+because the bot answers in a thread under each one — 3J, S, y asks for four
+reviews and gets four threads back. A batch that half-fails reports which PRs
+did land and keeps the selection for a retry.
+  The messages go out as you, over the session the Slack desktop app already
+holds (the same one \`sn\` replies with), so there is no token to configure — if
+Slack has rotated it, \`sn auth --token xoxc-…\`. The channel and the bot are
+looked up by name and cached in ~/.local/state/stacks-stamp.json;
+STACKS_STAMP_CHANNEL and STACKS_STAMP_BOT point them somewhere else. From the
+shell, \`stacks --stamp 16961 --send\` does the same thing, and without --send it
+prints the messages it would post.
+
 t opens the repository's GitHub labels as a searchable tag picker for the
 marked PRs, or just the current PR when nothing is marked. Type to filter by
 name or description, use arrows to move, and tab to toggle multiple tags.
@@ -4245,7 +4489,7 @@ sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the sam
       the ref fetch + drift detection run behind it ("⟳ checking sync…" in the
       header until they land), so the answers still reflect the remote.
 
-a, A, s, t, R and M all stage a confirmation first and only run on "y". a submits
+a, A, s, t, S, R and M all stage a confirmation first and only run on "y". a submits
 \`gh pr review <n> --approve\` for the selected PR (from the main view or the
 description dialog) and refreshes its badge; A does the same for every PR in
 the stack that is still open, in order, and reports any that GitHub refused

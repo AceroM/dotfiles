@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@dotfiles/opentui-cli": "file:../opentui-cli",
+    "@dotfiles/slack": "file:../slack-api",
     "react": "^19.2.0"
   },
   "devDependencies": {
