@@ -24,7 +24,18 @@ import {
   markDeltaFileHeaders,
   parseAnsiDiff,
   type DiffLine,
+  type DiffSpan,
 } from "./delta-diff";
+import {
+  findMatches,
+  firstMatch,
+  hOffsetFor,
+  MAX_HITS,
+  paintSpans,
+  sliceSpans,
+  stepMatch,
+  type SearchHit,
+} from "./search";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -156,6 +167,17 @@ type TagDialog = {
   query: string;
   idx: number;
   chosen: Set<string>;
+};
+
+// `/` over the diff. The same shape carries the pattern being typed and the
+// one that has been committed: `origin` is only set while typing, and is the
+// scroll esc puts back, the way leaving vim's command line without a match
+// leaves the cursor where it started.
+type DiffSearch = {
+  query: string;
+  dir: 1 | -1;
+  idx: number; // into the hit list; -1 when the pattern matches nothing
+  origin?: number;
 };
 
 function matchingLabels(dialog: TagDialog): RepoLabel[] {
@@ -990,6 +1012,12 @@ const DIFF_ADD_COLOR = "#98c379";
 const DIFF_DELETE_COLOR = "#e06c75";
 const DIFF_META_COLOR = "#74ade8";
 const DIFF_MUTED_COLOR = "#636d83";
+// vim's Search / CurSearch, in the same spirit: every hit takes a dark amber
+// background and keeps delta's own foreground (so a hit in an added line still
+// reads as added), while the one n/N is sitting on inverts to bright amber.
+const SEARCH_BG = "#5f5000";
+const CUR_SEARCH_BG = "#ffaf00";
+const CUR_SEARCH_FG = "#101010";
 const MIN_STACK_PANEL_W = 24;
 const MIN_CHANGES_PANEL_W = 22;
 const MIN_DIFF_PANEL_W = 24;
@@ -1977,11 +2005,30 @@ function App() {
   const draggingPanelRef = useRef<"left" | "right" | null>(null);
   const [diffLines, setDiffLines] = useState<DiffLine[] | null>(null);
   const [scroll, setScroll] = useState(0);
+  // `/` searches the diff. The committed pattern is what n/N walk and what the
+  // pane highlights; the draft is the pattern still being typed in the footer.
+  // Both live in refs as well, because a fast-typed pattern (or a paste) can
+  // outrun a React render the same way the comment box and tag filter can.
+  const [search, setSearch] = useState<DiffSearch | null>(null);
+  const searchRef = useRef<DiffSearch | null>(null);
+  const putSearch = useCallback((s: DiffSearch | null) => {
+    searchRef.current = s;
+    setSearch(s);
+  }, []);
+  const [searchDraft, setSearchDraft] = useState<DiffSearch | null>(null);
+  const searchDraftRef = useRef<DiffSearch | null>(null);
+  const putSearchDraft = useCallback((s: DiffSearch | null) => {
+    searchDraftRef.current = s;
+    setSearchDraft(s);
+  }, []);
 
   const diffCache = useRef(new Map<number, DiffLine[]>());
   // in-flight diff fetches, so a prefetch and a selection never fetch twice
   const diffPromises = useRef(new Map<number, Promise<DiffLine[]>>());
   const scrollMemo = useRef(new Map<number, number>());
+  // n/N read the scroll position to decide whether the last hit is still on
+  // screen, and two n presses can land between renders — keep it in a ref.
+  const scrollRef = useRef(0);
   const diffSeq = useRef(0);
   const syncSeq = useRef(0);
 
@@ -2048,6 +2095,19 @@ function App() {
   }, [openStack]);
 
   useEffect(load, [load]);
+
+  useEffect(() => {
+    scrollRef.current = scroll;
+  }, [scroll]);
+
+  // A search survives switching PRs, but the position in it does not: hit 7 of
+  // one diff means nothing in another, so drop the cursor and let the next n
+  // pick up from whatever is on screen rather than yanking the pane to a hit
+  // in a file you have not looked at yet. The highlight stays.
+  useEffect(() => {
+    const running = searchRef.current;
+    if (running && running.idx !== -1) putSearch({ ...running, idx: -1 });
+  }, [diffLines, putSearch]);
 
   // Run a confirmed action. A merge finishes here, so reload after it; a
   // rebase only *starts* here (the agent in the new pane does the work), so
@@ -2594,10 +2654,58 @@ function App() {
       setScroll((v) => {
         const next = Math.max(0, Math.min(maxScroll, updater(v)));
         if (sel?.prNumber != null) scrollMemo.current.set(sel.prNumber, next);
+        scrollRef.current = next;
         return next;
       });
     },
     [maxScroll, sel],
+  );
+
+  // ----- / search over the diff -----------------------------------------
+  // The pattern on screen is the draft while one is being typed, so the
+  // highlight and the view follow every keystroke, and the committed one
+  // otherwise. Hits are every occurrence, which is what n/N walk.
+  const activeSearch = searchDraft ?? search;
+  const searchHits = useMemo(
+    () => findMatches(diffLines, activeSearch?.query ?? ""),
+    [diffLines, activeSearch?.query],
+  );
+  const hitIdx =
+    activeSearch && activeSearch.idx >= 0 && activeSearch.idx < searchHits.length
+      ? activeSearch.idx
+      : -1;
+  const curHit = hitIdx >= 0 ? searchHits[hitIdx] : undefined;
+  const hitsByLine = useMemo(() => {
+    const byLine = new Map<number, SearchHit[]>();
+    for (const hit of searchHits) {
+      const row = byLine.get(hit.line);
+      if (row) row.push(hit);
+      else byLine.set(hit.line, [hit]);
+    }
+    return byLine;
+  }, [searchHits]);
+  // delta runs with --width variable, so a long line runs off the pane. The
+  // whole pane slides sideways together (rather than nudging the one row) so
+  // the code stays column-aligned, and only ever while a hit needs it.
+  const diffTextW = Math.max(
+    10,
+    cols - (showStackSidebar ? sidebarW : 0) - (changesOpen ? changesW : 0) - 2,
+  );
+  const hOff = hOffsetFor(curHit, diffTextW);
+
+  // Put a hit on screen without yanking the view around: one already inside
+  // the viewport with a row of margin stays exactly where it is, anything else
+  // lands a third of the way down so there is context above it.
+  const revealMatch = useCallback(
+    (hit: SearchHit | undefined) => {
+      if (!hit) return;
+      setScrollFor((v) =>
+        hit.line >= v && hit.line <= v + diffViewH - 2
+          ? v
+          : hit.line - Math.floor(diffViewH / 3),
+      );
+    },
+    [setScrollFor, diffViewH],
   );
 
   // The description dialog replaces the body: border rows plus its two header
@@ -2734,6 +2842,29 @@ function App() {
       if (y >= 4 && i < stackChoices.length) openStack(stackChoices[i]);
       return;
     }
+    // The changes tree doubles as a table of contents: clicking a row scrolls
+    // the diff to that file's header, the way n/p walks them. A directory
+    // lands on the first file under it, so no row is a dead click.
+    if (screen === "main" && changesOpen && x > RIGHT_DIVIDER_X && x <= cols - 2) {
+      const CHANGES_TOP = 5; // body + border + title + totals
+      if (y >= CHANGES_TOP && y < CHANGES_TOP + changesViewH) {
+        const i = changeStart + (y - CHANGES_TOP);
+        const row = changeRows[i];
+        const file =
+          row?.kind === "file"
+            ? row
+            : row
+              ? changeRows
+                  .slice(i + 1)
+                  .find((r) => r.kind === "file" && r.path.startsWith(row.path))
+              : undefined;
+        const mark = file
+          ? fileMarks.find((m) => diffLines?.[m]?.filePath === file.path)
+          : undefined;
+        if (mark != null) setScrollFor(() => mark);
+      }
+      return;
+    }
     if (screen !== "main" || !showStackSidebar || x >= sidebarW) return;
     // blank row, header, border, trunk row, plus the "↑ N more" line when windowed
     const top = 4 + (winStart > 0 ? 1 : 0);
@@ -2815,6 +2946,53 @@ function App() {
       else if (key.ctrl && input === "w") editQuery(tagDraft.query.replace(/\s*\S+\s*$/, ""));
       else if (input && !key.ctrl && !key.meta)
         editQuery(tagDraft.query + input.replace(/\s+/g, " "));
+      return;
+    }
+
+    // `/` opens vim's command line in the footer, and it owns the keyboard
+    // while it is up: every printable key is pattern text — digits included,
+    // so a count can't steal them — enter commits the pattern, and esc puts
+    // the view back where the search started.
+    const typing = searchDraftRef.current;
+    if (typing) {
+      const origin = typing.origin ?? 0;
+      const abort = () => {
+        putSearchDraft(null);
+        setScrollFor(() => origin);
+      };
+      // Incremental search: re-run the pattern from where / was pressed on
+      // every keystroke, so the view walks forward as the pattern narrows and
+      // walks back when characters come off it.
+      const retype = (query: string) => {
+        const hits = findMatches(diffLines, query);
+        const idx = query ? firstMatch(hits, origin, typing.dir) : -1;
+        putSearchDraft({ ...typing, query, idx });
+        if (idx >= 0) revealMatch(hits[idx]);
+        else setScrollFor(() => origin);
+      };
+      if (key.escape) abort();
+      else if (key.return) {
+        putSearchDraft(null);
+        if (typing.query)
+          putSearch({ query: typing.query, dir: typing.dir, idx: typing.idx });
+        else if (searchRef.current) {
+          // A bare / repeats the last pattern, the way it does in vim.
+          const last = searchRef.current;
+          const hits = findMatches(diffLines, last.query);
+          const idx = firstMatch(hits, origin, typing.dir);
+          putSearch({ ...last, dir: typing.dir, idx });
+          revealMatch(hits[idx]);
+        }
+      } else if (key.backspace || key.delete) {
+        // Backspacing past the / leaves the command line, as vim does.
+        if (typing.query) retype(typing.query.slice(0, -1));
+        else abort();
+      } else if (key.ctrl && input === "u") retype("");
+      else if (key.ctrl && input === "w")
+        retype(typing.query.replace(/\s*\S+\s*$/, ""));
+      else if (input && !key.ctrl && !key.meta)
+        // a paste arrives as one chunk; flatten it onto the single pattern line
+        retype(typing.query + input.replace(/\s+/g, " "));
       return;
     }
 
@@ -2918,11 +3096,15 @@ function App() {
     }
 
     if (input === "q" || key.escape) {
-      // esc peels one layer at a time — a half-typed count, then the J/K
-      // selection, then the app — so it never quits out from under a selection
-      // you were about to act on. q always quits.
+      // esc peels one layer at a time — a half-typed count, then the search,
+      // then the J/K selection, then the app — so it never quits out from
+      // under a selection you were about to act on. q always quits.
       if (key.escape) {
         if (rawCount !== null) return;
+        if (searchRef.current) {
+          putSearch(null);
+          return;
+        }
         if (markAnchor !== null) {
           setMarkAnchor(null);
           return;
@@ -2999,8 +3181,30 @@ function App() {
         setMarkAnchor(null);
         setSelected(Math.max(0, Math.min(entries.length - 1, N - 1)));
       } else setScrollFor(() => maxScroll);
-    } else if (input === "n") setScrollFor((v) => nthMark(fileMarks, v, N, 1, v));
-    else if (input === "p") setScrollFor((v) => nthMark(fileMarks, v, N, -1, 0));
+    } else if (input === "/" || input === "?") {
+      // vim's command line: / searches forward, ? backward. The scroll we
+      // start from is remembered so esc can put it back.
+      putSearchDraft({
+        query: "",
+        dir: input === "/" ? 1 : -1,
+        idx: -1,
+        origin: scrollRef.current,
+      });
+    } else if (input === "n" || input === "N") {
+      // A committed search lends n/N to its hits, the way vim does. With no
+      // search running — or a pattern that matches nothing in this PR's diff —
+      // n stays the next-file motion and N does nothing.
+      const running = searchRef.current;
+      const hits = running ? findMatches(diffLines, running.query) : [];
+      if (running && hits.length > 0) {
+        const dir = (input === "n" ? running.dir : -running.dir) as 1 | -1;
+        const idx = stepMatch(hits, running.idx, scrollRef.current, diffViewH, dir, N);
+        putSearch({ ...running, idx });
+        revealMatch(hits[idx]);
+      } else if (input === "n")
+        setScrollFor((v) => nthMark(fileMarks, v, N, 1, v));
+    } else if (input === "p")
+      setScrollFor((v) => nthMark(fileMarks, v, N, -1, 0));
     else if (input === "s") openStatus();
     else if (input === "t") openTags();
     else if (input === " " && sel) openDesc(sel);
@@ -3119,6 +3323,19 @@ function App() {
   const descPct =
     descMax === 0 ? 100 : Math.round((Math.min(desc?.scroll ?? 0, descMax) / descMax) * 100);
   const visible = (diffLines ?? []).slice(scroll, scroll + diffViewH);
+
+  // A pathological pattern stops collecting at the cap; say so rather than
+  // reporting a total that is not the total.
+  const hitCount = `${searchHits.length}${searchHits.length >= MAX_HITS ? "+" : ""}`;
+  // "3/17" once n/N have a hit under the cursor, a plain "17 matches" before
+  // that — a freshly committed pattern, or one a PR switch dropped the cursor
+  // out of, has hits but nothing you are standing on yet.
+  const hitLabel =
+    searchHits.length === 0
+      ? "no matches"
+      : hitIdx >= 0
+        ? `${hitIdx + 1}/${hitCount}`
+        : `${hitCount} matches`;
 
   // The Text shim truncates at the end, so window the draft by hand and keep
   // the tail — where the cursor is — visible on a long comment.
@@ -3362,6 +3579,7 @@ function App() {
             ) : null}
             {" · "}
             {pct}%
+            {hOff > 0 ? <Text color="yellow"> · ↔{hOff}</Text> : null}
             {selDetails?.labels.length ? ` · tags: ${selDetails.labels.join(", ")}` : ""}
             {sel.needsRebase && !sel.isMerged ? (
               <Text color="yellow"> · ⚠ behind {baseBranch}</Text>
@@ -3377,10 +3595,40 @@ function App() {
             <Text dimColor>loading diff…</Text>
           ) : (
             visible.map((line, i) => {
-              const s = line.spans.length > 0 ? {} : diffLineStyle(line.text);
+              const row = scroll + i;
+              const marks = hitsByLine.get(row);
+              // A search paints over delta's own colors and can slide the pane
+              // sideways, so a row carrying hits — or any row while the pane is
+              // shifted — renders from spans even when delta gave us none.
+              const styled = line.spans.length > 0 || marks !== undefined || hOff > 0;
+              const s = styled ? {} : diffLineStyle(line.text);
+              let spans: DiffSpan[] = !styled
+                ? []
+                : line.spans.length > 0
+                  ? line.spans
+                  : [{ text: line.text, ...diffLineStyle(line.text) }];
+              if (marks)
+                spans = paintSpans(
+                  spans,
+                  marks.map((hit) => ({
+                    start: hit.start,
+                    end: hit.end,
+                    style:
+                      hit === curHit
+                        ? {
+                            backgroundColor: CUR_SEARCH_BG,
+                            color: CUR_SEARCH_FG,
+                            bold: true,
+                            dim: false,
+                            inverse: false,
+                          }
+                        : { backgroundColor: SEARCH_BG, dim: false },
+                  })),
+                );
+              if (hOff > 0) spans = sliceSpans(spans, hOff);
               return (
                 <Box
-                  key={scroll + i}
+                  key={row}
                   width="100%"
                   flexDirection="row"
                   flexShrink={0}
@@ -3388,22 +3636,24 @@ function App() {
                 >
                   <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
                     <Text color={s.color} bold={s.bold} dimColor={s.dim} wrap="truncate-end">
-                      {line.spans.length > 0
-                        ? line.spans.map((span, si) => (
-                            <Text
-                              key={si}
-                              color={span.color}
-                              backgroundColor={span.backgroundColor}
-                              bold={span.bold}
-                              dimColor={span.dim}
-                              italic={span.italic}
-                              underline={span.underline}
-                              strikethrough={span.strike}
-                              inverse={span.inverse}
-                            >
-                              {span.text}
-                            </Text>
-                          ))
+                      {styled
+                        ? spans.length > 0
+                          ? spans.map((span, si) => (
+                              <Text
+                                key={si}
+                                color={span.color}
+                                backgroundColor={span.backgroundColor}
+                                bold={span.bold}
+                                dimColor={span.dim}
+                                italic={span.italic}
+                                underline={span.underline}
+                                strikethrough={span.strike}
+                                inverse={span.inverse}
+                              >
+                                {span.text}
+                              </Text>
+                            ))
+                          : " "
                         : line.text.length
                           ? line.text
                           : " "}
@@ -3687,6 +3937,23 @@ function App() {
             {actionMsg.text}
             <Text dimColor> · any key to dismiss</Text>
           </Text>
+        ) : searchDraft ? (
+          <Text wrap="truncate-end">
+            <Text bold color="cyan">
+              {searchDraft.dir === 1 ? "/" : "?"}
+            </Text>
+            <Text>{searchDraft.query}</Text>
+            <Text inverse> </Text>
+            {searchDraft.query ? (
+              <Text color={searchHits.length > 0 ? "yellow" : "red"}>
+                {"  "}
+                {hitLabel}
+              </Text>
+            ) : null}
+            <Text dimColor>
+              {"  · enter accept · esc cancel · ctrl+w word · ctrl+u clear"}
+            </Text>
+          </Text>
         ) : desc ? (
           <Text dimColor wrap="truncate-end">
             {countShown !== null ? (
@@ -3703,7 +3970,20 @@ function App() {
                 {countShown}{" "}
               </Text>
             ) : null}
-            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · t tags · s status · counts work on arrows/motions · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · n/p file · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {markAnchor !== null ? "esc clear" : "q quit"}
+            {search ? (
+              <>
+                <Text bold color="cyan">
+                  {search.dir === 1 ? "/" : "?"}
+                  {search.query}
+                </Text>
+                <Text color={searchHits.length > 0 ? "yellow" : "red"}>
+                  {" "}
+                  {hitLabel}
+                </Text>
+                <Text dimColor> · </Text>
+              </>
+            ) : null}
+            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · counts work on arrows/motions · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -3784,7 +4064,8 @@ usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
 keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection ·
       V toggle stack panel · v toggle changed-files tree · space PR description +
       comments · l/h (or ←→) expand/collapse a PR's CI checks · f/b page · d/u
-      half page · g/G top/bottom · n/p next/prev file · s set PR status · t add tags ·
+      half page · g/G top/bottom · / ? search the diff · n/N next/prev match ·
+      n/p next/prev file (with no search running) · s set PR status · t add tags ·
       a approve · A approve every open PR in the stack · z check out + open in
       Zed · c comment to the ticket's agent · o open in browser · R rebase via
       a claude agent · M squash-merge stack · r refresh · q quit
@@ -3795,9 +4076,30 @@ counts: every motion takes a vim count — 10↓ scrolls ten diff lines, 4↑ sc
       hybrid relative-number column (distance from the cursor on every row, the
       row's own number on the cursor), so the count to type is on screen. A
       half-typed count shows in the footer; esc throws it away.
-mouse: click a PR to select it · wheel scrolls the diff (over the sidebar it
-       moves the selection) · click the scrollbar to jump · drag either panel
-       border to resize it
+mouse: click a PR to select it · click a row in the changes tree to jump the
+       diff to that file (a folder jumps to its first file) · wheel scrolls the
+       diff (over the sidebar it moves the selection) · click the scrollbar to
+       jump · drag either panel border to resize it
+
+/ searches the diff the way vim does, with the pattern on the footer's command
+line: it matches as you type (the view walks to each hit and walks back as
+characters come off the pattern), enter accepts the position, and esc puts the
+view back where you pressed /. ? searches backwards. ctrl+w drops a word,
+ctrl+u clears the pattern, and backspacing past the / leaves the command line.
+The pattern is a regex when it compiles as one and the literal text when it
+does not, so a half-typed \`(\` searches for a paren instead of erroring; case is
+smart, so \`todo\` also finds TODO while \`TODO\` only finds TODO.
+  Once a pattern is committed, n/N walk its matches — every occurrence, so
+three hits on one line are three stops — and take a count like every other
+motion (3n). Matches highlight in amber across the whole diff with the one
+you are on inverted, the footer shows which hit of how many, and a hit that
+has scrolled off screen re-anchors the next n on what is actually in view
+rather than resuming from somewhere you can no longer see. esc clears the
+search, which gives n/p back to the file motions; a bare / (enter on an empty
+pattern) repeats the last one. A search survives switching PRs, so the same
+pattern carries down the stack. A hit that sits past the right edge of the
+pane slides the whole pane sideways to reach it (the meta line shows ↔N) since
+delta lays the diff out at its natural width.
 
 space opens the selected PR's description with its whole conversation under
 it: issue comments, reviews, and inline review threads (where Greptile leaves
@@ -3855,6 +4157,8 @@ V collapses/restores the stack panel on the left. v toggles the right panel,
 which starts open for the selected PR. It groups
 changed files into a compact directory tree, shows per-folder and per-file
 addition/deletion totals, and follows the file currently visible in the diff.
+Clicking a row scrolls the diff to that file, so the tree is also a table of
+contents; clicking a folder lands on the first file under it.
 On narrow terminals it temporarily replaces the stack sidebar so the diff
 keeps enough width; j/k still switches PRs and v restores the normal layout.
 Drag either panel's border to resize it; the center diff keeps a readable
