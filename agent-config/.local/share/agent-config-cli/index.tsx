@@ -18,13 +18,14 @@ import {
   DEFAULT_CONFIG,
   MODELS,
   PROFILE_NAMES,
-  REASONING_LEVELS,
   codexArgs,
   commandPreview,
   configPath,
   isProfileName,
   loadConfig,
+  normalizeReasoningForModel,
   normalizeConfig,
+  reasoningLevelsFor,
   resetProfile,
   saveConfig,
   type AgentConfig,
@@ -195,8 +196,16 @@ function App() {
       const selectedField = EDITABLE_FIELDS[fieldRef.current];
       if (selectedField === "model") {
         next.model = cycle(MODELS, next.model, direction);
+        next.reasoning = normalizeReasoningForModel(
+          next.model,
+          next.reasoning,
+        );
       } else if (selectedField === "reasoning") {
-        next.reasoning = cycle(REASONING_LEVELS, next.reasoning, direction);
+        next.reasoning = cycle(
+          reasoningLevelsFor(next.model),
+          next.reasoning,
+          direction,
+        );
       } else {
         next.access = cycle(ACCESS_MODES, next.access, direction);
       }

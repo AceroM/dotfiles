@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_CONFIG,
+  MODELS,
+  REASONING_LEVELS,
   codexArgs,
   loadConfig,
   normalizeConfig,
+  reasoningLevelsFor,
   saveConfig,
 } from "./config";
 
@@ -38,7 +41,11 @@ describe("agent config", () => {
     const config = normalizeConfig({
       profiles: {
         cx: { model: "gpt-5.6-luna", reasoning: "low", access: "standard" },
-        cxl: { model: "made-up-model", reasoning: "max", access: "root" },
+        cxl: {
+          model: "made-up-model",
+          reasoning: "overdrive",
+          access: "root",
+        },
       },
     });
 
@@ -48,6 +55,50 @@ describe("agent config", () => {
       access: "standard",
     });
     expect(config.profiles.cxl).toEqual(DEFAULT_CONFIG.profiles.cxl);
+  });
+
+  test("offers the current general-purpose Codex models and efforts", () => {
+    expect(MODELS).toEqual([
+      "gpt-6-astra",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ]);
+    expect(REASONING_LEVELS).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
+  });
+
+  test("limits reasoning choices to those supported by each model", () => {
+    expect(reasoningLevelsFor("gpt-6-astra")).toContain("ultra");
+    expect(reasoningLevelsFor("gpt-5.6-luna")).toContain("max");
+    expect(reasoningLevelsFor("gpt-5.6-luna")).not.toContain("ultra");
+    expect(reasoningLevelsFor("gpt-5.5")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+  });
+
+  test("clamps a saved unsupported effort to the model maximum", () => {
+    const config = normalizeConfig({
+      profiles: {
+        cx: { model: "gpt-5.5", reasoning: "ultra", access: "standard" },
+      },
+    });
+
+    expect(config.profiles.cx).toMatchObject({
+      model: "gpt-5.5",
+      reasoning: "xhigh",
+      access: "standard",
+    });
   });
 
   test("writes and reloads config", async () => {
