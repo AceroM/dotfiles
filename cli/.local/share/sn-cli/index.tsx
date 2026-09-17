@@ -11,6 +11,7 @@
 //   enter or l     open the message in Slack
 //   c              reply from here, as you (see slack.ts)
 //   r              same, but threaded onto the message
+//   g              search Tenor and send a gif back (see gif.ts)
 //   q / esc        quit
 
 import React, {
@@ -28,9 +29,10 @@ import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { creds, reply, saveToken, type ReplyTarget } from "@dotfiles/slack"
+import { bestUrl, claudePick, search, type Gif } from "./gif"
 
 const FEED = join(homedir(), ".local/state/slack-notifications.jsonl")
-const MAX_ROWS = 400
+const MAX_ROWS = 500
 const ACCENT = "#74ade8" // Zed One Dark accent
 const DANGER = "#e06c75"
 const SELECTED_BG = "#3a4b5f" // Zed One Dark selection, composited over its background
@@ -55,6 +57,22 @@ interface Draft {
   where: string // header label: the channel/sender, plus "· thread" when threaded
   text: string
   sending: boolean
+  error: string | null
+}
+
+// A gif being found, then sent. It walks one way through its phases — you type
+// a query, Tenor answers, you pick — and the phase is what the keyboard means
+// at any moment: printable keys are the query while typing, and the picker's
+// controls once there is something to pick.
+interface GifPick {
+  run: number // bumped per search/send, so a slow answer cannot clobber a newer one
+  target: ReplyTarget
+  where: string
+  phase: "query" | "searching" | "picking" | "sending"
+  query: string
+  results: Gif[]
+  index: number
+  busy: boolean // claude is reading the descriptions
   error: string | null
 }
 
@@ -121,10 +139,13 @@ function App() {
   const [cursor, setCursor] = useState(0)
   const [flash, setFlash] = useState("")
   const [draft, setDraft] = useState<Draft | null>(null)
+  const [gif, setGif] = useState<GifPick | null>(null)
   const feedSize = useRef(-1)
   // Key repeats and pastes deliver many events before React re-renders, so the
   // draft lives in a ref and state only mirrors it for display.
   const draftRef = useRef<Draft | null>(null)
+  const gifRef = useRef<GifPick | null>(null)
+  const gifRun = useRef(0)
 
   // Live tail: poll the feed's size and re-read on growth (it is small — the
   // Hammerspoon side prunes it). fs.watch misses atomic rewrites, so poll.
@@ -201,7 +222,134 @@ function App() {
       })
   }
 
+  const putGif = (g: GifPick | null) => {
+    gifRef.current = g
+    setGif(g)
+  }
+
+  const editGif = (edit: (text: string) => string) => {
+    const g = gifRef.current
+    if (!g || g.phase !== "query") return
+    putGif({ ...g, query: edit(g.query) })
+  }
+
+  // A gif goes where `c` would put a reply: inside the thread when the message
+  // is threaded, in the channel otherwise.
+  const openGif = (row: Notif) => {
+    if (!row.channel || !row.ts) {
+      setFlash("no channel on this row — open it in Slack instead")
+      return
+    }
+    const where = row.subtitle || row.title || row.channel
+    const run = ++gifRun.current
+    putGif({
+      run,
+      target: { channel: row.channel, ts: row.ts, thread_ts: row.thread_ts },
+      where: row.thread_ts ? `${where} · thread` : where,
+      phase: "query",
+      query: "",
+      results: [],
+      index: 0,
+      busy: false,
+      error: null,
+    })
+    creds().catch((e: Error) => {
+      const g = gifRef.current
+      if (g?.run === run) putGif({ ...g, error: e.message })
+    })
+  }
+
+  // Every async step stamps a fresh run and drops its own answer if the box has
+  // moved on since — an escape, or a second search started over the first.
+  const runSearch = () => {
+    const g = gifRef.current
+    if (!g || !g.query.trim()) return
+    const run = ++gifRun.current
+    putGif({ ...g, run, phase: "searching", error: null })
+    search(g.query.trim())
+      .then((results) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, phase: "picking", results, index: 0 })
+      })
+      .catch((e: Error) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, phase: "query", error: e.message })
+      })
+  }
+
+  const sendGif = () => {
+    const g = gifRef.current
+    const chosen = g?.results[g.index]
+    if (!g || g.phase !== "picking" || !chosen) return
+    const run = ++gifRun.current
+    putGif({ ...g, run, phase: "sending", error: null })
+    bestUrl(chosen.url)
+      .then((url) => reply(g.target, url))
+      .then(() => {
+        putGif(null)
+        setFlash(`sent a gif to ${g.where}`)
+      })
+      .catch((e: Error) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, phase: "picking", error: e.message })
+      })
+  }
+
+  const askClaude = () => {
+    const g = gifRef.current
+    if (!g || g.phase !== "picking" || g.busy) return
+    const run = g.run
+    putGif({ ...g, busy: true, error: null })
+    claudePick(g.query, g.results)
+      .then((index) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, index, busy: false })
+      })
+      .catch((e: Error) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, busy: false, error: e.message })
+      })
+  }
+
   useInput((input, key) => {
+    // The gif box owns the keyboard the same way the reply box does, except its
+    // meaning changes with the phase: printable keys are the query while you
+    // type it, and the picker's controls once Tenor has answered.
+    const g = gifRef.current
+    if (g) {
+      if (key.escape) {
+        gifRun.current++ // orphan anything still in flight
+        putGif(null)
+      } else if (g.phase === "query") {
+        if (key.return) runSearch()
+        else if (key.backspace || key.delete) editGif((t) => t.slice(0, -1))
+        else if (key.ctrl && input === "u") editGif(() => "")
+        else if (key.ctrl && input === "w") editGif((t) => t.replace(/\s*\S+\s*$/, ""))
+        else if (input && !key.ctrl && !key.meta) editGif((t) => t + input.replace(/\s+/g, " "))
+      } else if (g.phase === "picking") {
+        const step = (by: number) =>
+          putGif({ ...g, index: (g.index + by + g.results.length) % g.results.length })
+        if (key.return) sendGif()
+        else if (input === "n" || input === "j" || key.downArrow || key.rightArrow || key.tab)
+          step(1)
+        else if (input === "p" || input === "k" || key.upArrow || key.leftArrow) step(-1)
+        else if (input === "o")
+          // the terminal cannot show it, so preview in the browser — at the size
+          // Slack will post, not the thumbnail the search grid served
+          bestUrl(g.results[g.index].url).then((url) =>
+            Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" }),
+          )
+        else if (input === "a") askClaude()
+        else if (input === "e") putGif({ ...g, phase: "query", error: null })
+      }
+      return // searching / sending: only escape gets out
+    }
+
     // The reply box owns the keyboard while it is open: every printable key is
     // text, so `q` types a q rather than quitting, and escape only closes it.
     const d = draftRef.current
@@ -229,6 +377,8 @@ function App() {
       openDraft(row, "reply")
     } else if (input === "r") {
       openDraft(row, "thread")
+    } else if (input === "g") {
+      openGif(row)
     } else if (input === "j" || key.downArrow) {
       // functional update: key repeats can land within one render frame
       setCursor((c) => Math.min(c + 1, rows.length - 1))
@@ -247,8 +397,8 @@ function App() {
     return () => clearTimeout(t)
   }, [flash])
 
-  // border rows plus destination / input / hint, when the box is up
-  const draftH = draft ? 5 : 0
+  // border rows plus destination / input / hint, when either box is up
+  const draftH = draft || gif ? 5 : 0
   const height = Math.max(6, (stdout.rows ?? 30) - 4 - draftH) // header + hints + padding
   const width = stdout.columns ?? 100
   const channelWidth = Math.max(12, Math.min(24, Math.floor(width * 0.2)))
@@ -258,6 +408,9 @@ function App() {
   const inputW = Math.max(12, width - 8)
   const typed = draft?.text ?? ""
   const shownDraft = typed.length > inputW ? `…${typed.slice(-(inputW - 1))}` : typed
+  const asked = gif?.query ?? ""
+  const shownQuery = asked.length > inputW ? `…${asked.slice(-(inputW - 1))}` : asked
+  const chosen = gif?.results[gif.index]
 
   // Keep the selection inside the visible window.
   const top = Math.max(0, Math.min(clampedCursor - Math.floor(height / 2), rows.length - height))
@@ -341,9 +494,61 @@ function App() {
           </Text>
         </Box>
       ) : null}
+      {/* gif box: type what you want, pick from Tenor's answers, enter posts it */}
+      {gif ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={gif.error ? DANGER : ACCENT}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color={ACCENT}>
+              gif
+            </Text>
+            <Text dimColor>{" → "}</Text>
+            <Text>{gif.where}</Text>
+            {gif.phase !== "query" && gif.query ? <Text dimColor> · {gif.query}</Text> : null}
+          </Text>
+          {gif.phase === "query" ? (
+            <Text wrap="truncate-end">
+              <Text color={ACCENT}>{"❯ "}</Text>
+              {shownQuery ? (
+                <Text>{shownQuery}</Text>
+              ) : (
+                <Text dimColor>what type of gif would you like to send?</Text>
+              )}
+              <Text inverse> </Text>
+            </Text>
+          ) : (
+            <Text wrap="truncate-end">
+              <Text color={ACCENT}>
+                {gif.results.length ? `${gif.index + 1}/${gif.results.length}  ` : ""}
+              </Text>
+              <Text dimColor={!chosen}>
+                {chosen?.alt ?? (gif.phase === "searching" ? "searching tenor…" : "")}
+              </Text>
+            </Text>
+          )}
+          <Text dimColor={!gif.error} color={gif.error ? DANGER : undefined} wrap="truncate-end">
+            {gif.error
+              ? gif.error
+              : gif.phase === "query"
+                ? "enter search · esc cancel"
+                : gif.phase === "searching"
+                  ? "searching tenor…"
+                  : gif.phase === "sending"
+                    ? "sending…"
+                    : gif.busy
+                      ? "claude is reading the descriptions…"
+                      : "enter send · n/p cycle · o preview · a claude picks · e edit · esc"}
+          </Text>
+        </Box>
+      ) : null}
       <Text dimColor wrap="truncate-end">
         {" "}
-        j/k move · enter/l open in slack · c reply · r thread · q quit
+        j/k move · enter/l open in slack · c reply · r thread · g gif · q quit
       </Text>
     </Box>
   )

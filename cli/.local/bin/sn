@@ -12,6 +12,8 @@
 #            (see slack.ts); `sn auth --token xoxc-…` if that ever goes stale
 #   r        same, but always in a thread on the message — opens one when the
 #            message is top-level, instead of answering in the channel
+#   g        send a gif back — type what you want, pick from Tenor's answers
+#            (see gif.ts); no api key, and `a` lets claude pick for you
 set -euo pipefail
 
 script_dir="${HOME}/.local/share/sn-cli"

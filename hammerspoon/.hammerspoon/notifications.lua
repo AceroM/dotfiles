@@ -56,6 +56,12 @@ local timer = nil
 local task = nil
 local watermark = 0
 
+-- Rows kept in the feed. `sn` shows the newest 500, so anything past that is
+-- storage nobody reads — the cap lives here rather than in bytes, which drift
+-- with how chatty the messages happen to be.
+local FEED_LINES = 500
+local feedLines = 0 -- our running idea of the file, refreshed by trimFeed
+
 -- --- toast + feed ------------------------------------------------------------
 
 local function showToast(row, rule)
@@ -72,6 +78,21 @@ local function showToast(row, rule)
   })
 end
 
+--- Drop everything older than the newest FEED_LINES rows.
+local function trimFeed()
+  -- Extra parens: hs.execute returns (output, ok, type, rc), and the bare call
+  -- would hand `ok` to tonumber as its base argument.
+  local count = tonumber((hs.execute(string.format([[wc -l < "%s" 2>/dev/null]], M.feed)))) or 0
+  if count > FEED_LINES then
+    -- tmp + mv so a reader (`sn` polls this file every second) never sees a
+    -- half-rewritten feed.
+    hs.execute(string.format([[tail -n %d "%s" > "%s.tmp" && mv "%s.tmp" "%s"]],
+      FEED_LINES, M.feed, M.feed, M.feed, M.feed))
+    count = FEED_LINES
+  end
+  feedLines = count
+end
+
 local function appendFeed(line)
   local f = io.open(M.feed, "a")
   if not f then
@@ -79,6 +100,12 @@ local function appendFeed(line)
   end
   f:write(line .. "\n")
   f:close()
+  -- Trim in batches: rewriting the whole file on every notification would be
+  -- silly, and a few dozen rows over the cap costs nothing.
+  feedLines = feedLines + 1
+  if feedLines > FEED_LINES + 50 then
+    trimFeed()
+  end
 end
 
 -- --- polling -----------------------------------------------------------------
@@ -159,12 +186,7 @@ function M.start()
   watermark = math.max(watermark, now - 600)
 
   hs.fs.mkdir(os.getenv("HOME") .. "/.local/state")
-  -- Keep the feed from growing without bound.
-  local size = (hs.fs.attributes(M.feed) or {}).size or 0
-  if size > 400 * 1024 then
-    hs.execute(string.format([[tail -n 400 "%s" > "%s.tmp" && mv "%s.tmp" "%s"]],
-      M.feed, M.feed, M.feed, M.feed))
-  end
+  trimFeed()
 
   if timer then
     timer:stop()
