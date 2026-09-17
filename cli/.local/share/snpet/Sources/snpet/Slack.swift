@@ -176,6 +176,23 @@ actor Slack {
     return (try await channelId(named: q), "#\(q)")
   }
 
+  /// Mark a conversation read through `ts` — what opening it in the client
+  /// does. A reply inside a thread has the thread's own read state, which the
+  /// client marks with subscriptions.thread.mark; if that is refused, the
+  /// channel is marked instead.
+  func markRead(channel: String, ts: String, threadTs: String?) async throws {
+    if let thread = threadTs, thread != ts {
+      let r = try await call(
+        "subscriptions.thread.mark",
+        ["channel": channel, "thread_ts": thread, "ts": ts, "read": "1"])
+      if r["ok"] as? Bool == true { return }
+    }
+    let r = try await call("conversations.mark", ["channel": channel, "ts": ts])
+    guard r["ok"] as? Bool == true else {
+      throw SlackError((r["error"] as? String) ?? "conversations.mark failed")
+    }
+  }
+
   /// React to the message with `name` (no colons).
   func react(_ target: ReplyTarget, name: String) async throws {
     let r = try await call(

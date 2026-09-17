@@ -34,7 +34,10 @@ struct Draft {
 /// controller feeds it keys.
 final class InboxModel: ObservableObject {
   let feed: FeedStore
-  @Published var selection = 0
+  @Published var selection = 0 {
+    didSet { if visible { scheduleMarkRead() } }
+  }
+  var visible = false  // set by the panel; reading only counts while it is up
   @Published var draft: Draft?
   @Published var compose: Compose?
   @Published var flash = ""
@@ -49,6 +52,13 @@ final class InboxModel: ObservableObject {
   @Published var dictateOnReply = UserDefaults.standard.bool(forKey: "dictateOnReply") {
     didSet { UserDefaults.standard.set(dictateOnReply, forKey: "dictateOnReply") }
   }
+  /// Looking at a message here marks it read in Slack too. On unless turned off.
+  @Published var markReadInSlack = UserDefaults.standard.object(forKey: "markReadInSlack") as? Bool ?? true
+  {
+    didSet { UserDefaults.standard.set(markReadInSlack, forKey: "markReadInSlack") }
+  }
+  private var markTimer: Timer?
+  private var marked: [String: Double] = [:]  // conversation → latest ts already marked
   private var flashTimer: Timer?
 
   init(feed: FeedStore) { self.feed = feed }
@@ -101,6 +111,40 @@ final class InboxModel: ObservableObject {
     cancelDraft()
     cancelCompose()
     searching = true
+  }
+
+  // MARK: read in Slack
+
+  /// The highlight has to rest on a row before it counts as read.
+  func scheduleMarkRead() {
+    markTimer?.invalidate()
+    guard markReadInSlack else { return }
+    markTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
+      guard let self, let row = self.selected else { return }
+      self.markRead(row)
+    }
+  }
+
+  /// `M`: everything on this page.
+  func markPageRead() {
+    let rows = pageRows.filter { $0.channel != nil && $0.ts != nil }
+    rows.forEach(markRead)
+    setFlash("marked \(rows.count) read")
+  }
+
+  private func markRead(_ row: Notif) {
+    guard markReadInSlack, let channel = row.channel, let ts = row.ts else { return }
+    let key = channel + (row.threadTs.map { ":\($0)" } ?? "")
+    let stamp = Double(ts) ?? 0
+    if let done = marked[key], done >= stamp { return }  // already read this far
+    marked[key] = stamp
+    Task {
+      do {
+        try await Slack.shared.markRead(channel: channel, ts: ts, threadTs: row.threadTs)
+      } catch {
+        NSLog("snpet: mark read \(row.place) — \(error.localizedDescription)")
+      }
+    }
   }
 
   // MARK: compose
@@ -358,6 +402,17 @@ final class InboxModel: ObservableObject {
     dictating = false
   }
 
+  /// `y` copies the message, `Y` its link.
+  func yank(link: Bool = false) {
+    guard let row = selected else { return }
+    let text = link ? (row.link?.absoluteString ?? "") : row.text
+    guard !text.isEmpty else { return setFlash(link ? "no link on this row" : "nothing to copy") }
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    pasteboard.setString(text, forType: .string)
+    setFlash(link ? "copied link" : "copied")
+  }
+
   func openInSlack() {
     guard let row = selected else { return }
     NSWorkspace.shared.open(row.link ?? URL(string: "slack://open")!)
@@ -415,22 +470,11 @@ final class InboxPanelController {
     panel.backgroundColor = .clear
     panel.minSize = NSSize(width: 400, height: 60)
 
-    // A dark frosted pane, the SwiftUI content laid over it edge to edge.
-    let frost = NSVisualEffectView()
-    frost.material = .hudWindow
-    frost.blendingMode = .behindWindow
-    frost.state = .active
+    // Solid, not a material: the system's glass reads wrong over light content.
+    // The view paints its own background; the window only clips the corners.
     let host = NSHostingView(rootView: InboxView(model: model, feed: feed))
     host.sizingOptions = []  // or it pins the window's minimum to content + the hidden title bar
-    host.translatesAutoresizingMaskIntoConstraints = false
-    frost.addSubview(host)
-    NSLayoutConstraint.activate([
-      host.leadingAnchor.constraint(equalTo: frost.leadingAnchor),
-      host.trailingAnchor.constraint(equalTo: frost.trailingAnchor),
-      host.topAnchor.constraint(equalTo: frost.topAnchor),
-      host.bottomAnchor.constraint(equalTo: frost.bottomAnchor),
-    ])
-    panel.contentView = frost
+    panel.contentView = host
 
     // Size is remembered; position is recomputed under the pet each time. The
     // height you drag to decides rows per page; the box then snaps to fit them.
@@ -521,13 +565,16 @@ final class InboxPanelController {
         return self.handle(event) ? nil : event
       }
     }
+    model.visible = true
     model.selection = 0
+    model.scheduleMarkRead()  // row 0 is the same row as before, so didSet may not fire
     feed.markAllSeen()
     visibilityChanged?()
     fitToContent()
   }
 
   func hide() {
+    model.visible = false
     model.cancelDraft()
     model.cancelCompose()
     panel.orderOut(nil)
@@ -621,6 +668,9 @@ final class InboxPanelController {
       case "/": model.openSearch()
       case "c": model.openDraft(.reply)
       case "C": model.openCompose()
+      case "M": model.markPageRead()
+      case "y": model.yank()
+      case "Y": model.yank(link: true)
       case "r": model.openDraft(.thread)
       case "q": hide()
       default: return false

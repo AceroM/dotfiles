@@ -15,6 +15,19 @@ struct Notif: Identifiable, Equatable {
 
   var id: String { iden }
 
+  /// The message itself. In a channel or group the notification body starts
+  /// with `sender: `; a DM's does not (a DM's sender is the subtitle), so only
+  /// non-DM rows lose that prefix.
+  var text: String {
+    guard let channel, !channel.hasPrefix("D"),
+      let colon = body.firstIndex(of: ":"),
+      body.distance(from: body.startIndex, to: colon) <= 40,
+      body.index(after: colon) < body.endIndex,
+      body[body.index(after: colon)] == " "
+    else { return body }
+    return String(body[body.index(colon, offsetBy: 2)...])
+  }
+
   /// The channel or sender, as `sn` labels its rows.
   var place: String {
     if !subtitle.isEmpty { return subtitle }

@@ -30,10 +30,11 @@ struct InboxView: View {
     .frame(minWidth: 400)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     .background(
-      // a violet wash over the frost, strongest up where he stands
+      // a violet wash, strongest up where he stands
       LinearGradient(
         colors: [Palette.lavender.opacity(0.14), Palette.sakura.opacity(0.05), .clear],
         startPoint: .topTrailing, endPoint: .bottomLeading))
+    .background(Palette.panel)
     .overlay(
       RoundedRectangle(cornerRadius: 10)
         .strokeBorder(

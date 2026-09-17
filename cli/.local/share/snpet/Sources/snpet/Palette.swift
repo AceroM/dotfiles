@@ -14,6 +14,7 @@ enum Palette {
   static let lavender = Color(hex: 0xA78BFA)
   static let sky = Color(hex: 0x7DD3FC)
   static let card = Color(red: 0.15, green: 0.12, blue: 0.18)  // the lifted row: solid, nothing ghosts through
+  static let panel = Color(red: 0.11, green: 0.10, blue: 0.14)  // the box itself: solid, whatever is behind it
   static let badge = NSColor(red: 0xFF / 255, green: 0x8A / 255, blue: 0xD8 / 255, alpha: 1)
 }
 

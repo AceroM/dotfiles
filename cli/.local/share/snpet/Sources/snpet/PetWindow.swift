@@ -93,6 +93,12 @@ final class PetWindowController: NSObject {
     dictate.isEnabled = Wispr.isInstalled
     m.addItem(dictate)
 
+    let markRead = NSMenuItem(
+      title: "Mark read in Slack as I look", action: #selector(toggleMarkRead), keyEquivalent: "")
+    markRead.target = self
+    markRead.state = inbox.model.markReadInSlack ? .on : .off
+    m.addItem(markRead)
+
     let check = NSMenuItem(
       title: "Check Slack session", action: #selector(checkSession), keyEquivalent: "")
     check.target = self
@@ -107,6 +113,8 @@ final class PetWindowController: NSObject {
   @objc private func toggleInbox() { inbox.toggle() }
 
   @objc private func toggleDictateOnReply() { inbox.model.dictateOnReply.toggle() }
+
+  @objc private func toggleMarkRead() { inbox.model.markReadInSlack.toggle() }
 
   @objc private func checkSession() {
     inbox.show()
