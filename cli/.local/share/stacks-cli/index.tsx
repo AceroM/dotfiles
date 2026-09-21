@@ -71,7 +71,14 @@ type StackBranch = {
   base: string;
 };
 
-type CheckItem = { name: string; status: "pass" | "fail" | "pending" };
+type CheckItem = {
+  name: string;
+  status: "pass" | "fail" | "pending";
+  // The Actions run this check is a job of, when it is one. Commit statuses
+  // (Vercel and the like) have none, so they can't be rerun from here.
+  runId: number | null;
+  workflow: string | null;
+};
 
 type PrDetails = {
   title: string;
@@ -106,10 +113,10 @@ type Screen = "loading" | "pick" | "main" | "fatal";
 // Rebase rewrites history, merge is irreversible, and an approval or a status
 // flip goes out to the PR's author and its reviewers, so none fires on a bare
 // keypress — each stages a PendingAction that a second key has to confirm.
-// rebase spawns a Claude agent in a new Herdr pane; merge, approve, status and
-// tags run gh directly; stamp posts to Slack as you.
+// rebase spawns a Claude agent in a new Herdr pane; merge, approve, status,
+// tags and rerun run gh directly; stamp posts to Slack as you.
 type PendingAction = {
-  kind: "rebase" | "merge" | "approve" | "status" | "tags" | "stamp";
+  kind: "rebase" | "merge" | "approve" | "status" | "tags" | "stamp" | "rerun";
   prompt: string;
   exec: () => Promise<{ code: number; out: string; err: string }>;
   after?: () => void; // on success, once the footer has the result
@@ -611,6 +618,14 @@ async function resolveStacks(): Promise<{
   };
 }
 
+// An Actions job's detailsUrl is .../actions/runs/<run-id>/job/<job-id>; the
+// run ID is what `gh run rerun` takes. Anything else (a commit status's
+// targetUrl, say) has no run behind it.
+function runIdFromUrl(url: string | undefined): number | null {
+  const m = url?.match(/\/actions\/runs\/(\d+)(?:[/?#]|$)/);
+  return m ? Number(m[1]) : null;
+}
+
 function parseChecks(rollup: unknown): {
   checks: PrDetails["checks"];
   checkList: CheckItem[];
@@ -628,7 +643,12 @@ function parseChecks(rollup: unknown): {
       status = "fail";
     else status = "pending";
     checks[status]++;
-    checkList.push({ name: c.name || c.context || "check", status });
+    checkList.push({
+      name: c.name || c.context || "check",
+      status,
+      runId: runIdFromUrl(c.detailsUrl),
+      workflow: c.workflowName || null,
+    });
   }
   // Failures first, then pending, so the checks that need eyes surface at the
   // top of an expanded PR row.
@@ -2160,7 +2180,9 @@ function App() {
                 ? "adding tags…"
                 : action.kind === "stamp"
                   ? "stamping…"
-                  : "approving…",
+                  : action.kind === "rerun"
+                    ? "rerunning failed jobs…"
+                    : "approving…",
       );
       action
         .exec()
@@ -2509,6 +2531,106 @@ function App() {
     },
     [status, refreshDetails],
   );
+
+  // ----- rerun checks ---------------------------------------------------
+  // x: rerun the failed jobs behind every failing check on the selected PR,
+  // or on every marked one. Each failing CheckRun's detailsUrl names its
+  // workflow run, and one `gh run rerun <id> --failed` per distinct run
+  // re-queues every failed job in it plus what they depend on — the two
+  // staging-migration jobs are one run, so one call. Commit statuses have no
+  // run to rerun and are named and skipped. Acts on the checks as shown (l
+  // re-fetches them), so the confirmation spells out exactly what goes out.
+  const rerunChecks = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null);
+    if (targets.length === 0) {
+      setActionMsg({
+        text:
+          markedBranches.length > 1
+            ? "no PRs in the selection — nothing to rerun"
+            : "no PR for this branch yet — nothing to rerun",
+        color: "red",
+      });
+      return;
+    }
+    const runs = new Map<number, { workflow: string; prs: Set<number> }>();
+    const skipped: string[] = [];
+    const loading: number[] = [];
+    for (const b of targets) {
+      const n = b.prNumber!;
+      const d = details.get(n);
+      if (!d) {
+        loading.push(n);
+        continue;
+      }
+      for (const c of d.checkList) {
+        if (c.status !== "fail") continue;
+        if (c.runId == null) {
+          skipped.push(`${c.name} (#${n})`);
+          continue;
+        }
+        const entry = runs.get(c.runId) ?? {
+          workflow: c.workflow ?? c.name,
+          prs: new Set<number>(),
+        };
+        entry.prs.add(n);
+        runs.set(c.runId, entry);
+      }
+    }
+    if (loading.length > 0) {
+      setActionMsg({
+        text: `checks for ${loading.map((n) => `#${n}`).join(" ")} still loading — try again in a moment`,
+        color: "yellow",
+      });
+      return;
+    }
+    if (runs.size === 0) {
+      setActionMsg({
+        text:
+          skipped.length > 0
+            ? `only commit statuses are failing (${skipped.join(", ")}) — nothing gh can rerun`
+            : "no failing checks to rerun",
+        color: "red",
+      });
+      return;
+    }
+    const prs = [...new Set([...runs.values()].flatMap((r) => [...r.prs]))];
+    const workflows = [...new Set([...runs.values()].map((r) => r.workflow))];
+    const ids = [...runs.keys()];
+    const plural = (k: number, w: string) => `${k} ${w}${k === 1 ? "" : "s"}`;
+    setPending({
+      kind: "rerun",
+      prompt:
+        `Rerun failed jobs on ${prs.map((n) => `#${n}`).join(" ")} — ${workflows.join(", ")} (${plural(ids.length, "run")}, gh run rerun --failed)?` +
+        (skipped.length > 0
+          ? ` Skipping ${skipped.join(", ")}: not an Actions run.`
+          : ""),
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        const touched = new Set<number>();
+        for (const id of ids) {
+          const r = await run(["gh", "run", "rerun", String(id), "--failed"]);
+          if (r.code === 0) {
+            ok.push(id);
+            runs.get(id)!.prs.forEach((n) => touched.add(n));
+          } else {
+            failed.push(
+              `${runs.get(id)!.workflow}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`,
+            );
+          }
+        }
+        // GitHub queues the rerun jobs right away; re-read the PRs that got
+        // one so their expanded rows show ◌ instead of the stale ✗, whether
+        // or not another run was refused.
+        touched.forEach(refreshDetails);
+        const done = `${ok.length}/${plural(ids.length, "run")} re-queued`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => setMarkAnchor(null),
+    });
+  }, [markedBranches, details, refreshDetails]);
 
   // t: freeze the same targets as the status picker, then load all repo labels.
   const openTags = useCallback(() => {
@@ -3397,6 +3519,7 @@ function App() {
     else if (input === "z" && sel) openZed(sel);
     else if (input === "a" && sel) approvePr(sel);
     else if (input === "A") approveAll();
+    else if (input === "x") rerunChecks();
     else if (input === "c") openComment();
     else if (input === "o" && sel?.prNumber != null)
       Bun.spawn(["gh", "pr", "view", String(sel.prNumber), "--web"], {
@@ -4160,7 +4283,9 @@ function App() {
                         pending.kind === "tags" ||
                         pending.kind === "stamp"
                       ? "magenta"
-                      : "yellow"
+                      : pending.kind === "rerun"
+                        ? "cyan"
+                        : "yellow"
               }
             >
               {pending.kind.toUpperCase()}
@@ -4226,7 +4351,7 @@ function App() {
                 <Text dimColor> · </Text>
               </>
             ) : null}
-            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
+            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · x rerun failed · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -4362,8 +4487,8 @@ usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
 
 keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection ·
       V toggle stack panel · v toggle changed-files tree · space PR description +
-      comments · l/h (or ←→) expand/collapse a PR's CI checks · f/b page · d/u
-      half page · g/G top/bottom · / ? search the diff · n/N next/prev match ·
+      comments · l/h (or ←→) expand/collapse a PR's CI checks · x rerun its
+      failed checks · f/b page · d/u half page · g/G top/bottom · / ? search the diff · n/N next/prev match ·
       n/p next/prev file (with no search running) · s set PR status · S stamp
       PRs at the Slack review bot · t add tags ·
       a approve · A approve every open PR in the stack · z check out + open in
@@ -4471,6 +4596,17 @@ l expands the selected PR into its CI checks — failures and pending ones get a
 row each (worst first), passes roll up into a single "✓ N passed" line, and
 expanding re-fetches the PR so the list reflects CI right now. h collapses.
 
+x reruns the failed jobs behind the selected PR's failing checks — or every
+marked PR's, with J/K — after a confirmation that names the workflows. It runs
+one \`gh run rerun <run-id> --failed\` per workflow run, which re-queues each
+failed job plus whatever it depends on and leaves the passes alone; the two
+staging-migration jobs are one run, so one call. Apply the migration to
+staging, press x, and the ✗ rows flip to ◌. Checks that are commit statuses
+rather than Actions jobs (Vercel, for one) have no run to rerun and are named
+and skipped. GitHub refuses a rerun while the run is still in progress and
+only allows one within 30 days of the original; either refusal shows in the
+footer, and a partial failure keeps the selection so it can be retried.
+
 V collapses/restores the stack panel on the left. v toggles the right panel,
 which starts open for the selected PR. It groups
 changed files into a compact directory tree, shows per-folder and per-file
@@ -4489,7 +4625,7 @@ sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the sam
       the ref fetch + drift detection run behind it ("⟳ checking sync…" in the
       header until they land), so the answers still reflect the remote.
 
-a, A, s, t, S, R and M all stage a confirmation first and only run on "y". a submits
+a, A, s, t, S, x, R and M all stage a confirmation first and only run on "y". a submits
 \`gh pr review <n> --approve\` for the selected PR (from the main view or the
 description dialog) and refreshes its badge; A does the same for every PR in
 the stack that is still open, in order, and reports any that GitHub refused
