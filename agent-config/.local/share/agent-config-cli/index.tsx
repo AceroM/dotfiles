@@ -16,22 +16,25 @@ import React, {
 import {
   ACCESS_MODES,
   DEFAULT_CONFIG,
-  MODELS,
   PROFILE_NAMES,
   codexArgs,
   commandPreview,
   configPath,
   isProfileName,
   loadConfig,
-  normalizeReasoningForModel,
   normalizeConfig,
-  reasoningLevelsFor,
   resetProfile,
   saveConfig,
   type AgentConfig,
   type Profile,
   type ProfileName,
 } from "./config";
+import {
+  loadModelCatalog,
+  normalizeReasoningForModel,
+  reasoningEffortsFor,
+  type ModelOption,
+} from "./models";
 
 type EditableField = "model" | "reasoning" | "access";
 const EDITABLE_FIELDS: EditableField[] = ["model", "reasoning", "access"];
@@ -41,7 +44,11 @@ function cycle<T extends string>(
   current: T,
   direction: -1 | 1,
 ): T {
-  const index = Math.max(0, choices.indexOf(current));
+  if (choices.length === 0) return current;
+  const currentIndex = choices.indexOf(current);
+  if (currentIndex === -1)
+    return direction === 1 ? choices[0] : choices[choices.length - 1];
+  const index = currentIndex;
   return choices[(index + direction + choices.length) % choices.length];
 }
 
@@ -158,6 +165,7 @@ function App() {
   const [config, setConfig] = useState<AgentConfig>(() =>
     normalizeConfig(DEFAULT_CONFIG),
   );
+  const [catalog, setCatalog] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -170,8 +178,11 @@ function App() {
   const [original, setOriginal] = useState<Profile | null>(null);
 
   useEffect(() => {
-    loadConfig()
-      .then(setConfig)
+    Promise.all([loadConfig(), loadModelCatalog()])
+      .then(([loadedConfig, loadedCatalog]) => {
+        setConfig(loadedConfig);
+        setCatalog(loadedCatalog);
+      })
       .catch((cause: Error) => setError(cause.message))
       .finally(() => setLoading(false));
   }, []);
@@ -189,29 +200,37 @@ function App() {
     [config],
   );
 
-  const updateDraft = useCallback((direction: -1 | 1) => {
-    setDraft((current) => {
-      if (!current) return current;
-      const next = structuredClone(current);
-      const selectedField = EDITABLE_FIELDS[fieldRef.current];
-      if (selectedField === "model") {
-        next.model = cycle(MODELS, next.model, direction);
-        next.reasoning = normalizeReasoningForModel(
-          next.model,
-          next.reasoning,
-        );
-      } else if (selectedField === "reasoning") {
-        next.reasoning = cycle(
-          reasoningLevelsFor(next.model),
-          next.reasoning,
-          direction,
-        );
-      } else {
-        next.access = cycle(ACCESS_MODES, next.access, direction);
-      }
-      return next;
-    });
-  }, []);
+  const updateDraft = useCallback(
+    (direction: -1 | 1) => {
+      setDraft((current) => {
+        if (!current) return current;
+        const next = structuredClone(current);
+        const selectedField = EDITABLE_FIELDS[fieldRef.current];
+        if (selectedField === "model") {
+          next.model = cycle(
+            catalog.map((option) => option.model),
+            next.model,
+            direction,
+          );
+          next.reasoning = normalizeReasoningForModel(
+            catalog,
+            next.model,
+            next.reasoning,
+          );
+        } else if (selectedField === "reasoning") {
+          next.reasoning = cycle(
+            reasoningEffortsFor(catalog, next.model, next.reasoning),
+            next.reasoning,
+            direction,
+          );
+        } else {
+          next.access = cycle(ACCESS_MODES, next.access, direction);
+        }
+        return next;
+      });
+    },
+    [catalog],
+  );
 
   const persistDraft = useCallback(async () => {
     if (!editing || !draft) return;
@@ -323,7 +342,7 @@ function App() {
     return (
       <Box key="error" flexDirection="column" padding={1}>
         <Header />
-        <Text color="red">Could not update agent config: {error}</Text>
+        <Text color="red">Could not load agent config: {error}</Text>
         <Text dimColor>Press q to quit.</Text>
       </Box>
     );
