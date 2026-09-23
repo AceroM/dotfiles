@@ -48,7 +48,7 @@ new_workspace = "ctrl+alt+shift+n"
 # Shift on the same j/k axis hops between agent rows instead of workspaces.
 next_agent = "ctrl+alt+shift+j"
 previous_agent = "ctrl+alt+shift+k"
-# ctrl+alt+shift+a -- jump to whichever agent is actually waiting on me -- is the
+# ctrl+alt+a -- jump to whichever agent is actually waiting on me -- is the
 # same axis one letter over. It lives in a [[keys.command]] block below rather
 # than up here: herdr has no action for it (next_agent steps one row regardless
 # of what that row is doing, focus_agent is an indexed 1..9 binding), so it goes
@@ -314,7 +314,7 @@ type = "shell"
 description = "Space z*"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter z"'
 
-# ctrl+alt+shift+a -- focus the next agent that is waiting on me: the next blocked
+# ctrl+alt+a -- focus the next agent that is waiting on me: the next blocked
 # one, else the next agent whose finished work I have not seen, across every
 # space. next_agent (ctrl+alt+shift+j) walks the agent panel a row at a time and
 # does not care what the row is doing; this is the attention queue instead, and
@@ -331,23 +331,17 @@ command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-letter z"'
 # with the server's environment, so the command is wrapped in an explicit /bin/sh
 # rather than trusting $PATH to contain ~/.local/bin.
 [[keys.command]]
-key = "ctrl+alt+shift+a"
+key = "ctrl+alt+a"
 type = "shell"
 description = "Next agent waiting"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-agent-attention"'
 
-# ctrl+alt+; -- new tab already running the agent I pressed from, same cwd, same
-# flags. ctrl+alt+n's shell-tab sibling: ';' sits right of 'l', so it lands in
-# the same right-hand cluster as the h/l tab motion.
-#
-# There is no built-in action for this, so it goes through a script that reads
-# the focused pane and then drives `tab create` + `agent start`. `type = "shell"`
-# gets spawned detached with the server's environment, so the command is wrapped
-# in an explicit /bin/sh rather than trusting $PATH to contain ~/.local/bin.
+# ctrl+alt+; opens the live Jev agent picker in a centered Herdr popup.
 [[keys.command]]
 key = "ctrl+alt+semicolon"
-type = "shell"
-command = '/bin/sh -c "exec $HOME/.local/bin/herdr-agent-tab"'
+type = "plugin_action"
+description = "Find agent with Jev"
+command = "miguel.jev-focus.open"
 
 [[keys.command]]
 key = "ctrl+alt+shift+f"

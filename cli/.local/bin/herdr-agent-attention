@@ -6,8 +6,8 @@
 #   herdr-agent-attention done         only agents with unseen finished work
 #   herdr-agent-attention any          rotate through every agent, state ignored
 #
-# Bound in config.toml as ctrl+alt+shift+a -- the agent axis, the same
-# ctrl+alt+shift family as next_agent/previous_agent on j/k. Those two step the
+# Bound in config.toml as ctrl+alt+a -- the agent axis. The
+# ctrl+alt+shift+j/k bindings step the
 # sidebar one row at a time regardless of what the row is doing; this one skips
 # straight to whatever is actually waiting for an answer, across workspaces.
 #
@@ -65,7 +65,7 @@ fi
 # when the only match is the pane already focused -- three outcomes rather than
 # a bare empty string, so the log can tell "nothing is waiting" apart from
 # "the thing waiting is right here".
-IFS=$'\t' read -r verdict target status label title < <(jq -r \
+IFS=$'\t' read -r verdict target tab status label title < <(jq -r \
   --arg mode "$mode" --arg here "$here" '
   def rank: if . == "blocked" then 0 elif . == "done" then 1 else 2 end;
 
@@ -80,10 +80,10 @@ IFS=$'\t' read -r verdict target status label title < <(jq -r \
   | if $mode == "attention" then sort_by((.agent_status | rank), .ord) else sort_by(.ord) end
   | . as $c
   | ($c | map(.pane_id) | index($here)) as $i
-  | if   ($c | length) == 0 then ["none", "", "", "", ""]
-    elif $i == null         then ($c[0] | ["go", .pane_id, .agent_status, (.name // .agent // "?"), (.terminal_title_stripped // "")])
-    elif ($c | length) == 1 then ["self", "", "", "", ""]
-    else ($c[($i + 1) % ($c | length)] | ["go", .pane_id, .agent_status, (.name // .agent // "?"), (.terminal_title_stripped // "")])
+  | if   ($c | length) == 0 then ["none", "", "", "", "", ""]
+    elif $i == null         then ($c[0] | ["go", .pane_id, .tab_id, .agent_status, (.name // .agent // "?"), (.terminal_title_stripped // "")])
+    elif ($c | length) == 1 then ["self", "", "", "", "", ""]
+    else ($c[($i + 1) % ($c | length)] | ["go", .pane_id, .tab_id, .agent_status, (.name // .agent // "?"), (.terminal_title_stripped // "")])
     end
   | @tsv' <<<"$list_json")
 
@@ -105,4 +105,5 @@ case "${verdict:-none}" in
 esac
 
 herdr agent focus "$target" >/dev/null 2>&1 || die "agent focus $target failed"
+herdr tab focus "$tab" >/dev/null 2>&1 || die "tab focus $tab failed"
 log "focused $status agent $target ($label) -- $title"

@@ -15,7 +15,8 @@ import {
 } from "./search";
 
 const API_URL = "https://api.typesafe.ai/v1/systemone";
-const HERDR_BIN = process.env.HERDR_BIN || "herdr";
+const HERDR_BIN =
+  process.env.HERDR_BIN || process.env.HERDR_BIN_PATH || "herdr";
 const MAX_AGENTS = 255;
 
 type AgentListResponse = {
