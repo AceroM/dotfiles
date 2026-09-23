@@ -5,6 +5,7 @@ import {
   buildSearchPayload,
   exactMatch,
   makeCandidates,
+  metadataMatch,
   selectedCandidate,
   TRANSCRIPT_LINES,
   type Candidate,
@@ -271,17 +272,29 @@ async function main() {
   if (candidates.length === 0) throw new Error("No live Herdr agents found");
 
   const exact = exactMatch(query, candidates);
+  const otherCandidates = candidates.filter(
+    (candidate) => candidate.paneId !== process.env.HERDR_PANE_ID,
+  );
   const selected =
     exact ??
-    selectedCandidate(await askTypeSafe(query, candidates, apiKey), candidates);
+    metadataMatch(query, otherCandidates) ??
+    (otherCandidates.length > 0
+      ? selectedCandidate(
+          await askTypeSafe(query, otherCandidates, apiKey),
+          otherCandidates,
+        )
+      : null);
 
   if (!selected) {
-    console.error("No matching Herdr agent.");
+    console.error(`No unambiguous live Herdr agent for "${query}".`);
     process.exitCode = 1;
     return;
   }
 
   await run(HERDR_BIN, ["agent", "focus", selected.paneId]);
+  // Herdr 0.9.0 updates server focus for agent.focus without moving attached clients.
+  // tab.focus projects the selected tab to the client after the agent pane is chosen.
+  await run(HERDR_BIN, ["tab", "focus", selected.tab.id]);
 }
 
 if (import.meta.main) {

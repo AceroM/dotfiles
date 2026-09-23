@@ -3,6 +3,7 @@ export const MAX_STATE_TRANSCRIPT_CHARS = 64_000;
 export const MIN_TRANSCRIPT_CHARS_PER_AGENT = 256;
 export const MAX_TRANSCRIPT_CHARS_PER_AGENT = 8_000;
 export const MIN_MATCH_PROBABILITY = 0.25;
+export const MIN_TARGET_CONFIDENCE = 0.6;
 
 export type HerdrAgent = {
   agent: string;
@@ -245,6 +246,28 @@ export function exactMatch(
   return matches.length === 1 ? matches[0] : null;
 }
 
+export function metadataMatch(
+  query: string,
+  candidates: Candidate[],
+): Candidate | null {
+  const words = (value: string) =>
+    value
+      .normalize("NFKC")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  const needle = words(query);
+  if (!needle) return null;
+
+  const matches = candidates.filter((candidate) =>
+    [candidate.name, candidate.title, candidate.tab.label]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => ` ${words(value)} `.includes(` ${needle} `)),
+  );
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function selectedCandidate(
   answers: SearchAnswers,
   candidates: Candidate[],
@@ -263,6 +286,12 @@ export function selectedCandidate(
   const candidate = candidates.find((item) => item.id === choice);
   if (!candidate) {
     throw new Error(`TypeSafe selected an unknown agent: ${choice}`);
+  }
+
+  const confidence =
+    answers.target?.confidence ?? answers.target?.probabilities?.[choice];
+  if (typeof confidence === "number" && confidence < MIN_TARGET_CONFIDENCE) {
+    return null;
   }
 
   return candidate;

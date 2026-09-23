@@ -5,6 +5,7 @@ import {
   makeCandidates,
   MAX_TRANSCRIPT_CHARS_PER_AGENT,
   MIN_MATCH_PROBABILITY,
+  metadataMatch,
   selectedCandidate,
   tailText,
   transcriptCharLimit,
@@ -68,6 +69,23 @@ describe("candidate selection", () => {
     expect(exactMatch("autobuilder", candidates)).toBeNull();
   });
 
+  test("finds a unique name or tab label without relying on transcript mentions", () => {
+    expect(metadataMatch("credential", candidates)?.id).toBe("agent_1");
+    expect(metadataMatch("browser", candidates)?.id).toBe("agent_0");
+    expect(
+      metadataMatch("nebraska", [
+        ...candidates,
+        { ...candidates[0], id: "agent_2", name: "sst_nebraska" },
+      ])?.id,
+    ).toBe("agent_2");
+    expect(
+      metadataMatch("browser", [
+        ...candidates,
+        { ...candidates[1], id: "agent_2", tab: candidates[0].tab },
+      ]),
+    ).toBeNull();
+  });
+
   test("returns Jev's candidate for a plausible match", () => {
     const selected = selectedCandidate(
       {
@@ -90,6 +108,18 @@ describe("candidate selection", () => {
     );
 
     expect(selected).toBeNull();
+  });
+
+  test("does not jump on a low-confidence semantic guess", () => {
+    expect(
+      selectedCandidate(
+        {
+          target: { choice: "agent_0", confidence: 0.45 },
+          exists: { noul: 0.94 },
+        },
+        candidates,
+      ),
+    ).toBeNull();
   });
 
   test("rejects an unknown choice", () => {
