@@ -122,27 +122,8 @@ type PendingAction = {
   after?: () => void; // on success, once the footer has the result
 };
 
-// Where a comment is headed: the Herdr tab holding the ticket's agent, resolved
-// once when the dialog opens so the destination is on screen before anything is
-// sent to it.
-type CommentTarget = {
-  tabLabel: string;
-  agent: string; // herdr agent target: its name when it has one, else its pane
-  status: string;
-};
-
-type CommentDraft = {
-  ticket: string;
-  branch: string;
-  prNumber: number | null;
-  text: string;
-  target: CommentTarget | null;
-  error: string | null;
-  sending: boolean;
-};
-
 // The description dialog (space): the PR body plus its conversation, fetched
-// once per PR and re-rendered to the dialog width. Modal like the comment box.
+// once per PR and re-rendered to the dialog width.
 type DescDialog = {
   prNumber: number;
   data: Discussion | null;
@@ -175,7 +156,7 @@ type StatusDialog = {
 
 // The stamp dialog (S): hand PRs to the review bot in Slack, one message per
 // PR. It batches over the marked rows the way the status dialog does, and takes
-// a line of text the way the comment box does — an optional note the bot reads
+// a line of text for an optional note the bot reads
 // along with the request. The channel/bot lookup runs while you type.
 type StampDialog = {
   targets: StackBranch[];
@@ -863,7 +844,7 @@ function nthMark(
 }
 
 // ---------------------------------------------------------------------------
-// herdr: hand a comment to the agent working this branch's Linear ticket
+// herdr: rebase agent
 // ---------------------------------------------------------------------------
 
 // herdr reports a failure as a JSON envelope, and prints it on stdout — dig the
@@ -877,97 +858,6 @@ function herdrError(r: { code: number; out: string; err: string }): string {
     // not JSON — fall through to the raw first line
   }
   return firstLine(raw) || `exit ${r.code}`;
-}
-
-// miguel/prod-3083-hide-officer-ssn -> PROD-3083. Branch names put the ticket
-// straight after the miguel/ prefix, so anchor there and only fall back to a
-// loose scan for branches that were named some other way.
-function ticketFor(branch: string): string | null {
-  const tail = branch.slice(branch.lastIndexOf("/") + 1);
-  const m =
-    /^([a-z]{2,10})-(\d+)/i.exec(tail) ?? /([a-z]{2,10})-(\d+)/i.exec(branch);
-  return m ? `${m[1].toUpperCase()}-${m[2]}` : null;
-}
-
-// PROD-3083 must not match a tab for PROD-30831, so the character after the ID
-// has to be something other than another digit.
-function labelIsTicket(label: string, ticket: string): boolean {
-  const l = label.trim().toUpperCase();
-  return (
-    l === ticket ||
-    (l.startsWith(ticket) && !/\d/.test(l.charAt(ticket.length)))
-  );
-}
-
-// A ticket's work lives in one Herdr tab per workspace, labeled with the
-// uppercase ticket ID first ("PROD-3083 · slot 1"), hosting one agent — see the
-// Herdr section of ~/.claude/CLAUDE.md. Ambiguity is an error rather than a coin
-// flip: the wrong guess prompts an agent that is working on something else.
-async function resolveCommentTarget(
-  ticket: string,
-): Promise<{ target?: CommentTarget; error?: string }> {
-  if (process.env.HERDR_ENV !== "1")
-    return { error: "not inside a Herdr pane (HERDR_ENV unset)" };
-  const workspace = process.env.HERDR_WORKSPACE_ID;
-  if (!workspace) return { error: "HERDR_WORKSPACE_ID unset" };
-
-  const tabs = await run(["herdr", "tab", "list", "--workspace", workspace]);
-  if (tabs.code !== 0)
-    return { error: `herdr tab list failed — ${herdrError(tabs)}` };
-  const listed = (
-    JSON.parse(tabs.out) as {
-      result?: { tabs?: Array<{ tab_id: string; label?: string | null }> };
-    }
-  ).result?.tabs ?? [];
-  const hits = listed.filter((t) => labelIsTicket(t.label ?? "", ticket));
-  if (hits.length === 0)
-    return { error: `no tab in this workspace is labeled ${ticket}` };
-  if (hits.length > 1)
-    return {
-      error: `${ticket} matches ${hits.length} tabs: ${hits
-        .map((t) => (t.label ?? t.tab_id).trim())
-        .join(", ")}`,
-    };
-  const tab = hits[0];
-  const tabLabel = (tab.label ?? tab.tab_id).trim();
-
-  const agents = await run(["herdr", "agent", "list"]);
-  if (agents.code !== 0)
-    return { error: `herdr agent list failed — ${herdrError(agents)}` };
-  const inTab = (
-    (
-      JSON.parse(agents.out) as {
-        result?: {
-          agents?: Array<{
-            tab_id: string;
-            pane_id: string;
-            name?: string | null;
-            agent?: string | null;
-            agent_status?: string | null;
-          }>;
-        };
-      }
-    ).result?.agents ?? []
-  ).filter((a) => a.tab_id === tab.tab_id);
-  if (inTab.length === 0) return { error: `${tabLabel} has no agent running` };
-  if (inTab.length > 1)
-    return { error: `${tabLabel} hosts ${inTab.length} agents — ambiguous` };
-
-  const a = inTab[0];
-  return {
-    target: {
-      tabLabel,
-      agent: a.name || a.pane_id,
-      status: a.agent_status ?? "",
-    },
-  };
-}
-
-// What the agent over there actually receives. It has no idea the text came out
-// of a diff viewer, so name the PR and branch ahead of the comment itself.
-function commentBody(c: CommentDraft): string {
-  const what = c.prNumber != null ? `PR #${c.prNumber}` : `branch ${c.branch}`;
-  return `Comment on ${what} (${c.branch}): ${c.text.trim()}`;
 }
 
 // R doesn't run the rebase here: it splits a sibling pane on the right, starts
@@ -1246,16 +1136,17 @@ function shortPath(p: string): string {
   return home && p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 }
 
-// Put `branch` in a working tree and open that tree in Zed. Git refuses to
-// check a branch out twice, so one that already lives in another worktree
-// (a ~/Numeral slot, say) is opened where it is instead of being fought over.
+// Check out a branch in this worktree. If Zed is opening it, an existing
+// checkout in another worktree can be used there; c reports that location
+// because it cannot change the caller's working directory.
 // Nothing is stashed or forced: a checkout git rejects is reported as-is.
-async function openInZed(
+async function checkoutBranch(
   branch: string,
-): Promise<{ code: number; out: string; err: string }> {
+  useOtherWorktree = false,
+): Promise<{ code: number; out: string; err: string; dir: string }> {
   const top = await run(["git", "rev-parse", "--show-toplevel"]);
   if (top.code !== 0)
-    return { code: 1, out: "", err: "not inside a git worktree" };
+    return { code: 1, out: "", err: "not inside a git worktree", dir: "" };
   const here = realPath(top.out.trim());
   const holder = (await listWorktrees()).find((w) => w.branch === branch);
 
@@ -1263,6 +1154,13 @@ async function openInZed(
   let did: string;
   if (holder && realPath(holder.path) !== here) {
     dir = realPath(holder.path);
+    if (!useOtherWorktree)
+      return {
+        code: 1,
+        out: "",
+        err: `${branch} is already checked out in ${shortPath(dir)}`,
+        dir,
+      };
     did = `${branch} lives in ${shortPath(dir)}`;
   } else if (holder) {
     did = `already on ${branch}`;
@@ -1281,14 +1179,26 @@ async function openInZed(
         code: co.code,
         out: "",
         err: (co.err || co.out).trim() || `git checkout exited ${co.code}`,
+        dir: here,
       };
     did = `checked out ${branch}`;
   }
 
+  return { code: 0, out: did, err: "", dir };
+}
+
+// Put `branch` in a working tree and open that tree in Zed.
+async function openInZed(
+  branch: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const checkout = await checkoutBranch(branch, true);
+  if (checkout.code !== 0) return checkout;
   // The zed CLI is a symlink into Zed.app; fall back to Launch Services when
   // it isn't on PATH.
   const zed = await run(
-    Bun.which("zed") ? ["zed", dir] : ["open", "-a", "Zed", dir],
+    Bun.which("zed")
+      ? ["zed", checkout.dir]
+      : ["open", "-a", "Zed", checkout.dir],
   );
   if (zed.code !== 0)
     return {
@@ -1296,7 +1206,11 @@ async function openInZed(
       out: "",
       err: (zed.err || zed.out).trim() || `zed exited ${zed.code}`,
     };
-  return { code: 0, out: `${did} — opened ${shortPath(dir)} in zed`, err: "" };
+  return {
+    code: 0,
+    out: `${checkout.out} — opened ${shortPath(checkout.dir)} in zed`,
+    err: "",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1979,12 +1893,6 @@ function App() {
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<Badge | null>(null);
-  const [comment, setComment] = useState<CommentDraft | null>(null);
-  // A keyboard burst — fast typing, or a paste that arrives as separate key
-  // events — delivers many keys before React re-renders, so the draft lives in
-  // a ref and state only mirrors it for display. Editing off the last render
-  // would keep nothing but the final keystroke.
-  const commentRef = useRef<CommentDraft | null>(null);
   // space: the selected PR's description + conversation. Fetched once per PR
   // (r inside the dialog refreshes), cached for the session.
   const [desc, setDesc] = useState<DescDialog | null>(null);
@@ -2005,8 +1913,8 @@ function App() {
   const [tags, setTags] = useState<TagDialog | null>(null);
   // S: stamp every marked row at the Slack review bot.
   const [stamp, setStamp] = useState<StampDialog | null>(null);
-  // The note is typed, so it lives in a ref for the same reason the comment
-  // draft does — a paste arrives faster than React re-renders.
+  // The note is typed into a ref because a paste arrives faster than React
+  // re-renders.
   const stampRef = useRef<StampDialog | null>(null);
   const putStamp = useCallback((dialog: StampDialog | null) => {
     stampRef.current = dialog;
@@ -2019,7 +1927,7 @@ function App() {
     setTags(dialog);
   }, []);
   // vim counts — 3j, 3J, 5d, 12G. A digit burst can outrun a React render the
-  // same way a pasted comment can, so the count lives in a ref and state only
+  // same way a pasted note can, so the count lives in a ref and state only
   // mirrors it for the footer; reading it off the last render would drop keys.
   const countRef = useRef<number | null>(null);
   const [countShown, setCountShown] = useState<number | null>(null);
@@ -2061,7 +1969,7 @@ function App() {
   // `/` searches the diff. The committed pattern is what n/N walk and what the
   // pane highlights; the draft is the pattern still being typed in the footer.
   // Both live in refs as well, because a fast-typed pattern (or a paste) can
-  // outrun a React render the same way the comment box and tag filter can.
+  // outrun a React render the same way the stamp note and tag filter can.
   const [search, setSearch] = useState<DiffSearch | null>(null);
   const searchRef = useRef<DiffSearch | null>(null);
   const putSearch = useCallback((s: DiffSearch | null) => {
@@ -2255,72 +2163,6 @@ function App() {
     }
   }, [screen, sel, entries, selected, ensureDiff]);
 
-  // ----- comment --------------------------------------------------------
-  const putComment = useCallback((c: CommentDraft | null) => {
-    commentRef.current = c;
-    setComment(c);
-  }, []);
-
-  const editComment = useCallback(
-    (edit: (text: string) => string) => {
-      const c = commentRef.current;
-      if (!c || c.sending) return;
-      putComment({ ...c, text: edit(c.text) });
-    },
-    [putComment],
-  );
-
-  // Open the dialog immediately and resolve the Herdr tab behind it, so typing
-  // can start while the lookup runs and the destination shows up when it lands.
-  const openComment = useCallback(() => {
-    const branch = sel?.branch ?? stack?.currentBranch ?? "";
-    const ticket = branch ? ticketFor(branch) : null;
-    if (!ticket) {
-      setActionMsg({
-        text: branch
-          ? `no Linear ticket in "${branch}" — nothing to comment on`
-          : "no branch to read a ticket off",
-        color: "red",
-      });
-      return;
-    }
-    putComment({
-      ticket,
-      branch,
-      prNumber: sel?.prNumber ?? null,
-      text: "",
-      target: null,
-      error: null,
-      sending: false,
-    });
-    resolveCommentTarget(ticket).then(({ target, error }) => {
-      const c = commentRef.current;
-      if (!c || c.ticket !== ticket) return; // dialog closed or reopened since
-      putComment({ ...c, target: target ?? null, error: error ?? null });
-    });
-  }, [sel, stack, putComment]);
-
-  const submitComment = useCallback(() => {
-    const c = commentRef.current;
-    if (!c || c.sending || !c.target || !c.text.trim()) return;
-    const { target } = c;
-    const body = commentBody(c);
-    putComment({ ...c, sending: true });
-    run(["herdr", "agent", "prompt", target.agent, body])
-      .then((r) => {
-        putComment(null);
-        setActionMsg(
-          r.code === 0
-            ? { text: `comment sent to ${target.tabLabel}`, color: "green" }
-            : { text: `comment failed — ${herdrError(r)}`, color: "red" },
-        );
-      })
-      .catch((e: Error) => {
-        putComment(null);
-        setActionMsg({ text: `comment failed — ${e.message}`, color: "red" });
-      });
-  }, [putComment]);
-
   // ----- description dialog ---------------------------------------------
   const loadDiscussion = useCallback((prNumber: number) => {
     setDesc((d) => (d && d.prNumber === prNumber ? { ...d, loading: true } : d));
@@ -2357,6 +2199,48 @@ function App() {
     [loadDiscussion],
   );
 
+  const refreshCheckout = useCallback(async () => {
+    const cur = await currentBranch();
+    setStack(
+      (s) =>
+        s && {
+          ...s,
+          currentBranch: cur,
+          branches: s.branches.map((x) => ({
+            ...x,
+            isCurrent: x.branch === cur,
+            hasLocal: x.hasLocal || x.branch === cur,
+          })),
+        },
+    );
+  }, []);
+
+  // ----- checkout -------------------------------------------------------
+  // c: check out the selected branch in this worktree without opening an editor.
+  const checkoutSelected = useCallback(
+    (b: StackBranch) => {
+      setActionMsg(null);
+      setBusy(`checking out ${b.branch}…`);
+      checkoutBranch(b.branch)
+        .then(async (r) => {
+          if (r.code !== 0) {
+            setActionMsg({
+              text: `checkout failed — ${firstLine(r.err) || `exit ${r.code}`}`,
+              color: "red",
+            });
+            return;
+          }
+          await refreshCheckout();
+          setActionMsg({ text: r.out, color: "green" });
+        })
+        .catch((e: Error) => {
+          setActionMsg({ text: `checkout failed — ${e.message}`, color: "red" });
+        })
+        .finally(() => setBusy(null));
+    },
+    [refreshCheckout],
+  );
+
   // ----- zed ------------------------------------------------------------
   // z: check the selected branch out (when it isn't already) and open its
   // worktree in Zed. Runs as a busy action so a second z can't race the
@@ -2374,20 +2258,7 @@ function App() {
           });
           return;
         }
-        // the checkout may have moved HEAD; re-read it rather than assume
-        const cur = await currentBranch();
-        setStack(
-          (s) =>
-            s && {
-              ...s,
-              currentBranch: cur,
-              branches: s.branches.map((x) => ({
-                ...x,
-                isCurrent: x.branch === cur,
-                hasLocal: x.hasLocal || x.branch === cur,
-              })),
-            },
-        );
+        await refreshCheckout();
         setBusy(null);
         setActionMsg({ text: r.out, color: "green" });
       })
@@ -2395,7 +2266,7 @@ function App() {
         setBusy(null);
         setActionMsg({ text: `zed failed — ${e.message}`, color: "red" });
       });
-  }, []);
+  }, [refreshCheckout]);
 
   // ----- approve --------------------------------------------------------
   // a: stage an approval of the selected PR; y submits `gh pr review
@@ -2692,7 +2563,7 @@ function App() {
   // ----- stamp ----------------------------------------------------------
   // S: ask the Slack review bot to look at the marked PRs. Open the dialog
   // first and resolve the channel/bot behind it, so a note can be typed while
-  // the lookup runs — the same shape as the comment box.
+  // the lookup runs while the note is typed.
   const openStamp = useCallback(() => {
     const targets = markedBranches.filter((b) => b.prNumber != null && b.prUrl);
     if (targets.length === 0) {
@@ -2789,8 +2660,6 @@ function App() {
   // OpenTUI reserves the terminal's first line and Yoga needs room for the
   // header, footer, and their separating rows. Keep the visible diff within
   // the actual flex body so its title rows never collapse under line content.
-  // border rows plus destination / input / hint, when the dialog is up
-  const commentH = comment ? 5 : 0;
   // border rows plus the target line, one row per option, and the hint
   const statusH = status ? STATUS_OPTIONS.length + 4 : 0;
   const tagMatches = tags ? matchingLabels(tags) : [];
@@ -2798,9 +2667,9 @@ function App() {
   const tagStart = tags ? Math.max(0, tags.idx - tagRows + 1) : 0;
   // Borders, target, search, chosen tags, hint, and the windowed label list.
   const tagsH = tags ? tagRows + 6 : 0;
-  // border rows plus destination / note / hint, the comment box's shape
+  // border rows plus destination / note / hint
   const stampH = stamp ? 5 : 0;
-  const bodyH = Math.max(4, rows - 5 - commentH - statusH - tagsH - stampH);
+  const bodyH = Math.max(4, rows - 5 - statusH - tagsH - stampH);
   const diffViewH = Math.max(1, bodyH - 2); // pane title line + meta line
   const changesViewH = Math.max(1, bodyH - 4); // borders + title + totals
 
@@ -3025,7 +2894,7 @@ function App() {
       }
       return;
     }
-    if (comment || status || tagsRef.current || stampRef.current) return; // a dialog owns the screen while it is open
+    if (status || tagsRef.current || stampRef.current) return; // a dialog owns the screen while it is open
     // Geometry, 0-based like x/y and measured with injected clicks rather than
     // assumed: OpenTUI draws with a one-cell margin, so terminal row 0 and
     // column 0 stay blank, the header is row 1, the body starts at row 2
@@ -3196,25 +3065,7 @@ function App() {
   useInput((input, key) => {
     if (input.includes("[<")) return; // mouse reports, handled above
 
-    // The comment dialog owns the keyboard while it is open: every printable
-    // key is text, so nothing here may fall through to the keys below — "q"
-    // types a q rather than quitting, and escape closes the dialog only.
-    const draft = commentRef.current;
-    if (draft) {
-      if (key.escape) putComment(null);
-      else if (draft.sending) return; // in flight; only escape gets out
-      else if (key.return) submitComment();
-      else if (key.backspace || key.delete) editComment((t) => t.slice(0, -1));
-      else if (key.ctrl && input === "u") editComment(() => "");
-      else if (key.ctrl && input === "w")
-        editComment((t) => t.replace(/\s*\S+\s*$/, ""));
-      else if (input && !key.ctrl && !key.meta)
-        // a paste arrives as one chunk; flatten it onto the single input line
-        editComment((t) => t + input.replace(/\s+/g, " "));
-      return;
-    }
-
-    // The stamp dialog owns the keyboard the same way the comment box does:
+    // The stamp dialog owns the keyboard:
     // every printable key goes into the note, so nothing falls through.
     const stampDraft = stampRef.current;
     if (stampDraft) {
@@ -3386,7 +3237,7 @@ function App() {
           setSelected(at);
           openDesc(entries[at], desc.showAll);
         }
-      } else if (input === "c") openComment();
+      } else if (input === "c" && sel) checkoutSelected(sel);
       else if (input === "s") openStatus();
       else if (input === "S") openStamp();
       else if (input === "t") openTags();
@@ -3520,7 +3371,7 @@ function App() {
     else if (input === "a" && sel) approvePr(sel);
     else if (input === "A") approveAll();
     else if (input === "x") rerunChecks();
-    else if (input === "c") openComment();
+    else if (input === "c" && sel) checkoutSelected(sel);
     else if (input === "o" && sel?.prNumber != null)
       Bun.spawn(["gh", "pr", "view", String(sel.prNumber), "--web"], {
         stdout: "ignore",
@@ -3646,12 +3497,9 @@ function App() {
         ? `${hitIdx + 1}/${hitCount}`
         : `${hitCount} matches`;
 
-  // The Text shim truncates at the end, so window the draft by hand and keep
-  // the tail — where the cursor is — visible on a long comment.
+  // The Text shim truncates at the end, so window the stamp note by hand and
+  // keep the tail visible.
   const inputW = Math.max(12, cols - 8);
-  const draft = comment?.text ?? "";
-  const shownDraft =
-    draft.length > inputW ? `…${draft.slice(-(inputW - 1))}` : draft;
   const stampNote = stamp?.note ?? "";
   const shownNote =
     stampNote.length > inputW ? `…${stampNote.slice(-(inputW - 1))}` : stampNote;
@@ -4219,55 +4067,6 @@ function App() {
         </Box>
       ) : null}
 
-      {/* comment dialog: esc closes, enter hands the text to the ticket's agent */}
-      {comment ? (
-        <Box
-          flexDirection="column"
-          flexShrink={0}
-          borderStyle="round"
-          borderColor={comment.error ? "red" : "cyan"}
-          paddingX={1}
-        >
-          <Text wrap="truncate-end">
-            <Text bold color="cyan">
-              comment
-            </Text>
-            <Text dimColor>
-              {" "}
-              {comment.ticket}
-              {comment.prNumber != null ? ` · #${comment.prNumber}` : ""}
-              {" → "}
-            </Text>
-            {comment.target ? (
-              <Text>
-                {comment.target.tabLabel}
-                <Text dimColor>
-                  {" · "}
-                  {comment.target.agent}
-                  {comment.target.status ? ` (${comment.target.status})` : ""}
-                </Text>
-              </Text>
-            ) : comment.error ? (
-              <Text color="red">{comment.error}</Text>
-            ) : (
-              <Text dimColor>finding the herdr tab…</Text>
-            )}
-          </Text>
-          <Text wrap="truncate-end">
-            <Text color="cyan">{"❯ "}</Text>
-            <Text>{shownDraft}</Text>
-            {comment.sending ? null : <Text inverse>{" "}</Text>}
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {comment.sending
-              ? "sending…"
-              : comment.target
-                ? "enter send · esc cancel · ctrl+w word · ctrl+u clear"
-                : "esc cancel"}
-          </Text>
-        </Box>
-      ) : null}
-
       {/* footer: confirmation and action status take over the key hints */}
       <Box paddingX={1} flexShrink={0}>
         {pending ? (
@@ -4329,7 +4128,7 @@ function App() {
                 {countShown}{" "}
               </Text>
             ) : null}
-            t tags · s status · S stamp · ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c comment · o open · z zed · r refresh · esc close
+            t tags · s status · S stamp · ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c checkout · o open · z zed · r refresh · esc close
           </Text>
         ) : (
           <Text dimColor wrap="truncate-end">
@@ -4351,7 +4150,7 @@ function App() {
                 <Text dimColor> · </Text>
               </>
             ) : null}
-            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · x rerun failed · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c comment · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
+            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · x rerun failed · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c checkout · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -4394,6 +4193,22 @@ if (argv.includes("--zed")) {
     process.exit(2);
   }
   const r = await openInZed(branch);
+  if (r.code !== 0) {
+    console.error(r.err);
+    process.exit(r.code || 1);
+  }
+  console.log(r.out);
+  process.exit(0);
+}
+
+if (argv.includes("--checkout")) {
+  // Headless c for shell use and checkout verification without a TTY.
+  const branch = argv[argv.indexOf("--checkout") + 1];
+  if (!branch) {
+    console.error("usage: stacks --checkout <branch>");
+    process.exit(2);
+  }
+  const r = await checkoutBranch(branch);
   if (r.code !== 0) {
     console.error(r.err);
     process.exit(r.code || 1);
@@ -4482,7 +4297,7 @@ if (argv.includes("--stamp")) {
 if (argv.includes("-h") || argv.includes("--help")) {
   console.log(`stacks — browse a gh stack: PRs on the left, gh pr diff on the right
 
-usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>]
+usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>] [--checkout <branch>]
        stacks --stamp <pr-number|url>… [--note TEXT] [--send]
 
 keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection ·
@@ -4492,7 +4307,7 @@ keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection 
       n/p next/prev file (with no search running) · s set PR status · S stamp
       PRs at the Slack review bot · t add tags ·
       a approve · A approve every open PR in the stack · z check out + open in
-      Zed · c comment to the ticket's agent · o open in browser · R rebase via
+      Zed · c check out in this worktree · o open in browser · R rebase via
       a claude agent · M squash-merge stack · r refresh · q quit
 counts: every motion takes a vim count — 10↓ scrolls ten diff lines, 4↑ scrolls
       four lines up, 3j moves three PRs down, 3J takes three more rows into the
@@ -4534,7 +4349,7 @@ its findings), oldest first, rendered as terminal markdown. Inside it: j/k,
 space/b, d/u, g/G scroll like the diff · n/p jump between comments · tab /
 shift-tab step to the next/previous PR · x unfolds resolved threads and bot
 comments (Vercel, Linear), which fold to one line by default · a approves ·
-c comments to the ticket's agent · o opens the PR in the browser · z opens it
+c checks out the selected branch · o opens the PR in the browser · z opens it
 in Zed · r re-fetches · esc closes. Images show as a "⧉ alt" placeholder (o for the real
 thing).
 
@@ -4544,12 +4359,10 @@ Zed. A branch already checked out in another worktree opens there instead
 (git won't check it out twice), and a checkout git refuses (dirty tree) is
 reported, never stashed or forced.
 
-c opens a comment box for the selected PR. The Linear ticket comes off the
-branch name (miguel/prod-3083-hide-officer-ssn -> PROD-3083), the Herdr tab
-labeled with that ticket is looked up in the current workspace, and enter hands
-the text to the agent running in it via \`herdr agent prompt\`. esc closes the box
-without sending. Needs a Herdr pane (HERDR_ENV=1) and exactly one matching tab
-with one agent in it — anything else is reported in the box instead of guessed.
+c checks the selected branch out in the current worktree without opening an
+editor. It creates a local tracking branch when needed. If the branch already
+lives in another worktree, the location is shown instead; use z to open it there.
+Git errors (including dirty-tree conflicts) are reported without stashing or forcing.
 
 J and K extend a selection the way vim's visual line mode does: the first one
 anchors on the row the cursor is already on, and each further J/K (or count)

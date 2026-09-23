@@ -1,6 +1,7 @@
 alias gv="gh repo view -w"
 alias ga="gh pr review --approve"
 alias pv="gh pr view -w"
+alias gw="gh pr view -w"
 alias g="git"
 alias gi="git init"
 function jw() {
