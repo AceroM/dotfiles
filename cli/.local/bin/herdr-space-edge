@@ -8,7 +8,7 @@
 # and keys.next_workspace only step one row, and keys.switch_workspace is an
 # indexed 1..9 binding, which cannot name "whichever one is last". So this is
 # bound in config.toml as a `type = "shell"` command (ctrl+alt+u -> first,
-# ctrl+alt+i -> last) and the server spawns it detached: no $PATH, no tty to
+# ctrl+alt+g -> last) and the server spawns it detached: no $PATH, no tty to
 # print errors to. Hence the explicit PATH and the log file instead of stderr.
 #
 # Kept bash-3.2 clean: the shebang resolves against whatever PATH the server

@@ -60,15 +60,16 @@ focus_pane_left = "ctrl+alt+left"
 focus_pane_down = "ctrl+alt+down"
 focus_pane_up = "ctrl+alt+up"
 focus_pane_right = "ctrl+alt+right"
-# ctrl+alt+o -- back to the pane I was in before this one, wherever it lives.
+# ctrl+alt+o/i -- switch between this pane and the one used just before it.
 # The arrows above walk the split geometry inside one tab; this is the alt-tab
 # motion instead, the way back to the other agent I am bouncing between even when
 # it sits in a different tab or space. Unset by default, and it does not displace
 # anything: the stock prefix+tab / prefix+shift+tab still cycle panes within the
 # tab.
 #
-# Ghostty passes ctrl+alt+o through to Herdr via the kitty keyboard protocol.
-last_pane = "ctrl+alt+o"
+# Both chords reach Herdr through Ghostty's kitty keyboard protocol. Herdr's
+# last_pane action is a two-pane toggle, not a multi-entry Vim jump list.
+last_pane = ["ctrl+alt+o", "ctrl+alt+i"]
 split_vertical = "ctrl+alt+v"
 split_horizontal = "ctrl+alt+minus"
 # ctrl+alt+w closes the focused pane; the tab only goes away once its last
@@ -94,7 +95,7 @@ switch_tab = "ctrl+alt+1..9"
 
 # --- Indexed spaces -----------------------------------------------------
 # cmd+alt+shift+1..9 jumps straight to the Nth space in the sidebar: the indexed
-# sibling of ctrl+alt+j/k (one row at a time) and ctrl+alt+u/i (the two ends).
+# sibling of ctrl+alt+j/k (one row at a time) and ctrl+alt+u/g (the two ends).
 # Tabs already own the ctrl+alt+digit chord, so the space axis moves to the cmd
 # side of the keyboard rather than stacking a fourth modifier on top of it.
 #
@@ -104,12 +105,9 @@ switch_tab = "ctrl+alt+1..9"
 # mechanism switch_tab above relies on.
 switch_workspace = "cmd+alt+shift+1..9"
 
-# ctrl+alt+u/i -- jump to the first/last space in the sidebar. ctrl+alt+j/k walk
-# the list one row at a time; these are the two ends of that same axis, and u/i
-# sit directly above j/k on the home row, so the "one row" and "all the way"
-# motions stay in one finger cluster. (This used to be a lone ctrl+alt+g for the
-# bottom end, on vim's G; keeping both ends means the pair reads better as u=up,
-# i=down than as g/shift+g.)
+# ctrl+alt+u/g -- jump to the first/last space in the sidebar. ctrl+alt+j/k walk
+# the list one row at a time. The bottom-end shortcut moved back to g so
+# ctrl+alt+i can pair with ctrl+alt+o for pane switching.
 #
 # Herdr has no first_workspace/last_workspace action to bind -- switch_workspace
 # is an indexed 1..9 binding, which cannot name "whichever is last" -- so these go
@@ -118,12 +116,6 @@ switch_workspace = "cmd+alt+shift+1..9"
 # command is wrapped in an explicit /bin/sh rather than trusting $PATH to contain
 # ~/.local/bin.
 #
-# ctrl+i is legacy-encoded as Tab, but herdr pushes the kitty keyboard flags and
-# Ghostty answers in CSI-u (ctrl+alt+i -> CSI 105;7u), so the chord is distinct
-# from a real Tab -- same mechanism the ctrl+alt+1..9 binding relies on.
-#
-# ctrl+alt+g used to sit on the last-space job (and lazygit-in-a-popup before
-# that); it now has no binding at all.
 [[keys.command]]
 key = "ctrl+alt+u"
 type = "shell"
@@ -131,7 +123,7 @@ description = "First space"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-edge first"'
 
 [[keys.command]]
-key = "ctrl+alt+i"
+key = "ctrl+alt+g"
 type = "shell"
 description = "Last space"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-edge last"'
