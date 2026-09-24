@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+patterns="$root/private/commit-denylist"
+
+if [ ! -s "$patterns" ]; then
+  echo "Missing private/commit-denylist; add one literal blocked term per line." >&2
+  exit 1
+fi
+
+if LC_ALL=C grep -q '^[[:space:]]*$' "$patterns"; then
+  echo "private/commit-denylist must not contain blank lines." >&2
+  exit 1
+fi
+
+if git ls-files --cached -z | tr '\0' '\n' | LC_ALL=C grep -qiF -f "$patterns"; then
+  echo "A staged path contains a blocked private term." >&2
+  exit 1
+fi
+
+if git grep --cached -q -i -F -f "$patterns" --; then
+  echo "Staged content contains a blocked private term." >&2
+  exit 1
+else
+  status=$?
+  [ "$status" -eq 1 ] || exit "$status"
+fi
