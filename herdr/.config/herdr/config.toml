@@ -60,15 +60,15 @@ focus_pane_left = "ctrl+alt+left"
 focus_pane_down = "ctrl+alt+down"
 focus_pane_up = "ctrl+alt+up"
 focus_pane_right = "ctrl+alt+right"
-# ctrl+cmd+o -- back to the pane I was in before this one, wherever it lives.
+# ctrl+alt+o -- back to the pane I was in before this one, wherever it lives.
 # The arrows above walk the split geometry inside one tab; this is the alt-tab
 # motion instead, the way back to the other agent I am bouncing between even when
 # it sits in a different tab or space. Unset by default, and it does not displace
 # anything: the stock prefix+tab / prefix+shift+tab still cycle panes within the
 # tab.
 #
-# Ghostty passes ctrl+cmd+o through to Herdr via the kitty keyboard protocol.
-last_pane = "ctrl+cmd+o"
+# Ghostty passes ctrl+alt+o through to Herdr via the kitty keyboard protocol.
+last_pane = "ctrl+alt+o"
 split_vertical = "ctrl+alt+v"
 split_horizontal = "ctrl+alt+minus"
 # ctrl+alt+w closes the focused pane; the tab only goes away once its last

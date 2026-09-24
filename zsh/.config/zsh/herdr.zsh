@@ -5,6 +5,7 @@
 # capture/send verbs, and a real request/response call between panes (hx).
 #
 #   hd  <t>                resolve a target      hs    <t> <text>  type text / keys
+#   hi                     current pane ID
 #   j   <t> [n]            read output (= hr)    hsend <t> <text>  type text, no Enter
 #   hl                     spaces > tabs > panes hkeys <t> <key>   send key presses
 #   hls                    every pane, flat      hrun  <t> <cmd>   type cmd + Enter
@@ -42,7 +43,7 @@
 # Everything requires running inside Herdr (HERDR_ENV=1).
 
 # stale aliases from older versions of this file shadow the functions below
-unalias hd hl j hr hc hrc hs hls hp hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
+unalias hd hi hl j hr hc hrc hs hls hp hid hname hsend hkeys hrun hcap hwait hx hask hspawn hkill 2>/dev/null
 
 alias h="herdr"
 alias eh="nvim ~/.config/herdr/config.toml"
@@ -84,6 +85,11 @@ function _h_guard() {
     print -u2 "not inside a Herdr pane (HERDR_ENV unset)"
     return 1
   fi
+}
+
+function hi() {
+  _h_guard || return 1
+  print -r -- "$HERDR_PANE_ID"
 }
 
 # ── name resolution ─────────────────────────────────────────────────
