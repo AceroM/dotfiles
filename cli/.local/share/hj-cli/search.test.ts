@@ -21,8 +21,8 @@ const candidates: Candidate[] = [
     status: "idle",
     paneId: "w1:p1",
     sessionId: "session-1",
-    title: "Check Autobuilder browser steps | tax-holiday.4",
-    cwd: "/repo/tax-holiday.4",
+    title: "Check Autobuilder browser steps | service.4",
+    cwd: "/repo/service.4",
     workspace: { id: "w1", label: "autobuilder", number: 1 },
     tab: { id: "w1:t1", label: "browser", number: 1 },
     transcript: "Investigating why autobuilder batch 126 was cancelled.",
@@ -35,7 +35,7 @@ const candidates: Candidate[] = [
     paneId: "w1:p2",
     sessionId: "session-2",
     title: "Verify credential runner",
-    cwd: "/repo/tax-holiday",
+    cwd: "/repo/service",
     workspace: { id: "w1", label: "autobuilder", number: 1 },
     tab: { id: "w1:t2", label: "credentials", number: 2 },
     transcript: "Running the credential automation end to end.",
@@ -63,7 +63,7 @@ describe("candidate selection", () => {
     expect(exactMatch("w1:p1", candidates)?.id).toBe("agent_0");
     expect(exactMatch("credential-check", candidates)?.id).toBe("agent_1");
     expect(
-      exactMatch("Check Autobuilder browser steps | tax-holiday.4", candidates)
+      exactMatch("Check Autobuilder browser steps | service.4", candidates)
         ?.id,
     ).toBe("agent_0");
     expect(exactMatch("autobuilder", candidates)).toBeNull();

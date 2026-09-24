@@ -5,7 +5,7 @@ import Foundation
 struct Notif: Identifiable, Equatable {
   let iden: String
   let date: TimeInterval  // unix seconds
-  let title: String  // workspace ("Numeral HQ")
+  let title: String  // Slack workspace
   let subtitle: String  // channel, or the sender for a DM
   let body: String
   let link: URL?

@@ -247,7 +247,7 @@ end
 function M.test()
   local rule = M.rules["com.tinyspeck.slackmacgap"]
   showToast({
-    title = "Numeral HQ",
+    title = "Sample workspace",
     subtitle = "Miguel Acero",
     body = "hey can you take a look at the staging deploy when you get a sec? "
       .. "the migration step is timing out again",

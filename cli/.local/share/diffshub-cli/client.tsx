@@ -9543,7 +9543,7 @@ function App() {
               <label>Member repos</label>
               <input
                 value={dirForm.repos}
-                placeholder="e.g. tax-holiday, tax-holiday.[2-6]  ·  app, web"
+                placeholder="e.g. service, service.[2-6]  ·  app, web"
                 onChange={(e) => setDirForm((f) => ({ ...f, repos: e.target.value }))}
                 onKeyDown={(e) => {
                   e.stopPropagation();

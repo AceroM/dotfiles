@@ -6,59 +6,23 @@
 // shell wrapper does NOT work — the adapter connects but never spawns a process, leaving an empty
 // terminal and "no adapter running to send request: ThreadsCommand" in ~/Library/Logs/Zed/Zed.log.
 //
-// The Node scenarios run TypeScript through `tsx`, so breakpoints land in .ts sources with no build
-// step, and doppler injects secrets at launch — nothing is written to disk. Zed's JavaScript adapter
-// (vscode-js-debug) attaches through the doppler wrapper via NODE_OPTIONS, so the `node` child is
-// the process being debugged.
+// The TypeScript scenario runs through `tsx`, so breakpoints land in .ts sources with no build step.
 [
   {
-    "label": "Debug current file with Node (doppler dev_personal)",
+    "label": "Debug current file with Node (tsx)",
     "adapter": "JavaScript",
     "type": "node",
     "request": "launch",
     "cwd": "$ZED_WORKTREE_ROOT",
     "program": "$ZED_FILE",
-    "runtimeExecutable": "/opt/homebrew/bin/doppler",
-    "runtimeArgs": [
-      "-p",
-      "tax-holiday",
-      "-c",
-      "dev_personal",
-      "run",
-      "--",
-      "node",
-      "--import",
-      "tsx"
-    ],
+    "runtimeExecutable": "node",
+    "runtimeArgs": ["--import", "tsx"],
     "autoAttachChildProcesses": true,
     "console": "integratedTerminal",
     "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
   },
   {
-    "label": "Debug current file with Node (doppler dev)",
-    "adapter": "JavaScript",
-    "type": "node",
-    "request": "launch",
-    "cwd": "$ZED_WORKTREE_ROOT",
-    "program": "$ZED_FILE",
-    "runtimeExecutable": "/opt/homebrew/bin/doppler",
-    "runtimeArgs": [
-      "-p",
-      "tax-holiday",
-      "-c",
-      "dev",
-      "run",
-      "--",
-      "node",
-      "--import",
-      "tsx"
-    ],
-    "autoAttachChildProcesses": true,
-    "console": "integratedTerminal",
-    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
-  },
-  {
-    // Plain Node, no doppler — for scratch files that need no secrets.
+    // Plain Node for scratch files.
     "label": "Debug current file with Node (no secrets)",
     "adapter": "JavaScript",
     "type": "node",
@@ -70,7 +34,7 @@
   },
   {
     // Attach to any Node process started with --inspect-brk=127.0.0.1:9229.
-    // e.g. `./out/benton-lane.sh --debug` in tax-holiday.
+    // e.g. `node --inspect-brk=127.0.0.1:9229 script.js`.
     "label": "Attach to Node on :9229",
     "adapter": "JavaScript",
     "type": "node",
@@ -93,9 +57,9 @@
     "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
   },
   {
-    // Client-side debugging of an ALREADY-RUNNING dev server (th replica → :3001, th dev2 → :3002).
+    // Client-side debugging of an already running dev server.
     // Launches Chrome only; it does not start Next.js.
-    "label": "Launch web app in Chrome (:3001 replica)",
+    "label": "Launch web app in Chrome (:3001)",
     "adapter": "JavaScript",
     "type": "chrome",
     "request": "launch",
@@ -105,7 +69,7 @@
     "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
   },
   {
-    "label": "Launch web app in Chrome (:3002 second server)",
+    "label": "Launch web app in Chrome (:3002)",
     "adapter": "JavaScript",
     "type": "chrome",
     "request": "launch",

@@ -35,7 +35,7 @@ const restartCommand = process.env.DIFFSHUB_RESTART_COMMAND || "dh";
 // only) $DIFFSHUB_REPOS, then ./.diffshub.json, then the app+web default, then a
 // scan of every immediate child git repo.
 // Each member entry may be an exact sub-dir name OR a glob (`*`, `?`, `[2-6]`)
-// matched against the immediate child git repos/worktrees — so `tax-holiday.[2-6]`
+// matched against the immediate child git repos/worktrees — so `service.[2-6]`
 // keeps picking up worktrees as they come and go without re-editing the list.
 
 interface RepoCtx {

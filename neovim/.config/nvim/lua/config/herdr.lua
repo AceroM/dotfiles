@@ -80,7 +80,7 @@ local function contains(cwd, path)
   return cwd ~= "" and (path == cwd or path:sub(1, #cwd + 1) == cwd .. "/")
 end
 
--- Key for M.chosen. `.git` is matched as a file too, so worktrees (tax-holiday.3
+-- Key for M.chosen. `.git` is matched as a file too, so worktrees (service.3
 -- and friends) key off the worktree root rather than the main checkout.
 local function project_root(path)
   local dir = vim.fs.dirname(path)

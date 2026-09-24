@@ -39,7 +39,7 @@ const SELECTED_BG = "#3a4b5f" // Zed One Dark selection, composited over its bac
 
 interface Notif {
   date: number // unix seconds
-  title: string // workspace ("Numeral HQ")
+  title: string // Slack workspace
   subtitle: string // channel or DM sender
   body: string
   iden: string
