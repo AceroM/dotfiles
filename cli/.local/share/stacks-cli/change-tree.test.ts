@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { changeTreeRows } from "./change-tree";
+import { changeTreeRows, isTestPath } from "./change-tree";
 
 describe("changeTreeRows", () => {
   test("groups paths, collapses single-child directories, and rolls up stats", () => {
@@ -89,5 +89,16 @@ describe("changeTreeRows", () => {
         depth: 1,
       },
     ]);
+  });
+});
+
+describe("isTestPath", () => {
+  test("matches .test/.spec files and __tests__ folders only", () => {
+    expect(isTestPath("src/lib/git.test.ts")).toBe(true);
+    expect(isTestPath("src/Button.spec.tsx")).toBe(true);
+    expect(isTestPath("__tests__/setup.ts")).toBe(true);
+    expect(isTestPath("src/__tests__/fixtures/data.json")).toBe(true);
+    expect(isTestPath("src/lib/git.ts")).toBe(false);
+    expect(isTestPath("src/testing/latest.ts")).toBe(false);
   });
 });

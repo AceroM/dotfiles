@@ -98,3 +98,9 @@ export function changeTreeRows(files: ChangedFile[]): ChangeTreeRow[] {
   visit(root, 0, "");
   return rows;
 }
+
+// T hides test files from both the diff and the changes tree: *.test.ts and
+// friends (.spec, tsx/js/jsx) plus anything under a __tests__/ folder.
+export function isTestPath(path: string): boolean {
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(path) || /(^|\/)__tests__\//.test(path);
+}

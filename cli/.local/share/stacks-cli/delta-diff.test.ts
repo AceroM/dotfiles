@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  dropDiffFiles,
   deltaLanguageForPath,
   groupDiffForDelta,
   markDeltaFileHeaders,
@@ -68,4 +69,21 @@ test("Delta file headings retain semantic paths", () => {
       ["src/a.ts"],
     )[0].filePath,
   ).toBe("src/a.ts");
+});
+
+describe("dropDiffFiles", () => {
+  test("drops a file's whole section and keeps the rest", () => {
+    const line = (text: string, filePath?: string) => ({ text, spans: [], ...(filePath ? { filePath } : {}) });
+    const lines = [
+      line("a.ts", "a.ts"),
+      line("+a"),
+      line("a.test.ts", "a.test.ts"),
+      line("+t"),
+      line("b.ts", "b.ts"),
+      line("+b"),
+    ];
+    expect(dropDiffFiles(lines, (p) => p.endsWith(".test.ts")).map((l) => l.text)).toEqual([
+      "a.ts", "+a", "b.ts", "+b",
+    ]);
+  });
 });

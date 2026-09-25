@@ -258,3 +258,16 @@ export function markDeltaFileHeaders(
   return marked;
 }
 
+
+// Drop whole file sections from a rendered diff. A section runs from its
+// marked header to the next one; lines before the first header always stay.
+export function dropDiffFiles(
+  lines: DiffLine[],
+  drop: (path: string) => boolean,
+): DiffLine[] {
+  let keep = true;
+  return lines.filter((line) => {
+    if (line.filePath) keep = !drop(line.filePath);
+    return keep;
+  });
+}

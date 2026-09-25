@@ -17,9 +17,11 @@ import React, {
 import { realpathSync } from "node:fs";
 import {
   changeTreeRows,
+  isTestPath,
   type ChangedFile,
 } from "./change-tree";
 import {
+  dropDiffFiles,
   groupDiffForDelta,
   markDeltaFileHeaders,
   parseAnsiDiff,
@@ -1958,7 +1960,13 @@ function App() {
     null,
   );
   const draggingPanelRef = useRef<"left" | "right" | null>(null);
-  const [diffLines, setDiffLines] = useState<DiffLine[] | null>(null);
+  const [rawDiffLines, setDiffLines] = useState<DiffLine[] | null>(null);
+  // T hides test files (*.test.ts, __tests__/) from the diff and changes tree.
+  const [hideTests, setHideTests] = useState(false);
+  const diffLines = useMemo(
+    () => (rawDiffLines && hideTests ? dropDiffFiles(rawDiffLines, isTestPath) : rawDiffLines),
+    [rawDiffLines, hideTests],
+  );
   const [scroll, setScroll] = useState(0);
   // The wheel scrolls the side panels on their own. null means a panel is
   // following: the stack list windows around the selection and the changes
@@ -2134,8 +2142,11 @@ function App() {
   const sel = entries[selected];
   const selectedDetails = sel?.prNumber != null ? details.get(sel.prNumber) : undefined;
   const changeRows = useMemo(
-    () => changeTreeRows(selectedDetails?.files ?? []),
-    [selectedDetails?.files],
+    () =>
+      changeTreeRows(
+        (selectedDetails?.files ?? []).filter((f) => !hideTests || !isTestPath(f.path)),
+      ),
+    [selectedDetails?.files, hideTests],
   );
   useEffect(() => {
     if (screen !== "main" || !sel) return;
@@ -3327,6 +3338,11 @@ function App() {
         });
     } else if (input === "V") setStackOpen((open) => !open);
     else if (input === "v") setChangesOpen((open) => !open);
+    else if (input === "T") {
+      setHideTests((h) => !h);
+      // the diff gets shorter or longer underneath us; start from the top
+      setScrollFor(() => 0);
+    }
     else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH * N);
     else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH * N);
     else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2) * N);
@@ -3846,6 +3862,7 @@ function App() {
               <Text dimColor>
                 {" · "}
                 {selDetails?.changedFiles ?? selDetails?.files.length ?? 0} files
+                {hideTests ? " · tests hidden" : ""}
               </Text>
             </Text>
             <Text dimColor wrap="truncate-end" flexShrink={0}>
@@ -4150,7 +4167,7 @@ function App() {
                 <Text dimColor> · </Text>
               </>
             ) : null}
-            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · x rerun failed · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c checkout · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
+            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · T {hideTests ? "show tests" : "hide tests"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · x rerun failed · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c checkout · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
           </Text>
         )}
       </Box>
@@ -4301,7 +4318,8 @@ usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>] 
        stacks --stamp <pr-number|url>… [--note TEXT] [--send]
 
 keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection ·
-      V toggle stack panel · v toggle changed-files tree · space PR description +
+      V toggle stack panel · v toggle changed-files tree · T hide/show test
+      files (*.test.ts, __tests__/) · space PR description +
       comments · l/h (or ←→) expand/collapse a PR's CI checks · x rerun its
       failed checks · f/b page · d/u half page · g/G top/bottom · / ? search the diff · n/N next/prev match ·
       n/p next/prev file (with no search running) · s set PR status · S stamp
