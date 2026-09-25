@@ -1,4 +1,7 @@
 [global]
+# Keep environment changes active without printing "direnv: export ...".
+hide_env_diff = true
+
 # log_filter is an allow-list: only messages matching this regex are printed.
 # "^$" matches nothing, so normal "direnv: loading/export ..." chatter is muted.
 # Errors (blocked .envrc, script failures) bypass it and still show.

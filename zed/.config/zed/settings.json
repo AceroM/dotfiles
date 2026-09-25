@@ -1,0 +1,24 @@
+{
+  "agent": {
+    "tool_permissions": {
+      "default": "allow"
+    },
+    "default_model": {
+      "provider": "zed.dev",
+      "model": "claude-opus-4-6"
+    }
+  },
+  "cli_default_open_behavior": "new_window",
+  "relative_line_numbers": "enabled",
+  "edit_predictions": {
+    "mode": "subtle"
+  },
+  "vim_mode": true,
+  "ui_font_size": 14,
+  "buffer_font_size": 14,
+  "theme": {
+    "light": "One Light",
+    "dark": "One Dark",
+    "mode": "system"
+  }
+}
