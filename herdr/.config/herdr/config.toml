@@ -342,6 +342,8 @@ width = "60%"
 height = "20%"
 
 [ui]
+# Use the whole terminal for the pane when the sidebar is toggled off.
+sidebar_collapsed_mode = "hidden"
 # Borders and navigate-mode UI default to cyan, which would be a third hue
 # alongside the tab blue and the grey chrome. Pin it to Zed's One Dark accent
 # (its `text.accent` / player-1 blue), which is also what ghostty's
