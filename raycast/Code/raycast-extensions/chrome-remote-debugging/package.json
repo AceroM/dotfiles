@@ -1,0 +1,75 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "chrome-remote-debugging",
+  "title": "Chrome Remote Debugging",
+  "description": "Auto-click Chrome's \"Allow remote debugging?\" prompt in the background, toggled like Coffee.",
+  "icon": "icon.png",
+  "author": "AceroM",
+  "license": "MIT",
+  "categories": ["Developer Tools"],
+  "commands": [
+    {
+      "name": "status",
+      "title": "Remote Debugging Status",
+      "subtitle": "Chrome Remote Debugging",
+      "description": "Menu bar item showing whether the auto-allow watcher is running.",
+      "mode": "menu-bar",
+      "interval": "30s"
+    },
+    {
+      "name": "toggle",
+      "title": "Toggle Remote Debugging Auto-Allow",
+      "subtitle": "Chrome Remote Debugging",
+      "description": "Start or stop the watcher that clicks Allow on Chrome's remote debugging prompt.",
+      "mode": "no-view"
+    },
+    {
+      "name": "start",
+      "title": "Start Remote Debugging Auto-Allow",
+      "subtitle": "Chrome Remote Debugging",
+      "description": "Start the watcher.",
+      "mode": "no-view"
+    },
+    {
+      "name": "stop",
+      "title": "Stop Remote Debugging Auto-Allow",
+      "subtitle": "Chrome Remote Debugging",
+      "description": "Stop the watcher.",
+      "mode": "no-view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "interval",
+      "title": "Poll Interval (seconds)",
+      "description": "How often to look for the prompt.",
+      "type": "textfield",
+      "required": false,
+      "default": "3"
+    },
+    {
+      "name": "hideWhenInactive",
+      "label": "Hide menu bar icon when stopped",
+      "description": "Only show the menu bar icon while the watcher is running.",
+      "type": "checkbox",
+      "required": false,
+      "default": false
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^2.5.2"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.2.0",
+    "@types/node": "22.13.10",
+    "@types/react": "19.0.10",
+    "eslint": "^9.22.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.2"
+  },
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop",
+    "lint": "ray lint"
+  }
+}
