@@ -362,7 +362,7 @@ prompt_new_workspace_name = true
 
 [ui.sound]
 # Raycast's "Toggle Herdr Sounds" command flips this value and reloads Herdr.
-enabled = true
+enabled = false
 
 [ui.sidebar.spaces]
 rows = [["state_icon", "workspace"], ["branch", "git_status"]]
