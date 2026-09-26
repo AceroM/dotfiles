@@ -78,6 +78,7 @@ describe("agent config", () => {
 
   test("builds explicit Codex arguments", () => {
     expect(codexArgs(DEFAULT_CONFIG.profiles.cx)).toEqual([
+      "--no-daemon",
       "--yolo",
       "--model",
       "gpt-5.6-sol",

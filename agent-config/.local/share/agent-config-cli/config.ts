@@ -119,7 +119,8 @@ export async function saveConfig(
 }
 
 export function codexArgs(profile: Profile): string[] {
-  const args: string[] = [];
+  // Per-profile reasoning uses --config, so Codex must run in embedded mode.
+  const args: string[] = ["--no-daemon"];
   if (profile.access === "yolo") args.push("--yolo");
   args.push(
     "--model",
