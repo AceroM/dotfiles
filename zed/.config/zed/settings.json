@@ -19,6 +19,6 @@
   "theme": {
     "light": "One Light",
     "dark": "One Dark",
-    "mode": "system"
+    "mode": "dark"
   }
 }
