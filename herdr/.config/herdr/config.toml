@@ -15,13 +15,14 @@ onboarding = false
 # the direct chords below.
 
 [theme]
-# Match Zed's system-aware theme pair. Herdr re-queries the host terminal when
-# focus returns, so macOS appearance changes switch both layers together.
-# `name` is the fallback if the host does not report its appearance.
+# Keep Herdr dark regardless of the host terminal or macOS appearance.
 name = "one-dark"
-auto_switch = true
-dark_name = "one-dark"
-light_name = "rose-pine-dawn"
+auto_switch = false
+
+# Restore appearance-based switching by replacing auto_switch above with:
+# auto_switch = true
+# dark_name = "one-dark"
+# light_name = "rose-pine-dawn"
 
 [keys]
 # --- Tabs ---------------------------------------------------------------

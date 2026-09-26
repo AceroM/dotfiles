@@ -14,7 +14,7 @@
       "subtitle": "Chrome Remote Debugging",
       "description": "Menu bar item showing whether the auto-allow watcher is running.",
       "mode": "menu-bar",
-      "interval": "30s"
+      "interval": "1m"
     },
     {
       "name": "toggle",

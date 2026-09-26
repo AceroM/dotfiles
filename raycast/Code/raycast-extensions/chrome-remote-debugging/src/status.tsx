@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { Color, getPreferenceValues, Icon, MenuBarExtra, open } from "@raycast/api";
 import { isRunning, LOG, start, stop } from "./watcher";
 
@@ -18,6 +20,12 @@ export default function Command() {
     setRunning(await isRunning());
   };
 
+  const openLog = async () => {
+    mkdirSync(dirname(LOG), { recursive: true });
+    writeFileSync(LOG, "", { flag: "a" });
+    await open(LOG, "com.apple.TextEdit");
+  };
+
   return (
     <MenuBarExtra
       isLoading={running === undefined}
@@ -26,7 +34,7 @@ export default function Command() {
     >
       <MenuBarExtra.Item title={running ? "Auto-allow is on" : "Auto-allow is off"} />
       <MenuBarExtra.Item title={running ? "Stop" : "Start"} icon={running ? Icon.Stop : Icon.Play} onAction={toggle} />
-      <MenuBarExtra.Item title="Open Log" icon={Icon.Document} onAction={() => open(LOG)} />
+      <MenuBarExtra.Item title="Open Log" icon={Icon.Document} onAction={openLog} />
     </MenuBarExtra>
   );
 }
