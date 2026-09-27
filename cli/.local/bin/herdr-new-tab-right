@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Create a Herdr tab immediately to the right of the tab that invoked this."""
+
+import json
+import os
+import socket
+import sys
+
+
+def request(method, params):
+    path = os.environ.get("HERDR_SOCKET_PATH") or os.path.expanduser(
+        "~/.config/herdr/herdr.sock"
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.connect(path)
+        connection.sendall(
+            (json.dumps({"id": "new_tab_right", "method": method, "params": params}) + "\n").encode()
+        )
+        with connection.makefile("r") as response_file:
+            response = json.loads(response_file.readline())
+    if "error" in response:
+        raise RuntimeError(f"{method}: {response['error']}")
+    return response["result"]
+
+
+def main():
+    workspace_id = os.environ["HERDR_ACTIVE_WORKSPACE_ID"]
+    source_tab_id = os.environ["HERDR_ACTIVE_TAB_ID"]
+    tabs = request("tab.list", {"workspace_id": workspace_id})["tabs"]
+    source_index = next(
+        index for index, tab in enumerate(tabs) if tab["tab_id"] == source_tab_id
+    )
+    cwd = os.environ.get("HERDR_ACTIVE_PANE_CWD") or os.getcwd()
+    created = request(
+        "tab.create", {"workspace_id": workspace_id, "cwd": cwd, "focus": True}
+    )
+    request(
+        "tab.move",
+        {"tab_id": created["tab"]["tab_id"], "insert_index": source_index + 1},
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyError, OSError, ValueError, StopIteration, RuntimeError) as error:
+        print(f"herdr-new-tab-right: {error}", file=sys.stderr)
+        sys.exit(1)
