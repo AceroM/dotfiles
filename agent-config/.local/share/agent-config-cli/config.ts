@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 
-export const PROFILE_NAMES = ["cx", "cxl", "cxm", "cxh"] as const;
+export const PROFILE_NAMES = ["cx", "cxl", "cxm", "cxh", "cxx"] as const;
 export const ACCESS_MODES = ["yolo", "standard"] as const;
 
 export type ProfileName = (typeof PROFILE_NAMES)[number];
@@ -47,6 +47,12 @@ export const DEFAULT_CONFIG: AgentConfig = {
       label: "High",
       model: "gpt-5.6-sol",
       reasoning: "xhigh",
+      access: "yolo",
+    },
+    cxx: {
+      label: "Ultra",
+      model: "gpt-6-astra",
+      reasoning: "ultra",
       access: "yolo",
     },
   },

@@ -39,19 +39,6 @@ import {
 type EditableField = "model" | "reasoning" | "access";
 const EDITABLE_FIELDS: EditableField[] = ["model", "reasoning", "access"];
 
-function cycle<T extends string>(
-  choices: readonly T[],
-  current: T,
-  direction: -1 | 1,
-): T {
-  if (choices.length === 0) return current;
-  const currentIndex = choices.indexOf(current);
-  if (currentIndex === -1)
-    return direction === 1 ? choices[0] : choices[choices.length - 1];
-  const index = currentIndex;
-  return choices[(index + direction + choices.length) % choices.length];
-}
-
 function profileLine(name: ProfileName, profile: Profile): string {
   return [
     name.padEnd(4),
@@ -78,11 +65,13 @@ function ProfileRow({
   profile,
   active,
   compact,
+  onSelect,
 }: {
   name: ProfileName;
   profile: Profile;
   active: boolean;
   compact: boolean;
+  onSelect: () => void;
 }) {
   if (compact) {
     return (
@@ -90,6 +79,7 @@ function ProfileRow({
         flexDirection="column"
         backgroundColor={active ? "selected" : undefined}
         paddingX={1}
+        onMouseUp={onSelect}
       >
         <Text color={active ? "brightWhite" : undefined} bold={active}>
           {active ? ">" : " "} {name} · {profile.label}
@@ -103,7 +93,11 @@ function ProfileRow({
   }
 
   return (
-    <Box backgroundColor={active ? "selected" : undefined} paddingX={1}>
+    <Box
+      backgroundColor={active ? "selected" : undefined}
+      paddingX={1}
+      onMouseUp={onSelect}
+    >
       <Text color={active ? "brightWhite" : undefined} bold={active}>
         {active ? ">" : " "} {profileLine(name, profile)}
       </Text>
@@ -115,15 +109,45 @@ function FieldRow({
   label,
   value,
   active,
+  onSelect,
 }: {
   label: string;
   value: string;
   active: boolean;
+  onSelect: () => void;
 }) {
   return (
-    <Box backgroundColor={active ? "selected" : undefined} paddingX={1}>
+    <Box
+      backgroundColor={active ? "selected" : undefined}
+      paddingX={1}
+      onMouseUp={onSelect}
+    >
       <Text color={active ? "brightWhite" : undefined} bold={active}>
-        {active ? ">" : " "} {label.padEnd(11)} {value}
+        {active ? ">" : " "} {label.padEnd(11)} {value}  ›
+      </Text>
+    </Box>
+  );
+}
+
+function ChoiceRow({
+  value,
+  active,
+  current,
+  onSelect,
+}: {
+  value: string;
+  active: boolean;
+  current: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <Box
+      backgroundColor={active ? "selected" : undefined}
+      paddingX={1}
+      onMouseUp={onSelect}
+    >
+      <Text color={active ? "brightWhite" : undefined} bold={active}>
+        {active ? ">" : " "} {current ? "●" : "○"} {value}
       </Text>
     </Box>
   );
@@ -150,8 +174,18 @@ function EditorFooter({ dirty }: { dirty: boolean }) {
     <Box flexDirection="column" marginTop={1}>
       {dirty ? <Text color="yellow">Unsaved changes.</Text> : null}
       <Text dimColor>
-        <Key>↑↓</Key> field <Key>←→</Key> change <Key>s</Key> save{" "}
+        <Key>↑↓</Key> field <Key>enter</Key> select <Key>s</Key> save{" "}
         <Key>esc</Key> cancel
+      </Text>
+    </Box>
+  );
+}
+
+function ChoiceFooter() {
+  return (
+    <Box marginTop={1}>
+      <Text dimColor>
+        <Key>↑↓</Key> navigate <Key>enter</Key> choose <Key>esc</Key> back
       </Text>
     </Box>
   );
@@ -174,6 +208,9 @@ function App() {
   const [editing, setEditing] = useState<ProfileName | null>(null);
   const [field, setField] = useState(0);
   const fieldRef = useRef(0);
+  const [choosing, setChoosing] = useState<EditableField | null>(null);
+  const [choiceIndex, setChoiceIndex] = useState(0);
+  const choiceIndexRef = useRef(0);
   const [draft, setDraft] = useState<Profile | null>(null);
   const [original, setOriginal] = useState<Profile | null>(null);
 
@@ -195,39 +232,58 @@ function App() {
       setOriginal(structuredClone(profile));
       setField(0);
       fieldRef.current = 0;
+      setChoosing(null);
       setStatus(null);
     },
     [config],
   );
 
-  const updateDraft = useCallback(
-    (direction: -1 | 1) => {
+  const choicesFor = useCallback(
+    (selectedField: EditableField, profile: Profile): string[] => {
+      if (selectedField === "model")
+        return [...new Set([...catalog.map((option) => option.model), profile.model])];
+      if (selectedField === "reasoning")
+        return [...reasoningEffortsFor(catalog, profile.model, profile.reasoning)];
+      return [...ACCESS_MODES];
+    },
+    [catalog],
+  );
+
+  const beginChoice = useCallback(
+    (index: number) => {
+      if (!draft) return;
+      const selectedField = EDITABLE_FIELDS[index];
+      const choices = choicesFor(selectedField, draft);
+      const selectedIndex = Math.max(0, choices.indexOf(draft[selectedField]));
+      fieldRef.current = index;
+      setField(index);
+      choiceIndexRef.current = selectedIndex;
+      setChoiceIndex(selectedIndex);
+      setChoosing(selectedField);
+    },
+    [choicesFor, draft],
+  );
+
+  const chooseValue = useCallback(
+    (selectedField: EditableField, value: string) => {
       setDraft((current) => {
         if (!current) return current;
         const next = structuredClone(current);
-        const selectedField = EDITABLE_FIELDS[fieldRef.current];
         if (selectedField === "model") {
-          next.model = cycle(
-            catalog.map((option) => option.model),
-            next.model,
-            direction,
-          );
+          next.model = value;
           next.reasoning = normalizeReasoningForModel(
             catalog,
-            next.model,
+            value,
             next.reasoning,
           );
         } else if (selectedField === "reasoning") {
-          next.reasoning = cycle(
-            reasoningEffortsFor(catalog, next.model, next.reasoning),
-            next.reasoning,
-            direction,
-          );
-        } else {
-          next.access = cycle(ACCESS_MODES, next.access, direction);
+          next.reasoning = value;
+        } else if (value === "yolo" || value === "standard") {
+          next.access = value;
         }
         return next;
       });
+      setChoosing(null);
     },
     [catalog],
   );
@@ -273,6 +329,25 @@ function App() {
       return;
     }
 
+    if (editing && choosing && draft) {
+      const choices = choicesFor(choosing, draft);
+      if (key.escape) {
+        setChoosing(null);
+      } else if (key.upArrow || input === "k") {
+        choiceIndexRef.current = Math.max(0, choiceIndexRef.current - 1);
+        setChoiceIndex(choiceIndexRef.current);
+      } else if (key.downArrow || input === "j") {
+        choiceIndexRef.current = Math.min(
+          choices.length - 1,
+          choiceIndexRef.current + 1,
+        );
+        setChoiceIndex(choiceIndexRef.current);
+      } else if (key.return) {
+        chooseValue(choosing, choices[choiceIndexRef.current]);
+      }
+      return;
+    }
+
     if (editing) {
       if (key.escape) {
         setEditing(null);
@@ -287,10 +362,8 @@ function App() {
           fieldRef.current + 1,
         );
         setField(fieldRef.current);
-      } else if (key.leftArrow || input === "h") {
-        updateDraft(-1);
       } else if (key.rightArrow || input === "l" || key.return) {
-        updateDraft(1);
+        beginChoice(fieldRef.current);
       } else if (input === "s") {
         void persistDraft();
       } else if (input === "r") {
@@ -316,7 +389,7 @@ function App() {
       beginEdit(PROFILE_NAMES[selectedRef.current]);
     } else if (input === "r") {
       void resetSelected();
-    } else if (/^[1-4]$/.test(input)) {
+    } else if (/^[1-9]$/.test(input) && Number(input) <= PROFILE_NAMES.length) {
       const index = Number(input) - 1;
       selectedRef.current = index;
       setSelected(index);
@@ -348,6 +421,33 @@ function App() {
     );
   }
 
+  if (editing && choosing && draft) {
+    const choices = choicesFor(choosing, draft);
+    return (
+      <Box key="choices" flexDirection="column" padding={1}>
+        <Header />
+        <Box flexDirection="column" marginBottom={1}>
+          <Text color="brightWhite" bold>
+            {editing} · {draft.label} · {choosing}
+          </Text>
+          <Text dimColor>Choose a value.</Text>
+        </Box>
+        <Box flexDirection="column" borderStyle="round" borderColor="border" padding={1}>
+          {choices.map((value, index) => (
+            <ChoiceRow
+              key={value}
+              value={value}
+              active={choiceIndex === index}
+              current={draft[choosing] === value}
+              onSelect={() => chooseValue(choosing, value)}
+            />
+          ))}
+        </Box>
+        <ChoiceFooter />
+      </Box>
+    );
+  }
+
   if (editing && draft) {
     return (
       <Box key="editor" flexDirection="column" padding={1}>
@@ -365,13 +465,24 @@ function App() {
           borderColor="border"
           padding={1}
         >
-          <FieldRow label="Model" value={draft.model} active={field === 0} />
+          <FieldRow
+            label="Model"
+            value={draft.model}
+            active={field === 0}
+            onSelect={() => beginChoice(0)}
+          />
           <FieldRow
             label="Reasoning"
             value={draft.reasoning}
             active={field === 1}
+            onSelect={() => beginChoice(1)}
           />
-          <FieldRow label="Access" value={draft.access} active={field === 2} />
+          <FieldRow
+            label="Access"
+            value={draft.access}
+            active={field === 2}
+            onSelect={() => beginChoice(2)}
+          />
         </Box>
 
         {draft.access === "yolo" ? (
@@ -413,6 +524,11 @@ function App() {
             profile={config.profiles[name]}
             active={selected === index}
             compact={compact}
+            onSelect={() => {
+              selectedRef.current = index;
+              setSelected(index);
+              beginEdit(name);
+            }}
           />
         ))}
       </Box>
@@ -436,14 +552,14 @@ Usage:
   ac                  Open the profile editor
   ac show             Print the resolved profiles
   ac path             Print the config file path
-  ac run <profile>    Launch Codex with cx, cxl, cxm, or cxh
+  ac run <profile>    Launch Codex with ${PROFILE_NAMES.join(", ")}
   ac --help           Show this help`);
 }
 
 async function runCodex(args: string[]): Promise<never> {
   const name = args[0];
   if (!name || !isProfileName(name)) {
-    console.error("ac: expected a profile: cx, cxl, cxm, or cxh");
+    console.error(`ac: expected a profile: ${PROFILE_NAMES.join(", ")}`);
     process.exit(2);
   }
 

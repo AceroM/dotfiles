@@ -13,7 +13,7 @@ function 'c!'() {
   cs "$@"
 }
 alias ca="claude --permission-mode plan"
-unalias cx cxl cxm cxh 2>/dev/null
+unalias cx cxl cxm cxh cxx 2>/dev/null
 _ac_codex_profile() {
   local profile="$1"
   shift
@@ -23,6 +23,7 @@ cx() { _ac_codex_profile cx "$@"; }
 cxl() { _ac_codex_profile cxl "$@"; }
 cxm() { _ac_codex_profile cxm "$@"; }
 cxh() { _ac_codex_profile cxh "$@"; }
+cxx() { _ac_codex_profile cxx "$@"; }
 alias pn="pnpm"
 alias sp="git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E '\\.(ts|tsx|js|jsx|json|css|md)$' | xargs -0 bunx prettier --write && git diff main --cached --name-only -z --diff-filter=ACMR | grep -z -E '\\.(ts|tsx|js|jsx)$' | xargs -0 env NODE_OPTIONS=--max-old-space-size=8192 bunx eslint --fix"
 alias y="yazi"

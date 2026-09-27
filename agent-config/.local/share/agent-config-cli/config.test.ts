@@ -32,6 +32,11 @@ describe("agent config", () => {
     expect(config.profiles.cxl.model).toBe("gpt-5.6-luna");
     expect(config.profiles.cxm.model).toBe("gpt-5.6-terra");
     expect(config.profiles.cxh.reasoning).toBe("xhigh");
+    expect(config.profiles.cxx).toMatchObject({
+      label: "Ultra",
+      model: "gpt-6-astra",
+      reasoning: "ultra",
+    });
   });
 
   test("preserves forward-compatible model and effort identifiers", () => {
@@ -84,6 +89,15 @@ describe("agent config", () => {
       "gpt-5.6-sol",
       "--config",
       "model_reasoning_effort=xhigh",
+    ]);
+
+    expect(codexArgs(DEFAULT_CONFIG.profiles.cxx)).toEqual([
+      "--no-daemon",
+      "--yolo",
+      "--model",
+      "gpt-6-astra",
+      "--config",
+      "model_reasoning_effort=ultra",
     ]);
 
     expect(
