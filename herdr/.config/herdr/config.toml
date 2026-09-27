@@ -26,9 +26,9 @@ auto_switch = false
 
 [keys]
 # --- Tabs ---------------------------------------------------------------
-# ctrl+alt+n opens a tab beside the current one via the custom command below.
-# ctrl+alt+x closes it; ctrl+alt+h/l walk between tabs (same left/right feel
-# as vim's h/l).
+# ctrl+alt+n opens a tab at the end; ctrl+alt+x closes it; ctrl+alt+h/l walk
+# between tabs (same left/right feel as vim's h/l).
+new_tab = "ctrl+alt+n"
 close_tab = "ctrl+alt+x"
 previous_tab = "ctrl+alt+h"
 next_tab = "ctrl+alt+l"
@@ -117,12 +117,6 @@ switch_workspace = "cmd+alt+shift+1..9"
 # command is wrapped in an explicit /bin/sh rather than trusting $PATH to contain
 # ~/.local/bin.
 #
-[[keys.command]]
-key = "ctrl+alt+n"
-type = "shell"
-description = "New tab to the right"
-command = '/bin/sh -c "exec $HOME/.local/bin/herdr-new-tab-right"'
-
 [[keys.command]]
 key = "ctrl+alt+u"
 type = "shell"
@@ -358,8 +352,8 @@ sidebar_collapsed_mode = "hidden"
 # own highlights are one blue rather than three neighboring ones.
 accent = "#74ade8"
 
-# The stock new-tab action (prefix+c) also skips the name prompt.
-# The ctrl+alt+n custom command always creates its tab immediately.
+# ctrl+alt+n should feel like a browser new-tab, so skip the name prompt.
+# Flip to true to be asked for a tab name on every create.
 prompt_new_tab_name = false
 
 # Workspaces are long-lived and picked by name (ctrl+alt+shift+w), so always
