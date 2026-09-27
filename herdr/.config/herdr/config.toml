@@ -27,11 +27,9 @@ auto_switch = false
 [keys]
 # --- Tabs ---------------------------------------------------------------
 # ctrl+alt+n opens a tab beside the current one via the custom command below.
-# ctrl+alt+x closes it and keeps focus at that tab position when possible;
-# ctrl+alt+h/l walk between tabs (same left/right feel as vim's h/l).
-# The stock prefix+shift+x close action stays available for Herdr's built-in
-# confirmation when closing a worktree group.
-close_tab = "prefix+shift+x"
+# ctrl+alt+x closes it; ctrl+alt+h/l walk between tabs (same left/right feel
+# as vim's h/l).
+close_tab = "ctrl+alt+x"
 previous_tab = "ctrl+alt+h"
 next_tab = "ctrl+alt+l"
 rename_tab = "ctrl+alt+r"
@@ -75,10 +73,9 @@ focus_pane_right = "ctrl+alt+right"
 last_pane = ["ctrl+alt+o", "ctrl+alt+i"]
 split_vertical = "ctrl+alt+v"
 split_horizontal = "ctrl+alt+minus"
-# ctrl+alt+w closes the focused pane and keeps the tab position if its last
-# pane goes away. The stock prefix+x action remains available for Herdr's
-# built-in confirmation when closing a worktree group.
-close_pane = "prefix+x"
+# ctrl+alt+w closes the focused pane; the tab only goes away once its last
+# pane is gone. ctrl+alt+x closes the whole tab.
+close_pane = "ctrl+alt+w"
 # rename_pane has no direct chord on purpose. It sat on ctrl+alt+shift+p, but
 # that swallowed cmd+alt+shift+p before the "jump to the p* space" command below
 # could see it -- the one letter of the 26 that misfired that way (cmd+alt+shift+r
@@ -125,18 +122,6 @@ key = "ctrl+alt+n"
 type = "shell"
 description = "New tab to the right"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-new-tab-right"'
-
-[[keys.command]]
-key = "ctrl+alt+x"
-type = "shell"
-description = "Close tab, keep position"
-command = '/bin/sh -c "exec $HOME/.local/bin/herdr-close-tab-in-place"'
-
-[[keys.command]]
-key = "ctrl+alt+w"
-type = "shell"
-description = "Close pane, keep tab position"
-command = '/bin/sh -c "exec $HOME/.local/bin/herdr-close-tab-in-place pane"'
 
 [[keys.command]]
 key = "ctrl+alt+u"
