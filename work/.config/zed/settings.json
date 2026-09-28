@@ -1,4 +1,7 @@
 {
+  "markdown_preview": {
+    "max_width": 1200.0
+  },
   "diff_view_style": "unified",
   "icon_theme": {
     "mode": "dark",
