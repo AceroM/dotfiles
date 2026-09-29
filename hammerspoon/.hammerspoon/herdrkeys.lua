@@ -5,6 +5,7 @@
 --   fn+;          toggle the recent Claude/Codex sessions picker; Enter
 --                 resumes one in a new tab with permissions bypassed
 --   fn+y          copy the focused pane's Claude/Codex session id
+--   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
 --                 last pane back/forth
 --   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
@@ -58,7 +59,24 @@ local remapped = {
 local shiftable = { [keys.n] = true, [keys.r] = true }
 
 local tap
-local inflight = {} -- keeps sockets alive until they answer
+local inflight = {} -- keeps background tasks alive until they answer
+
+local function toggleRecording()
+  local task
+  task = hs.task.new("/usr/bin/open", function(exitCode, _, stderr)
+    inflight[task] = nil
+    if exitCode ~= 0 then
+      hs.printf("Quick Record toggle failed: %s", stderr or "")
+      hs.alert.show("Couldn’t open Quick Record. Run its install.sh first.", 3)
+    end
+  end, { "-g", "-a", HOME .. "/Applications/Quick Record.app", "quickrecord://toggle" })
+  if not task then return end
+  inflight[task] = true
+  if not task:start() then
+    inflight[task] = nil
+    hs.alert.show("Couldn’t start Quick Record.", 3)
+  end
+end
 
 -- One JSON request/response over the Herdr socket. cb(response, rawLine).
 -- Via `nc -U`, not hs.socket: hs.socket crashes Hammerspoon outright when it
@@ -160,10 +178,13 @@ local function handleKey(event)
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
   if flags.shift and not shiftable[code] then return false end
   local mode = pickers[code]
-  if not mode and code ~= keys.y and not remapped[code] then return false end
+  if not mode and code ~= keys.y and code ~= keys.q and not remapped[code] then return false end
   local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
 
-  if mode then
+  if code == keys.q then
+    if not autorepeat then toggleRecording() end
+    return true
+  elseif mode then
     if not autorepeat then toggle(mode) end
     return true
   elseif code == keys.y then
@@ -186,5 +207,6 @@ end
 
 M.toggle = toggle
 M.copySessionId = copySessionId
+M.toggleRecording = toggleRecording
 
 return M
