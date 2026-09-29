@@ -4,6 +4,14 @@
 - `Ctrl-Option-Shift-;`: spaces in sidebar order (direct popup bound in config.toml).
 - `Ctrl-Option-'`: the separate Jev semantic agent picker.
 - `fn-a` / `fn-s` (Hammerspoon, `herdrkeys.lua`): toggle the agents / spaces picker from any app.
+- `fn-t`: every tab in every space, in sidebar order; filter also matches pane titles and cwds.
+- `fn-;`: the 20 most recently written Claude (`~/.claude/projects`) and Codex
+  (`~/.codex/sessions`) transcripts (`sessions.ts`). Enter opens a new tab in the
+  current space at the session's cwd and runs `claude --resume <id>
+  --dangerously-skip-permissions` or `codex resume
+  --dangerously-bypass-approvals-and-sandbox <id>`. Rows marked `*` are already
+  running under Herdr, so Enter focuses that pane instead. `claude -p` runs and
+  Codex subagent/exec threads are skipped.
   Hammerspoon also takes over `Ctrl-Option-;` while Ghostty is focused and opens
   the popup over Herdr's socket with the snapshot preloaded; the Herdr bindings
   and `open.sh` are the slower fallback when Hammerspoon isn't running.

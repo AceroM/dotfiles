@@ -1,6 +1,9 @@
 -- fn shortcuts for Herdr, from a raw keyDown tap (hs.hotkey can't bind fn).
 --
 --   fn+a / fn+s   toggle the quick agents / spaces picker (from any app)
+--   fn+t          toggle the tabs picker (every tab in every space)
+--   fn+;          toggle the recent Claude/Codex sessions picker; Enter
+--                 resumes one in a new tab with permissions bypassed
 --   fn+y          copy the focused pane's Claude/Codex session id
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
 --                 last pane back/forth
@@ -8,6 +11,8 @@
 --   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
 --   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
 --                 vertically / horizontally
+--   fn+r          becomes ctrl+alt+r in Ghostty: rename tab
+--   fn+shift+r    becomes ctrl+alt+shift+r in Ghostty: rename space
 --   fn+n          becomes ctrl+alt+n in Ghostty: new tab
 --   fn+shift+n    becomes ctrl+alt+shift+n in Ghostty: new space
 --   fn+arrows     become ctrl+alt+arrows in Ghostty: focus the pane that way.
@@ -32,19 +37,21 @@ local PIDFILE = HOME .. "/.cache/herdr-quick-picker.pid"
 local GHOSTTY = "com.mitchellh.ghostty"
 local PLUGIN = "miguel.quick-pickers"
 local WIDTH = 40 -- ~300px at font-size 14
+local SESSIONS_WIDTH = 110 -- title + cwd + age
+local SESSIONS_ROWS = 20 -- sessions.ts LIMIT
 
 local keys = hs.keycodes.map
-local pickers = { [keys.a] = "agents", [keys.s] = "spaces" }
+local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.t] = "tabs", [keys[";"]] = "sessions" }
 local remapped = {
   [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
   [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
-  [keys["-"]] = true, [keys.n] = true,
+  [keys["-"]] = true, [keys.n] = true, [keys.r] = true,
   [keys.d] = keys.v, -- fn+d -> ctrl+alt+v
   [keys.home] = keys.left, [keys["end"]] = keys.right,
   [keys.pageup] = keys.up, [keys.pagedown] = keys.down,
 }
 -- Keys whose shifted chord is forwarded too (fn+shift+n -> ctrl+alt+shift+n).
-local shiftable = { [keys.n] = true }
+local shiftable = { [keys.n] = true, [keys.r] = true }
 
 local tap
 local inflight = {} -- keeps sockets alive until they answer
@@ -79,13 +86,15 @@ local function openPicker(mode, attempt)
     local snap = response.result and response.result.snapshot
     if not snap then return end
     local area = snap.layouts and snap.layouts[1] and snap.layouts[1].area or { width = 80, height = 24 }
-    local count = #(mode == "spaces" and snap.workspaces or snap.agents)
+    local lists = { agents = snap.agents, spaces = snap.workspaces, tabs = snap.tabs }
+    local count = lists[mode] and #lists[mode] or SESSIONS_ROWS
+    local width = mode == "sessions" and SESSIONS_WIDTH or WIDTH
     request("plugin.pane.open", {
       plugin_id = PLUGIN,
       entrypoint = mode,
       placement = "popup",
       focus = true,
-      width = math.min(WIDTH, area.width),
+      width = math.min(width, area.width),
       -- rows + query/count/blank/footer + border, capped at 80% of the client
       height = math.min(count + 7, math.floor(area.height * 0.8)),
       env = { QP_SNAPSHOT = raw }, -- the picker skips its own fetch

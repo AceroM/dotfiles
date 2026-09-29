@@ -2,8 +2,8 @@
 set -eu
 
 case "${1:-}" in
-  agents|spaces) ;;
-  *) echo "usage: open.sh agents|spaces" >&2; exit 2 ;;
+  agents|spaces|tabs|sessions) ;;
+  *) echo "usage: open.sh agents|spaces|tabs|sessions" >&2; exit 2 ;;
 esac
 
 herdr="${HERDR_BIN_PATH:-$HOME/.local/bin/herdr}"
@@ -27,6 +27,9 @@ max_width=40
 case "$1" in
   agents) filter='.agents | length' ;;
   spaces) filter='.workspaces | length' ;;
+  tabs) filter='.tabs | length' ;;
+  # sessions.ts shows the 20 most recent; wide enough for title + cwd.
+  sessions) filter='20'; max_width=110 ;;
 esac
 snapshot=$("$herdr" api snapshot 2>/dev/null) || snapshot=""
 size=$(printf '%s' "$snapshot" | /usr/bin/jq -r --argjson w "$max_width" "

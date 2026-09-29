@@ -26,20 +26,22 @@ type Space = {
   workspace_id: string;
 };
 
-type Tab = { label?: string; number?: number; tab_id: string };
+type Tab = { agent_status?: string; label?: string; number?: number; pane_count?: number; tab_id: string; workspace_id?: string };
+type Pane = { pane_id: string; tab_id: string; cwd?: string; terminal_title_stripped?: string; terminal_title?: string };
 type Snapshot = {
   agents: Agent[];
+  panes?: Pane[];
   workspaces: Space[];
   tabs: Tab[];
   focused_pane_id?: string;
   focused_tab_id?: string;
   focused_workspace_id?: string;
 };
-type Entry = { id: string; label: string; location: string; status: string; search: string; agent?: Agent; space?: Space };
+type Entry = { id: string; label: string; location: string; status: string; search: string; agent?: Agent; space?: Space; tab?: Tab };
 
 const mode = process.argv[2];
-if (mode !== "agents" && mode !== "spaces") {
-  console.error("usage: picker.ts agents|spaces");
+if (mode !== "agents" && mode !== "spaces" && mode !== "tabs") {
+  console.error("usage: picker.ts agents|spaces|tabs");
   process.exit(2);
 }
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -94,6 +96,34 @@ function entries(snapshot: Snapshot): Entry[] {
   }
 
   const spaces = new Map(snapshot.workspaces.map((space) => [space.workspace_id, space]));
+  if (mode === "tabs") {
+    // Sidebar order: space number, then tab number. Pane titles and cwds are
+    // searchable so a tab can be found by what is running in it.
+    const panes = new Map<string, string[]>();
+    for (const pane of snapshot.panes || []) {
+      const words = panes.get(pane.tab_id) || [];
+      words.push(clean(pane.terminal_title_stripped || pane.terminal_title), pane.cwd || "");
+      panes.set(pane.tab_id, words);
+    }
+    const spaceNumber = (tab: Tab) => spaces.get(tab.workspace_id || "")?.number ?? Infinity;
+    return snapshot.tabs
+      .slice()
+      .sort((a, b) => spaceNumber(a) - spaceNumber(b) || (a.number ?? Infinity) - (b.number ?? Infinity))
+      .map((tab) => {
+        const space = spaces.get(tab.workspace_id || "");
+        const label = clean(tab.label) || String(tab.number ?? tab.tab_id);
+        const spaceLabel = clean(space?.label) || tab.workspace_id || "";
+        const location = `${spaceLabel} · ${tab.pane_count ?? 0} panes`;
+        return {
+          id: tab.tab_id,
+          label,
+          location,
+          status: clean(tab.agent_status) || "unknown",
+          search: `${label} ${spaceLabel} ${tab.tab_id} ${tab.agent_status || ""} ${(panes.get(tab.tab_id) || []).join(" ")}`.toLowerCase(),
+          tab,
+        };
+      });
+  }
   const tabs = new Map(snapshot.tabs.map((tab) => [tab.tab_id, tab]));
   return snapshot.agents
     .slice()
@@ -206,6 +236,7 @@ function load(snapshot: Snapshot | undefined) {
 // (else the first agent in the focused tab).
 function current(snapshot: Snapshot): number {
   if (mode === "spaces") return all.findIndex((entry) => entry.id === snapshot.focused_workspace_id);
+  if (mode === "tabs") return all.findIndex((entry) => entry.id === snapshot.focused_tab_id);
   const pane = all.findIndex((entry) => entry.id === snapshot.focused_pane_id);
   return pane >= 0 ? pane : all.findIndex((entry) => entry.agent?.tab_id === snapshot.focused_tab_id);
 }
@@ -248,6 +279,9 @@ async function focusSelected(index = selected) {
       await call("agent.focus", { target: target.agent.pane_id });
       // Herdr 0.9.0 also needs tab.focus to move the attached client's viewport.
       await call("tab.focus", { tab_id: target.agent.tab_id });
+    } else if (target.tab) {
+      if (target.tab.workspace_id) await call("workspace.focus", { workspace_id: target.tab.workspace_id });
+      await call("tab.focus", { tab_id: target.tab.tab_id });
     } else if (target.space) {
       await call("workspace.focus", { workspace_id: target.space.workspace_id });
     }

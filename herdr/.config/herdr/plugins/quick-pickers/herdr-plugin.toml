@@ -32,3 +32,31 @@ placement = "popup"
 width = "62%"
 height = "50%"
 command = ["bun", "picker.ts", "spaces"]
+
+[[actions]]
+id = "tabs"
+title = "Browse tabs"
+contexts = ["global"]
+command = ["/bin/sh", "open.sh", "tabs"]
+
+[[actions]]
+id = "sessions"
+title = "Resume a recent Claude/Codex session"
+contexts = ["global"]
+command = ["/bin/sh", "open.sh", "sessions"]
+
+[[panes]]
+id = "tabs"
+title = "Tabs"
+placement = "popup"
+width = "62%"
+height = "60%"
+command = ["bun", "picker.ts", "tabs"]
+
+[[panes]]
+id = "sessions"
+title = "Recent sessions"
+placement = "popup"
+width = "80%"
+height = "60%"
+command = ["bun", "sessions.ts"]
