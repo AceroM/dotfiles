@@ -12,4 +12,6 @@
 # @raycast.author AceroM
 # @raycast.authorURL https://raycast.com/AceroM
 
-yabai -m window --resize abs:1728:1107
+# Chrome's 1728x1084 window, centered in this display's 2560x1410 usable area.
+# Yabai's grid positions this window one pixel lower and shorter than the input.
+exec yabai -m window --grid 1410:2560:416:162:1728:1085

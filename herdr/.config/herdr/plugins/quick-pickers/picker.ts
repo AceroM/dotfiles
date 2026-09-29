@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { emitKeypressEvents } from "node:readline";
 
@@ -39,7 +40,7 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
   process.exit(1);
 }
 
-const herdr = process.env.HERDR_BIN_PATH || "herdr";
+const socketPath = process.env.HERDR_SOCKET_PATH || `${homedir()}/.config/herdr/herdr.sock`;
 const priority: Record<string, number> = { blocked: 0, done: 1, working: 2, idle: 3, unknown: 4 };
 let all: Entry[] = [];
 let shown: Entry[] = [];
@@ -160,15 +161,38 @@ function render() {
   process.stdout.write(`\x1b[H\x1b[2J${lines.slice(0, height).map((line) => line.includes("\x1b[7m") ? line : clip(line, width - 1)).join("\n")}`);
 }
 
-async function runHerdr(args: string[]): Promise<string> {
-  const child = Bun.spawn([herdr, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  if (exitCode !== 0) throw new Error(stderr.trim() || `herdr ${args.join(" ")} failed`);
-  return stdout;
+// Talk to the Herdr socket directly: spawning the herdr CLI costs ~30ms a call.
+function call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write(`${JSON.stringify({ id: "quick-picker", method, params })}\n`));
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const end = buffer.indexOf("\n");
+      if (end < 0) return;
+      socket.destroy();
+      try {
+        const response = JSON.parse(buffer.slice(0, end)) as { result?: T; error?: { message?: string } };
+        if (response.error) reject(new Error(response.error.message || `${method} failed`));
+        else resolve(response.result as T);
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.on("error", reject);
+  });
+}
+
+function load(snapshot: Snapshot | undefined) {
+  if (!snapshot || !Array.isArray(snapshot.agents) || !Array.isArray(snapshot.workspaces) || !Array.isArray(snapshot.tabs)) {
+    throw new Error("Herdr returned an invalid snapshot");
+  }
+  all = entries(snapshot);
+  message = "";
+  selected = 0;
+  scroll = 0;
 }
 
 async function refresh() {
@@ -177,15 +201,7 @@ async function refresh() {
   message = "Loading Herdr…";
   render();
   try {
-    const response = JSON.parse(await runHerdr(["api", "snapshot"])) as { result?: { snapshot?: Snapshot } };
-    const snapshot = response.result?.snapshot;
-    if (!snapshot || !Array.isArray(snapshot.agents) || !Array.isArray(snapshot.workspaces) || !Array.isArray(snapshot.tabs)) {
-      throw new Error("Herdr returned an invalid snapshot");
-    }
-    all = entries(snapshot);
-    message = "";
-    selected = 0;
-    scroll = 0;
+    load((await call<{ snapshot?: Snapshot }>("session.snapshot")).snapshot);
   } catch (error) {
     message = `Herdr: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
@@ -214,11 +230,11 @@ async function focusSelected(index = selected) {
   render();
   try {
     if (target.agent) {
-      await runHerdr(["agent", "focus", target.agent.pane_id]);
+      await call("agent.focus", { target: target.agent.pane_id });
       // Herdr 0.9.0 also needs tab.focus to move the attached client's viewport.
-      await runHerdr(["tab", "focus", target.agent.tab_id]);
+      await call("tab.focus", { tab_id: target.agent.tab_id });
     } else if (target.space) {
-      await runHerdr(["workspace", "focus", target.space.workspace_id]);
+      await call("workspace.focus", { workspace_id: target.space.workspace_id });
     }
     finish();
   } catch (error) {
@@ -281,5 +297,18 @@ process.stdin.on("keypress", (text, key) => {
   }
 });
 process.stdout.on("resize", render);
-render();
-void refresh();
+// The opener already fetched a snapshot to size the popup; reuse it when given.
+const preloaded = process.env.QP_SNAPSHOT;
+delete process.env.QP_SNAPSHOT;
+let usedPreload = false;
+if (preloaded) {
+  try {
+    load((JSON.parse(preloaded) as { result?: { snapshot?: Snapshot } }).result?.snapshot);
+    usedPreload = true;
+  } catch {}
+}
+if (usedPreload) filter();
+else {
+  render();
+  void refresh();
+}

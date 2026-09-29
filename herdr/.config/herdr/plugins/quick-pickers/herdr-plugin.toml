@@ -23,7 +23,7 @@ title = "Agents"
 placement = "popup"
 width = "76%"
 height = "64%"
-command = ["/bin/sh", "-c", "exec \"$HOME/.bun/bin/bun\" picker.ts \"$HERDR_PLUGIN_ENTRYPOINT_ID\""]
+command = ["bun", "picker.ts", "agents"]
 
 [[panes]]
 id = "spaces"
@@ -31,4 +31,4 @@ title = "Spaces"
 placement = "popup"
 width = "62%"
 height = "50%"
-command = ["/bin/sh", "-c", "exec \"$HOME/.bun/bin/bun\" picker.ts \"$HERDR_PLUGIN_ENTRYPOINT_ID\""]
+command = ["bun", "picker.ts", "spaces"]

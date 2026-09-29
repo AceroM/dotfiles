@@ -1,8 +1,14 @@
--- fn+a / fn+s toggle Herdr's quick agent / space pickers from any app.
+-- fn shortcuts for Herdr, from a raw keyDown tap (hs.hotkey can't bind fn).
 --
--- hs.hotkey can't bind fn, so this is a raw keyDown tap that checks the fn flag
--- itself. open.sh does the toggling (a second press closes the popup, the other
--- key swaps it); Ghostty is brought forward so the popup is actually visible.
+--   fn+a / fn+s   toggle the quick agents / spaces picker (from any app)
+--   fn+y          copy the focused pane's Claude/Codex session id
+--   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
+--                 last pane back/forth
+--   ctrl+alt+;    (and +shift) handled here too while Ghostty is focused, so
+--                 Herdr's own binding -- a slower shell hop -- is only a fallback
+--
+-- Everything talks to the Herdr socket via nc: every spawned process costs
+-- ~20-30ms on this machine, and the pickers used to chain nine of them.
 --
 -- Usage from init.lua:
 --   herdrkeys = require("herdrkeys")
@@ -10,29 +16,131 @@
 
 local M = {}
 
-local OPEN = os.getenv("HOME") .. "/.config/herdr/plugins/quick-pickers/open.sh"
+local HOME = os.getenv("HOME")
+local SOCK = HOME .. "/.config/herdr/herdr.sock"
+local PIDFILE = HOME .. "/.cache/herdr-quick-picker.pid"
+local GHOSTTY = "com.mitchellh.ghostty"
+local PLUGIN = "miguel.quick-pickers"
+local WIDTH = 40 -- ~300px at font-size 14
 
-local modes = {
-  [hs.keycodes.map.a] = "agents",
-  [hs.keycodes.map.s] = "spaces",
-}
+local keys = hs.keycodes.map
+local pickers = { [keys.a] = "agents", [keys.s] = "spaces" }
+local remapped = { [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true }
 
 local tap
+local inflight = {} -- keeps sockets alive until they answer
 
+-- One JSON request/response over the Herdr socket. cb(response, rawLine).
+-- Via `nc -U`, not hs.socket: hs.socket crashes Hammerspoon outright when it
+-- connects to a unix socket (GCDAsyncSocket urlFromSockaddrUN, 1.1.1).
+local function request(method, params, cb)
+  local line = hs.json.encode({ id = "hs", method = method, params = params or {} })
+  -- hs.json encodes an empty table as [], which Herdr rejects.
+  line = line:gsub('"params":%[%]', '"params":{}')
+  local task
+  task = hs.task.new("/usr/bin/nc", function(_, stdout)
+    inflight[task] = nil
+    local raw = (stdout or ""):match("^[^\n]*")
+    if cb then cb(hs.json.decode(raw) or {}, raw) end
+  end, { "-U", "-w", "2", SOCK })
+  inflight[task] = true
+  task:setInput(line .. "\n")
+  task:start()
+  task:closeInput()
+end
+
+local function ghosttyFocused()
+  local win = hs.window.focusedWindow()
+  local app = win and win:application()
+  return app ~= nil and app:bundleID() == GHOSTTY
+end
+
+local function openPicker(mode, attempt)
+  request("session.snapshot", nil, function(response, raw)
+    local snap = response.result and response.result.snapshot
+    if not snap then return end
+    local area = snap.layouts and snap.layouts[1] and snap.layouts[1].area or { width = 80, height = 24 }
+    local count = #(mode == "spaces" and snap.workspaces or snap.agents)
+    request("plugin.pane.open", {
+      plugin_id = PLUGIN,
+      entrypoint = mode,
+      placement = "popup",
+      focus = true,
+      width = math.min(WIDTH, area.width),
+      -- rows + query/count/blank/footer + border, capped at 80% of the client
+      height = math.min(count + 7, math.floor(area.height * 0.8)),
+      env = { QP_SNAPSHOT = raw }, -- the picker skips its own fetch
+    }, function(opened)
+      -- Swapping pickers can race the old popup's teardown.
+      local code = opened.error and opened.error.code
+      if code == "ui_busy" and (attempt or 0) < 10 then
+        hs.timer.doAfter(0.02, function() openPicker(mode, (attempt or 0) + 1) end)
+      end
+    end)
+  end)
+end
+
+-- Same key closes the picker, the other key swaps it. The pidfile is only a
+-- hint: Herdr SIGKILLs popups, so it can go stale; popup.close is the truth.
 local function toggle(mode)
-  -- `open -b` rather than hs.application, which stack-overflows on this build.
-  hs.task.new("/usr/bin/open", nil, { "-b", "com.mitchellh.ghostty" }):start()
-  hs.task.new("/bin/sh", nil, { OPEN, mode }):start()
+  if not ghosttyFocused() then
+    hs.task.new("/usr/bin/open", nil, { "-b", GHOSTTY }):start()
+  end
+  local file = io.open(PIDFILE, "r")
+  local openMode = file and file:read("*l"):match("^%d+ (%a+)")
+  if file then file:close() end
+  if not openMode then return openPicker(mode) end
+  request("popup.close", nil, function(response)
+    os.remove(PIDFILE)
+    if response.result and openMode == mode then return end
+    openPicker(mode)
+  end)
+end
+
+local function copySessionId()
+  request("session.snapshot", nil, function(response)
+    local snap = response.result and response.result.snapshot
+    if not snap then return end
+    for _, agent in ipairs(snap.agents or {}) do
+      if agent.pane_id == snap.focused_pane_id then
+        local session = agent.agent_session and agent.agent_session.value
+        if session then
+          hs.pasteboard.setContents(session)
+          hs.alert.show("Copied " .. agent.agent .. " session " .. session:sub(1, 8) .. "…", 1)
+          return
+        end
+      end
+    end
+    hs.alert.show("No Claude/Codex session in the focused pane", 1)
+  end)
 end
 
 local function handleKey(event)
-  local mode = modes[event:getKeyCode()]
-  if not mode then return false end
+  local code = event:getKeyCode()
   local flags = event:getFlags()
+
+  if flags.ctrl and flags.alt and not flags.cmd and code == keys[";"] then
+    if not ghosttyFocused() then return false end
+    toggle(flags.shift and "spaces" or "agents")
+    return true
+  end
+
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl or flags.shift then return false end
-  if event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0 then return true end
-  toggle(mode)
-  return true
+  local mode = pickers[code]
+  if not mode and code ~= keys.y and not remapped[code] then return false end
+  local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
+
+  if mode then
+    if not autorepeat then toggle(mode) end
+    return true
+  elseif code == keys.y then
+    if not autorepeat then copySessionId() end
+    return true
+  elseif ghosttyFocused() then
+    -- Rewrite in place: Herdr sees a plain ctrl+alt+<key>.
+    event:setFlags({ ctrl = true, alt = true })
+  end
+  return false
 end
 
 function M.start()
@@ -43,5 +151,6 @@ function M.start()
 end
 
 M.toggle = toggle
+M.copySessionId = copySessionId
 
 return M
