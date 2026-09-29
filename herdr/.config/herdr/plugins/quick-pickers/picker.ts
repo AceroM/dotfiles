@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { emitKeypressEvents } from "node:readline";
 
 type Agent = {
@@ -74,7 +76,7 @@ function entries(snapshot: Snapshot): Entry[] {
         const location = `${folder ? `${folder} · ` : ""}${space.tab_count ?? 0} tabs · ${space.pane_count ?? 0} panes`;
         return {
           id: space.workspace_id,
-          label: `${space.number ?? "?"}. ${label}`,
+          label,
           location,
           status: clean(space.agent_status) || "unknown",
           search: `${label} ${folder} ${space.workspace_id} ${space.agent_status || ""}`.toLowerCase(),
@@ -113,7 +115,7 @@ function entries(snapshot: Snapshot): Entry[] {
 }
 
 function visibleRows(): number {
-  return Math.max(1, (process.stdout.rows || 24) - 6);
+  return Math.max(1, (process.stdout.rows || 24) - 5);
 }
 
 function filter() {
@@ -127,12 +129,13 @@ function filter() {
   render();
 }
 
-function row(entry: Entry, active: boolean, width: number): string {
+function row(entry: Entry, index: number, active: boolean, width: number): string {
   const marker = active ? ">" : " ";
+  const number = index < 9 ? String(index + 1) : " ";
   const status = entry.status.padEnd(7).slice(0, 7);
-  const locationWidth = Math.min(25, Math.max(0, Math.floor((width - 14) / 3)));
-  const labelWidth = Math.max(1, width - locationWidth - 14);
-  const line = clip(`${marker} ${status}  ${clip(entry.label, labelWidth).padEnd(labelWidth)}  ${clip(entry.location, locationWidth)}`, width - 1);
+  const locationWidth = Math.min(25, Math.max(0, Math.floor((width - 15) / 3)));
+  const labelWidth = Math.max(1, width - locationWidth - 15);
+  const line = clip(`${marker}${number} ${status}  ${clip(entry.label, labelWidth).padEnd(labelWidth)}  ${clip(entry.location, locationWidth)}`, width - 1);
   return active ? `\x1b[7m${line.padEnd(width - 1)}\x1b[0m` : line;
 }
 
@@ -141,21 +144,19 @@ function render() {
   const width = Math.max(20, process.stdout.columns || 80);
   const height = Math.max(8, process.stdout.rows || 24);
   const rows = visibleRows();
-  const title = mode === "agents" ? "Agents · attention first" : "Spaces · sidebar order";
   const count = `${shown.length}/${all.length} ${mode}`;
   const lines = [
-    ` ${title}`,
     ` > ${query || "Type to filter…"}`,
     ` ${message || count}`,
     "",
   ];
 
   for (let index = scroll; index < Math.min(shown.length, scroll + rows); index += 1) {
-    lines.push(row(shown[index], index === selected, width));
+    lines.push(row(shown[index], index, index === selected, width));
   }
   if (!shown.length && !loading) lines.push(" No matches");
   while (lines.length < height - 1) lines.push("");
-  lines.push(" ↑↓ move · PgUp/PgDn scroll · Enter focus · Ctrl-R refresh · Esc close");
+  lines.push(" ↑↓ move · ⏎ focus · ^R refresh");
   process.stdout.write(`\x1b[H\x1b[2J${lines.slice(0, height).map((line) => line.includes("\x1b[7m") ? line : clip(line, width - 1)).join("\n")}`);
 }
 
@@ -196,14 +197,17 @@ async function refresh() {
 function finish(code = 0) {
   if (closed) return;
   closed = true;
+  try {
+    if (readFileSync(pidfile, "utf8").startsWith(`${process.pid} `)) rmSync(pidfile);
+  } catch {}
   process.stdin.setRawMode(false);
   process.stdin.pause();
   process.stdout.write("\x1b[?25h\x1b[?1049l");
-  process.exitCode = code;
+  process.exit(code);
 }
 
-async function focusSelected() {
-  const target = shown[selected];
+async function focusSelected(index = selected) {
+  const target = shown[index];
   if (!target || busy) return;
   busy = true;
   message = `Focusing ${target.label}…`;
@@ -224,6 +228,15 @@ async function focusSelected() {
   }
 }
 
+// open.sh reads this to make the hotkeys toggle the popup.
+const pidfile = `${homedir()}/.cache/herdr-quick-picker.pid`;
+try {
+  mkdirSync(`${homedir()}/.cache`, { recursive: true });
+  writeFileSync(pidfile, `${process.pid} ${mode}\n`);
+} catch {}
+process.on("SIGTERM", () => finish());
+process.on("SIGHUP", () => finish());
+
 process.stdout.write("\x1b[?1049h\x1b[?25l");
 process.stdin.setRawMode(true);
 process.stdin.resume();
@@ -234,6 +247,9 @@ process.stdin.on("keypress", (text, key) => {
     finish();
   } else if (key?.name === "return" || key?.name === "enter") {
     void focusSelected();
+  } else if (!key?.ctrl && !key?.meta && text && /^[1-9]$/u.test(text)) {
+    // Digits jump straight to the numbered row instead of filtering.
+    if (Number(text) <= shown.length) void focusSelected(Number(text) - 1);
   } else if (key?.name === "up" || key?.name === "down" || key?.name === "pageup" || key?.name === "pagedown" || key?.name === "home" || key?.name === "end") {
     const page = visibleRows();
     const delta = key.name === "up" ? -1 : key.name === "down" ? 1 : key.name === "pageup" ? -page : page;
@@ -242,6 +258,11 @@ process.stdin.on("keypress", (text, key) => {
     filter();
   } else if (key?.ctrl && key.name === "r") {
     void refresh();
+  } else if ((key?.ctrl && key.name === "w") || (key?.meta && key.name === "backspace")) {
+    query = query.replace(/\s*\S+\s*$/u, "");
+    selected = 0;
+    scroll = 0;
+    filter();
   } else if (key?.name === "backspace" || key?.name === "delete") {
     query = Array.from(query).slice(0, -1).join("");
     selected = 0;

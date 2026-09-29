@@ -86,7 +86,7 @@ function render() {
         : `${Math.round(probability * 100).toString().padStart(3)}%`;
     const title = candidate.name || candidate.title;
     lines.push(
-      ` ${marker} ${score}  ${shorten(title, width - 16)}  [${candidate.status}]`,
+      ` ${marker}${index < 9 ? index + 1 : " "} ${score}  ${shorten(title, width - 16)}  [${candidate.status}]`,
     );
     const place = `${candidate.workspace.label || candidate.workspace.id} / ${candidate.tab.label || candidate.tab.id}`;
     const description = candidate.name ? `${candidate.title} · ${place}` : place;
@@ -94,7 +94,7 @@ function render() {
   }
 
   while (lines.length < height - 1) lines.push("");
-  lines.push(" ↑↓ choose  ·  Enter focus  ·  Esc close");
+  lines.push(" ↑↓ choose · ⏎ focus · Esc close");
   process.stdout.write(`\x1b[H\x1b[2J${lines.map((line) => clip(line, width - 1)).join("\n")}`);
 }
 
@@ -187,11 +187,11 @@ function finish(code = 0) {
   process.stdin.setRawMode(false);
   process.stdin.pause();
   process.stdout.write("\x1b[?1049l");
-  process.exitCode = code;
+  process.exit(code);
 }
 
-async function focusSelected() {
-  const target = results[selected]?.candidate;
+async function focusSelected(index = selected) {
+  const target = results[index]?.candidate;
   if (!target) return;
   status = `Focusing ${target.name || target.title}…`;
   render();
@@ -221,12 +221,17 @@ process.stdin.on("keypress", (text, key) => {
     finish();
   } else if (key?.name === "return" || key?.name === "enter") {
     void focusSelected();
+  } else if (!key?.ctrl && !key?.meta && text && /^[1-9]$/u.test(text)) {
+    // Digits jump straight to the numbered result instead of searching.
+    if (Number(text) <= results.length) void focusSelected(Number(text) - 1);
   } else if (key?.name === "up") {
     selected = Math.max(0, selected - 1);
     render();
   } else if (key?.name === "down") {
     selected = Math.max(0, Math.min(results.length - 1, selected + 1));
     render();
+  } else if (key?.meta && key.name === "backspace") {
+    updateQuery(query.replace(/\s*\S+\s*$/, ""));
   } else if (key?.name === "backspace" || key?.name === "delete") {
     updateQuery(Array.from(query).slice(0, -1).join(""));
   } else if (key?.ctrl && key.name === "u") {

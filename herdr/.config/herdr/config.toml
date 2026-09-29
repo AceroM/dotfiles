@@ -327,19 +327,22 @@ type = "shell"
 description = "Next agent waiting"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-agent-attention"'
 
-# ctrl+alt+; opens the fast local agent picker, ordered by attention.
+# ctrl+alt+; opens the fast local agent picker, ordered by attention. A shell
+# binding straight into open.sh (not the plugin action) skips one Herdr hop;
+# open.sh still sizes the popup to fit the list, which a type = "popup" binding
+# cannot do.
 [[keys.command]]
 key = "ctrl+alt+semicolon"
-type = "plugin_action"
+type = "shell"
 description = "Browse agents by attention"
-command = "miguel.quick-pickers.agents"
+command = '/bin/sh -c "exec $HOME/.config/herdr/plugins/quick-pickers/open.sh agents"'
 
 # Shift on the same key opens the matching picker for spaces.
 [[keys.command]]
 key = "ctrl+alt+shift+semicolon"
-type = "plugin_action"
+type = "shell"
 description = "Browse spaces"
-command = "miguel.quick-pickers.spaces"
+command = '/bin/sh -c "exec $HOME/.config/herdr/plugins/quick-pickers/open.sh spaces"'
 
 # The adjacent apostrophe key opens the intelligent semantic agent picker.
 [[keys.command]]

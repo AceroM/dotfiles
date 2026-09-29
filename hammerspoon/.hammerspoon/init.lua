@@ -30,4 +30,8 @@ end)
 wispr = require("wispr")
 wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 
+-- fn+a / fn+s toggle Herdr's quick agent / space pickers; see herdrkeys.lua.
+herdrkeys = require("herdrkeys")
+herdrkeys.start()
+
 hs.alert.show("Hammerspoon loaded")
