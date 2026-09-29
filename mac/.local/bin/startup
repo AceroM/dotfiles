@@ -1,0 +1,460 @@
+#!/usr/bin/env bash
+# startup — keep a Mac's startup items to a per-machine allowlist, and make
+# every login a fresh one (no "reopen windows", no relaunched apps).
+#
+# The allowlist lives in the gitignored private/ dir, so each checkout (each
+# machine) has its own:  ~/.dotfiles/private/startup.conf
+#
+#   login  <Name>     "Open at Login" apps (System Settings > Login Items)
+#   helper <label>    background helpers apps register (SMAppService)
+#   agent  <label>    LaunchAgents in ~/Library or /Library/LaunchAgents
+#   protect <glob>    never touch these (MDM, security tooling)
+#
+# Anything enabled that is not allowed gets disabled by `startup apply`.
+# LaunchDaemons (system domain) are listed but never modified.
+set -euo pipefail
+
+CONF="${STARTUP_CONF:-$HOME/.dotfiles/private/startup.conf}"
+UID_="$(id -u)"
+GUI="gui/$UID_"
+SELF_LABEL="com.miguel.startup"
+SELF_PLIST="$HOME/Library/LaunchAgents/$SELF_LABEL.plist"
+# Built-in protections: company MDM/security agents and Apple's own.
+DEFAULT_PROTECT=("io.kandji.*" "*oneleet*" "com.apple.*" "$SELF_LABEL")
+
+if [ -t 1 ]; then
+  B=$'\e[1m' D=$'\e[2m' R=$'\e[31m' G=$'\e[32m' Y=$'\e[33m' N=$'\e[0m'
+else
+  B="" D="" R="" G="" Y="" N=""
+fi
+
+die() { echo "startup: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+${B}startup${N} — per-machine startup allowlist + fresh logins
+
+  startup [ls]              list every startup item; ${R}✗${N} = enabled but not allowed
+  startup init              seed $CONF from what is enabled now
+  startup edit              open the allowlist in \$EDITOR
+  startup allow <id|name>   add an item to the allowlist (kind auto-detected)
+  startup deny  <id|name>   remove it from the allowlist
+  startup apply [-n] [-q]   disable everything not allowed (-n dry run)
+  startup fresh [--unlock]  never restore windows/apps at login (see below)
+  startup fresh status      show the relaunch settings
+  startup enforce on|off    run \`apply\` + \`fresh\` at every login
+
+fresh sets:
+  loginwindow TALLogoutSavesState=false            "Reopen windows" unchecked
+  loginwindow LoginwindowLaunchesRelaunchApps=false  never relaunch, even if checked
+  NSGlobalDomain NSQuitAlwaysKeepsWindows=false      apps don't restore windows
+  clears the saved relaunch list + ~/Library/Saved Application State
+  locks the ByHost loginwindow plist (chflags uchg) so nothing can re-save it
+EOF
+}
+
+# ---------------------------------------------------------------- config
+
+conf_lines() { # kind -> ids, one per line
+  [ -f "$CONF" ] || return 0
+  awk -v k="$1" '
+    { sub(/#.*/, ""); sub(/[ \t]+$/, "") }
+    $1 == k { sub(/^[^ \t]+[ \t]+/, ""); print }' "$CONF"
+}
+
+is_allowed() { # kind id
+  [ "$2" = "$SELF_LABEL" ] && return 0
+  conf_lines "$1" | grep -qxF -- "$2"
+}
+
+is_protected() { # id
+  local p
+  local -a pats=("${DEFAULT_PROTECT[@]}")
+  while IFS= read -r p; do pats+=("$p"); done < <(conf_lines protect)
+  shopt -s nocasematch
+  for p in "${pats[@]}"; do
+    # shellcheck disable=SC2254
+    case "$1" in $p) return 0 ;; esac
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- discovery
+# Every collector prints: kind<TAB>id<TAB>state<TAB>detail
+# state is enabled | disabled.
+
+DISABLED_GUI="" ALL_OVERRIDES=""
+load_disabled() {
+  local o
+  o="$(launchctl print-disabled "$GUI" 2>/dev/null)"
+  DISABLED_GUI="$(awk -F'"' '/=> disabled/ { print $2 }' <<<"$o")"
+  ALL_OVERRIDES="$(awk -F'"' '/=>/ { print $2 }' <<<"$o")"
+}
+launchd_disabled() { grep -qxF -- "$1" <<<"$DISABLED_GUI"; }
+
+# "Open at Login" apps. System Events is the only unprivileged source —
+# the BTM database (sfltool dumpbtm) needs admin auth on every read.
+collect_login() {
+  osascript <<'OSA' 2>/dev/null | while IFS=$'\t' read -r name path; do
+-- Two bulk Apple Events; per-item property reads take ~1s each.
+tell application "System Events"
+  set ns to name of every login item
+  set ps to path of every login item
+end tell
+set out to ""
+repeat with i from 1 to count of ns
+  set p to item i of ps
+  if p is missing value then set p to ""
+  set out to out & (item i of ns) & tab & p & linefeed
+end repeat
+return out
+OSA
+    [ -z "$name" ] || printf 'login\t%s\tenabled\t%s\n' "$name" "${path/#"$HOME"/\~}"
+  done
+}
+
+# Background helpers apps embed and register with SMAppService
+# (Contents/Library/LoginItems/*.app, Contents/Library/LaunchAgents/*.plist).
+# Only ones launchd knows about — loaded now, or carrying a disable
+# override — count as startup items.
+collect_helper() {
+  local loaded f id app
+  loaded="$(launchctl list 2>/dev/null | awk 'NR > 1 { print $3 }')"
+  for f in /Applications/*.app/Contents/Library/LoginItems/*.app \
+    /Applications/*.app/Contents/Library/LaunchAgents/*.plist \
+    "$HOME"/Applications/*.app/Contents/Library/LoginItems/*.app \
+    "$HOME"/Applications/*.app/Contents/Library/LaunchAgents/*.plist; do
+    [ -e "$f" ] || continue
+    case "$f" in
+      *.plist) id="$(plutil -extract Label raw "$f" 2>/dev/null)" || continue ;;
+      *) id="$(plutil -extract CFBundleIdentifier raw "$f/Contents/Info.plist" 2>/dev/null)" || continue ;;
+    esac
+    app="${f%%.app/Contents/*}.app"
+    if grep -qxF -- "$id" <<<"$loaded"; then
+      printf 'helper\t%s\tenabled\t%s\n' "$id" "${app##*/}"
+    elif grep -qxF -- "$id" <<<"$ALL_OVERRIDES"; then
+      printf 'helper\t%s\tdisabled\t%s\n' "$id" "${app##*/}"
+    fi
+  done
+}
+
+collect_agent() {
+  local f label dir
+  for dir in "$HOME/Library/LaunchAgents" /Library/LaunchAgents; do
+    for f in "$dir"/*.plist; do
+      [ -e "$f" ] || continue
+      label="$(plutil -extract Label raw "$f" 2>/dev/null)" || continue
+      printf 'agent\t%s\t%s\t%s\n' "$label" enabled "${f/#"$HOME"/\~}"
+    done
+  done
+}
+
+collect_daemon() {
+  local f label off
+  off="$(launchctl print-disabled system 2>/dev/null | awk -F'"' '/=> disabled/ { print $2 }')"
+  for f in /Library/LaunchDaemons/*.plist; do
+    [ -e "$f" ] || continue
+    label="$(plutil -extract Label raw "$f" 2>/dev/null)" || continue
+    if grep -qxF -- "$label" <<<"$off"; then
+      printf 'daemon\t%s\tdisabled\t%s\n' "$label" "$f"
+    else
+      printf 'daemon\t%s\tenabled\t%s\n' "$label" "$f"
+    fi
+  done
+}
+
+# launchctl's per-user disable overrides win over what BTM/plists claim.
+collect_all_uncached() {
+  load_disabled
+  {
+    { collect_login; collect_helper; collect_agent; } |
+      while IFS=$'\t' read -r kind id state detail; do
+        if [ "$kind" != login ] && launchd_disabled "$id"; then state=disabled; fi
+        printf '%s\t%s\t%s\t%s\n' "$kind" "$id" "$state" "$detail"
+      done
+    collect_daemon
+  } | awk -F'\t' 'BEGIN { r["login"] = 1; r["helper"] = 2; r["agent"] = 3; r["daemon"] = 4 }
+        { print r[$1] "\t" $0 }' | sort -t$'\t' -k1,1n -k3,3f | cut -f2-
+}
+
+# Discovery takes a few seconds (System Events), so do it once per run.
+ITEMS=""
+collect_all() {
+  [ -n "$ITEMS" ] || ITEMS="$(collect_all_uncached)"
+  printf '%s\n' "$ITEMS"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_ls() {
+  local kind id state detail mark drift=0
+  [ -f "$CONF" ] || echo "${Y}no allowlist yet — run \`startup init\`${N} ($CONF)"
+  printf "${D}%-2s %-7s %-9s %-48s %s${N}\n" "" KIND STATE ID DETAIL
+  while IFS=$'\t' read -r kind id state detail; do
+    if [ "$kind" = daemon ]; then
+      mark="${D}·${N}"
+    elif is_protected "$id"; then
+      mark="${D}🔒${N}"
+    elif is_allowed "$kind" "$id"; then
+      if [ "$state" = enabled ]; then mark="${G}✓${N}"; else mark="${Y}!${N}"; drift=1; fi
+    elif [ "$state" = enabled ]; then
+      mark="${R}✗${N}"; drift=1
+    else
+      mark=" "
+    fi
+    [ "$state" = enabled ] && state="${B}enabled${N}  " || state="${D}disabled${N} "
+    printf "%-2s %-7s %s %-48s ${D}%s${N}\n" "$mark" "$kind" "$state" "$id" "$detail"
+  done < <(collect_all)
+  echo
+  echo "${D}✓ allowed  ✗ not allowed (apply disables)  ! allowed but off  🔒 protected  · daemon (read-only)${N}"
+  fresh_status --brief
+  [ "$drift" = 0 ] || echo "${Y}drift — run \`startup apply -n\` to preview${N}"
+}
+
+cmd_init() {
+  [ -f "$CONF" ] && die "$CONF already exists (use \`startup edit\`)"
+  mkdir -p "$(dirname "$CONF")"
+  {
+    echo "# startup allowlist for $(scutil --get ComputerName 2>/dev/null || hostname)"
+    echo "# kinds: login <Name> | helper <label> | agent <label> | protect <glob>"
+    echo "# Seeded from what was enabled on $(date +%F). Delete lines to disable them."
+    local kind id state detail last=""
+    while IFS=$'\t' read -r kind id state detail; do
+      [ "$kind" != daemon ] && [ "$state" = enabled ] || continue
+      is_protected "$id" && continue
+      [ "$kind" = "$last" ] || { echo; last="$kind"; }
+      printf '%-7s%s\n' "$kind" "$id"
+    done < <(collect_all)
+  } >"$CONF"
+  echo "wrote $CONF — prune it with \`startup edit\`, then \`startup apply\`"
+}
+
+find_item() { # query -> "kind<TAB>id" of the unique match
+  local q="$1" matches
+  collect_all >/dev/null
+  matches="$(collect_all | awk -F'\t' -v q="$q" '$1 != "daemon" && ($2 == q) { print $1 "\t" $2 }')"
+  [ -n "$matches" ] || matches="$(collect_all | awk -F'\t' -v q="$(tr '[:upper:]' '[:lower:]' <<<"$q")" '
+    $1 != "daemon" && index(tolower($2 " " $4), q) { print $1 "\t" $2 }')"
+  [ -n "$matches" ] || die "no startup item matches '$q'"
+  [ "$(wc -l <<<"$matches")" -eq 1 ] || { echo "$matches" >&2; die "'$q' is ambiguous"; }
+  echo "$matches"
+}
+
+cmd_allow() {
+  [ $# -ge 1 ] || die "usage: startup allow <id|name>"
+  [ -f "$CONF" ] || die "no allowlist — run \`startup init\` first"
+  local kind id
+  local m; m="$(find_item "$*")" || exit 1
+  IFS=$'\t' read -r kind id <<<"$m"
+  is_allowed "$kind" "$id" && { echo "already allowed: $kind $id"; return; }
+  printf '%-7s%s\n' "$kind" "$id" >>"$CONF"
+  echo "${G}allowed${N} $kind $id — \`startup apply\` re-enables it if it is off"
+}
+
+cmd_deny() {
+  [ $# -ge 1 ] || die "usage: startup deny <id|name>"
+  local kind id tmp
+  local m; m="$(find_item "$*")" || exit 1
+  IFS=$'\t' read -r kind id <<<"$m"
+  tmp="$(mktemp)"
+  awk -v k="$kind" -v id="$id" '{
+      line = $0; sub(/#.*/, "", line); sub(/[ \t]+$/, "", line)
+      split(line, f, /[ \t]+/); rest = line; sub(/^[^ \t]+[ \t]+/, "", rest)
+      if (f[1] == k && rest == id) next
+      print }' "$CONF" >"$tmp" && mv "$tmp" "$CONF"
+  echo "${R}denied${N} $kind $id — \`startup apply\` disables it"
+}
+
+run() { # dry-run aware executor
+  if [ "$DRY" = 1 ]; then echo "  ${D}would:${N} $*"; else
+    [ "$QUIET" = 1 ] || echo "  $*"
+    "$@" >/dev/null 2>&1 || [ "$QUIET" = 1 ] || echo "  ${Y}(failed: $*)${N}"
+  fi
+}
+
+remove_login_item() {
+  osascript -e "tell application \"System Events\" to delete login item \"${1//\"/\\\"}\""
+}
+
+add_login_item() { # name — looks the app up by name
+  local app
+  app="$(mdfind "kMDItemContentType == 'com.apple.application-bundle' && kMDItemFSName == '$1.app'" 2>/dev/null | head -1)"
+  [ -n "$app" ] || { echo "  ${Y}can't find $1.app to re-add${N}"; return 0; }
+  osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"$app\", hidden:false}"
+}
+
+cmd_apply() {
+  DRY=0 QUIET=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n | --dry-run) DRY=1 ;;
+      -q | --quiet) QUIET=1 ;;
+      *) die "apply: unknown flag $1" ;;
+    esac
+    shift
+  done
+  [ -f "$CONF" ] || die "no allowlist — run \`startup init\` first (refusing to disable everything)"
+
+  local kind id state detail changes=0 seen_login=""
+  while IFS=$'\t' read -r kind id state detail; do
+    [ "$kind" = daemon ] && continue
+    is_protected "$id" && continue
+    [ "$kind" = login ] && seen_login+="$id"$'\n'
+    if is_allowed "$kind" "$id"; then
+      [ "$state" = disabled ] || continue
+      changes=1
+      [ "$QUIET" = 1 ] || echo "${G}enable${N} $kind $id"
+      run launchctl enable "$GUI/$id"
+    else
+      [ "$state" = enabled ] || continue
+      changes=1
+      [ "$QUIET" = 1 ] || echo "${R}disable${N} $kind $id"
+      case "$kind" in
+        login) run remove_login_item "$id" ;;
+        helper | agent)
+          run launchctl disable "$GUI/$id"
+          run launchctl bootout "$GUI/$id"
+          ;;
+      esac
+    fi
+  done < <(collect_all)
+
+  # Allowed login items that aren't registered at all.
+  while IFS= read -r id; do
+    [ -n "$id" ] && ! grep -qxF -- "$id" <<<"$seen_login" || continue
+    changes=1
+    [ "$QUIET" = 1 ] || echo "${G}add${N} login $id"
+    run add_login_item "$id"
+  done < <(conf_lines login)
+
+  [ "$changes" = 1 ] || [ "$QUIET" = 1 ] || echo "${G}startup items match the allowlist${N}"
+  if [ "$changes" = 1 ] && [ "$DRY" = 0 ] && [ "$QUIET" = 0 ]; then
+    echo "${D}apps that re-register themselves: turn off \"Launch at login\" in the app too${N}"
+  fi
+}
+
+# ---------------------------------------------------------------- fresh logins
+
+byhost_plist() {
+  local uuid
+  uuid="$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/ { print $4 }')"
+  echo "$HOME/Library/Preferences/ByHost/com.apple.loginwindow.$uuid.plist"
+}
+
+fresh_status() {
+  local p saves relaunch keeps locked apps
+  p="$(byhost_plist)"
+  saves="$(defaults read com.apple.loginwindow TALLogoutSavesState 2>/dev/null || echo unset)"
+  relaunch="$(defaults read com.apple.loginwindow LoginwindowLaunchesRelaunchApps 2>/dev/null || echo unset)"
+  keeps="$(defaults read NSGlobalDomain NSQuitAlwaysKeepsWindows 2>/dev/null || echo unset)"
+  apps="$( (plutil -extract TALAppsToRelaunchAtLogin raw "$p" 2>/dev/null) || echo 0)"
+  if [ -e "$p" ] && ls -lO "$p" | grep -q uchg; then locked=yes; else locked=no; fi
+
+  if [ "$saves" = 0 ] && [ "$relaunch" = 0 ] && [ "$keeps" = 0 ] && [ "$locked" = yes ] && [ "$apps" = 0 ]; then
+    echo "${G}fresh logins: on${N} ${D}(nothing reopens after restart)${N}"
+  else
+    echo "${Y}fresh logins: off${N} ${D}— run \`startup fresh\`${N}"
+  fi
+  [ "${1:-}" = --brief ] && return
+  printf '  %-34s %s\n' "TALLogoutSavesState" "$saves" \
+    "LoginwindowLaunchesRelaunchApps" "$relaunch" \
+    "NSQuitAlwaysKeepsWindows" "$keeps" \
+    "apps queued to relaunch" "$apps" \
+    "ByHost plist locked" "$locked"
+  echo "  ${D}$p${N}"
+}
+
+cmd_fresh() {
+  local p
+  p="$(byhost_plist)"
+  case "${1:-}" in
+    status) fresh_status; return ;;
+    --unlock)
+      chflags nouchg "$p" 2>/dev/null || true
+      defaults delete com.apple.loginwindow LoginwindowLaunchesRelaunchApps 2>/dev/null || true
+      echo "unlocked $p; relaunching is allowed again"
+      return
+      ;;
+    "") ;;
+    *) die "fresh: unknown arg $1" ;;
+  esac
+
+  # Unlock first so the writes below land on disk.
+  [ -e "$p" ] && chflags nouchg "$p"
+  defaults write com.apple.loginwindow TALLogoutSavesState -bool false
+  defaults -currentHost write com.apple.loginwindow TALLogoutSavesState -bool false
+  defaults write com.apple.loginwindow LoginwindowLaunchesRelaunchApps -bool false
+  defaults write NSGlobalDomain NSQuitAlwaysKeepsWindows -bool false
+  defaults -currentHost delete com.apple.loginwindow TALAppsToRelaunchAtLogin 2>/dev/null || true
+  # Per-app window restoration state (Finder, Preview, Terminal…).
+  find "$HOME/Library/Saved Application State" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+
+  # Make sure cfprefsd flushed, then freeze the file: loginwindow can no
+  # longer record apps to relaunch or flip the checkbox back on.
+  local i
+  for i in 1 2 3 4 5; do
+    plutil -extract TALAppsToRelaunchAtLogin raw "$p" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  [ -e "$p" ] || defaults -currentHost write com.apple.loginwindow TALLogoutSavesState -bool false
+  chflags uchg "$p"
+  fresh_status
+}
+
+# ---------------------------------------------------------------- enforce
+
+cmd_enforce() {
+  case "${1:-}" in
+    on)
+      local bin
+      bin="$(command -v startup || echo "$HOME/.local/bin/startup")"
+      mkdir -p "$(dirname "$SELF_PLIST")"
+      cat >"$SELF_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$SELF_LABEL</string>
+    <!-- generated by \`startup enforce on\` -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>"$bin" apply --quiet; "$bin" fresh &gt;/dev/null</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/Library/Logs/startup.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/Library/Logs/startup.log</string>
+</dict>
+</plist>
+EOF
+      launchctl bootout "$GUI/$SELF_LABEL" 2>/dev/null || true
+      launchctl enable "$GUI/$SELF_LABEL"
+      launchctl bootstrap "$GUI" "$SELF_PLIST"
+      echo "${G}enforcing at every login${N} ($SELF_PLIST, log ~/Library/Logs/startup.log)"
+      ;;
+    off)
+      launchctl bootout "$GUI/$SELF_LABEL" 2>/dev/null || true
+      rm -f "$SELF_PLIST"
+      echo "enforcement removed"
+      ;;
+    *) die "usage: startup enforce on|off" ;;
+  esac
+}
+
+case "${1:-ls}" in
+  ls | list) cmd_ls ;;
+  init) cmd_init ;;
+  edit) [ -f "$CONF" ] || cmd_init; exec "${EDITOR:-vi}" "$CONF" ;;
+  allow) shift; cmd_allow "$@" ;;
+  deny) shift; cmd_deny "$@" ;;
+  apply) shift; cmd_apply "$@" ;;
+  fresh) shift; cmd_fresh "$@" ;;
+  enforce) shift; cmd_enforce "$@" ;;
+  -h | --help | help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac

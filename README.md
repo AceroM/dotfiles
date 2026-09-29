@@ -9,3 +9,10 @@ The pre-commit hook scans staged paths and content for terms listed in the local
 `private/commit-denylist` file (one literal term per line, with no blank lines).
 Enable it in a new checkout with `git config core.hooksPath .githooks` after
 creating that file. The denylist itself stays outside Git.
+
+## Startup items (macOS)
+
+`startup` (in `mac/`) keeps each machine's login items, app helpers and LaunchAgents to an
+allowlist in `private/startup.conf`, and makes every login fresh (no reopened windows/apps).
+On a new Mac: `stow mac && startup init && startup edit && startup apply && startup fresh &&
+startup enforce on`.
