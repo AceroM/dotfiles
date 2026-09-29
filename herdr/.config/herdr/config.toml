@@ -373,9 +373,9 @@ accent = "#74ade8"
 # Flip to true to be asked for a tab name on every create.
 prompt_new_tab_name = false
 
-# Workspaces are long-lived and picked by name (ctrl+alt+shift+w), so always
-# ask for one on ctrl+alt+shift+n instead of taking a generated name.
-prompt_new_workspace_name = true
+# ctrl+alt+shift+n (fn+shift+n) opens a space instantly, like new_tab; rename it
+# afterwards with ctrl+alt+shift+r if it needs a real name.
+prompt_new_workspace_name = false
 
 [ui.sound]
 # Raycast's "Toggle Herdr Sounds" command flips this value and reloads Herdr.

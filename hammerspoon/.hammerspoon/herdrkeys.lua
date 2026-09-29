@@ -8,6 +8,12 @@
 --   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
 --   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
 --                 vertically / horizontally
+--   fn+n          becomes ctrl+alt+n in Ghostty: new tab
+--   fn+shift+n    becomes ctrl+alt+shift+n in Ghostty: new space
+--   fn+arrows     become ctrl+alt+arrows in Ghostty: focus the pane that way.
+--                 macOS has already turned fn+arrow into home/end/pgup/pgdn
+--                 by the time the tap sees it, so those keycodes are mapped
+--                 back to arrows (outside Ghostty they keep their usual job)
 --   ctrl+alt+;    (and +shift) handled here too while Ghostty is focused, so
 --                 Herdr's own binding -- a slower shell hop -- is only a fallback
 --
@@ -32,9 +38,13 @@ local pickers = { [keys.a] = "agents", [keys.s] = "spaces" }
 local remapped = {
   [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
   [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
-  [keys["-"]] = true,
+  [keys["-"]] = true, [keys.n] = true,
   [keys.d] = keys.v, -- fn+d -> ctrl+alt+v
+  [keys.home] = keys.left, [keys["end"]] = keys.right,
+  [keys.pageup] = keys.up, [keys.pagedown] = keys.down,
 }
+-- Keys whose shifted chord is forwarded too (fn+shift+n -> ctrl+alt+shift+n).
+local shiftable = { [keys.n] = true }
 
 local tap
 local inflight = {} -- keeps sockets alive until they answer
@@ -134,7 +144,8 @@ local function handleKey(event)
     return true
   end
 
-  if not flags.fn or flags.cmd or flags.alt or flags.ctrl or flags.shift then return false end
+  if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
+  if flags.shift and not shiftable[code] then return false end
   local mode = pickers[code]
   if not mode and code ~= keys.y and not remapped[code] then return false end
   local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
@@ -147,7 +158,7 @@ local function handleKey(event)
     return true
   elseif ghosttyFocused() then
     -- Rewrite in place: Herdr sees a plain ctrl+alt+<key>.
-    event:setFlags({ ctrl = true, alt = true })
+    event:setFlags({ ctrl = true, alt = true, shift = flags.shift or nil })
     if remapped[code] ~= true then event:setKeyCode(remapped[code]) end
   end
   return false
