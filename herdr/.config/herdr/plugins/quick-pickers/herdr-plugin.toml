@@ -1,0 +1,34 @@
+id = "miguel.quick-pickers"
+name = "Quick Pickers"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Fast local pickers for Herdr agents and spaces"
+platforms = ["macos"]
+
+[[actions]]
+id = "agents"
+title = "Browse agents by attention"
+contexts = ["global"]
+command = ["/bin/sh", "open.sh", "agents"]
+
+[[actions]]
+id = "spaces"
+title = "Browse spaces"
+contexts = ["global"]
+command = ["/bin/sh", "open.sh", "spaces"]
+
+[[panes]]
+id = "agents"
+title = "Agents"
+placement = "popup"
+width = "76%"
+height = "64%"
+command = ["/bin/zsh", "run.zsh"]
+
+[[panes]]
+id = "spaces"
+title = "Spaces"
+placement = "popup"
+width = "62%"
+height = "50%"
+command = ["/bin/zsh", "run.zsh"]

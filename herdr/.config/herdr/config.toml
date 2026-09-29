@@ -327,9 +327,23 @@ type = "shell"
 description = "Next agent waiting"
 command = '/bin/sh -c "exec $HOME/.local/bin/herdr-agent-attention"'
 
-# ctrl+alt+; opens the live Jev agent picker in a centered Herdr popup.
+# ctrl+alt+; opens the fast local agent picker, ordered by attention.
 [[keys.command]]
 key = "ctrl+alt+semicolon"
+type = "plugin_action"
+description = "Browse agents by attention"
+command = "miguel.quick-pickers.agents"
+
+# Shift on the same key opens the matching picker for spaces.
+[[keys.command]]
+key = "ctrl+alt+shift+semicolon"
+type = "plugin_action"
+description = "Browse spaces"
+command = "miguel.quick-pickers.spaces"
+
+# The adjacent apostrophe key opens the intelligent semantic agent picker.
+[[keys.command]]
+key = "ctrl+alt+'"
 type = "plugin_action"
 description = "Find agent with Jev"
 command = "miguel.jev-focus.open"
