@@ -16,6 +16,13 @@ function jk() {
 function js() {
   gh pr diff "$@" | delta
 }
+# jt [pr] — `js` minus the tests (__tests__/ dirs, *.test.ts). gh pr diff takes
+# no pathspecs, so drop whole file sections by their `diff --git` header.
+function jt() {
+  gh pr diff "$@" --color=never |
+    awk '/^diff --git / { skip = ($3 ~ /(^|\/)__tests__\// || $3 ~ /\.test\.ts$/) } !skip' |
+    delta
+}
 function jc() {
   gh pr checkout "$@"
 }
@@ -160,6 +167,11 @@ function nss() {
 }
 # nd <path...> — full patch for one or more files from the PR (base defaults to main, override with ND_BASE)
 function nd() { git diff "${ND_BASE:-main}...HEAD" -- "$@"; }
+# dt [rev...] — diff through delta minus the tests (__tests__/ dirs, *.test.ts).
+# No args = everything uncommitted since HEAD, like `d`.
+function dt() {
+  git diff "${@:-HEAD}" -- . ':(exclude,glob)**/__tests__/**' ':(exclude,glob)**/*.test.ts'
+}
 function dg() {
   if [[ -f ./scripts/dg.sh ]]; then
     ./scripts/dg.sh "$@"
