@@ -9,6 +9,7 @@
   and `open.sh` are the slower fallback when Hammerspoon isn't running.
 
 Pressing a picker's key again closes it; the other picker's key swaps to it.
+Each picker opens with the current space / focused agent highlighted.
 Digits 1-9 focus that numbered row immediately instead of filtering.
 
 Type to filter names, titles, and locations locally; Ctrl-W or Option-Backspace deletes a word. Use Up/Down or Page Up/Down

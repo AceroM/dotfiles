@@ -27,7 +27,14 @@ type Space = {
 };
 
 type Tab = { label?: string; number?: number; tab_id: string };
-type Snapshot = { agents: Agent[]; workspaces: Space[]; tabs: Tab[] };
+type Snapshot = {
+  agents: Agent[];
+  workspaces: Space[];
+  tabs: Tab[];
+  focused_pane_id?: string;
+  focused_tab_id?: string;
+  focused_workspace_id?: string;
+};
 type Entry = { id: string; label: string; location: string; status: string; search: string; agent?: Agent; space?: Space };
 
 const mode = process.argv[2];
@@ -191,8 +198,16 @@ function load(snapshot: Snapshot | undefined) {
   }
   all = entries(snapshot);
   message = "";
-  selected = 0;
+  selected = Math.max(0, current(snapshot));
   scroll = 0;
+}
+
+// Start on where I already am: the focused space, or the focused pane's agent
+// (else the first agent in the focused tab).
+function current(snapshot: Snapshot): number {
+  if (mode === "spaces") return all.findIndex((entry) => entry.id === snapshot.focused_workspace_id);
+  const pane = all.findIndex((entry) => entry.id === snapshot.focused_pane_id);
+  return pane >= 0 ? pane : all.findIndex((entry) => entry.agent?.tab_id === snapshot.focused_tab_id);
 }
 
 async function refresh() {
@@ -270,6 +285,8 @@ process.stdin.on("keypress", (text, key) => {
     const page = visibleRows();
     const delta = key.name === "up" ? -1 : key.name === "down" ? 1 : key.name === "pageup" ? -page : page;
     selected = key.name === "home" ? 0 : key.name === "end" ? shown.length - 1 : selected + delta;
+    // Single steps wrap around the ends; paging and home/end stop at them.
+    if (key.name === "up" || key.name === "down") selected = (selected + shown.length) % Math.max(1, shown.length);
     selected = Math.max(0, Math.min(shown.length - 1, selected));
     filter();
   } else if (key?.ctrl && key.name === "r") {

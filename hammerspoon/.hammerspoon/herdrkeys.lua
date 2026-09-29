@@ -4,6 +4,10 @@
 --   fn+y          copy the focused pane's Claude/Codex session id
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
 --                 last pane back/forth
+--   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
+--   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
+--   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
+--                 vertically / horizontally
 --   ctrl+alt+;    (and +shift) handled here too while Ghostty is focused, so
 --                 Herdr's own binding -- a slower shell hop -- is only a fallback
 --
@@ -25,7 +29,12 @@ local WIDTH = 40 -- ~300px at font-size 14
 
 local keys = hs.keycodes.map
 local pickers = { [keys.a] = "agents", [keys.s] = "spaces" }
-local remapped = { [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true }
+local remapped = {
+  [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
+  [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
+  [keys["-"]] = true,
+  [keys.d] = keys.v, -- fn+d -> ctrl+alt+v
+}
 
 local tap
 local inflight = {} -- keeps sockets alive until they answer
@@ -139,6 +148,7 @@ local function handleKey(event)
   elseif ghosttyFocused() then
     -- Rewrite in place: Herdr sees a plain ctrl+alt+<key>.
     event:setFlags({ ctrl = true, alt = true })
+    if remapped[code] ~= true then event:setKeyCode(remapped[code]) end
   end
   return false
 end
