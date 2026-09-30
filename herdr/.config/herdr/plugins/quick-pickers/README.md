@@ -16,6 +16,11 @@
   the popup over Herdr's socket with the snapshot preloaded; the Herdr bindings
   and `open.sh` are the slower fallback when Hammerspoon isn't running.
 
+- `fn-/`: grep every other pane's *visible* screen (`pane.read` source `visible`,
+  so nothing scrolls and scrollback isn't searched). Each row is one screen line;
+  type to filter (all words must match, case-insensitive), Enter focuses that
+  pane. Starts empty until you type; digits filter here instead of jumping.
+
 Pressing a picker's key again closes it; the other picker's key swaps to it.
 Each picker opens with the current space / focused agent highlighted.
 Digits 1-9 focus that numbered row immediately instead of filtering.

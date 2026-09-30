@@ -27,7 +27,16 @@ type Space = {
 };
 
 type Tab = { agent_status?: string; label?: string; number?: number; pane_count?: number; tab_id: string; workspace_id?: string };
-type Pane = { pane_id: string; tab_id: string; cwd?: string; terminal_title_stripped?: string; terminal_title?: string };
+type Pane = {
+  agent?: string;
+  agent_status?: string;
+  cwd?: string;
+  pane_id: string;
+  tab_id: string;
+  terminal_title?: string;
+  terminal_title_stripped?: string;
+  workspace_id?: string;
+};
 type Snapshot = {
   agents: Agent[];
   panes?: Pane[];
@@ -37,11 +46,11 @@ type Snapshot = {
   focused_tab_id?: string;
   focused_workspace_id?: string;
 };
-type Entry = { id: string; label: string; location: string; status: string; search: string; agent?: Agent; space?: Space; tab?: Tab };
+type Entry = { id: string; label: string; location: string; status: string; search: string; agent?: Agent; space?: Space; tab?: Tab; pane?: Pane };
 
 const mode = process.argv[2];
-if (mode !== "agents" && mode !== "spaces" && mode !== "tabs") {
-  console.error("usage: picker.ts agents|spaces|tabs");
+if (mode !== "agents" && mode !== "spaces" && mode !== "tabs" && mode !== "grep") {
+  console.error("usage: picker.ts agents|spaces|tabs|grep");
   process.exit(2);
 }
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -60,6 +69,7 @@ let message = "Loading Herdr…";
 let loading = false;
 let busy = false;
 let closed = false;
+let paneCount = 0;
 
 function clean(value: string | undefined): string {
   return (value || "").replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim();
@@ -152,13 +162,60 @@ function entries(snapshot: Snapshot): Entry[] {
     });
 }
 
+// The pane I opened grep from, and the picker's own pane when run outside a popup.
+function skipPane(pane: Pane, snapshot: Snapshot): boolean {
+  return pane.pane_id === snapshot.focused_pane_id || pane.pane_id === process.env.HERDR_PANE_ID;
+}
+
+// grep: one entry per non-blank line on every other pane's visible screen
+// (source "visible", so nothing is scrolled or read from scrollback).
+async function grepEntries(snapshot: Snapshot): Promise<Entry[]> {
+  const spaces = new Map(snapshot.workspaces.map((space) => [space.workspace_id, space]));
+  const tabs = new Map(snapshot.tabs.map((tab) => [tab.tab_id, tab]));
+  const spaceNumber = (pane: Pane) => spaces.get(pane.workspace_id || "")?.number ?? Infinity;
+  const tabNumber = (pane: Pane) => tabs.get(pane.tab_id)?.number ?? Infinity;
+  const panes = (snapshot.panes || [])
+    .filter((pane) => !skipPane(pane, snapshot))
+    .sort((a, b) => spaceNumber(a) - spaceNumber(b) || tabNumber(a) - tabNumber(b) || a.pane_id.localeCompare(b.pane_id));
+  const screens = await Promise.all(
+    panes.map((pane) =>
+      call<{ read?: { text?: string } }>("pane.read", { pane_id: pane.pane_id, source: "visible" })
+        .then((result) => result.read?.text || "")
+        .catch(() => ""),
+    ),
+  );
+  const result: Entry[] = [];
+  panes.forEach((pane, index) => {
+    const tab = tabs.get(pane.tab_id);
+    const spaceLabel = clean(spaces.get(pane.workspace_id || "")?.label) || pane.workspace_id || "";
+    const tabLabel = clean(tab?.label) || String(tab?.number ?? pane.tab_id);
+    const location = `${spaceLabel} / ${tabLabel}`;
+    const seen = new Set<string>();
+    for (const raw of screens[index].split("\n")) {
+      const line = clean(raw);
+      if (!line || seen.has(line)) continue;
+      seen.add(line);
+      result.push({
+        id: `${pane.pane_id}#${result.length}`,
+        label: line,
+        location,
+        status: clean(pane.agent_status) || (pane.agent ? "unknown" : "shell"),
+        search: line.toLowerCase(),
+        pane,
+      });
+    }
+  });
+  return result;
+}
+
 function visibleRows(): number {
   return Math.max(1, (process.stdout.rows || 24) - 5);
 }
 
 function filter() {
   const words = query.toLowerCase().trim().split(/\s+/u).filter(Boolean);
-  shown = words.length ? all.filter((entry) => words.every((word) => entry.search.includes(word))) : all;
+  // grep starts empty: every line of every pane is noise until there's a query.
+  shown = words.length ? all.filter((entry) => words.every((word) => entry.search.includes(word))) : mode === "grep" ? [] : all;
   selected = Math.min(selected, Math.max(0, shown.length - 1));
   const rows = visibleRows();
   if (selected < scroll) scroll = selected;
@@ -167,13 +224,24 @@ function filter() {
   render();
 }
 
+// Shift a long grep line so its first match sits inside the column.
+function around(label: string, width: number): string {
+  const word = query.toLowerCase().trim().split(/\s+/u)[0];
+  const chars = Array.from(label);
+  const at = word ? Array.from(label.toLowerCase().slice(0, Math.max(0, label.toLowerCase().indexOf(word)))).length : 0;
+  if (chars.length <= width || at + Array.from(word || "").length < width - 1) return label;
+  const start = Math.max(1, Math.min(at - Math.floor(width / 3), chars.length - width + 1));
+  return `…${chars.slice(start).join("")}`;
+}
+
 function row(entry: Entry, index: number, active: boolean, width: number): string {
   const marker = active ? ">" : " ";
   const number = index < 9 ? String(index + 1) : " ";
   const status = entry.status.padEnd(7).slice(0, 7);
   const locationWidth = Math.min(25, Math.max(0, Math.floor((width - 15) / 3)));
   const labelWidth = Math.max(1, width - locationWidth - 15);
-  const line = clip(`${marker}${number} ${status}  ${clip(entry.label, labelWidth).padEnd(labelWidth)}  ${clip(entry.location, locationWidth)}`, width - 1);
+  const label = mode === "grep" ? around(entry.label, labelWidth) : entry.label;
+  const line = clip(`${marker}${number} ${status}  ${clip(label, labelWidth).padEnd(labelWidth)}  ${clip(entry.location, locationWidth)}`, width - 1);
   return active ? `\x1b[7m${line.padEnd(width - 1)}\x1b[0m` : line;
 }
 
@@ -182,9 +250,9 @@ function render() {
   const width = Math.max(20, process.stdout.columns || 80);
   const height = Math.max(8, process.stdout.rows || 24);
   const rows = visibleRows();
-  const count = `${shown.length}/${all.length} ${mode}`;
+  const count = mode === "grep" ? `${shown.length}/${all.length} lines · ${paneCount} panes` : `${shown.length}/${all.length} ${mode}`;
   const lines = [
-    ` > ${query || "Type to filter…"}`,
+    ` > ${query || (mode === "grep" ? "Type to grep other panes' screens…" : "Type to filter…")}`,
     ` ${message || count}`,
     "",
   ];
@@ -192,9 +260,9 @@ function render() {
   for (let index = scroll; index < Math.min(shown.length, scroll + rows); index += 1) {
     lines.push(row(shown[index], index, index === selected, width));
   }
-  if (!shown.length && !loading) lines.push(" No matches");
+  if (!shown.length && !loading && (query.trim() || mode !== "grep")) lines.push(" No matches");
   while (lines.length < height - 1) lines.push("");
-  lines.push(" ↑↓ move · ⏎ focus · ^R refresh");
+  lines.push(mode === "grep" ? " ↑↓ move · ⏎ focus pane · ^R re-read" : " ↑↓ move · ⏎ focus · ^R refresh");
   process.stdout.write(`\x1b[H\x1b[2J${lines.slice(0, height).map((line) => line.includes("\x1b[7m") ? line : clip(line, width - 1)).join("\n")}`);
 }
 
@@ -222,9 +290,19 @@ function call<T = unknown>(method: string, params: Record<string, unknown> = {})
   });
 }
 
-function load(snapshot: Snapshot | undefined) {
+async function load(snapshot: Snapshot | undefined) {
   if (!snapshot || !Array.isArray(snapshot.agents) || !Array.isArray(snapshot.workspaces) || !Array.isArray(snapshot.tabs)) {
     throw new Error("Herdr returned an invalid snapshot");
+  }
+  if (mode === "grep") {
+    paneCount = (snapshot.panes || []).filter((pane) => !skipPane(pane, snapshot)).length;
+    message = `Reading ${paneCount} panes…`;
+    render();
+    all = await grepEntries(snapshot);
+    message = "";
+    selected = 0;
+    scroll = 0;
+    return;
   }
   all = entries(snapshot);
   message = "";
@@ -247,7 +325,7 @@ async function refresh() {
   message = "Loading Herdr…";
   render();
   try {
-    load((await call<{ snapshot?: Snapshot }>("session.snapshot")).snapshot);
+    await load((await call<{ snapshot?: Snapshot }>("session.snapshot")).snapshot);
   } catch (error) {
     message = `Herdr: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
@@ -275,7 +353,11 @@ async function focusSelected(index = selected) {
   message = `Focusing ${target.label}…`;
   render();
   try {
-    if (target.agent) {
+    if (target.pane) {
+      if (target.pane.workspace_id) await call("workspace.focus", { workspace_id: target.pane.workspace_id });
+      await call("tab.focus", { tab_id: target.pane.tab_id });
+      await call("pane.focus", { pane_id: target.pane.pane_id });
+    } else if (target.agent) {
       await call("agent.focus", { target: target.agent.pane_id });
       // Herdr 0.9.0 also needs tab.focus to move the attached client's viewport.
       await call("tab.focus", { tab_id: target.agent.tab_id });
@@ -312,7 +394,7 @@ process.stdin.on("keypress", (text, key) => {
     finish();
   } else if (key?.name === "return" || key?.name === "enter") {
     void focusSelected();
-  } else if (!key?.ctrl && !key?.meta && text && /^[1-9]$/u.test(text)) {
+  } else if (mode !== "grep" && !key?.ctrl && !key?.meta && text && /^[1-9]$/u.test(text)) {
     // Digits jump straight to the numbered row instead of filtering.
     if (Number(text) <= shown.length) void focusSelected(Number(text) - 1);
   } else if (key?.name === "up" || key?.name === "down" || key?.name === "pageup" || key?.name === "pagedown" || key?.name === "home" || key?.name === "end") {
@@ -351,15 +433,19 @@ process.stdout.on("resize", render);
 // The opener already fetched a snapshot to size the popup; reuse it when given.
 const preloaded = process.env.QP_SNAPSHOT;
 delete process.env.QP_SNAPSHOT;
-let usedPreload = false;
+let snapshot: Snapshot | undefined;
 if (preloaded) {
   try {
-    load((JSON.parse(preloaded) as { result?: { snapshot?: Snapshot } }).result?.snapshot);
-    usedPreload = true;
+    snapshot = (JSON.parse(preloaded) as { result?: { snapshot?: Snapshot } }).result?.snapshot;
   } catch {}
 }
-if (usedPreload) filter();
-else {
+if (!snapshot) {
   render();
   void refresh();
+} else {
+  // grep still has to read every pane; keystrokes typed meanwhile keep filtering.
+  loading = mode === "grep";
+  load(snapshot)
+    .catch((error) => { message = `Herdr: ${error instanceof Error ? error.message : String(error)}`; })
+    .finally(() => { loading = false; filter(); });
 }

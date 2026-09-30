@@ -4,6 +4,8 @@
 --   fn+t          toggle the tabs picker (every tab in every space)
 --   fn+;          toggle the recent Claude/Codex sessions picker; Enter
 --                 resumes one in a new tab with permissions bypassed
+--   fn+/          toggle the grep picker: filter every other pane's visible
+--                 screen (no scrollback) line by line; Enter focuses that pane
 --   fn+y          copy the focused pane's Claude/Codex session id
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
@@ -42,9 +44,10 @@ local PLUGIN = "miguel.quick-pickers"
 local WIDTH = 40 -- ~300px at font-size 14
 local SESSIONS_WIDTH = 110 -- title + cwd + age
 local SESSIONS_ROWS = 20 -- sessions.ts LIMIT
+local GREP_WIDTH = 120 -- long screen lines + location
 
 local keys = hs.keycodes.map
-local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.t] = "tabs", [keys[";"]] = "sessions" }
+local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.t] = "tabs", [keys[";"]] = "sessions", [keys["/"]] = "grep" }
 local remapped = {
   [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
   [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
@@ -150,8 +153,8 @@ local function openPicker(mode, attempt)
     if not snap then return end
     local area = snap.layouts and snap.layouts[1] and snap.layouts[1].area or { width = 80, height = 24 }
     local lists = { agents = snap.agents, spaces = snap.workspaces, tabs = snap.tabs }
-    local count = lists[mode] and #lists[mode] or SESSIONS_ROWS
-    local width = mode == "sessions" and SESSIONS_WIDTH or WIDTH
+    local count = lists[mode] and #lists[mode] or (mode == "grep" and 1000 or SESSIONS_ROWS)
+    local width = mode == "sessions" and SESSIONS_WIDTH or mode == "grep" and GREP_WIDTH or WIDTH
     request("plugin.pane.open", {
       plugin_id = PLUGIN,
       entrypoint = mode,

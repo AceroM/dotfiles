@@ -60,3 +60,17 @@ placement = "popup"
 width = "80%"
 height = "60%"
 command = ["bun", "sessions.ts"]
+
+[[actions]]
+id = "grep"
+title = "Grep other panes' visible screens"
+contexts = ["global"]
+command = ["/bin/sh", "open.sh", "grep"]
+
+[[panes]]
+id = "grep"
+title = "Grep panes"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["bun", "picker.ts", "grep"]

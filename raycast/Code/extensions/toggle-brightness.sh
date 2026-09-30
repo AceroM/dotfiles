@@ -28,17 +28,20 @@ else
 fi
 
 current_brightness="$(
-  "${lunar_command[@]}" displays builtin brightness 2>/dev/null |
+  "${lunar_command[@]}" displays all brightness 2>/dev/null |
     awk '
-      $1 == "brightness:" {
-        print $2
-        exit
+      $1 == "brightness:" && $2 ~ /^[0-9]+([.][0-9]+)?$/ {
+        if (!found || $2 > brightest) brightest = $2
+        found = 1
+      }
+      END {
+        if (found) print brightest
       }
     '
 )"
 
 if [[ ! "$current_brightness" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  echo "Unable to read the built-in display brightness (lid closed?)"
+  echo "Unable to read brightness from any connected display"
   exit 1
 fi
 
@@ -47,4 +50,4 @@ target_brightness="$(
     'BEGIN { print (value <= 0.5 ? "80" : "0") }'
 )"
 
-"${lunar_command[@]}" displays builtin brightness "$target_brightness" >/dev/null
+"${lunar_command[@]}" displays all brightness "$target_brightness" >/dev/null

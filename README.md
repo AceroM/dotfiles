@@ -2,6 +2,14 @@
 
 These are my dotfiles.
 
+## Shared Slack skill
+
+`stow cli agent-config` installs the read-only `slack-agent` CLI and the global Codex
+skill in `~/.agents/skills/slack`. Share it with Claude Code using
+`ln -s "$HOME/.agents/skills/slack" ~/.claude/skills/slack` (if that path is absent).
+Run `slack-agent read '<message-url>'` for a full thread, or `slack-agent --help` for search and
+channel history. Authentication reuses the signed-in macOS Slack desktop session.
+
 ## Private references
 
 Keep machine-specific configuration and secrets under the ignored `private/` directory.
