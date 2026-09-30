@@ -35,7 +35,7 @@
 local M = {}
 
 local HOME = os.getenv("HOME")
-local SOCK = HOME .. "/.config/herdr/herdr.sock"
+local socket
 local PIDFILE = HOME .. "/.cache/herdr-quick-picker.pid"
 local GHOSTTY = "com.mitchellh.ghostty"
 local PLUGIN = "miguel.quick-pickers"
@@ -61,6 +61,27 @@ local shiftable = { [keys.n] = true, [keys.r] = true }
 local tap
 local inflight = {} -- keeps background tasks alive until they answer
 
+local function socketCandidates()
+  local paths, seen = {}, {}
+  local function add(path)
+    if path and not seen[path] and hs.fs.attributes(path, "mode") == "socket" then
+      seen[path] = true
+      paths[#paths + 1] = path
+    end
+  end
+  add(socket)
+  add(os.getenv("HERDR_SOCKET"))
+  local xdg = os.getenv("XDG_CONFIG_HOME")
+  if xdg then add(xdg .. "/herdr/herdr.sock") end
+  add(HOME .. "/.config/herdr/herdr.sock")
+  for name in hs.fs.dir(HOME .. "/.config") do
+    if name ~= "." and name ~= ".." then
+      add(HOME .. "/.config/" .. name .. "/herdr/herdr.sock")
+    end
+  end
+  return paths
+end
+
 local function toggleRecording()
   local task
   task = hs.task.new("/usr/bin/open", function(exitCode, _, stderr)
@@ -85,16 +106,36 @@ local function request(method, params, cb)
   local line = hs.json.encode({ id = "hs", method = method, params = params or {} })
   -- hs.json encodes an empty table as [], which Herdr rejects.
   line = line:gsub('"params":%[%]', '"params":{}')
-  local task
-  task = hs.task.new("/usr/bin/nc", function(_, stdout)
-    inflight[task] = nil
-    local raw = (stdout or ""):match("^[^\n]*")
-    if cb then cb(hs.json.decode(raw) or {}, raw) end
-  end, { "-U", "-w", "2", SOCK })
-  inflight[task] = true
-  task:setInput(line .. "\n")
-  task:start()
-  task:closeInput()
+  local paths = socketCandidates()
+  local function tryPath(index)
+    local path = paths[index]
+    if not path then
+      socket = nil
+      if cb then cb({ error = { code = "socket_unavailable" } }, "") end
+      return
+    end
+    local task
+    task = hs.task.new("/usr/bin/nc", function(_, stdout)
+      inflight[task] = nil
+      local raw = (stdout or ""):match("^[^\n]*")
+      local ok, response = pcall(hs.json.decode, raw or "")
+      if not ok or type(response) ~= "table" or response.id ~= "hs" then
+        if socket == path then socket = nil end
+        return tryPath(index + 1)
+      end
+      socket = path
+      if cb then cb(response, raw) end
+    end, { "-U", "-w", "2", path })
+    if not task then return tryPath(index + 1) end
+    inflight[task] = true
+    task:setInput(line .. "\n")
+    if not task:start() then
+      inflight[task] = nil
+      return tryPath(index + 1)
+    end
+    task:closeInput()
+  end
+  tryPath(1)
 end
 
 local function ghosttyFocused()
