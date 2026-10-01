@@ -432,5 +432,14 @@
       "shift-h": "pane::ActivatePreviousItem",
       "shift-l": "pane::ActivateNextItem"
     }
+  },
+  // Extend the default search motions, then center before the next redraw.
+  // SendKeystrokes falls through to the default n/N binding rather than recursing.
+  {
+    "context": "Editor && mode == full && vim_mode == normal && !VimWaiting && !menu",
+    "bindings": {
+      "n": ["workspace::SendKeystrokes", "n z z"],
+      "shift-n": ["workspace::SendKeystrokes", "shift-n z z"]
+    }
   }
 ]

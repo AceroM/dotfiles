@@ -35,4 +35,28 @@ wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 herdrkeys = require("herdrkeys")
 herdrkeys.start()
 
+-- Option-minus toggles external displays; Option-plus toggles the laptop.
+-- Both use Lunar to switch between 0% and 80%.
+-- Run asynchronously so Lunar's DDC calls don't block other global hotkeys.
+local brightnessTask
+local function toggleBrightness(displayFilter)
+  if brightnessTask and brightnessTask:isRunning() then return end
+  brightnessTask = hs.task.new("/bin/bash", function(exitCode, stdout, stderr)
+    brightnessTask = nil
+    if exitCode ~= 0 then
+      hs.alert.show("Lunar brightness toggle failed")
+      print("Lunar brightness toggle: " .. stdout .. stderr)
+    end
+  end, { os.getenv("HOME") .. "/Code/extensions/toggle-brightness.sh", displayFilter })
+  brightnessTask:start()
+end
+
+hs.hotkey.bind({ "alt" }, "-", function()
+  toggleBrightness("external")
+end)
+-- Plus is Shift-equals on the keyboard.
+hs.hotkey.bind({ "alt", "shift" }, "=", function()
+  toggleBrightness("builtin")
+end)
+
 hs.alert.show("Hammerspoon loaded")
