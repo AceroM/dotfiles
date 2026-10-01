@@ -2,39 +2,34 @@
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "chrome-remote-debugging",
   "title": "Chrome Remote Debugging",
-  "description": "Auto-click Chrome's \"Allow remote debugging?\" prompt in the background, toggled like Coffee.",
+  "description": "Automatically click Chrome's \"Allow remote debugging?\" prompt while the tool is open.",
   "icon": "icon.png",
   "author": "AceroM",
   "license": "MIT",
-  "categories": ["Developer Tools"],
+  "categories": [
+    "Developer Tools"
+  ],
   "commands": [
     {
       "name": "status",
       "title": "Remote Debugging Status",
       "subtitle": "Chrome Remote Debugging",
-      "description": "Menu bar item showing whether the auto-allow watcher is running.",
+      "description": "Open the menu bar tool and automatically keep the auto-allow watcher running until you quit.",
       "mode": "menu-bar",
       "interval": "1m"
     },
     {
-      "name": "toggle",
-      "title": "Toggle Remote Debugging Auto-Allow",
-      "subtitle": "Chrome Remote Debugging",
-      "description": "Start or stop the watcher that clicks Allow on Chrome's remote debugging prompt.",
-      "mode": "no-view"
-    },
-    {
       "name": "start",
-      "title": "Start Remote Debugging Auto-Allow",
+      "title": "Open Remote Debugging Auto-Allow",
       "subtitle": "Chrome Remote Debugging",
-      "description": "Start the watcher.",
+      "description": "Open or reopen the tool and start auto-allowing prompts.",
       "mode": "no-view"
     },
     {
-      "name": "stop",
-      "title": "Stop Remote Debugging Auto-Allow",
+      "name": "quit",
+      "title": "Quit Remote Debugging Auto-Allow",
       "subtitle": "Chrome Remote Debugging",
-      "description": "Stop the watcher.",
+      "description": "Quit the watcher and hide its menu bar icon until you reopen the tool.",
       "mode": "no-view"
     }
   ],
@@ -46,14 +41,6 @@
       "type": "textfield",
       "required": false,
       "default": "3"
-    },
-    {
-      "name": "hideWhenInactive",
-      "label": "Hide menu bar icon when stopped",
-      "description": "Only show the menu bar icon while the watcher is running.",
-      "type": "checkbox",
-      "required": false,
-      "default": false
     }
   ],
   "dependencies": {

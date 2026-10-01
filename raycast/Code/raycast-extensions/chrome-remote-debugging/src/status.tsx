@@ -1,23 +1,33 @@
 import { useEffect, useState } from "react";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { Color, getPreferenceValues, Icon, MenuBarExtra, open } from "@raycast/api";
-import { isRunning, LOG, start, stop } from "./watcher";
+import { Color, environment, Icon, LaunchType, MenuBarExtra, open, showToast, Toast } from "@raycast/api";
+import { hasQuit, isRunning, LOG, quit, start } from "./watcher";
 
 export default function Command() {
   const [running, setRunning] = useState<boolean>();
-  const { hideWhenInactive } = getPreferenceValues<Preferences>();
+  const [quitting, setQuitting] = useState(false);
 
   useEffect(() => {
-    isRunning().then(setRunning);
+    const initialize = async () => {
+      if (environment.launchType === LaunchType.Background && (await hasQuit())) {
+        setQuitting(true);
+        return;
+      }
+      await start();
+      setRunning(await isRunning());
+    };
+    initialize().catch(async (error: Error) => {
+      setRunning(false);
+      await showToast({ style: Toast.Style.Failure, title: "Could not start auto-allow", message: error.message });
+    });
   }, []);
 
-  if (running === false && hideWhenInactive) return null;
+  if (quitting) return null;
 
-  const toggle = async () => {
-    if (running) await stop();
-    else await start();
-    setRunning(await isRunning());
+  const quitApp = async () => {
+    await quit();
+    setQuitting(true);
   };
 
   const openLog = async () => {
@@ -30,11 +40,16 @@ export default function Command() {
     <MenuBarExtra
       isLoading={running === undefined}
       icon={running ? { source: Icon.Bug, tintColor: Color.Green } : { source: Icon.Bug }}
-      tooltip={running ? "Auto-allowing Chrome remote debugging" : "Chrome remote debugging auto-allow off"}
+      tooltip={running ? "Auto-allowing Chrome remote debugging" : "Chrome remote debugging auto-allow unavailable"}
     >
-      <MenuBarExtra.Item title={running ? "Auto-allow is on" : "Auto-allow is off"} />
-      <MenuBarExtra.Item title={running ? "Stop" : "Start"} icon={running ? Icon.Stop : Icon.Play} onAction={toggle} />
+      <MenuBarExtra.Item
+        title={
+          running === undefined ? "Starting auto-allow…" : running ? "Auto-allow is on" : "Could not start auto-allow"
+        }
+      />
       <MenuBarExtra.Item title="Open Log" icon={Icon.Document} onAction={openLog} />
+      <MenuBarExtra.Separator />
+      <MenuBarExtra.Item title="Quit" icon={Icon.XMarkCircle} onAction={quitApp} />
     </MenuBarExtra>
   );
 }
