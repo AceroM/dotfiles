@@ -7,6 +7,7 @@
 --   fn+/          toggle the grep picker: filter every other pane's visible
 --                 screen (no scrollback) line by line; Enter focuses that pane
 --   fn+y          copy the focused pane's Claude/Codex session id
+--   fn+shift+y    copy the focused pane's Herdr pane id
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
 --                 last pane back/forth
@@ -58,8 +59,9 @@ local remapped = {
   [keys.home] = keys.left, [keys["end"]] = keys.right,
   [keys.pageup] = keys.up, [keys.pagedown] = keys.down,
 }
--- Keys whose shifted chord is forwarded too (fn+shift+n -> ctrl+alt+shift+n).
-local shiftable = { [keys.n] = true, [keys.r] = true }
+-- Keys whose shifted chord is handled too: forwarded (fn+shift+n ->
+-- ctrl+alt+shift+n), or fn+shift+y -> copy the pane id.
+local shiftable = { [keys.n] = true, [keys.r] = true, [keys.y] = true }
 
 local tap
 local inflight = {} -- keeps background tasks alive until they answer
@@ -209,6 +211,19 @@ local function copySessionId()
   end)
 end
 
+local function copyPaneId()
+  request("session.snapshot", nil, function(response)
+    local snap = response.result and response.result.snapshot
+    local pane = snap and snap.focused_pane_id
+    if not pane then
+      hs.alert.show("No focused Herdr pane", 1)
+      return
+    end
+    hs.pasteboard.setContents(pane)
+    hs.alert.show("Copied pane " .. pane, 1)
+  end)
+end
+
 local function handleKey(event)
   local code = event:getKeyCode()
   local flags = event:getFlags()
@@ -232,7 +247,9 @@ local function handleKey(event)
     if not autorepeat then toggle(mode) end
     return true
   elseif code == keys.y then
-    if not autorepeat then copySessionId() end
+    if not autorepeat then
+      if flags.shift then copyPaneId() else copySessionId() end
+    end
     return true
   elseif ghosttyFocused() then
     -- Rewrite in place: Herdr sees a plain ctrl+alt+<key>.
@@ -251,6 +268,7 @@ end
 
 M.toggle = toggle
 M.copySessionId = copySessionId
+M.copyPaneId = copyPaneId
 M.toggleRecording = toggleRecording
 
 return M
