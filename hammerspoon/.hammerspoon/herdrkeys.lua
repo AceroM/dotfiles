@@ -12,6 +12,7 @@
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
 --                 last pane back/forth
 --   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
+--   fn+1..9       become ctrl+alt+1..9 in Ghostty: jump to the Nth tab
 --   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
 --   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
 --                 vertically / horizontally
@@ -56,6 +57,9 @@ local remapped = {
   [keys.z] = true, -- fn+z -> ctrl+alt+z (zoom)
   [keys.c] = keys.b, -- fn+c -> ctrl+alt+b (toggle sidebar)
   [keys.d] = keys.v, -- fn+d -> ctrl+alt+v
+  [keys["1"]] = true, [keys["2"]] = true, [keys["3"]] = true, -- fn+digit ->
+  [keys["4"]] = true, [keys["5"]] = true, [keys["6"]] = true, -- ctrl+alt+digit
+  [keys["7"]] = true, [keys["8"]] = true, [keys["9"]] = true, -- (switch_tab)
   [keys.home] = keys.left, [keys["end"]] = keys.right,
   [keys.pageup] = keys.up, [keys.pagedown] = keys.down,
 }
