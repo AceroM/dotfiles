@@ -45,6 +45,7 @@ local M = {}
 
 local HOME = os.getenv("HOME")
 local socket
+local socketCheckedAt = 0
 local PIDFILE = HOME .. "/.cache/herdr-quick-picker.pid"
 local GHOSTTY = "com.mitchellh.ghostty"
 local PLUGIN = "miguel.quick-pickers"
@@ -93,6 +94,7 @@ local function socketCandidates()
     end
   end
   add(socket)
+  add(os.getenv("HERDR_SOCKET_PATH"))
   add(os.getenv("HERDR_SOCKET"))
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg then add(xdg .. "/herdr/herdr.sock") end
@@ -125,7 +127,7 @@ end
 -- One JSON request/response over the Herdr socket. cb(response, rawLine).
 -- Via `nc -U`, not hs.socket: hs.socket crashes Hammerspoon outright when it
 -- connects to a unix socket (GCDAsyncSocket urlFromSockaddrUN, 1.1.1).
-local function request(method, params, cb)
+local function requestOnSocket(method, params, cb)
   local line = hs.json.encode({ id = "hs", method = method, params = params or {} })
   -- hs.json encodes an empty table as [], which Herdr rejects.
   line = line:gsub('"params":%[%]', '"params":{}')
@@ -159,6 +161,30 @@ local function request(method, params, cb)
     task:closeInput()
   end
   tryPath(1)
+end
+
+-- Hammerspoon has no shell environment. With multiple live servers the
+-- default socket may belong to a background session, so follow Ghostty's
+-- Herdr client instead. Cache briefly to keep chained requests inexpensive.
+local function request(method, params, cb)
+  local app = hs.application.get(GHOSTTY)
+  if not app or hs.timer.secondsSinceEpoch() - socketCheckedAt < 2 then
+    return requestOnSocket(method, params, cb)
+  end
+  local task
+  task = hs.task.new("/usr/bin/python3", function(exitCode, stdout)
+    inflight[task] = nil
+    local path = exitCode == 0 and (stdout or ""):match("^([^\r\n]+)")
+    if path and hs.fs.attributes(path, "mode") == "socket" then socket = path end
+    socketCheckedAt = hs.timer.secondsSinceEpoch()
+    requestOnSocket(method, params, cb)
+  end, { HOME .. "/.hammerspoon/herdr-socket.py", tostring(app:pid()) })
+  if not task then return requestOnSocket(method, params, cb) end
+  inflight[task] = true
+  if not task:start() then
+    inflight[task] = nil
+    return requestOnSocket(method, params, cb)
+  end
 end
 
 local function ghosttyFocused()
