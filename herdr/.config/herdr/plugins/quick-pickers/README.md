@@ -6,6 +6,7 @@
 - `fn-a` (Hammerspoon, `herdrkeys.lua`): focus the next agent needing attention from any app, rotating through blocked agents and unseen finished work.
 - `fn-shift-a` / `fn-s`: toggle the agents / spaces picker from any app.
 - `fn-1..9` / `fn-shift-1..9`: jump to the numbered tab / space while Ghostty is focused.
+- `fn-j` / `fn-k`: next / previous space while Ghostty is focused; add Shift for next / previous agent.
 - `fn-t`: every tab in every space, in sidebar order; filter also matches pane titles and cwds.
 - `fn-;`: the 20 most recently written Claude (`~/.claude/projects`) and Codex
   (`~/.codex/sessions`) transcripts (`sessions.ts`). Enter opens a new tab in the

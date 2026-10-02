@@ -17,6 +17,7 @@
 --   fn+1..9       become ctrl+alt+1..9 in Ghostty: jump to the Nth tab
 --   fn+shift+1..9 become cmd+alt+shift+1..9 in Ghostty: jump to the Nth space
 --   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
+--   fn+shift+j/k  become ctrl+alt+shift+j/k in Ghostty: next / previous agent
 --   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
 --                 vertically / horizontally
 --   fn+z          becomes ctrl+alt+z in Ghostty: zoom the pane
@@ -68,7 +69,10 @@ local remapped = {
 }
 -- Keys whose shifted chord is handled too: forwarded (fn+shift+n ->
 -- ctrl+alt+shift+n), fn+shift+a -> agents picker, or fn+shift+y -> copy the pane id.
-local shiftable = { [keys.a] = true, [keys.n] = true, [keys.r] = true, [keys.y] = true }
+local shiftable = {
+  [keys.a] = true, [keys.j] = true, [keys.k] = true,
+  [keys.n] = true, [keys.r] = true, [keys.y] = true,
+}
 local workspaceKeys = {}
 for number = 1, 9 do
   local code = keys[tostring(number)]
@@ -226,16 +230,79 @@ local function toggle(mode)
   end)
 end
 
+local function copyAgentSession(agent, session)
+  hs.pasteboard.setContents(session)
+  hs.alert.show("Copied " .. (agent.agent or "agent") .. " session " .. session:sub(1, 8) .. "…", 1)
+end
+
+-- Existing Codex processes can lack Herdr's SessionStart metadata. Resolve
+-- their own open transcript instead of guessing from cwd or newest session.
+local function copyCodexSession(agent)
+  request("pane.process_info", { pane_id = agent.pane_id }, function(response)
+    local info = response.result and response.result.process_info
+    local pids = {}
+    for _, process in ipairs(info and info.foreground_processes or {}) do
+      local executable = (process.argv and process.argv[1]) or process.argv0 or ""
+      if process.name == "codex" or executable:match("([^/]+)$") == "codex" then
+        pids[#pids + 1] = tostring(process.pid)
+      end
+    end
+    if #pids == 0 then
+      hs.alert.show("No Codex process found in the focused pane", 2)
+      return
+    end
+    local task
+    task = hs.task.new("/usr/sbin/lsof", function(exitCode, stdout)
+      inflight[task] = nil
+      local sessions = {}
+      if exitCode == 0 or exitCode == 1 then
+        for line in (stdout or ""):gmatch("[^\r\n]+") do
+          local path = line:match("^n(.*/rollout%-[^/]+%.jsonl)$")
+          local file = path and io.open(path, "r")
+          if file then
+            local metadata = file:read("*l")
+            file:close()
+            local ok, record = pcall(hs.json.decode, metadata or "")
+            local session = ok and type(record) == "table" and record.type == "session_meta"
+              and type(record.payload) == "table" and record.payload.id
+            if type(session) == "string" and session ~= "" then sessions[session] = true end
+          end
+        end
+      end
+      local session = next(sessions)
+      if session and not next(sessions, session) then
+        copyAgentSession(agent, session)
+      else
+        hs.alert.show("Couldn’t identify one Codex session in the focused pane", 2)
+      end
+    end, { "-nP", "-a", "-p", table.concat(pids, ","), "-Fn" })
+    if not task then
+      hs.alert.show("Couldn’t inspect the focused Codex process", 2)
+      return
+    end
+    inflight[task] = true
+    if not task:start() then
+      inflight[task] = nil
+      hs.alert.show("Couldn’t inspect the focused Codex process", 2)
+    end
+  end)
+end
+
 local function copySessionId()
   request("session.snapshot", nil, function(response)
     local snap = response.result and response.result.snapshot
-    if not snap then return end
+    if not snap then
+      hs.alert.show("Couldn’t read the focused Herdr pane", 2)
+      return
+    end
     for _, agent in ipairs(snap.agents or {}) do
       if agent.pane_id == snap.focused_pane_id then
         local session = agent.agent_session and agent.agent_session.value
-        if session then
-          hs.pasteboard.setContents(session)
-          hs.alert.show("Copied " .. agent.agent .. " session " .. session:sub(1, 8) .. "…", 1)
+        if type(session) == "string" and session ~= "" then
+          copyAgentSession(agent, session)
+          return
+        elseif agent.agent == "codex" then
+          copyCodexSession(agent)
           return
         end
       end
