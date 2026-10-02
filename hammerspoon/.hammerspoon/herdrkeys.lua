@@ -25,6 +25,7 @@
 --   fn+r          becomes ctrl+alt+r in Ghostty: rename tab
 --   fn+shift+r    becomes ctrl+alt+shift+r in Ghostty: rename space
 --   fn+n          becomes ctrl+alt+n in Ghostty: new tab
+--   fn+e          becomes ctrl+alt+e in Ghostty: new tab next to the current
 --   fn+shift+n    becomes ctrl+alt+shift+n in Ghostty: new space
 --   fn+arrows     become ctrl+alt+arrows in Ghostty: focus the pane that way.
 --                 macOS has already turned fn+arrow into home/end/pgup/pgdn
@@ -57,7 +58,7 @@ local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.t] = "tabs", [
 local remapped = {
   [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
   [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
-  [keys["-"]] = true, [keys.n] = true, [keys.r] = true,
+  [keys["-"]] = true, [keys.n] = true, [keys.r] = true, [keys.e] = true,
   [keys.z] = true, -- fn+z -> ctrl+alt+z (zoom)
   [keys.c] = keys.b, -- fn+c -> ctrl+alt+b (toggle sidebar)
   [keys.d] = keys.v, -- fn+d -> ctrl+alt+v
@@ -357,6 +358,7 @@ local function handleKey(event)
     end
     return true
   elseif ghosttyFocused() then
+    if code == keys.e and autorepeat then return true end
     -- Rewrite in place using Herdr's indexed-space chord for shifted digits.
     if flags.shift and workspaceKeys[code] then
       event:setFlags({ cmd = true, alt = true, shift = true })
