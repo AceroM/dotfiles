@@ -1,6 +1,8 @@
 -- fn shortcuts for Herdr, from a raw keyDown tap (hs.hotkey can't bind fn).
 --
---   fn+a / fn+s   toggle the quick agents / spaces picker (from any app)
+--   fn+a          focus the next agent needing attention (from any app)
+--   fn+shift+a    toggle the quick agents picker (from any app)
+--   fn+s          toggle the quick spaces picker (from any app)
 --   fn+t          toggle the tabs picker (every tab in every space)
 --   fn+;          toggle the recent Claude/Codex sessions picker; Enter
 --                 resumes one in a new tab with permissions bypassed
@@ -13,6 +15,7 @@
 --                 last pane back/forth
 --   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
 --   fn+1..9       become ctrl+alt+1..9 in Ghostty: jump to the Nth tab
+--   fn+shift+1..9 become cmd+alt+shift+1..9 in Ghostty: jump to the Nth space
 --   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
 --   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
 --                 vertically / horizontally
@@ -64,8 +67,14 @@ local remapped = {
   [keys.pageup] = keys.up, [keys.pagedown] = keys.down,
 }
 -- Keys whose shifted chord is handled too: forwarded (fn+shift+n ->
--- ctrl+alt+shift+n), or fn+shift+y -> copy the pane id.
-local shiftable = { [keys.n] = true, [keys.r] = true, [keys.y] = true }
+-- ctrl+alt+shift+n), fn+shift+a -> agents picker, or fn+shift+y -> copy the pane id.
+local shiftable = { [keys.a] = true, [keys.n] = true, [keys.r] = true, [keys.y] = true }
+local workspaceKeys = {}
+for number = 1, 9 do
+  local code = keys[tostring(number)]
+  workspaceKeys[code] = true
+  shiftable[code] = true
+end
 
 local tap
 local inflight = {} -- keeps background tasks alive until they answer
@@ -151,6 +160,26 @@ local function ghosttyFocused()
   local win = hs.window.focusedWindow()
   local app = win and win:application()
   return app ~= nil and app:bundleID() == GHOSTTY
+end
+
+local function focusNextAgent()
+  if not ghosttyFocused() then
+    hs.task.new("/usr/bin/open", nil, { "-b", GHOSTTY }):start()
+  end
+  local task
+  task = hs.task.new("/bin/bash", function(exitCode, _, stderr)
+    inflight[task] = nil
+    if exitCode ~= 0 then
+      hs.printf("Herdr agent attention failed: %s", stderr or "")
+      hs.alert.show("Couldn’t focus the next agent. See ~/.local/state/herdr-agent-attention.log", 3)
+    end
+  end, { HOME .. "/.local/bin/herdr-agent-attention" })
+  if not task then return end
+  inflight[task] = true
+  if not task:start() then
+    inflight[task] = nil
+    hs.alert.show("Couldn’t start Herdr agent attention.", 3)
+  end
 end
 
 local function openPicker(mode, attempt)
@@ -247,6 +276,11 @@ local function handleKey(event)
   if code == keys.q then
     if not autorepeat then toggleRecording() end
     return true
+  elseif code == keys.a then
+    if not autorepeat then
+      if flags.shift then toggle("agents") else focusNextAgent() end
+    end
+    return true
   elseif mode then
     if not autorepeat then toggle(mode) end
     return true
@@ -256,8 +290,12 @@ local function handleKey(event)
     end
     return true
   elseif ghosttyFocused() then
-    -- Rewrite in place: Herdr sees a plain ctrl+alt+<key>.
-    event:setFlags({ ctrl = true, alt = true, shift = flags.shift or nil })
+    -- Rewrite in place using Herdr's indexed-space chord for shifted digits.
+    if flags.shift and workspaceKeys[code] then
+      event:setFlags({ cmd = true, alt = true, shift = true })
+    else
+      event:setFlags({ ctrl = true, alt = true, shift = flags.shift or nil })
+    end
     if remapped[code] ~= true then event:setKeyCode(remapped[code]) end
   end
   return false
@@ -271,6 +309,7 @@ function M.start()
 end
 
 M.toggle = toggle
+M.focusNextAgent = focusNextAgent
 M.copySessionId = copySessionId
 M.copyPaneId = copyPaneId
 M.toggleRecording = toggleRecording

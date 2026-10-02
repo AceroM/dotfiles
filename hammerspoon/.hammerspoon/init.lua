@@ -30,7 +30,8 @@ end)
 wispr = require("wispr")
 wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 
--- fn+a / fn+s toggle Herdr's quick agent / space pickers; see herdrkeys.lua.
+-- fn+a focuses the next agent needing attention; fn+shift+a / fn+s toggle
+-- Herdr's quick agent / space pickers; see herdrkeys.lua.
 -- fn+q toggles Quick Record from any app through the same Fn-key handler.
 herdrkeys = require("herdrkeys")
 herdrkeys.start()
