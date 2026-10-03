@@ -3,6 +3,7 @@
 --   fn+a          focus the next agent needing attention (from any app)
 --   fn+shift+a    toggle the quick agents picker (from any app)
 --   fn+s          toggle the quick spaces picker (from any app)
+--   fn+m          move the current tab to a numbered space (from any app)
 --   fn+t          toggle the tabs picker (every tab in every space)
 --   fn+;          toggle the recent Claude/Codex sessions picker; Enter
 --                 resumes one in a new tab with permissions bypassed
@@ -55,7 +56,7 @@ local SESSIONS_ROWS = 20 -- sessions.ts LIMIT
 local GREP_WIDTH = 120 -- long screen lines + location
 
 local keys = hs.keycodes.map
-local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.t] = "tabs", [keys[";"]] = "sessions", [keys["/"]] = "grep" }
+local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.m] = "move", [keys.t] = "tabs", [keys[";"]] = "sessions", [keys["/"]] = "grep" }
 local remapped = {
   [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
   [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
@@ -218,7 +219,7 @@ local function openPicker(mode, attempt)
     local snap = response.result and response.result.snapshot
     if not snap then return end
     local area = snap.layouts and snap.layouts[1] and snap.layouts[1].area or { width = 80, height = 24 }
-    local lists = { agents = snap.agents, spaces = snap.workspaces, tabs = snap.tabs }
+    local lists = { agents = snap.agents, spaces = snap.workspaces, move = snap.workspaces, tabs = snap.tabs }
     local count = lists[mode] and #lists[mode] or (mode == "grep" and 1000 or SESSIONS_ROWS)
     local width = mode == "sessions" and SESSIONS_WIDTH or mode == "grep" and GREP_WIDTH or WIDTH
     request("plugin.pane.open", {
@@ -247,8 +248,15 @@ local function toggle(mode)
     hs.task.new("/usr/bin/open", nil, { "-b", GHOSTTY }):start()
   end
   local file = io.open(PIDFILE, "r")
-  local openMode = file and file:read("*l"):match("^%d+ (%a+)")
+  local record = file and file:read("*l") or ""
   if file then file:close() end
+  -- A tab transfer preserves its panes through several socket calls. Let it
+  -- finish before a toggle can destroy the popup process.
+  if record:match("^%d+ move busy$") then
+    local _, alive = hs.execute("/bin/kill -0 " .. record:match("^%d+") .. " 2>/dev/null")
+    if alive then return end
+  end
+  local openMode = record:match("^%d+ (%a+)")
   if not openMode then return openPicker(mode) end
   request("popup.close", nil, function(response)
     os.remove(PIDFILE)

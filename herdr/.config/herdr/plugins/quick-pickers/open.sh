@@ -2,8 +2,8 @@
 set -eu
 
 case "${1:-}" in
-  agents|spaces|tabs|sessions|grep) ;;
-  *) echo "usage: open.sh agents|spaces|tabs|sessions|grep" >&2; exit 2 ;;
+  agents|spaces|move|tabs|sessions|grep) ;;
+  *) echo "usage: open.sh agents|spaces|move|tabs|sessions|grep" >&2; exit 2 ;;
 esac
 
 herdr="${HERDR_BIN_PATH:-$HOME/.local/bin/herdr}"
@@ -12,7 +12,11 @@ herdr="${HERDR_BIN_PATH:-$HOME/.local/bin/herdr}"
 # other picker's key swaps it out.
 pidfile="$HOME/.cache/herdr-quick-picker.pid"
 if [ -r "$pidfile" ]; then
-  read -r pid open_mode < "$pidfile" || true
+  read -r pid open_mode picker_state < "$pidfile" || true
+  # Do not terminate a tab transfer between its pane moves.
+  if [ "${open_mode:-}" = move ] && [ "${picker_state:-}" = busy ] && kill -0 "${pid:-}" 2>/dev/null; then
+    exit 0
+  fi
   if [ -n "${pid:-}" ] && kill -TERM "$pid" 2>/dev/null; then
     [ "${open_mode:-}" = "$1" ] && exit 0
     # Herdr allows one popup at a time; let the old one close first.
@@ -26,7 +30,7 @@ fi
 max_width=40
 case "$1" in
   agents) filter='.agents | length' ;;
-  spaces) filter='.workspaces | length' ;;
+  spaces|move) filter='.workspaces | length' ;;
   tabs) filter='.tabs | length' ;;
   # sessions.ts shows the 20 most recent; wide enough for title + cwd.
   sessions) filter='20'; max_width=110 ;;

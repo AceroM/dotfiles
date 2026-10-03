@@ -1,7 +1,9 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { emitKeypressEvents } from "node:readline";
+import { MoveTabError } from "./move-tab";
+import { moveTabInWorker } from "./move-tab-worker";
+import { call } from "./rpc";
 
 type Agent = {
   agent: string;
@@ -49,8 +51,8 @@ type Snapshot = {
 type Entry = { id: string; label: string; location: string; status: string; search: string; agent?: Agent; space?: Space; tab?: Tab; pane?: Pane };
 
 const mode = process.argv[2];
-if (mode !== "agents" && mode !== "spaces" && mode !== "tabs" && mode !== "grep") {
-  console.error("usage: picker.ts agents|spaces|tabs|grep");
+if (mode !== "agents" && mode !== "spaces" && mode !== "move" && mode !== "tabs" && mode !== "grep") {
+  console.error("usage: picker.ts agents|spaces|move|tabs|grep");
   process.exit(2);
 }
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -58,7 +60,6 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
   process.exit(1);
 }
 
-const socketPath = process.env.HERDR_SOCKET_PATH || `${homedir()}/.config/herdr/herdr.sock`;
 const priority: Record<string, number> = { blocked: 0, done: 1, working: 2, idle: 3, unknown: 4 };
 let all: Entry[] = [];
 let shown: Entry[] = [];
@@ -70,6 +71,12 @@ let loading = false;
 let busy = false;
 let closed = false;
 let paneCount = 0;
+// Pin the tab from the opener's snapshot. Refreshing the destination list must
+// never change which tab is being sent.
+let sourceTabId: string | undefined;
+let sourceWorkspaceId: string | undefined;
+let sourceTabLabel = "";
+let moveUnavailable = false;
 
 function clean(value: string | undefined): string {
   return (value || "").replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim();
@@ -86,7 +93,7 @@ function statusRank(status: string): number {
 }
 
 function entries(snapshot: Snapshot): Entry[] {
-  if (mode === "spaces") {
+  if (mode === "spaces" || mode === "move") {
     return snapshot.workspaces
       .slice()
       .sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity))
@@ -250,7 +257,9 @@ function render() {
   const width = Math.max(20, process.stdout.columns || 80);
   const height = Math.max(8, process.stdout.rows || 24);
   const rows = visibleRows();
-  const count = mode === "grep" ? `${shown.length}/${all.length} lines · ${paneCount} panes` : `${shown.length}/${all.length} ${mode}`;
+  const count = mode === "grep" ? `${shown.length}/${all.length} lines · ${paneCount} panes`
+    : mode === "move" ? `Move ${sourceTabLabel || "tab"} → space · ${shown.length}/${all.length}`
+    : `${shown.length}/${all.length} ${mode}`;
   const lines = [
     ` > ${query || (mode === "grep" ? "Type to grep other panes' screens…" : "Type to filter…")}`,
     ` ${message || count}`,
@@ -262,37 +271,22 @@ function render() {
   }
   if (!shown.length && !loading && (query.trim() || mode !== "grep")) lines.push(" No matches");
   while (lines.length < height - 1) lines.push("");
-  lines.push(mode === "grep" ? " ↑↓ move · ⏎ focus pane · ^R re-read" : " ↑↓ move · ⏎ focus · ^R refresh");
+  lines.push(mode === "grep" ? " ↑↓ move · ⏎ focus pane · ^R re-read"
+    : mode === "move" ? (moveUnavailable ? " Move incomplete · esc close and inspect" : " 1-9 send · ⏎ send · esc cancel")
+    : " ↑↓ move · ⏎ focus · ^R refresh");
   process.stdout.write(`\x1b[H\x1b[2J${lines.slice(0, height).map((line) => line.includes("\x1b[7m") ? line : clip(line, width - 1)).join("\n")}`);
-}
-
-// Talk to the Herdr socket directly: spawning the herdr CLI costs ~30ms a call.
-function call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
-    let buffer = "";
-    socket.setEncoding("utf8");
-    socket.on("connect", () => socket.write(`${JSON.stringify({ id: "quick-picker", method, params })}\n`));
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      const end = buffer.indexOf("\n");
-      if (end < 0) return;
-      socket.destroy();
-      try {
-        const response = JSON.parse(buffer.slice(0, end)) as { result?: T; error?: { message?: string } };
-        if (response.error) reject(new Error(response.error.message || `${method} failed`));
-        else resolve(response.result as T);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    socket.on("error", reject);
-  });
 }
 
 async function load(snapshot: Snapshot | undefined) {
   if (!snapshot || !Array.isArray(snapshot.agents) || !Array.isArray(snapshot.workspaces) || !Array.isArray(snapshot.tabs)) {
     throw new Error("Herdr returned an invalid snapshot");
+  }
+  if (mode === "move" && !sourceTabId) {
+    const source = snapshot.tabs.find((tab) => tab.tab_id === snapshot.focused_tab_id);
+    if (!source) throw new Error("No focused tab to move");
+    sourceTabId = source.tab_id;
+    sourceWorkspaceId = source.workspace_id || snapshot.focused_workspace_id;
+    sourceTabLabel = clean(source.label) || source.tab_id;
   }
   if (mode === "grep") {
     paneCount = (snapshot.panes || []).filter((pane) => !skipPane(pane, snapshot)).length;
@@ -313,6 +307,7 @@ async function load(snapshot: Snapshot | undefined) {
 // Start on where I already am: the focused space, or the focused pane's agent
 // (else the first agent in the focused tab).
 function current(snapshot: Snapshot): number {
+  if (mode === "move") return all.findIndex((entry) => entry.id === sourceWorkspaceId);
   if (mode === "spaces") return all.findIndex((entry) => entry.id === snapshot.focused_workspace_id);
   if (mode === "tabs") return all.findIndex((entry) => entry.id === snapshot.focused_tab_id);
   const pane = all.findIndex((entry) => entry.id === snapshot.focused_pane_id);
@@ -348,12 +343,16 @@ function finish(code = 0) {
 
 async function focusSelected(index = selected) {
   const target = shown[index];
-  if (!target || busy) return;
+  if (!target || busy || (mode === "move" && moveUnavailable)) return;
   busy = true;
-  message = `Focusing ${target.label}…`;
+  if (mode === "move") recordMoveState(true);
+  message = mode === "move" ? `Moving to ${target.label}…` : `Focusing ${target.label}…`;
   render();
   try {
-    if (target.pane) {
+    if (mode === "move") {
+      if (!sourceTabId || !target.space) throw new Error("No tab or destination selected");
+      await moveTabInWorker(sourceTabId, target.space.workspace_id);
+    } else if (target.pane) {
       if (target.pane.workspace_id) await call("workspace.focus", { workspace_id: target.pane.workspace_id });
       await call("tab.focus", { tab_id: target.pane.tab_id });
       await call("pane.focus", { pane_id: target.pane.pane_id });
@@ -369,14 +368,31 @@ async function focusSelected(index = selected) {
     }
     finish();
   } catch (error) {
-    message = `Focus failed: ${error instanceof Error ? error.message : String(error)}`;
+    if (error instanceof MoveTabError) {
+      if (error.recoveredTabId) {
+        sourceTabId = error.recoveredTabId;
+        sourceWorkspaceId = error.sourceWorkspaceId;
+      } else if (error.movedTabId) {
+        sourceTabId = error.movedTabId;
+        sourceWorkspaceId = error.destinationWorkspaceId;
+      }
+      moveUnavailable = error.partial === true;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    message = mode === "move" && error instanceof MoveTabError ? detail : `${mode === "move" ? "Move" : "Focus"} failed: ${detail}`;
     busy = false;
+    if (mode === "move") recordMoveState(false);
     render();
   }
 }
 
 // open.sh reads this to make the hotkeys toggle the popup.
 const pidfile = `${homedir()}/.cache/herdr-quick-picker.pid`;
+function recordMoveState(moving: boolean) {
+  try {
+    writeFileSync(pidfile, `${process.pid} ${mode}${moving ? " busy" : ""}\n`);
+  } catch {}
+}
 try {
   mkdirSync(`${homedir()}/.cache`, { recursive: true });
   writeFileSync(pidfile, `${process.pid} ${mode}\n`);

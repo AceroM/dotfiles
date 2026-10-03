@@ -17,6 +17,12 @@ title = "Browse spaces"
 contexts = ["global"]
 command = ["/bin/sh", "open.sh", "spaces"]
 
+[[actions]]
+id = "move"
+title = "Move tab to space"
+contexts = ["global"]
+command = ["/bin/sh", "open.sh", "move"]
+
 [[panes]]
 id = "agents"
 title = "Agents"
@@ -32,6 +38,14 @@ placement = "popup"
 width = "62%"
 height = "50%"
 command = ["bun", "picker.ts", "spaces"]
+
+[[panes]]
+id = "move"
+title = "Move tab to space"
+placement = "popup"
+width = "62%"
+height = "50%"
+command = ["bun", "picker.ts", "move"]
 
 [[actions]]
 id = "tabs"
