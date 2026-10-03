@@ -8,7 +8,7 @@
 --                 resumes one in a new tab with permissions bypassed
 --   fn+/          toggle the grep picker: filter every other pane's visible
 --                 screen (no scrollback) line by line; Enter focuses that pane
---   fn+y          copy the focused pane's Claude/Codex session id
+--   fn+y          copy "Claude/Codex session ID <id>" for the focused pane
 --   fn+shift+y    copy the focused pane's Herdr pane id
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
@@ -258,59 +258,109 @@ local function toggle(mode)
 end
 
 local function copyAgentSession(agent, session)
-  hs.pasteboard.setContents(session)
-  hs.alert.show("Copied " .. (agent.agent or "agent") .. " session " .. session:sub(1, 8) .. "…", 1)
+  local name = agent.agent == "codex" and "Codex" or "Claude"
+  if not hs.pasteboard.setContents(name .. " session ID " .. session) then
+    hs.alert.show("Couldn’t copy the session ID", 2)
+    return
+  end
+  hs.alert.show("Copied " .. name .. " session " .. session:sub(1, 8) .. "…", 1)
 end
 
--- Existing Codex processes can lack Herdr's SessionStart metadata. Resolve
--- their own open transcript instead of guessing from cwd or newest session.
-local function copyCodexSession(agent)
-  request("pane.process_info", { pane_id = agent.pane_id }, function(response)
+local function readSessionFile(path, firstLine)
+  local file = io.open(path, "r")
+  if not file then return end
+  local contents = file:read(firstLine and "*l" or "*a")
+  file:close()
+  local ok, record = pcall(hs.json.decode, contents or "")
+  if ok and type(record) == "table" then return record end
+end
+
+local function processAgent(process)
+  local argv = process.argv or {}
+  -- Claude's native binary may have a version number as its process name.
+  for _, executable in ipairs({ process.name or "", process.argv0 or "", argv[1] or "" }) do
+    local name = executable:match("([^/]+)$")
+    if name == "codex" or name == "claude" then return name end
+  end
+  -- Older npm installations launch the CLI through node.
+  local script = argv[2] or ""
+  if script:match("/@anthropic%-ai/claude%-code/cli%.js$") then return "claude" end
+  if script:match("/@openai/codex/bin/codex%.js$") then return "codex" end
+end
+
+-- Agents launched before (or without) SessionStart hooks have no metadata.
+-- Use Claude's PID registry or the process's open transcript, never cwd/mtime:
+-- multiple agents can be working in the same directory at once.
+local function copyProcessSession(paneId, expectedAgent)
+  request("pane.process_info", { pane_id = paneId }, function(response)
     local info = response.result and response.result.process_info
-    local pids = {}
-    for _, process in ipairs(info and info.foreground_processes or {}) do
-      local executable = (process.argv and process.argv[1]) or process.argv0 or ""
-      if process.name == "codex" or executable:match("([^/]+)$") == "codex" then
-        pids[#pids + 1] = tostring(process.pid)
+    if not info then
+      hs.alert.show("Couldn’t inspect the focused Herdr pane", 2)
+      return
+    end
+    local pids, kinds, sessions = {}, {}, {}
+    local function addSession(kind, session)
+      if type(session) == "string" and session ~= "" then
+        sessions[kind .. ":" .. session] = { agent = kind, session = session }
       end
     end
+    local function copyFoundSession()
+      local key, found = next(sessions)
+      if key and not next(sessions, key) then
+        copyAgentSession(found, found.session)
+        return true
+      end
+      return false
+    end
+    for _, process in ipairs(info.foreground_processes or {}) do
+      local kind = processAgent(process)
+      if kind and process.pid and (not expectedAgent or kind == expectedAgent) then
+        local pid = tostring(process.pid)
+        pids[#pids + 1] = pid
+        kinds[pid] = kind
+        if kind == "claude" then
+          local record = readSessionFile(HOME .. "/.claude/sessions/" .. pid .. ".json")
+          if record and record.pid == process.pid then addSession(kind, record.sessionId) end
+        end
+      end
+    end
+    if copyFoundSession() then return end
     if #pids == 0 then
-      hs.alert.show("No Codex process found in the focused pane", 2)
+      hs.alert.show("No Claude/Codex process found in the focused pane", 2)
       return
     end
     local task
     task = hs.task.new("/usr/sbin/lsof", function(exitCode, stdout)
       inflight[task] = nil
-      local sessions = {}
+      local kind
       if exitCode == 0 or exitCode == 1 then
         for line in (stdout or ""):gmatch("[^\r\n]+") do
-          local path = line:match("^n(.*/rollout%-[^/]+%.jsonl)$")
-          local file = path and io.open(path, "r")
-          if file then
-            local metadata = file:read("*l")
-            file:close()
-            local ok, record = pcall(hs.json.decode, metadata or "")
-            local session = ok and type(record) == "table" and record.type == "session_meta"
-              and type(record.payload) == "table" and record.payload.id
-            if type(session) == "string" and session ~= "" then sessions[session] = true end
+          local pid = line:match("^p(%d+)$")
+          if pid then kind = kinds[pid] end
+          local path = line:match("^n(.+)$")
+          if kind == "codex" and path and path:match("/rollout%-[^/]+%.jsonl$") then
+            local record = readSessionFile(path, true)
+            if record and record.type == "session_meta" and type(record.payload) == "table" then
+              addSession(kind, record.payload.id)
+            end
+          elseif kind == "claude" and path and path:match("/projects/[^/]+/[^/]+%.jsonl$") then
+            local record = readSessionFile(path, true)
+            if record then addSession(kind, record.sessionId) end
           end
         end
       end
-      local session = next(sessions)
-      if session and not next(sessions, session) then
-        copyAgentSession(agent, session)
-      else
-        hs.alert.show("Couldn’t identify one Codex session in the focused pane", 2)
+      if not copyFoundSession() then
+        hs.alert.show("Couldn’t identify one Claude/Codex session in the focused pane", 2)
       end
     end, { "-nP", "-a", "-p", table.concat(pids, ","), "-Fn" })
     if not task then
-      hs.alert.show("Couldn’t inspect the focused Codex process", 2)
+      hs.alert.show("Couldn’t inspect the focused agent process", 2)
       return
     end
     inflight[task] = true
     if not task:start() then
       inflight[task] = nil
-      hs.alert.show("Couldn’t inspect the focused Codex process", 2)
+      hs.alert.show("Couldn’t inspect the focused agent process", 2)
     end
   end)
 end
@@ -318,23 +368,23 @@ end
 local function copySessionId()
   request("session.snapshot", nil, function(response)
     local snap = response.result and response.result.snapshot
-    if not snap then
+    if not snap or not snap.focused_pane_id then
       hs.alert.show("Couldn’t read the focused Herdr pane", 2)
       return
     end
     for _, agent in ipairs(snap.agents or {}) do
-      if agent.pane_id == snap.focused_pane_id then
-        local session = agent.agent_session and agent.agent_session.value
-        if type(session) == "string" and session ~= "" then
+      if agent.pane_id == snap.focused_pane_id and (agent.agent == "codex" or agent.agent == "claude") then
+        local metadata = agent.agent_session
+        local session = metadata and metadata.value
+        if metadata and metadata.kind ~= "path" and type(session) == "string" and session ~= "" then
           copyAgentSession(agent, session)
           return
-        elseif agent.agent == "codex" then
-          copyCodexSession(agent)
-          return
         end
+        copyProcessSession(agent.pane_id, agent.agent)
+        return
       end
     end
-    hs.alert.show("No Claude/Codex session in the focused pane", 1)
+    copyProcessSession(snap.focused_pane_id)
   end)
 end
 
