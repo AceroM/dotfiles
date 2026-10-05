@@ -12,7 +12,7 @@
 - `fn-1..9` / `fn-shift-1..9`: jump to the numbered tab / space while Ghostty is focused.
 - `fn-j` / `fn-k`: next / previous space while Ghostty is focused; add Shift for next / previous agent.
 - `fn-t`: every tab in every space, in sidebar order; filter also matches pane titles and cwds.
-- `fn-;`: the 20 most recently written Claude (`~/.claude/projects`) and Codex
+- `fn-shift-;`: the 20 most recently written Claude (`~/.claude/projects`) and Codex
   (`~/.codex/sessions`) transcripts (`sessions.ts`). Enter opens a new tab in the
   current space at the session's cwd and runs `claude --resume <id>
   --dangerously-skip-permissions` or `codex resume

@@ -5,7 +5,9 @@
 --   fn+s          toggle the quick spaces picker (from any app)
 --   fn+m          move the current tab to a numbered space (from any app)
 --   fn+t          toggle the tabs picker (every tab in every space)
---   fn+;          toggle the recent Claude/Codex sessions picker; Enter
+--   fn+;          toggle the Jev agent search (miguel.jev-focus): rank live
+--                 agents by task/topic; Enter focuses one
+--   fn+shift+;    toggle the recent Claude/Codex sessions picker; Enter
 --                 resumes one in a new tab with permissions bypassed
 --   fn+/          toggle the grep picker: filter every other pane's visible
 --                 screen (no scrollback) line by line; Enter focuses that pane
@@ -50,13 +52,15 @@ local socketCheckedAt = 0
 local PIDFILE = HOME .. "/.cache/herdr-quick-picker.pid"
 local GHOSTTY = "com.mitchellh.ghostty"
 local PLUGIN = "miguel.quick-pickers"
+local JEV_PLUGIN = "miguel.jev-focus"
 local WIDTH = 40 -- ~300px at font-size 14
 local SESSIONS_WIDTH = 110 -- title + cwd + age
 local SESSIONS_ROWS = 20 -- sessions.ts LIMIT
 local GREP_WIDTH = 120 -- long screen lines + location
+local JEV_WIDTH = 110 -- agent title + space / tab location
 
 local keys = hs.keycodes.map
-local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.m] = "move", [keys.t] = "tabs", [keys[";"]] = "sessions", [keys["/"]] = "grep" }
+local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.m] = "move", [keys.t] = "tabs", [keys[";"]] = "jev", [keys["/"]] = "grep" }
 local remapped = {
   [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
   [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
@@ -75,6 +79,7 @@ local remapped = {
 local shiftable = {
   [keys.a] = true, [keys.j] = true, [keys.k] = true,
   [keys.n] = true, [keys.r] = true, [keys.y] = true,
+  [keys[";"]] = true, -- fn+shift+; -> sessions picker
 }
 local workspaceKeys = {}
 for number = 1, 9 do
@@ -232,7 +237,7 @@ local function openPicker(mode, attempt)
     local lists = { agents = snap.agents, spaces = snap.workspaces, move = snap.workspaces, tabs = snap.tabs }
     local count = lists[mode] and #lists[mode] or (mode == "grep" and 1000 or SESSIONS_ROWS)
     local width = mode == "sessions" and SESSIONS_WIDTH or mode == "grep" and GREP_WIDTH or WIDTH
-    request("plugin.pane.open", {
+    local params = {
       plugin_id = PLUGIN,
       entrypoint = mode,
       placement = "popup",
@@ -241,7 +246,15 @@ local function openPicker(mode, attempt)
       -- rows + query/count/blank/footer + border, capped at 80% of the client
       height = math.min(count + 7, math.floor(area.height * 0.8)),
       env = { QP_SNAPSHOT = raw }, -- the picker skips its own fetch
-    }, function(opened)
+    }
+    if mode == "jev" then
+      -- Two lines per agent; the picker loads its own candidates.
+      params.plugin_id, params.entrypoint = JEV_PLUGIN, "picker"
+      params.width = math.min(JEV_WIDTH, area.width)
+      params.height = math.min(#(snap.agents or {}) * 2 + 8, math.floor(area.height * 0.8))
+      params.env = { HJ_SOURCE_PANE_ID = snap.focused_pane_id or "" }
+    end
+    request("plugin.pane.open", params, function(opened)
       -- Swapping pickers can race the old popup's teardown.
       local code = opened.error and opened.error.code
       if code == "ui_busy" and (attempt or 0) < 10 then
@@ -444,6 +457,7 @@ local function handleKey(event)
     end
     return true
   elseif mode then
+    if code == keys[";"] and flags.shift then mode = "sessions" end
     if not autorepeat then toggle(mode) end
     return true
   elseif code == keys.y then
@@ -468,10 +482,12 @@ function M.start()
   if tap then tap:stop() end
   tap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, handleKey)
   tap:start()
+  M.tap = tap
   return M
 end
 
 M.toggle = toggle
+M.toggleJev = function() toggle("jev") end
 M.focusNextAgent = focusNextAgent
 M.copySessionId = copySessionId
 M.copyPaneId = copyPaneId

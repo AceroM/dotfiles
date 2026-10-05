@@ -3,12 +3,12 @@ set -eu
 
 herdr="${HERDR_BIN_PATH:-herdr}"
 
-# ~300px wide at font-size 14; two lines per agent plus the header, footer,
+# 110 cols wide (title + location); two lines per agent plus the header, footer,
 # and popup frame, capped at 80% of the client.
 size=$("$herdr" api snapshot 2>/dev/null | jq -r '
   .result.snapshot as $s
   | ($s.layouts[0].area // {width: 80, height: 24}) as $c
-  | [([40, $c.width] | min), ([($s.agents | length) * 2 + 8, ($c.height * 0.8 | floor)] | min)]
+  | [([110, $c.width] | min), ([($s.agents | length) * 2 + 8, ($c.height * 0.8 | floor)] | min)]
   | @tsv' 2>/dev/null) || size=""
 
 set --

@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { emitKeypressEvents } from "node:readline";
 import { buildSearchPayload, metadataMatch, type Candidate, type SearchAnswers } from "../../../../../cli/.local/share/hj-cli/search";
 import { loadCandidates } from "../../../../../cli/.local/share/hj-cli/index";
@@ -182,6 +184,9 @@ async function runHerdr(args: string[]) {
 function finish(code = 0) {
   if (closed) return;
   closed = true;
+  try {
+    if (readFileSync(pidfile, "utf8").startsWith(`${process.pid} `)) rmSync(pidfile);
+  } catch {}
   if (debounce) clearTimeout(debounce);
   activeRequest?.abort();
   process.stdin.setRawMode(false);
@@ -210,6 +215,15 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error("Jev picker needs an interactive terminal");
   process.exit(1);
 }
+
+// Shared with quick-pickers so Hammerspoon's fn keys toggle/swap this popup too.
+const pidfile = `${homedir()}/.cache/herdr-quick-picker.pid`;
+try {
+  mkdirSync(`${homedir()}/.cache`, { recursive: true });
+  writeFileSync(pidfile, `${process.pid} jev\n`);
+} catch {}
+process.on("SIGTERM", () => finish());
+process.on("SIGHUP", () => finish());
 
 process.stdout.write("\x1b[?1049h");
 process.stdin.setRawMode(true);

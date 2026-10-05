@@ -1,6 +1,7 @@
 # Jev agent picker
 
-`Ctrl-Option-;` opens this Herdr plugin in a centered popup. Type a task, name, or
+`Fn-;` (Hammerspoon, from any app) or `Ctrl-Option-'` opens this Herdr plugin in a
+centered popup; press `Fn-;` again to close it. Type a task, name, or
 topic to rank live coding agents with Jev. Use the arrow keys and Enter to focus
 one, or Escape to close the popup. The list includes each agent's name, status,
 and workspace and tab location.
