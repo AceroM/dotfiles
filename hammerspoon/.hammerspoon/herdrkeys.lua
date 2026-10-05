@@ -140,10 +140,16 @@ local function requestOnSocket(method, params, cb)
       if cb then cb({ error = { code = "socket_unavailable" } }, "") end
       return
     end
+    -- hs.task never drains a pipe past 64KB (a session.snapshot with many
+    -- agents), leaving nc blocked in write forever. Spool through a file.
+    local out = os.tmpname()
     local task
-    task = hs.task.new("/usr/bin/nc", function(_, stdout)
+    task = hs.task.new("/bin/sh", function()
       inflight[task] = nil
-      local raw = (stdout or ""):match("^[^\n]*")
+      local file = io.open(out, "r")
+      local raw = file and file:read("*l") or ""
+      if file then file:close() end
+      os.remove(out)
       local ok, response = pcall(hs.json.decode, raw or "")
       if not ok or type(response) ~= "table" or response.id ~= "hs" then
         if socket == path then socket = nil end
@@ -151,12 +157,16 @@ local function requestOnSocket(method, params, cb)
       end
       socket = path
       if cb then cb(response, raw) end
-    end, { "-U", "-w", "2", path })
-    if not task then return tryPath(index + 1) end
+    end, { "-c", 'exec /usr/bin/nc -U -w 2 "$1" > "$2"', "sh", path, out })
+    if not task then
+      os.remove(out)
+      return tryPath(index + 1)
+    end
     inflight[task] = true
     task:setInput(line .. "\n")
     if not task:start() then
       inflight[task] = nil
+      os.remove(out)
       return tryPath(index + 1)
     end
     task:closeInput()
