@@ -7,10 +7,10 @@ alias b="bun"
 alias o="open"
 alias n="nvim"
 alias nl="NVIM_NO_LSP=1 nvim" # open without any LSP (see nvim options.lua)
-alias c="claude"
-alias cs="claude --dangerously-skip-permissions"
+alias c="claude --dangerously-skip-permissions"
+alias cs="claude --permission-mode auto"
 function 'c!'() {
-  cs "$@"
+  c "$@"
 }
 alias ca="claude --permission-mode plan"
 unalias cx cxl cxm cxh cxx 2>/dev/null
