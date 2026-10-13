@@ -1,0 +1,23 @@
+id = "miguel.nvim-links"
+name = "Neovim File Links"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Ctrl-click code locations to open them in a sibling Neovim pane"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "open"
+title = "Open code location in sibling Neovim"
+command = ["python3", "open.py"]
+
+[[link_handlers]]
+id = "file-location"
+title = "Open path:line in Neovim"
+pattern = '^@?[^:\s]+:[0-9]+(:[0-9]+)?(-[0-9]+)?$'
+action = "open"
+
+[[link_handlers]]
+id = "file-uri"
+title = "Open terminal file hyperlink in Neovim"
+pattern = '^file://'
+action = "open"
