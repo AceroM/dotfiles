@@ -2,6 +2,15 @@
 
 These are my dotfiles.
 
+## Fn shortcuts (Hammerspoon)
+
+With `stow hammerspoon` and Hammerspoon running:
+
+- **Fn+Q** toggles Quick Record.
+- **Fn+B** toggles horizontal scrolling from any app. While enabled, vertical
+  mouse-wheel or trackpad scrolling moves sideways. Press it again to restore
+  normal scrolling; a Hammerspoon reload also resets it to off.
+
 ## Shared Slack skill
 
 `stow cli agent-config` installs the read-only `slack-agent` CLI and the global Codex

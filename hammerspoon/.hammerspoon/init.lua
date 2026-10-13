@@ -34,6 +34,7 @@ wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 -- Herdr's quick agent / space pickers; see herdrkeys.lua.
 -- fn+m opens the matching spaces picker to move the current tab.
 -- fn+q toggles Quick Record from any app through the same Fn-key handler.
+-- fn+b toggles vertical wheel/trackpad movement into horizontal scrolling.
 herdrkeys = require("herdrkeys")
 herdrkeys.start()
 

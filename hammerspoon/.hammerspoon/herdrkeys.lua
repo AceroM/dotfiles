@@ -14,6 +14,7 @@
 --   fn+y          copy "Claude/Codex session ID <id>" for the focused pane
 --   fn+shift+y    copy the focused pane's Herdr pane id
 --   fn+q          toggle Quick Record's region recording (from any app)
+--   fn+b          toggle horizontal wheel/trackpad scrolling (from any app)
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
 --                 last pane back/forth
 --   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
@@ -45,6 +46,7 @@
 --   herdrkeys.start()
 
 local M = {}
+local horizontalScroll = require("horizontalscroll")
 
 local HOME = os.getenv("HOME")
 local socket
@@ -445,11 +447,14 @@ local function handleKey(event)
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
   if flags.shift and not shiftable[code] then return false end
   local mode = pickers[code]
-  if not mode and code ~= keys.y and code ~= keys.q and not remapped[code] then return false end
+  if not mode and code ~= keys.y and code ~= keys.q and code ~= keys.b and not remapped[code] then return false end
   local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
 
   if code == keys.q then
     if not autorepeat then toggleRecording() end
+    return true
+  elseif code == keys.b then
+    if not autorepeat then horizontalScroll.toggle() end
     return true
   elseif code == keys.a then
     if not autorepeat then
@@ -480,6 +485,7 @@ end
 
 function M.start()
   if tap then tap:stop() end
+  horizontalScroll.start()
   tap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, handleKey)
   tap:start()
   M.tap = tap
