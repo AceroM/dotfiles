@@ -13,13 +13,15 @@ function 'c!'() {
   c "$@"
 }
 alias ca="claude --permission-mode plan"
-unalias cx cxl cxm cxh cxx 2>/dev/null
+unalias cx cy cxl cxm cxh cxx 2>/dev/null
 _ac_codex_profile() {
   local profile="$1"
   shift
   command ac run "$profile" -- "$@"
 }
 cx() { _ac_codex_profile cx "$@"; }
+# Auto-review handles sandbox escalation approvals for this profile.
+cy() { _ac_codex_profile cy "$@"; }
 cxl() { _ac_codex_profile cxl "$@"; }
 cxm() { _ac_codex_profile cxm "$@"; }
 cxh() { _ac_codex_profile cxh "$@"; }

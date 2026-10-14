@@ -42,7 +42,7 @@ const EDITABLE_FIELDS: EditableField[] = ["model", "reasoning", "access"];
 function profileLine(name: ProfileName, profile: Profile): string {
   return [
     name.padEnd(4),
-    profile.label.padEnd(8),
+    profile.label.padEnd(11),
     profile.model.padEnd(15),
     profile.reasoning.padEnd(7),
     profile.access,
@@ -490,6 +490,11 @@ function App() {
             <Text color="yellow">Yolo bypasses approvals and sandboxing.</Text>
           </Box>
         ) : null}
+        {draft.access === "auto-review" ? (
+          <Box marginTop={1}>
+            <Text dimColor>Workspace sandbox with automatic approval review.</Text>
+          </Box>
+        ) : null}
 
         <Box flexDirection="column" marginTop={1}>
           <Text dimColor>Command preview.</Text>
@@ -510,7 +515,7 @@ function App() {
         <Box paddingX={1} marginBottom={1}>
           <Text dimColor>
             {"  "}
-            {"NAME".padEnd(4)} {"PROFILE".padEnd(8)} {"MODEL".padEnd(15)}{" "}
+            {"NAME".padEnd(4)} {"PROFILE".padEnd(11)} {"MODEL".padEnd(15)}{" "}
             {"EFFORT".padEnd(7)} ACCESS
           </Text>
         </Box>

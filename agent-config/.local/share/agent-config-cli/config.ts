@@ -2,8 +2,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 
-export const PROFILE_NAMES = ["cx", "cxl", "cxm", "cxh", "cxx"] as const;
-export const ACCESS_MODES = ["yolo", "standard"] as const;
+export const PROFILE_NAMES = ["cx", "cy", "cxl", "cxm", "cxh", "cxx"] as const;
+export const ACCESS_MODES = ["yolo", "standard", "auto-review"] as const;
 
 export type ProfileName = (typeof PROFILE_NAMES)[number];
 export type Model = string;
@@ -30,6 +30,12 @@ export const DEFAULT_CONFIG: AgentConfig = {
       model: "gpt-5.6-sol",
       reasoning: "xhigh",
       access: "yolo",
+    },
+    cy: {
+      label: "Auto-review",
+      model: "gpt-5.6-sol",
+      reasoning: "xhigh",
+      access: "auto-review",
     },
     cxl: {
       label: "Low",
@@ -99,6 +105,15 @@ export function normalizeConfig(raw: unknown): AgentConfig {
     if (isOneOf(value.access, ACCESS_MODES)) profile.access = value.access;
   }
 
+  // Existing configs start cy with their chosen cx model and reasoning.
+  if (!(profiles as Record<string, unknown>).cy) {
+    config.profiles.cy = {
+      ...config.profiles.cx,
+      label: DEFAULT_CONFIG.profiles.cy.label,
+      access: "auto-review",
+    };
+  }
+
   return config;
 }
 
@@ -128,6 +143,7 @@ export function codexArgs(profile: Profile): string[] {
   // Per-profile reasoning uses --config, so Codex must run in embedded mode.
   const args: string[] = ["--no-daemon"];
   if (profile.access === "yolo") args.push("--yolo");
+  if (profile.access === "auto-review") args.push("--approve-for-me");
   args.push(
     "--model",
     profile.model,

@@ -67,6 +67,8 @@ describe("agent config", () => {
     const path = await tempConfigPath();
     const config = normalizeConfig(DEFAULT_CONFIG);
     config.profiles.cxm.reasoning = "high";
+    config.profiles.cy.model = "custom-review-model";
+    config.profiles.cy.reasoning = "medium";
 
     await saveConfig(config, path);
 
@@ -103,5 +105,22 @@ describe("agent config", () => {
     expect(
       codexArgs({ ...DEFAULT_CONFIG.profiles.cx, access: "standard" }),
     ).not.toContain("--yolo");
+  });
+
+  test("adds auto-review to an existing config without changing cx", () => {
+    const cx = { model: "gpt-6.1-sol", reasoning: "high", access: "yolo" } as const;
+    const config = normalizeConfig({ profiles: { cx } });
+
+    expect(config.profiles.cx).toEqual({ label: "Default", ...cx });
+    expect(config.profiles.cy).toEqual({
+      label: "Auto-review",
+      model: cx.model,
+      reasoning: cx.reasoning,
+      access: "auto-review",
+    });
+    const args = codexArgs(config.profiles.cy);
+    expect(args).toContain("--approve-for-me");
+    expect(args).not.toContain("--yolo");
+    expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 });
