@@ -29,7 +29,7 @@
 --   fn+r          becomes ctrl+alt+r in Ghostty: rename tab
 --   fn+shift+r    becomes ctrl+alt+shift+r in Ghostty: rename space
 --   fn+n          becomes ctrl+alt+n in Ghostty: new tab
---   fn+e          becomes ctrl+alt+e in Ghostty: new tab next to the current
+--   fn+e          opens a tab immediately to the right of the current tab
 --   fn+shift+n    becomes ctrl+alt+shift+n in Ghostty: new space
 --   fn+arrows     become ctrl+alt+arrows in Ghostty: focus the pane that way.
 --                 macOS has already turned fn+arrow into home/end/pgup/pgdn
@@ -66,7 +66,7 @@ local pickers = { [keys.a] = "agents", [keys.s] = "spaces", [keys.m] = "move", [
 local remapped = {
   [keys.x] = true, [keys.w] = true, [keys.o] = true, [keys.i] = true,
   [keys.h] = true, [keys.j] = true, [keys.k] = true, [keys.l] = true,
-  [keys["-"]] = true, [keys.n] = true, [keys.r] = true, [keys.e] = true,
+  [keys["-"]] = true, [keys.n] = true, [keys.r] = true,
   [keys.z] = true, -- fn+z -> ctrl+alt+z (zoom)
   [keys.c] = keys.b, -- fn+c -> ctrl+alt+b (toggle sidebar)
   [keys.d] = keys.v, -- fn+d -> ctrl+alt+v
@@ -209,6 +209,52 @@ local function ghosttyFocused()
   local win = hs.window.focusedWindow()
   local app = win and win:application()
   return app ~= nil and app:bundleID() == GHOSTTY
+end
+
+local creatingTab = false
+local function newTabNext()
+  if creatingTab then return end
+  creatingTab = true
+  local function failed(response)
+    creatingTab = false
+    local message = response.error and (response.error.message or response.error.code) or "Invalid response"
+    hs.printf("Herdr new adjacent tab failed: %s", message)
+    hs.alert.show("Couldn’t open adjacent tab: " .. message, 3)
+  end
+  request("session.snapshot", nil, function(response)
+    local snap = response.result and response.result.snapshot
+    if not snap then return failed(response) end
+    local source
+    for _, pane in ipairs(snap.panes or {}) do
+      if pane.pane_id == snap.focused_pane_id then source = pane; break end
+    end
+    if not source then return failed(response) end
+    -- Tab numbers are stable identities, not positions. Count only this
+    -- workspace's tabs in display order to get the zero-based insertion slot.
+    local insertIndex, count = nil, 0
+    for _, tab in ipairs(snap.tabs or {}) do
+      if tab.workspace_id == source.workspace_id then
+        count = count + 1
+        if tab.tab_id == source.tab_id then insertIndex = count end
+      end
+    end
+    if not insertIndex then return failed(response) end
+    request("tab.create", {
+      workspace_id = source.workspace_id,
+      cwd = source.foreground_cwd or source.cwd,
+      focus = false,
+    }, function(created)
+      local tab = created.result and created.result.tab
+      if not tab then return failed(created) end
+      request("tab.move", { tab_id = tab.tab_id, insert_index = insertIndex }, function(moved)
+        if moved.error or not moved.result then return failed(moved) end
+        request("tab.focus", { tab_id = tab.tab_id }, function(focused)
+          if focused.error or not focused.result then return failed(focused) end
+          creatingTab = false
+        end)
+      end)
+    end)
+  end)
 end
 
 local function focusNextAgent()
@@ -438,6 +484,12 @@ local function handleKey(event)
   local code = event:getKeyCode()
   local flags = event:getFlags()
 
+  if flags.ctrl and flags.alt and not flags.cmd and not flags.shift and code == keys.e then
+    if not ghosttyFocused() then return false end
+    if event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then newTabNext() end
+    return true
+  end
+
   if flags.ctrl and flags.alt and not flags.cmd and code == keys[";"] then
     if not ghosttyFocused() then return false end
     toggle(flags.shift and "spaces" or "agents")
@@ -447,7 +499,7 @@ local function handleKey(event)
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
   if flags.shift and not shiftable[code] then return false end
   local mode = pickers[code]
-  if not mode and code ~= keys.y and code ~= keys.q and code ~= keys.b and not remapped[code] then return false end
+  if not mode and code ~= keys.y and code ~= keys.q and code ~= keys.b and code ~= keys.e and not remapped[code] then return false end
   local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
 
   if code == keys.q then
@@ -470,8 +522,11 @@ local function handleKey(event)
       if flags.shift then copyPaneId() else copySessionId() end
     end
     return true
+  elseif code == keys.e then
+    if not ghosttyFocused() then return false end
+    if not autorepeat then newTabNext() end
+    return true
   elseif ghosttyFocused() then
-    if code == keys.e and autorepeat then return true end
     -- Rewrite in place using Herdr's indexed-space chord for shifted digits.
     if flags.shift and workspaceKeys[code] then
       event:setFlags({ cmd = true, alt = true, shift = true })
@@ -498,5 +553,6 @@ M.focusNextAgent = focusNextAgent
 M.copySessionId = copySessionId
 M.copyPaneId = copyPaneId
 M.toggleRecording = toggleRecording
+M.newTabNext = newTabNext
 
 return M

@@ -9,11 +9,12 @@
 #
 # Rules (from ~/.claude/CLAUDE.md "Name the work after the work"):
 #   - cwd == ~/Numeral is the coordinator: never rename anything.
-#   - one pane in the tab → rename the tab; two or more → rename this pane only.
+#   - one chat in the tab (including editor/shell splits) → rename the tab;
+#     several chats → rename this pane only.
 #   - only overwrite a tab label that is herdr-generated (a bare number), one we set
 #     ourselves, or a ticket label whose suffix is still "slot N"; leave main/coordinator
 #     and anything a human or sibling set alone.
-#   - ticket tabs use just the ID: "PROD-3083".
+#   - names always come from the chat topic, never the worktree's ticket branch.
 #
 # HERDR_AUTONAME=0 disables it; HERDR_AUTONAME_DEBUG=1 logs decisions to stderr.
 
@@ -59,9 +60,6 @@ if [ -z "$title" ]; then
 fi
 [ -n "$title" ] || { log "no title yet"; exit 0; }
 
-ticket=$(git -C "$cwd" branch --show-current 2>/dev/null \
-  | sed -nE 's#^miguel/([a-z]+-[0-9]+).*#\1#p' | tr '[:lower:]' '[:upper:]')
-
 # --- target ------------------------------------------------------------------------
 state_dir="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-autoname"
 mkdir -p "$state_dir" 2>/dev/null
@@ -73,34 +71,40 @@ pane_count=$(printf '%s' "$tab" | jq -r '.result.tab.pane_count // empty')
 [[ "$pane_count" =~ ^[1-9][0-9]*$ ]] || exit 0
 current=$(printf '%s' "$tab" | jq -r '.result.tab.label // empty')
 
-if [ "$pane_count" -le 1 ]; then
+# An editor beside a chat should not prevent the tab from following that chat.
+# If inventory is unavailable, retain the conservative pane-count behavior.
+chat_count=$pane_count
+if [ "$pane_count" -gt 1 ]; then
+  panes=$(herdr pane list --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || panes=""
+  count=$(printf '%s' "$panes" | jq -r --arg tab "$HERDR_TAB_ID" --arg pane "$HERDR_PANE_ID" '
+    [.result.panes[] | select(.tab_id == $tab)] as $panes
+    | if any($panes[]; .pane_id == $pane and ((.agent // "") != "")) then
+        [$panes[] | select((.agent // "") != "")] | length
+      else empty end' 2>/dev/null)
+  [[ "$count" =~ ^[1-9][0-9]*$ ]] && chat_count=$count
+fi
+
+if [ "$chat_count" -le 1 ]; then
   case "$current" in
     main|coordinator) log "coordinator tab label, skipping"; exit 0 ;;
   esac
   if printf '%s' "$current" | grep -qE '^[A-Z]+-[0-9]+'; then
-    id=$(printf '%s' "$current" | grep -oE '^[A-Z]+-[0-9]+')
     suffix=$(printf '%s' "$current" | sed -E 's/^[A-Z]+-[0-9]+( · )?//')
-    if [ "$current" != "$mine" ] && ! printf '%s' "$suffix" | grep -qiE '^(slot [0-9]+)?$'; then
+    if [ "$current" != "$mine" ] && [ -n "$suffix" ] && ! printf '%s' "$suffix" | grep -qiE '^slot [0-9]+$'; then
       log "ticket tab already summarized by someone else: $current"; exit 0
     fi
-    new="$id"
+    : # Bare ticket IDs and slot placeholders may migrate to chat-topic names.
   elif [ -z "$current" ] || printf '%s' "$current" | grep -qE '^[0-9]+$' || [ "$current" = "$mine" ]; then
-    new="$ticket"
+    :
   else
     log "tab label set by someone else: $current"; exit 0
   fi
-  if [ -z "$new" ]; then
-    new=$(printf '%s' "$title" | python3 "$script_dir/herdr-short-name.py")
-  fi
+  new=$(printf '%s' "$title" | python3 "$script_dir/herdr-short-name.py")
   [ -n "$new" ] || exit 0
   [ "$new" = "$current" ] && exit 0
   herdr tab rename "$HERDR_TAB_ID" "$new" >/dev/null 2>&1 && printf '%s' "$new" >"$state" && log "tab → $new"
 else
-  # herdr doesn't expose pane labels, so "ours" is whatever we last wrote for this pane.
-  new="$ticket"
-  if [ -z "$new" ]; then
-    new=$(printf '%s' "$title" | python3 "$script_dir/herdr-short-name.py")
-  fi
+  new=$(printf '%s' "$title" | python3 "$script_dir/herdr-short-name.py")
   [ -n "$new" ] || exit 0
   [ "$new" = "$mine" ] && exit 0
   herdr pane rename "$HERDR_PANE_ID" "$new" >/dev/null 2>&1 && printf '%s' "$new" >"$state" && log "pane → $new"

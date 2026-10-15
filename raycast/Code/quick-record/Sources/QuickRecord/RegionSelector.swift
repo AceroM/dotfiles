@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 
 @MainActor
 final class RegionSelector {
@@ -7,17 +8,24 @@ final class RegionSelector {
 
     func show(completion: @escaping (CaptureRegion?) -> Void) {
         self.completion = completion
+        // Snapshot before showing overlays, which would otherwise obscure the targets.
+        let windowRects = visibleWindowRects()
         for screen in NSScreen.screens {
             let window = SelectionWindow(contentRect: screen.frame, styleMask: .borderless,
                                          backing: .buffered, defer: false)
-            window.title = "Quick Record — Select Region"
+            window.title = "Quick Record — Select Window or Region"
             window.isOpaque = false
             window.backgroundColor = .clear
             window.level = .screenSaver
             window.hasShadow = false
+            window.acceptsMouseMovedEvents = true
             window.isReleasedWhenClosed = false
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            let view = SelectionView(frame: CGRect(origin: .zero, size: screen.frame.size))
+            let displayFrame = CGDisplayBounds(screen.displayID)
+            let localRects = windowRects.map { $0.offsetBy(dx: -displayFrame.minX, dy: -displayFrame.minY) }
+            let view = SelectionView(frame: CGRect(origin: .zero, size: screen.frame.size), windowRects: localRects)
+            view.hover(at: CGPoint(x: NSEvent.mouseLocation.x - screen.frame.minX,
+                                  y: screen.frame.maxY - NSEvent.mouseLocation.y))
             view.onSelect = { [weak self] rect in
                 self?.finish(CaptureRegion(displayUUID: screen.displayUUID, rect: rect))
             }
@@ -31,6 +39,21 @@ final class RegionSelector {
         (underMouse ?? windows.first)?.makeKeyAndOrderFront(nil)
         if let window = underMouse ?? windows.first { window.makeFirstResponder(window.contentView) }
         NSCursor.crosshair.set()
+    }
+
+    /// Core Graphics supplies on-screen windows in front-to-back order.
+    private func visibleWindowRects() -> [CGRect] {
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                   kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return info.compactMap { window in
+            guard let layer = window[kCGWindowLayer as String] as? NSNumber, layer.intValue == 0,
+                  let owner = window[kCGWindowOwnerPID as String] as? NSNumber,
+                  owner.int32Value != ProcessInfo.processInfo.processIdentifier,
+                  let alpha = window[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue > 0,
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds) else { return nil }
+            return rect
+        }
     }
 
     func cancel() { finish(nil) }
@@ -52,44 +75,61 @@ private final class SelectionWindow: NSWindow {
 private final class SelectionView: NSView {
     var onSelect: ((CGRect) -> Void)?
     var onCancel: (() -> Void)?
-    private var anchor: CGPoint?
-    private var selection: CGRect?
+    private let logger = Logger(subsystem: "com.acerom.quickrecord", category: "selection")
+    private var gesture: CaptureSelection
+    private var tracking: NSTrackingArea?
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override init(frame: NSRect) {
+    init(frame: NSRect, windowRects: [CGRect]) {
+        gesture = CaptureSelection(bounds: CGRect(origin: .zero, size: frame.size), windowRects: windowRects)
         super.init(frame: frame)
-        setAccessibilityLabel("Drag a region. Release to start recording. Escape cancels.")
+        setAccessibilityLabel("Click a highlighted window or hold and drag a region. Release to start recording. Escape cancels.")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.activeAlways, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    func hover(at point: CGPoint) {
+        gesture.hover(at: point)
+        needsDisplay = true
+    }
+
+    override func mouseMoved(with event: NSEvent) { hover(at: point(event)) }
+    override func mouseEntered(with event: NSEvent) { hover(at: point(event)) }
+    override func mouseExited(with event: NSEvent) {
+        gesture.leave()
+        needsDisplay = true
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeKey()
-        anchor = point(event)
-        selection = nil
+        gesture.press(at: point(event))
+        logger.notice("Selection press at \(String(describing: self.gesture.anchor), privacy: .public), target \(String(describing: self.gesture.selection), privacy: .public)")
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let anchor else { return }
-        let end = point(event)
-        selection = CGRect(x: min(anchor.x, end.x), y: min(anchor.y, end.y),
-                           width: abs(end.x - anchor.x), height: abs(end.y - anchor.y)).integral
-            .intersection(bounds)
+        gesture.drag(to: point(event))
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
-        mouseDragged(with: event)
-        guard let selection, selection.width >= 16, selection.height >= 16 else {
-            anchor = nil
-            self.selection = nil
-            needsDisplay = true
-            return
-        }
-        onSelect?(selection)
+        let selection = gesture.release(at: point(event))
+        logger.notice("Selection release at \(String(describing: self.point(event)), privacy: .public), result \(String(describing: selection), privacy: .public)")
+        if let selection { onSelect?(selection) }
+        needsDisplay = true
     }
 
     override func rightMouseDown(with event: NSEvent) { onCancel?() }
@@ -105,6 +145,11 @@ private final class SelectionView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Fully transparent pixels let clicks fall through to the underlying app.
+        // Keep the highlighted area almost clear, but part of this window's hit area.
+        NSColor.black.withAlphaComponent(0.01).setFill()
+        NSBezierPath(rect: bounds).fill()
+        let selection = gesture.selection
         let mask = NSBezierPath(rect: bounds)
         if let selection { mask.appendRect(selection) }
         mask.windingRule = .evenOdd
@@ -118,8 +163,8 @@ private final class SelectionView: NSView {
             label("\(Int(selection.width)) × \(Int(selection.height))", at:
                     CGPoint(x: selection.midX, y: min(bounds.height - 44, selection.maxY + 12)))
         }
-        if anchor == nil {
-            label("Drag to record  ·  Release to start  ·  Esc to cancel",
+        if gesture.anchor == nil {
+            label("Click a window  ·  Hold + drag a region  ·  Esc to cancel",
                   at: CGPoint(x: bounds.midX, y: 72))
         }
     }

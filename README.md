@@ -6,6 +6,8 @@ These are my dotfiles.
 
 With `stow hammerspoon` and Hammerspoon running:
 
+- **Fn+E** opens and focuses a Herdr tab immediately to the right of the current
+  tab, using the current pane’s directory (while Ghostty is focused).
 - **Fn+Q** toggles Quick Record.
 - **Fn+B** toggles horizontal scrolling from any app. While enabled, vertical
   mouse-wheel or trackpad scrolling moves sideways. Press it again to restore

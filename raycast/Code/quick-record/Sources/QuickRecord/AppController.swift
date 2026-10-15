@@ -87,7 +87,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         lastError = nil
         startLatencyMS = nil
         stopWhenReady = false
-        // Fetch content while the user drags, without capturing anything yet.
+        // Fetch content while the user selects, without capturing anything yet.
         if CGPreflightScreenCaptureAccess() {
             contentTask = Task { try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) }
         }
@@ -235,7 +235,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         let title: String
         switch phase {
-        case .idle: title = "Record Region…"
+        case .idle: title = "Record Window or Region…"
         case .selecting: title = "Cancel Selection"
         case .starting, .recording: title = "Stop Recording"
         case .stopping: title = "Saving Recording…"
@@ -343,7 +343,7 @@ private enum RecordingError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .microphoneDenied: return "Microphone access was denied. Enable it in System Settings → Privacy & Security → Microphone, or turn Microphone off in the Quick Record menu."
-        case .displayChanged: return "The selected display or region changed. Use Record Region to choose a new box."
+        case .displayChanged: return "The selected display or region changed. Use Record Window or Region to choose a new area."
         }
     }
 }

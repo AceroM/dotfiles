@@ -1,7 +1,7 @@
 # Quick Record
 
 A native Swift menu-bar recorder for macOS 15+, using ScreenCaptureKit and AVAssetWriter. A resident
-app makes region selection immediate; Raycast only sends a toggle command.
+app makes window and region selection immediate; Raycast only sends a toggle command.
 
 ## Install
 
@@ -21,8 +21,12 @@ Extensions → Script Commands. Assign a hotkey to **Toggle Recording** there.
 
 - **Fn+Q:** with the dotfiles Hammerspoon configuration loaded, toggle recording
   from any app. It opens the same selector and stops the same recording as Raycast.
-- **Toggle Recording:** drag a box on any display. Releasing the mouse starts
-  recording, without a countdown or another click. Run the same command to stop.
+- **Toggle Recording:** hover over a window on any display to highlight it, then
+  click to record its visible area. Hold the mouse button and drag to select a
+  section instead. Releasing starts recording, without a countdown or another
+  click. Run the same command to stop. Clicking empty desktop does nothing.
+  Window selection records fixed display bounds; moving the window does not move
+  the capture, and overlapping windows remain visible in the recording.
 - **Record Last Region:** record your previous box immediately. Run again to stop.
   If that display is disconnected or the box no longer fits, select a new region.
 - **Escape**, right click, or the toggle command cancels an unfinished selection.
@@ -72,7 +76,8 @@ Local diagnostics are in
 last successful file, the last error, and release-to-record latency. Additional
 events use the macOS log subsystem `com.acerom.quickrecord`.
 
-Tests cover saved-region validation, display bounds changes, Retina dimensions,
+Tests cover window hover ordering, click-versus-drag selection, display clipping,
+saved-region validation, display bounds changes, Retina dimensions,
 and encoder size limits. Verify the real selection/start/stop flow and the resulting
 MP4 after granting screen permission; pure geometry tests cannot verify macOS
 capture or audio behavior.

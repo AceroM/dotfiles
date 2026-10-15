@@ -4,7 +4,7 @@
 # @raycast.mode silent
 # @raycast.icon ⏺️
 # @raycast.packageName Quick Record
-# @raycast.description Drag a region to record immediately; run again to stop and save.
+# @raycast.description Click a window or hold and drag a region to record; run again to stop and save.
 
 set -euo pipefail
 app="$HOME/Applications/Quick Record.app"

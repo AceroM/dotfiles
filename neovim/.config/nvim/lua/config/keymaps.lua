@@ -236,6 +236,10 @@ end
 vim.api.nvim_create_user_command("PRDiff", open_pr_diff, { desc = "Open full PR diff in one scrollable buffer" })
 vim.keymap.set("n", "<leader>gp", open_pr_diff, { desc = "PR diff (single scroll buffer)" })
 
+-- Built-in gd searches for the declaration when no LSP is attached. Clear its
+-- search highlight after jumping; buffer-local LSP mappings still take priority.
+vim.keymap.set("n", "gd", "gd<Cmd>nohlsearch<CR>", { desc = "Goto Declaration", silent = true })
+
 -- Go to definition in vertical/horizontal splits
 vim.keymap.set(
   "n",

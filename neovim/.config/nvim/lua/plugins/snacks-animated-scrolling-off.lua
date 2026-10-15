@@ -7,5 +7,8 @@ return {
     indent = {
       enabled = false, -- Disable indent lines completely
     },
+    words = {
+      enabled = false, -- Disable automatic LSP reference highlighting after jumps
+    },
   },
 }
