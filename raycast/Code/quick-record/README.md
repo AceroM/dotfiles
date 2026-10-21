@@ -21,6 +21,9 @@ Extensions → Script Commands. Assign a hotkey to **Toggle Recording** there.
 
 - **Fn+Q:** with the dotfiles Hammerspoon configuration loaded, toggle recording
   from any app. It opens the same selector and stops the same recording as Raycast.
+- **Fn+Shift+Q:** the same toggle, but this recording includes Microphone and
+  System Audio (mixed into one track) regardless of the menu toggles
+  (`quickrecord://toggle-audio`).
 - **Toggle Recording:** hover over a window on any display to highlight it, then
   click to record its visible area. Hold the mouse button and drag to select a
   section instead. Releasing starts recording, without a countdown or another
@@ -29,6 +32,10 @@ Extensions → Script Commands. Assign a hotkey to **Toggle Recording** there.
   the capture, and overlapping windows remain visible in the recording.
 - **Record Last Region:** record your previous box immediately. Run again to stop.
   If that display is disconnected or the box no longer fits, select a new region.
+- **F** while selecting records the whole display under the pointer.
+- The selector opens with your last region pre-selected (dimmed around it, dashed
+  while you hover a window). Press **Return** to record it; click or drag to pick
+  something else.
 - **Escape**, right click, or the toggle command cancels an unfinished selection.
 - The menu-bar icon turns red and shows a timer while recording. Its menu also
   provides a stop action and optional **Microphone** and **System Audio** toggles.

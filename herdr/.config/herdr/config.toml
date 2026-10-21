@@ -36,12 +36,13 @@ rename_tab = "ctrl+alt+r"
 
 # --- Workspaces ("spaces") ---------------------------------------------
 # ctrl+alt+j/k move down/up the workspace list in the sidebar, mirroring
-# the tab motion one axis over. ctrl+alt+shift+w opens the workspace picker
-# to jump straight to one by name (plain ctrl+alt+w closes a pane, browser
-# style).
+# the tab motion one axis over. ctrl+alt+shift+w (fn+shift+w) closes the
+# workspace; plain ctrl+alt+w closes a pane. fn+s opens the quick spaces
+# picker, and prefix+w keeps Herdr's built-in workspace picker available.
 next_workspace = "ctrl+alt+j"
 previous_workspace = "ctrl+alt+k"
-workspace_picker = "ctrl+alt+shift+w"
+workspace_picker = "prefix+w"
+close_workspace = "ctrl+alt+shift+w"
 rename_workspace = "ctrl+alt+shift+r"
 new_workspace = "ctrl+alt+shift+n"
 

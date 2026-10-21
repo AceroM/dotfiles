@@ -14,9 +14,11 @@
 --   fn+y          copy "Claude/Codex session ID <id>" for the focused pane
 --   fn+shift+y    copy the focused pane's Herdr pane id
 --   fn+q          toggle Quick Record's region recording (from any app)
+--   fn+shift+q    same, but also records microphone + system audio
 --   fn+b          toggle horizontal wheel/trackpad scrolling (from any app)
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
 --                 last pane back/forth
+--   fn+shift+w    becomes ctrl+alt+shift+w in Ghostty: close workspace
 --   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
 --   fn+1..9       become ctrl+alt+1..9 in Ghostty: jump to the Nth tab
 --   fn+shift+1..9 become cmd+alt+shift+1..9 in Ghostty: jump to the Nth space
@@ -80,7 +82,7 @@ local remapped = {
 -- ctrl+alt+shift+n), fn+shift+a -> agents picker, or fn+shift+y -> copy the pane id.
 local shiftable = {
   [keys.a] = true, [keys.j] = true, [keys.k] = true,
-  [keys.n] = true, [keys.r] = true, [keys.y] = true,
+  [keys.n] = true, [keys.q] = true, [keys.r] = true, [keys.w] = true, [keys.y] = true,
   [keys[";"]] = true, -- fn+shift+; -> sessions picker
 }
 local workspaceKeys = {}
@@ -115,7 +117,7 @@ local function socketCandidates()
   return paths
 end
 
-local function toggleRecording()
+local function toggleRecording(withAudio)
   local task
   task = hs.task.new("/usr/bin/open", function(exitCode, _, stderr)
     inflight[task] = nil
@@ -123,7 +125,7 @@ local function toggleRecording()
       hs.printf("Quick Record toggle failed: %s", stderr or "")
       hs.alert.show("Couldn’t open Quick Record. Run its install.sh first.", 3)
     end
-  end, { "-g", "-a", HOME .. "/Applications/Quick Record.app", "quickrecord://toggle" })
+  end, { "-g", "-a", HOME .. "/Applications/Quick Record.app", withAudio and "quickrecord://toggle-audio" or "quickrecord://toggle" })
   if not task then return end
   inflight[task] = true
   if not task:start() then
@@ -503,7 +505,7 @@ local function handleKey(event)
   local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
 
   if code == keys.q then
-    if not autorepeat then toggleRecording() end
+    if not autorepeat then toggleRecording(flags.shift) end
     return true
   elseif code == keys.b then
     if not autorepeat then horizontalScroll.toggle() end

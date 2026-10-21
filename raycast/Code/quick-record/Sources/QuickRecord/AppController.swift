@@ -20,6 +20,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var requestedAt: Date?
     private var startLatencyMS: Int?
     private var stopWhenReady = false
+    /// Set by the audio toggle: records microphone and system audio regardless of the menu settings.
+    private var forceAudio = false
     private var previousApp: NSRunningApplication?
     private var toast: NSPanel?
     private var toastTimer: Timer?
@@ -50,6 +52,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             switch url.host {
             case "toggle": toggle()
             case "last": toggle(useLastRegion: true)
+            case "toggle-audio": toggle(withAudio: true)
             case "stop": stop()
             case "quit": if phase == .idle { NSApp.terminate(nil) }
             default: break
@@ -75,7 +78,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     @objc private func toggleFromMenu() { toggle() }
     @objc private func lastFromMenu() { toggle(useLastRegion: true) }
 
-    private func toggle(useLastRegion: Bool = false) {
+    private func toggle(useLastRegion: Bool = false, withAudio: Bool = false) {
         switch phase {
         case .recording, .starting: stop(); return
         case .stopping: return
@@ -87,6 +90,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         lastError = nil
         startLatencyMS = nil
         stopWhenReady = false
+        forceAudio = withAudio
         // Fetch content while the user selects, without capturing anything yet.
         if CGPreflightScreenCaptureAccess() {
             contentTask = Task { try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) }
@@ -98,7 +102,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             return
         }
         phase = .selecting
-        selector.show { [weak self] region in
+        selector.show(lastRegion: lastRegion) { [weak self] region in
             guard let self else { return }
             self.restoreFocus()
             guard let region else {
@@ -124,7 +128,8 @@ final class AppController: NSObject, NSApplicationDelegate {
                 return
             }
             do {
-                let microphone = self.defaults.bool(forKey: "microphone")
+                let microphone = self.forceAudio || self.defaults.bool(forKey: "microphone")
+                let systemAudio = self.forceAudio || self.defaults.bool(forKey: "systemAudio")
                 if microphone {
                     let granted = await AVCaptureDevice.requestAccess(for: .audio)
                     guard granted else { throw RecordingError.microphoneDenied }
@@ -164,7 +169,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                 }
                 await session.start(display: display, region: region, scale: screen.backingScaleFactor,
                                     applications: content.applications, microphone: microphone,
-                                    systemAudio: self.defaults.bool(forKey: "systemAudio"))
+                                    systemAudio: systemAudio)
             } catch { self.finish(.failure(error)) }
         }
     }

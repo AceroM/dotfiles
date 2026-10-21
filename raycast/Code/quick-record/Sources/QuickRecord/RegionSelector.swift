@@ -6,7 +6,8 @@ final class RegionSelector {
     private var windows: [NSWindow] = []
     private var completion: ((CaptureRegion?) -> Void)?
 
-    func show(completion: @escaping (CaptureRegion?) -> Void) {
+    /// `lastRegion` is pre-drawn on its display as the default; Return records it.
+    func show(lastRegion: CaptureRegion? = nil, completion: @escaping (CaptureRegion?) -> Void) {
         self.completion = completion
         // Snapshot before showing overlays, which would otherwise obscure the targets.
         let windowRects = visibleWindowRects()
@@ -23,13 +24,18 @@ final class RegionSelector {
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             let displayFrame = CGDisplayBounds(screen.displayID)
             let localRects = windowRects.map { $0.offsetBy(dx: -displayFrame.minX, dy: -displayFrame.minY) }
-            let view = SelectionView(frame: CGRect(origin: .zero, size: screen.frame.size), windowRects: localRects)
+            let defaultRect = lastRegion.flatMap {
+                $0.displayUUID == screen.displayUUID && $0.fits(in: screen.frame.size) ? $0.rect : nil
+            }
+            let view = SelectionView(frame: CGRect(origin: .zero, size: screen.frame.size), windowRects: localRects,
+                                     defaultRect: defaultRect)
             view.hover(at: CGPoint(x: NSEvent.mouseLocation.x - screen.frame.minX,
                                   y: screen.frame.maxY - NSEvent.mouseLocation.y))
             view.onSelect = { [weak self] rect in
                 self?.finish(CaptureRegion(displayUUID: screen.displayUUID, rect: rect))
             }
             view.onCancel = { [weak self] in self?.finish(nil) }
+            view.onFullScreen = { [weak self] in self?.selectFullScreen() }
             window.contentView = view
             windows.append(window)
             window.orderFrontRegardless()
@@ -58,6 +64,12 @@ final class RegionSelector {
 
     func cancel() { finish(nil) }
 
+    /// The display under the pointer, not the key window's, so F follows the mouse across displays.
+    private func selectFullScreen() {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
+        finish(CaptureRegion(displayUUID: screen.displayUUID, rect: CGRect(origin: .zero, size: screen.frame.size)))
+    }
+
     private func finish(_ region: CaptureRegion?) {
         guard let completion else { return }
         self.completion = nil
@@ -75,6 +87,8 @@ private final class SelectionWindow: NSWindow {
 private final class SelectionView: NSView {
     var onSelect: ((CGRect) -> Void)?
     var onCancel: (() -> Void)?
+    var onFullScreen: (() -> Void)?
+    private let defaultRect: CGRect?
     private let logger = Logger(subsystem: "com.acerom.quickrecord", category: "selection")
     private var gesture: CaptureSelection
     private var tracking: NSTrackingArea?
@@ -82,10 +96,11 @@ private final class SelectionView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    init(frame: NSRect, windowRects: [CGRect]) {
+    init(frame: NSRect, windowRects: [CGRect], defaultRect: CGRect?) {
+        self.defaultRect = defaultRect
         gesture = CaptureSelection(bounds: CGRect(origin: .zero, size: frame.size), windowRects: windowRects)
         super.init(frame: frame)
-        setAccessibilityLabel("Click a highlighted window or hold and drag a region. Release to start recording. Escape cancels.")
+        setAccessibilityLabel("Click a highlighted window or hold and drag a region. Release to start recording. F records the full screen. Escape cancels.")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -136,6 +151,8 @@ private final class SelectionView: NSView {
     override func cancelOperation(_ sender: Any?) { onCancel?() }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { onCancel?() }
+        else if event.charactersIgnoringModifiers?.lowercased() == "f" { onFullScreen?() }
+        else if [36, 76].contains(event.keyCode), gesture.anchor == nil, let defaultRect { onSelect?(defaultRect) }
         else { super.keyDown(with: event) }
     }
 
@@ -149,7 +166,9 @@ private final class SelectionView: NSView {
         // Keep the highlighted area almost clear, but part of this window's hit area.
         NSColor.black.withAlphaComponent(0.01).setFill()
         NSBezierPath(rect: bounds).fill()
-        let selection = gesture.selection
+        // With nothing hovered, the last region is the selection Return would record.
+        let showingDefault = gesture.selection == nil && gesture.anchor == nil && defaultRect != nil
+        let selection = gesture.selection ?? (gesture.anchor == nil ? defaultRect : nil)
         let mask = NSBezierPath(rect: bounds)
         if let selection { mask.appendRect(selection) }
         mask.windingRule = .evenOdd
@@ -160,11 +179,18 @@ private final class SelectionView: NSView {
             let outline = NSBezierPath(rect: selection.insetBy(dx: 0.5, dy: 0.5))
             outline.lineWidth = 1
             outline.stroke()
-            label("\(Int(selection.width)) × \(Int(selection.height))", at:
+            label("\(Int(selection.width)) × \(Int(selection.height))\(showingDefault ? "  ·  Return to record last region" : "")", at:
                     CGPoint(x: selection.midX, y: min(bounds.height - 44, selection.maxY + 12)))
         }
+        if let defaultRect, !showingDefault, gesture.anchor == nil {
+            NSColor.white.withAlphaComponent(0.7).setStroke()
+            let outline = NSBezierPath(rect: defaultRect.insetBy(dx: 0.5, dy: 0.5))
+            outline.setLineDash([6, 4], count: 2, phase: 0)
+            outline.lineWidth = 1
+            outline.stroke()
+        }
         if gesture.anchor == nil {
-            label("Click a window  ·  Hold + drag a region  ·  Esc to cancel",
+            label("Click a window  ·  Hold + drag a region  ·  F for full screen\(defaultRect == nil ? "" : "  ·  Return for last region")  ·  Esc to cancel",
                   at: CGPoint(x: bounds.midX, y: 72))
         }
     }
