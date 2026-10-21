@@ -26,7 +26,8 @@ The shot opens in an editor, as in Shottr:
 
 - **Esc** copies to the clipboard and closes. **⌘W** closes without copying.
 - **⌘C** also copies and closes. **⌘S** saves a PNG to `~/Documents`.
-- Drag to annotate: **A** draws an arrow (default), **R** draws a box, and **⌘Z** undoes.
+- Drag to annotate: **A** draws an arrow (default), **R** draws a box, and **T** types text: click to place it, Return to finish, Option-Return for a new line. Text wraps at the image edge. Clicking text with **T**, or double-clicking it, edits it.
+- **V** selects: click an annotation to select it, drag to move it, and Delete removes it. **⌘Z** undoes drawing, moves, edits, and deletes.
 
 Output keeps Retina resolution, and the PNG/TIFF DPI is set so pasted images keep their
 on-screen size. Hotkeys use Carbon `RegisterEventHotKey`, so no Accessibility permission

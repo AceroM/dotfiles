@@ -5,9 +5,51 @@ import UniformTypeIdentifiers
 enum Annotation {
     case arrow(from: CGPoint, to: CGPoint)
     case box(CGRect)
+    /// Starts at `origin`, its top left, and wraps at `width`.
+    case text(String, origin: CGPoint, width: CGFloat)
 
     static let color = NSColor.systemRed
     static let lineWidth: CGFloat = 4
+    static let fontSize: CGFloat = 22
+
+    static func textAttributes(zoom: CGFloat = 1) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: fontSize * zoom, weight: .bold), .foregroundColor: color]
+    }
+
+    static func textSize(_ string: String, width: CGFloat) -> CGSize {
+        let rect = (string as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude),
+                                                     options: [.usesLineFragmentOrigin], attributes: textAttributes())
+        return CGSize(width: ceil(rect.width), height: ceil(rect.height))
+    }
+
+    var bounds: CGRect {
+        switch self {
+        case .arrow(let from, let to):
+            CGRect(x: min(from.x, to.x), y: min(from.y, to.y), width: abs(to.x - from.x), height: abs(to.y - from.y))
+        case .box(let rect): rect
+        case .text(let string, let origin, let width): CGRect(origin: origin, size: Self.textSize(string, width: width))
+        }
+    }
+
+    func contains(_ point: CGPoint, tolerance: CGFloat) -> Bool {
+        switch self {
+        case .arrow(let from, let to):
+            let dx = to.x - from.x, dy = to.y - from.y
+            let t = max(0, min(1, ((point.x - from.x) * dx + (point.y - from.y) * dy) / max(1, dx * dx + dy * dy)))
+            return hypot(point.x - (from.x + t * dx), point.y - (from.y + t * dy)) <= tolerance
+        case .box, .text:
+            return bounds.insetBy(dx: -tolerance, dy: -tolerance).contains(point)
+        }
+    }
+
+    func offsetBy(dx: CGFloat, dy: CGFloat) -> Annotation {
+        switch self {
+        case .arrow(let from, let to):
+            .arrow(from: CGPoint(x: from.x + dx, y: from.y + dy), to: CGPoint(x: to.x + dx, y: to.y + dy))
+        case .box(let rect): .box(rect.offsetBy(dx: dx, dy: dy))
+        case .text(let string, let origin, let width): .text(string, origin: CGPoint(x: origin.x + dx, y: origin.y + dy), width: width)
+        }
+    }
 
     func draw() {
         Self.color.set()
@@ -35,16 +77,21 @@ enum Annotation {
             tip.line(to: right)
             tip.close()
             tip.fill()
+        case .text(let string, let origin, let width):
+            (string as NSString).draw(with: CGRect(origin: origin, size: CGSize(width: width, height: .greatestFiniteMagnitude)),
+                                      options: [.usesLineFragmentOrigin], attributes: Self.textAttributes(), context: nil)
         }
     }
 }
 
 enum Tool {
+    case select
     case arrow
     case box
+    case text
 }
 
-/// Shottr-style editor: Esc and ⌘C copy and close, ⌘S saves, A/R pick arrow/box, ⌘Z undoes.
+/// Shottr-style editor: Esc and ⌘C copy and close, ⌘S saves, V/A/R/T pick move/arrow/box/text, ⌘Z undoes.
 @MainActor
 final class ShotEditor: NSObject, NSWindowDelegate {
     static let saveFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
@@ -92,9 +139,9 @@ final class ShotEditor: NSObject, NSWindowDelegate {
 
     private func updateTitle(_ status: String? = nil) {
         let size = "\(shot.image.width) × \(shot.image.height)"
-        let tool = canvas.tool == .arrow ? "Arrow" : "Box"
+        let tool = switch canvas.tool { case .select: "Move"; case .arrow: "Arrow"; case .box: "Box"; case .text: "Text" }
         window.title = status.map { "\(size)  ·  \($0)" }
-            ?? "\(size)  ·  \(tool) (A / R)  ·  ⌘Z undo  ·  Esc copy + close  ·  ⌘S save"
+            ?? "\(size)  ·  \(tool) (V / A / R / T)  ·  ⌘Z undo  ·  Esc copy + close  ·  ⌘S save"
     }
 
     private func copy() {
@@ -136,7 +183,7 @@ final class ShotEditor: NSObject, NSWindowDelegate {
     }
 }
 
-private final class AnnotationCanvas: NSView {
+private final class AnnotationCanvas: NSView, NSTextViewDelegate {
     var onCopyAndClose: (() -> Void)?
     var onCopy: (() -> Void)?
     var onSave: (() -> Void)?
@@ -147,8 +194,17 @@ private final class AnnotationCanvas: NSView {
     private let image: NSImage
     private let pointSize: CGSize
     private var annotations: [Annotation] = []
+    /// Snapshots taken before each change, for ⌘Z.
+    private var history: [[Annotation]] = []
     private var draft: Annotation?
     private var anchor: CGPoint?
+    private var selected: Int?
+    private var move: (start: CGPoint, original: Annotation, recorded: Bool)?
+    /// Text being typed; `editingIndex` is set when it replaces an existing annotation.
+    private var editor: NSTextView?
+    private var editingIndex: Int?
+    private var editingOrigin = CGPoint.zero
+    private var editingWidth: CGFloat = 0
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -164,7 +220,15 @@ private final class AnnotationCanvas: NSView {
     /// The window keeps the image's aspect ratio, so the image fills the view.
     private var zoom: CGFloat { bounds.width / pointSize.width }
 
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
+    override func resetCursorRects() {
+        let cursor: NSCursor = switch tool { case .select: .arrow; case .text: .iBeam; default: .crosshair }
+        addCursorRect(bounds, cursor: cursor)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layoutEditor()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1, respectFlipped: true,
@@ -173,7 +237,15 @@ private final class AnnotationCanvas: NSView {
         let transform = NSAffineTransform()
         transform.scale(by: zoom)
         transform.concat()
-        (annotations + [draft].compactMap { $0 }).forEach { $0.draw() }
+        for (index, annotation) in annotations.enumerated() where index != editingIndex { annotation.draw() }
+        draft?.draw()
+        if let selected, selected < annotations.count {
+            let outline = NSBezierPath(rect: annotations[selected].bounds.insetBy(dx: -6, dy: -6))
+            outline.lineWidth = 1.5 / zoom
+            outline.setLineDash([4 / zoom, 3 / zoom], count: 2, phase: 0)
+            NSColor.controlAccentColor.setStroke()
+            outline.stroke()
+        }
         NSGraphicsContext.restoreGraphicsState()
     }
 
@@ -201,35 +273,179 @@ private final class AnnotationCanvas: NSView {
         return CGPoint(x: min(max(0, point.x / zoom), pointSize.width), y: min(max(0, point.y / zoom), pointSize.height))
     }
 
-    override func mouseDown(with event: NSEvent) { anchor = imagePoint(event) }
+    /// Topmost first, with a tolerance of about 8 screen points.
+    private func hit(_ point: CGPoint, textOnly: Bool = false) -> Int? {
+        annotations.indices.reversed().first { index in
+            if textOnly { guard case .text = annotations[index] else { return false } }
+            return annotations[index].contains(point, tolerance: 8 / zoom)
+        }
+    }
+
+    private func record() { history.append(annotations) }
+
+    private func setTool(_ newTool: Tool) {
+        tool = newTool
+        if tool != .select { selected = nil }
+        window?.invalidateCursorRects(for: self)
+        needsDisplay = true
+        onChange?()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = imagePoint(event)
+        let wasEditing = editor != nil
+        if wasEditing { commitText() }
+        // Clicking text with the text tool, or double-clicking it with any tool, edits it.
+        if let index = hit(point, textOnly: true), tool == .text || event.clickCount == 2 {
+            editText(at: index)
+            return
+        }
+        guard !wasEditing else { return }
+        switch tool {
+        case .select:
+            selected = hit(point)
+            if let selected { move = (point, annotations[selected], false) }
+        case .text:
+            beginText(at: point)
+        case .arrow, .box:
+            anchor = point
+        }
+        needsDisplay = true
+    }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let anchor else { return }
         let point = imagePoint(event)
+        if let selected, let current = move {
+            if !current.recorded { record(); move?.recorded = true }
+            annotations[selected] = current.original.offsetBy(dx: point.x - current.start.x, dy: point.y - current.start.y)
+            needsDisplay = true
+            return
+        }
+        guard let anchor else { return }
         switch tool {
         case .arrow: draft = .arrow(from: anchor, to: point)
         case .box: draft = .box(CGRect(x: min(anchor.x, point.x), y: min(anchor.y, point.y),
                                        width: abs(point.x - anchor.x), height: abs(point.y - anchor.y)))
+        case .select, .text: return
         }
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         if let anchor, let draft, hypot(imagePoint(event).x - anchor.x, imagePoint(event).y - anchor.y) >= 4 {
+            record()
             annotations.append(draft)
         }
         anchor = nil
         draft = nil
+        move = nil
         needsDisplay = true
     }
+
+    // MARK: Text
+
+    /// Centers the first line on the click and wraps at the image's right edge.
+    private func beginText(at point: CGPoint) {
+        let lineHeight = Annotation.textSize("Ag", width: .greatestFiniteMagnitude).height
+        let x = min(point.x, max(0, pointSize.width - 84))
+        startEditor(origin: CGPoint(x: x, y: max(0, point.y - lineHeight / 2)),
+                    width: max(80, pointSize.width - x - 4), string: "", index: nil)
+    }
+
+    private func editText(at index: Int) {
+        guard case .text(let string, let origin, let width) = annotations[index] else { return }
+        selected = nil
+        startEditor(origin: origin, width: width, string: string, index: index)
+    }
+
+    private func startEditor(origin: CGPoint, width: CGFloat, string: String, index: Int?) {
+        editingOrigin = origin
+        editingWidth = width
+        editingIndex = index
+        let view = NSTextView(frame: .zero)
+        view.isRichText = false
+        view.drawsBackground = false
+        view.allowsUndo = true
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.textContainer?.widthTracksTextView = false
+        view.isHorizontallyResizable = false
+        view.isVerticallyResizable = false
+        view.textColor = Annotation.color
+        view.insertionPointColor = Annotation.color
+        view.string = string
+        view.delegate = self
+        editor = view
+        addSubview(view)
+        layoutEditor()
+        window?.makeFirstResponder(view)
+        view.setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
+        needsDisplay = true
+    }
+
+    /// Grows the editor with its text; long lines wrap instead of scrolling off the image.
+    private func layoutEditor() {
+        guard let editor, let container = editor.textContainer, let layout = editor.layoutManager else { return }
+        editor.font = Annotation.textAttributes(zoom: zoom)[.font] as? NSFont
+        container.containerSize = CGSize(width: editingWidth * zoom, height: .greatestFiniteMagnitude)
+        layout.ensureLayout(for: container)
+        let used = layout.usedRect(for: container)
+        let lineHeight = layout.defaultLineHeight(for: editor.font ?? .systemFont(ofSize: 22))
+        editor.frame = CGRect(x: editingOrigin.x * zoom, y: editingOrigin.y * zoom,
+                              width: min(editingWidth * zoom, used.width + 4), height: max(lineHeight, used.height))
+    }
+
+    func textDidChange(_ notification: Notification) { layoutEditor() }
+
+    /// Return finishes, Option-Return adds a line, Esc discards the edit.
+    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if selector == #selector(insertNewline(_:)) { commitText(); return true }
+        if selector == #selector(cancelOperation(_:)) { closeEditor(); return true }
+        return false
+    }
+
+    private func commitText() {
+        guard let editor else { return }
+        let string = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let annotation = Annotation.text(string, origin: editingOrigin, width: editingWidth)
+        if let index = editingIndex {
+            if case .text(let old, _, _) = annotations[index], old != string {
+                record()
+                if string.isEmpty { annotations.remove(at: index) } else { annotations[index] = annotation }
+            }
+        } else if !string.isEmpty {
+            record()
+            annotations.append(annotation)
+        }
+        closeEditor()
+    }
+
+    private func closeEditor() {
+        editor?.removeFromSuperview()
+        editor = nil
+        editingIndex = nil
+        window?.makeFirstResponder(self)
+        needsDisplay = true
+    }
+
+    // MARK: Keys
 
     override func cancelOperation(_ sender: Any?) { onCopyAndClose?() }
 
     override func keyDown(with event: NSEvent) {
         switch event.charactersIgnoringModifiers?.lowercased() {
         case _ where event.keyCode == 53: onCopyAndClose?()
-        case "a": tool = .arrow; onChange?()
-        case "r": tool = .box; onChange?()
+        case _ where [51, 117].contains(event.keyCode):
+            if let selected {
+                record()
+                annotations.remove(at: selected)
+                self.selected = nil
+                needsDisplay = true
+            }
+        case "v": setTool(.select)
+        case "a": setTool(.arrow)
+        case "r": setTool(.box)
+        case "t": setTool(.text)
         default: super.keyDown(with: event)
         }
     }
@@ -239,12 +455,26 @@ private final class AnnotationCanvas: NSView {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else {
             return super.performKeyEquivalent(with: event)
         }
-        switch event.charactersIgnoringModifiers?.lowercased() {
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        if let editor {
+            switch key {
+            case "z": editor.undoManager?.undo(); return true
+            case "v": editor.paste(nil); return true
+            case "x": editor.cut(nil); return true
+            case "a": editor.selectAll(nil); return true
+            default: commitText()
+            }
+        }
+        switch key {
         case "c": onCopy?()
         case "s": onSave?()
         case "w": onClose?()
         case "z":
-            if !annotations.isEmpty { annotations.removeLast(); needsDisplay = true }
+            if let previous = history.popLast() {
+                annotations = previous
+                selected = nil
+                needsDisplay = true
+            }
         default: return super.performKeyEquivalent(with: event)
         }
         return true
