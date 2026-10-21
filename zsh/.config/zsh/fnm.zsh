@@ -1,12 +1,6 @@
-if command -v fnm >/dev/null 2>&1; then
-  eval "$(fnm env --use-on-cd --shell zsh)"
-elif [ -x "/opt/homebrew/opt/fnm/bin/fnm" ]; then
-  export PATH="/opt/homebrew/opt/fnm/bin:$PATH"
-  eval "$(fnm env --use-on-cd --shell zsh)"
-elif [ -x "$HOME/.local/share/fnm/fnm" ]; then
-  export PATH="$HOME/.local/share/fnm:$PATH"
-  eval "$(fnm env --use-on-cd --shell zsh)"
-elif [ -x "$HOME/.fnm/fnm" ]; then
-  export PATH="$HOME/.fnm:$PATH"
-  eval "$(fnm env --use-on-cd --shell zsh)"
-fi
+# fnm disabled — ~/.vite-plus/bin/node sits ahead of fnm on PATH, so fnm's
+# per-cd switch ("Using Node vX") never changed which node ran; it only cost
+# ~13ms at startup and ~9ms per cd. Uncomment to bring it back.
+# if command -v fnm >/dev/null 2>&1; then
+#   eval "$(fnm env --use-on-cd --log-level=quiet --shell zsh)"
+# fi
