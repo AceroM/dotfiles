@@ -20,6 +20,17 @@ enum Capture {
         return shots
     }
 
+    /// One display, straight to the editor with no selector.
+    static func display(id: CGDirectDisplayID) async throws -> Shot {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first(where: { $0.displayID == id }) else {
+            throw CaptureError.displayGone
+        }
+        let ownApp = content.applications.filter { $0.processID == getpid() }
+        let filter = SCContentFilter(display: display, excludingApplications: ownApp, exceptingWindows: [])
+        return try await shot(filter, size: filter.contentRect.size)
+    }
+
     /// The window alone, including parts hidden behind other windows.
     static func window(id: CGWindowID) async throws -> Shot {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -44,8 +55,14 @@ enum Capture {
 
 enum CaptureError: LocalizedError {
     case windowGone
+    case displayGone
 
-    var errorDescription: String? { "That window closed before it could be captured." }
+    var errorDescription: String? {
+        switch self {
+        case .windowGone: "That window closed before it could be captured."
+        case .displayGone: "That display disconnected before it could be captured."
+        }
+    }
 }
 
 extension NSScreen {

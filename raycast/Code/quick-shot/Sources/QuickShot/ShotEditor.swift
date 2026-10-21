@@ -91,7 +91,7 @@ enum Tool {
     case text
 }
 
-/// Shottr-style editor: Esc and ⌘C copy and close, ⌘S saves, V/A/R/T pick move/arrow/box/text, ⌘Z undoes.
+/// Shottr-style editor: Esc and ⌘C copy and close, ⌘S saves and closes, V/A/R/T pick move/arrow/box/text, ⌘Z undoes.
 @MainActor
 final class ShotEditor: NSObject, NSWindowDelegate {
     static let saveFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
@@ -123,7 +123,7 @@ final class ShotEditor: NSObject, NSWindowDelegate {
                                       y: visible.midY - contentSize.height / 2))
         canvas.onCopyAndClose = { [weak self] in self?.copy(); self?.window.close() }
         canvas.onCopy = { [weak self] in self?.copy(); self?.window.close() }
-        canvas.onSave = { [weak self] in self?.save() }
+        canvas.onSave = { [weak self] in if self?.save() == true { self?.window.close() } }
         canvas.onClose = { [weak self] in self?.window.close() }
         canvas.onChange = { [weak self] in self?.updateTitle() }
         updateTitle()
@@ -141,7 +141,7 @@ final class ShotEditor: NSObject, NSWindowDelegate {
         let size = "\(shot.image.width) × \(shot.image.height)"
         let tool = switch canvas.tool { case .select: "Move"; case .arrow: "Arrow"; case .box: "Box"; case .text: "Text" }
         window.title = status.map { "\(size)  ·  \($0)" }
-            ?? "\(size)  ·  \(tool) (V / A / R / T)  ·  ⌘Z undo  ·  Esc copy + close  ·  ⌘S save"
+            ?? "\(size)  ·  \(tool) (V / A / R / T)  ·  ⌘Z undo  ·  Esc copy + close  ·  ⌘S save + close"
     }
 
     private func copy() {
@@ -156,17 +156,19 @@ final class ShotEditor: NSObject, NSWindowDelegate {
         updateTitle("Copied")
     }
 
-    private func save() {
-        guard let image = canvas.rendered(), let png = Self.png(image, scale: shot.scale) else { return }
+    /// Saves a PNG to `saveFolder`; false leaves the editor open with the error in its title.
+    private func save() -> Bool {
+        guard let image = canvas.rendered(), let png = Self.png(image, scale: shot.scale) else { return false }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let url = Self.saveFolder.appendingPathComponent("Quick Shot \(formatter.string(from: Date())).png")
         do {
             try FileManager.default.createDirectory(at: Self.saveFolder, withIntermediateDirectories: true)
             try png.write(to: url, options: .withoutOverwriting)
-            updateTitle("Saved \(url.lastPathComponent)")
+            return true
         } catch {
             updateTitle("Save failed: \(error.localizedDescription)")
+            return false
         }
     }
 

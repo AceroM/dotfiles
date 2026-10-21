@@ -17,7 +17,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let commandShift = cmdKey | shiftKey
         hotKeys.add(1, keyCode: kVK_ANSI_2, modifiers: commandShift) { [weak self] in self?.capture(.area) }
-        hotKeys.add(2, keyCode: kVK_ANSI_1, modifiers: commandShift) { [weak self] in self?.capture(.window) }
+        hotKeys.add(2, keyCode: kVK_ANSI_1, modifiers: commandShift) { [weak self] in self?.captureFullScreen() }
         missingHotKeys = hotKeys.registerMissing()
         if !missingHotKeys.isEmpty { logger.error("Hotkeys unavailable: \(self.missingHotKeys, privacy: .public)") }
 
@@ -38,8 +38,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         let area = menu.addItem(withTitle: "Capture Area", action: #selector(captureArea), keyEquivalent: "2")
         area.keyEquivalentModifierMask = [.command, .shift]
-        let window = menu.addItem(withTitle: "Capture Window", action: #selector(captureWindow), keyEquivalent: "1")
-        window.keyEquivalentModifierMask = [.command, .shift]
+        let full = menu.addItem(withTitle: "Capture Full Screen", action: #selector(captureFullScreen), keyEquivalent: "1")
+        full.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(withTitle: "Capture Window", action: #selector(captureWindow), keyEquivalent: "")
         if !missingHotKeys.isEmpty {
             menu.addItem(.separator())
             let warning = menu.addItem(withTitle: "Shortcut taken by another app (quit Shottr?)", action: nil,
@@ -78,25 +79,52 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch url.host {
         case "area": capture(.area)
         case "window": capture(.window)
+        case "full": captureFullScreen()
         case "quit": NSApp.terminate(nil)
         default: logger.error("Unknown command \(string, privacy: .public)")
+        }
+    }
+
+    /// The display under the pointer, straight into the editor.
+    @objc func captureFullScreen() {
+        if selector.isActive { selector.cancel() }
+        guard !isCapturing, hasScreenAccess() else { return }
+        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        guard let screen else { return }
+        isCapturing = true
+        rememberFrontApp()
+        Task {
+            defer { isCapturing = false }
+            do { open(try await Capture.display(id: screen.displayID)) }
+            catch {
+                restoreFocus()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
+    private func hasScreenAccess() -> Bool {
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            alert("Screen Recording permission needed",
+                  "Enable Quick Shot in System Settings → Privacy & Security → Screen & System Audio Recording, then try again.")
+            return false
+        }
+        return true
+    }
+
+    private func rememberFrontApp() {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != getpid() {
+            previousApp = NSWorkspace.shared.frontmostApplication
         }
     }
 
     /// The same shortcut again cancels an open selector.
     func capture(_ mode: CaptureMode) {
         if selector.isActive { selector.cancel(); return }
-        guard !isCapturing else { return }
-        guard CGPreflightScreenCaptureAccess() else {
-            CGRequestScreenCaptureAccess()
-            alert("Screen Recording permission needed",
-                  "Enable Quick Shot in System Settings → Privacy & Security → Screen & System Audio Recording, then try again.")
-            return
-        }
+        guard !isCapturing, hasScreenAccess() else { return }
         isCapturing = true
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier != getpid() {
-            previousApp = NSWorkspace.shared.frontmostApplication
-        }
+        rememberFrontApp()
         Task {
             do {
                 let frozen = mode == .area ? try await Capture.displays() : [:]
