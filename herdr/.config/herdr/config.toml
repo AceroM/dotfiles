@@ -26,10 +26,13 @@ auto_switch = false
 
 [keys]
 # --- Tabs ---------------------------------------------------------------
-# ctrl+alt+n opens a tab at the end; ctrl+alt+x closes it; ctrl+alt+h/l walk
-# between tabs (same left/right feel as vim's h/l).
+# ctrl+alt+n opens a tab at the end; ctrl+alt+h/l walk between tabs (same
+# left/right feel as vim's h/l). ctrl+alt+x (fn+x) closes the tab, but through
+# the herdr-close-tab [[keys.command]] below rather than close_tab: the stock
+# action waits out each agent's shutdown one pane at a time (~450ms apiece),
+# the script SIGKILLs the agents first. close_tab keeps its prefix+shift+x
+# default as the graceful fallback.
 new_tab = "ctrl+alt+n"
-close_tab = "ctrl+alt+x"
 previous_tab = "ctrl+alt+h"
 next_tab = "ctrl+alt+l"
 rename_tab = "ctrl+alt+r"
@@ -118,6 +121,12 @@ switch_workspace = "cmd+alt+shift+1..9"
 # command is wrapped in an explicit /bin/sh rather than trusting $PATH to contain
 # ~/.local/bin.
 #
+[[keys.command]]
+key = "ctrl+alt+x"
+type = "shell"
+description = "Close tab (kill agents)"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-close-tab"'
+
 [[keys.command]]
 key = "ctrl+alt+u"
 type = "shell"

@@ -10,6 +10,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let selector = RegionSelector()
     private var statusItem: NSStatusItem?
     private var editors: [ShotEditor] = []
+    private var scroller: ScrollCapture?
     private var previousApp: NSRunningApplication?
     private var isCapturing = false
     private var missingHotKeys: [UInt32] = []
@@ -18,6 +19,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let commandShift = cmdKey | shiftKey
         hotKeys.add(1, keyCode: kVK_ANSI_2, modifiers: commandShift) { [weak self] in self?.capture(.area) }
         hotKeys.add(2, keyCode: kVK_ANSI_1, modifiers: commandShift) { [weak self] in self?.captureFullScreen() }
+        hotKeys.add(3, keyCode: kVK_ANSI_2, modifiers: cmdKey | optionKey) { [weak self] in self?.captureAppWindow() }
         missingHotKeys = hotKeys.registerMissing()
         if !missingHotKeys.isEmpty { logger.error("Hotkeys unavailable: \(self.missingHotKeys, privacy: .public)") }
 
@@ -40,6 +42,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         area.keyEquivalentModifierMask = [.command, .shift]
         let full = menu.addItem(withTitle: "Capture Full Screen", action: #selector(captureFullScreen), keyEquivalent: "1")
         full.keyEquivalentModifierMask = [.command, .shift]
+        let app = menu.addItem(withTitle: "Capture Current App", action: #selector(captureAppWindow), keyEquivalent: "2")
+        app.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(withTitle: "Capture Window", action: #selector(captureWindow), keyEquivalent: "")
         if !missingHotKeys.isEmpty {
             menu.addItem(.separator())
@@ -80,6 +84,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "area": capture(.area)
         case "window": capture(.window)
         case "full": captureFullScreen()
+        case "app": captureAppWindow()
         case "quit": NSApp.terminate(nil)
         default: logger.error("Unknown command \(string, privacy: .public)")
         }
@@ -97,6 +102,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             defer { isCapturing = false }
             do { open(try await Capture.display(id: screen.displayID)) }
             catch {
+                restoreFocus()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
+    /// The frontmost app's front window, whole even where it's covered, straight into the editor.
+    @objc func captureAppWindow() {
+        if selector.isActive { selector.cancel() }
+        guard !isCapturing, hasScreenAccess() else { return }
+        rememberFrontApp()
+        guard let pid = previousApp?.processIdentifier, let target = Capture.frontWindow(of: pid) else {
+            captureFullScreen()
+            return
+        }
+        isCapturing = true
+        Task {
+            defer { isCapturing = false }
+            do {
+                var shot = try await Capture.window(id: target.id)
+                shot.region = target.region
+                open(shot)
+            } catch {
                 restoreFocus()
                 alert("Capture failed", error.localizedDescription)
             }
@@ -152,7 +180,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 restoreFocus()
                 return
             }
-            open(Shot(image: image, scale: shot.scale))
+            open(Shot(image: image, scale: shot.scale, region: ScreenRegion(displayID: displayID, rect: rect)))
         case .window(let id):
             Task {
                 defer { isCapturing = false }
@@ -168,8 +196,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.editors.removeAll { $0 === closed }
             if self?.editors.isEmpty == true { self?.restoreFocus() }
         }
+        editor.onScrollCapture = { [weak self] editor in self?.scrollCapture(from: editor) }
         editors.append(editor)
         editor.show()
+    }
+
+    /// Hides the editor while J scrolls and captures the live area; Return opens the stitched shot in its place.
+    private func scrollCapture(from editor: ShotEditor) {
+        guard scroller == nil else { return }
+        guard let region = editor.shot.region else {
+            editor.status("Scrolling capture needs an area or full-screen shot")
+            return
+        }
+        guard CGPreflightPostEventAccess() else {
+            CGRequestPostEventAccess()
+            alert("Accessibility permission needed",
+                  "Scrolling capture sends scroll events. Enable Quick Shot in System Settings → Privacy & Security → Accessibility, then try again.")
+            return
+        }
+        editor.hide()
+        let scroller = ScrollCapture(region: region) { [weak self] shot in
+            self?.scroller = nil
+            if let shot {
+                self?.open(shot)
+                editor.close()
+            } else {
+                editor.show()
+            }
+        }
+        self.scroller = scroller
+        Task {
+            do { try await scroller.start() }
+            catch {
+                self.scroller = nil
+                editor.show()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
     }
 
     private func restoreFocus() {

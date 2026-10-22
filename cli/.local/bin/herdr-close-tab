@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Close the focused Herdr tab without waiting out the agents in it.
+#
+#   herdr-close-tab           close the focused tab
+#   herdr-close-tab <tab_id>  close that tab instead
+#
+# Herdr's own close_tab sends each pane SIGHUP, waits ~400ms, then escalates to
+# SIGTERM. Shells die on the HUP; Claude Code ignores it, so every agent pane in
+# the tab sits out the full grace period, and even SIGTERM only starts Claude's
+# own ~400ms graceful shutdown. So we SIGKILL each agent's foreground process
+# group (the agent plus its MCP servers and children) and then hand the
+# now-plain shells to `tab close`, which reaps them on the first HUP.
+#
+# Skipping the graceful shutdown is deliberate: there are no SessionEnd hooks
+# left to run, and transcripts are appended per message, so the most a kill
+# loses is a turn that was still streaming.
+#
+# Bound in config.toml as a `type = "shell"` command on ctrl+alt+x (fn+x). The
+# server spawns it detached: no $PATH, no tty to print errors to. Hence the
+# explicit PATH and the log file instead of stderr.
+#
+# Kept bash-3.2 clean: the shebang resolves against whatever PATH the server
+# hands us, which may well find /bin/bash rather than homebrew's bash 5.
+set -uo pipefail
+
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
+log_file="$HOME/.local/state/herdr-close-tab.log"
+mkdir -p "$(dirname "$log_file")" 2>/dev/null
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; }
+die() { log "error: $*"; exit 1; }
+
+tab="${1:-}"
+if [ -z "$tab" ]; then
+  workspace="$(herdr workspace list 2>/dev/null |
+    jq -r '.result.workspaces[] | select(.focused) | .workspace_id' | head -n1)"
+  [ -n "$workspace" ] || die "no focused space"
+  tab="$(herdr tab list --workspace "$workspace" 2>/dev/null |
+    jq -r '.result.tabs[] | select(.focused) | .tab_id' | head -n1)"
+  [ -n "$tab" ] || die "no focused tab in $workspace"
+else
+  workspace="${tab%%:*}"
+fi
+
+# Only panes Herdr recognizes as agents. Editors and shells already die on the
+# HUP, and SIGTERMing an editor would skip its own unsaved-changes prompt.
+agent_panes="$(herdr pane list --workspace "$workspace" 2>/dev/null |
+  jq -r --arg t "$tab" '.result.panes[] | select(.tab_id == $t and ((.agent // "") != "")) | .pane_id')"
+
+groups=""
+for pane in $agent_panes; do
+  # The foreground group is the agent plus anything it spawned in the
+  # foreground. When it equals the shell's pid there is no foreground job
+  # (the agent already exited back to the prompt), so leave the shell alone.
+  read -r pgid shell_pid < <(herdr pane process-info --pane "$pane" 2>/dev/null |
+    jq -r '.result.process_info | "\(.foreground_process_group_id // "") \(.shell_pid // "")"')
+  if [ -n "${pgid:-}" ] && [ "$pgid" != "${shell_pid:-}" ]; then
+    kill -KILL "-$pgid" 2>/dev/null && groups="$groups $pgid"
+  fi
+done
+
+# SIGKILL lands at once, but the kernel reaps asynchronously; a short poll keeps
+# `tab close` from racing a process that is still on its way out.
+for _ in 1 2 3 4 5; do
+  alive=""
+  for g in $groups; do kill -0 "-$g" 2>/dev/null && alive="$alive $g"; done
+  [ -z "$alive" ] && break
+  sleep 0.02
+done
+
+herdr tab close "$tab" >/dev/null 2>&1 || die "tab close $tab failed"
+log "closed $tab (killed groups:${groups:- none}${alive:+; still alive:$alive})"

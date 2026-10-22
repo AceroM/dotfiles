@@ -97,7 +97,8 @@ final class ShotEditor: NSObject, NSWindowDelegate {
     static let saveFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
 
     var onClose: ((ShotEditor) -> Void)?
-    private let shot: Shot
+    var onScrollCapture: ((ShotEditor) -> Void)?
+    let shot: Shot
     private let window: NSWindow
     private let canvas: AnnotationCanvas
 
@@ -126,6 +127,7 @@ final class ShotEditor: NSObject, NSWindowDelegate {
         canvas.onSave = { [weak self] in if self?.save() == true { self?.window.close() } }
         canvas.onClose = { [weak self] in self?.window.close() }
         canvas.onChange = { [weak self] in self?.updateTitle() }
+        canvas.onScrollCapture = { [weak self] in if let self { self.onScrollCapture?(self) } }
         updateTitle()
     }
 
@@ -135,13 +137,17 @@ final class ShotEditor: NSObject, NSWindowDelegate {
         window.makeFirstResponder(canvas)
     }
 
+    func hide() { window.orderOut(nil) }
+    func close() { window.close() }
+    func status(_ text: String) { updateTitle(text) }
+
     func windowWillClose(_ notification: Notification) { onClose?(self) }
 
     private func updateTitle(_ status: String? = nil) {
         let size = "\(shot.image.width) × \(shot.image.height)"
         let tool = switch canvas.tool { case .select: "Move"; case .arrow: "Arrow"; case .box: "Box"; case .text: "Text" }
         window.title = status.map { "\(size)  ·  \($0)" }
-            ?? "\(size)  ·  \(tool) (V / A / R / T)  ·  ⌘Z undo  ·  Esc copy + close  ·  ⌘S save + close"
+            ?? "\(size)  ·  \(tool) (V / A / R / T)  ·  J scroll  ·  ⌘Z undo  ·  Esc copy + close  ·  ⌘S save + close"
     }
 
     private func copy() {
@@ -191,6 +197,7 @@ private final class AnnotationCanvas: NSView, NSTextViewDelegate {
     var onSave: (() -> Void)?
     var onClose: (() -> Void)?
     var onChange: (() -> Void)?
+    var onScrollCapture: (() -> Void)?
     private(set) var tool = Tool.arrow
     private let shot: Shot
     private let image: NSImage
@@ -448,6 +455,7 @@ private final class AnnotationCanvas: NSView, NSTextViewDelegate {
         case "a": setTool(.arrow)
         case "r": setTool(.box)
         case "t": setTool(.text)
+        case "j": onScrollCapture?()
         default: super.keyDown(with: event)
         }
     }
