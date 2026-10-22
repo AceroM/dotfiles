@@ -38,6 +38,11 @@ wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 herdrkeys = require("herdrkeys")
 herdrkeys.start()
 
+-- Window tiling on fn keys herdrkeys leaves free: fn+,/. halves (shift = other
+-- screen), fn+g center, fn+f apply app size + center, fn+shift+f save size.
+windowtiler = require("windowtiler")
+windowtiler.start()
+
 -- Option-minus toggles external displays; Option-plus toggles the laptop.
 -- Both use Lunar to switch between 0% and 80%.
 -- Run asynchronously so Lunar's DDC calls don't block other global hotkeys.
