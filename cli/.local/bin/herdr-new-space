@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Create and focus a Herdr space immediately below the shortcut's space."""
+
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+
+
+def call(method, **params):
+    socket_path = os.environ.get(
+        "HERDR_SOCKET_PATH", str(Path.home() / ".config/herdr/herdr.sock")
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(socket_path)
+        request = {"id": f"new-space-{os.getpid()}", "method": method, "params": params}
+        connection.sendall((json.dumps(request) + "\n").encode())
+        with connection.makefile("r") as response_file:
+            response = json.loads(response_file.readline())
+    if "error" in response:
+        raise RuntimeError(response["error"]["message"])
+    return response["result"]
+
+
+def main():
+    # Custom commands receive the invoking client's coordinates, which may differ
+    # from both the server's focus and its inherited pane environment.
+    source = os.environ.get("HERDR_ACTIVE_WORKSPACE_ID") or os.environ.get(
+        "HERDR_WORKSPACE_ID"
+    )
+    if not source:
+        raise RuntimeError("Run this shortcut inside Herdr")
+    spaces = call("workspace.list")["workspaces"]
+    if not any(space["workspace_id"] == source for space in spaces):
+        raise RuntimeError(f"Source space {source} no longer exists")
+
+    created = call("workspace.create", source_workspace_id=source, focus=False)
+    new_id = created["workspace"]["workspace_id"]
+    # Refresh the order after creating so other sidebar changes cannot leave us
+    # inserting at an old numeric index. Focus only after the move completes.
+    spaces = call("workspace.list")["workspaces"]
+    source_index = next(
+        index for index, space in enumerate(spaces) if space["workspace_id"] == source
+    )
+    call("workspace.move", workspace_id=new_id, insert_index=source_index + 1)
+    call("workspace.focus", workspace_id=new_id)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        message = f"herdr-new-space: {error}\n"
+        log = Path.home() / ".local/state/herdr-new-space.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as output:
+            output.write(message)
+        sys.exit(message)

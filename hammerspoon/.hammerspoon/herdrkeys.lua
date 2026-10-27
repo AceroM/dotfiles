@@ -11,8 +11,8 @@
 --                 resumes one in a new tab with permissions bypassed
 --   fn+/          toggle the grep picker: filter every other pane's visible
 --                 screen (no scrollback) line by line; Enter focuses that pane
---   fn+y          copy "Claude/Codex session ID <id>" for the focused pane
---   fn+shift+y    copy the focused pane's Herdr pane id
+--   fn+y          copy the focused pane's Herdr pane id
+--   fn+shift+y    copy just the session ID for the focused pane
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+shift+q    same, but also records microphone + system audio
 --   fn+b          toggle horizontal wheel/trackpad scrolling (from any app)
@@ -20,8 +20,10 @@
 --                 last pane back/forth
 --   fn+shift+w    becomes ctrl+alt+shift+w in Ghostty: close workspace
 --   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
---   fn+1..9       become ctrl+alt+1..9 in Ghostty: jump to the Nth tab
---   fn+shift+1..9 become cmd+alt+shift+1..9 in Ghostty: jump to the Nth space
+--   fn+1..8       become ctrl+alt+1..8 in Ghostty: jump to the Nth tab
+--   fn+shift+1..8 become cmd+alt+shift+1..8 in Ghostty: jump to the Nth space
+--   fn+9         focus the last tab in the current space
+--   fn+shift+9   focus the last space in the sidebar
 --   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
 --   fn+shift+j/k  become ctrl+alt+shift+j/k in Ghostty: next / previous agent
 --   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
@@ -79,7 +81,7 @@ local remapped = {
   [keys.pageup] = keys.up, [keys.pagedown] = keys.down,
 }
 -- Keys whose shifted chord is handled too: forwarded (fn+shift+n ->
--- ctrl+alt+shift+n), fn+shift+a -> agents picker, or fn+shift+y -> copy the pane id.
+-- ctrl+alt+shift+n), fn+shift+a -> agents picker, or fn+shift+y -> copy the session id.
 local shiftable = {
   [keys.a] = true, [keys.j] = true, [keys.k] = true,
   [keys.n] = true, [keys.q] = true, [keys.r] = true, [keys.w] = true, [keys.y] = true,
@@ -213,6 +215,27 @@ local function ghosttyFocused()
   return app ~= nil and app:bundleID() == GHOSTTY
 end
 
+local function focusLast(workspace)
+  request("session.snapshot", nil, function(response)
+    local snap = response.result and response.result.snapshot
+    if not snap then
+      hs.alert.show("Couldn’t read Herdr’s tabs and spaces", 2)
+      return
+    end
+    -- Snapshot arrays follow display order; numbers are stable identities.
+    local target
+    for _, item in ipairs((workspace and snap.workspaces or snap.tabs) or {}) do
+      if workspace or item.workspace_id == snap.focused_workspace_id then target = item end
+    end
+    if not target then return end
+    local method = workspace and "workspace.focus" or "tab.focus"
+    local params = workspace and { workspace_id = target.workspace_id } or { tab_id = target.tab_id }
+    request(method, params, function(focused)
+      if focused.error then hs.alert.show("Couldn’t focus the last " .. (workspace and "space" or "tab"), 2) end
+    end)
+  end)
+end
+
 local creatingTab = false
 local function newTabNext()
   if creatingTab then return end
@@ -340,7 +363,7 @@ end
 
 local function copyAgentSession(agent, session)
   local name = agent.agent == "codex" and "Codex" or "Claude"
-  if not hs.pasteboard.setContents(name .. " session ID " .. session) then
+  if not hs.pasteboard.setContents(session) then
     hs.alert.show("Couldn’t copy the session ID", 2)
     return
   end
@@ -521,12 +544,16 @@ local function handleKey(event)
     return true
   elseif code == keys.y then
     if not autorepeat then
-      if flags.shift then copyPaneId() else copySessionId() end
+      if flags.shift then copySessionId() else copyPaneId() end
     end
     return true
   elseif code == keys.e then
     if not ghosttyFocused() then return false end
     if not autorepeat then newTabNext() end
+    return true
+  elseif code == keys["9"] then
+    if not ghosttyFocused() then return false end
+    if not autorepeat then focusLast(flags.shift) end
     return true
   elseif ghosttyFocused() then
     -- Rewrite in place using Herdr's indexed-space chord for shifted digits.

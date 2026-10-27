@@ -47,7 +47,9 @@ previous_workspace = "ctrl+alt+k"
 workspace_picker = "prefix+w"
 close_workspace = "ctrl+alt+shift+w"
 rename_workspace = "ctrl+alt+shift+r"
-new_workspace = "ctrl+alt+shift+n"
+# fn+shift+n uses herdr-new-space below to insert after the current space.
+# Keep the stock prefix shortcut available.
+new_workspace = "prefix+shift+n"
 
 # --- Agents -------------------------------------------------------------
 # Shift on the same j/k axis hops between agent rows instead of workspaces.
@@ -369,6 +371,12 @@ command = '/bin/sh -c "exec $HOME/.local/bin/herdr-space-folder"'
 width = "60%"
 height = "20%"
 
+[[keys.command]]
+key = "ctrl+alt+shift+n"
+type = "shell"
+description = "New space below current"
+command = '/bin/sh -c "exec /usr/bin/python3 $HOME/.local/bin/herdr-new-space"'
+
 [ui]
 # Use the whole terminal for the pane when the sidebar is toggled off.
 sidebar_collapsed_mode = "hidden"
@@ -383,8 +391,8 @@ accent = "#74ade8"
 # Flip to true to be asked for a tab name on every create.
 prompt_new_tab_name = false
 
-# ctrl+alt+shift+n (fn+shift+n) opens a space instantly, like new_tab; rename it
-# afterwards with ctrl+alt+shift+r if it needs a real name.
+# The stock new_workspace action opens a space instantly; fn+shift+n uses the
+# helper above to also place it below the current space. Rename with fn+shift+r.
 prompt_new_workspace_name = false
 
 [ui.sound]
