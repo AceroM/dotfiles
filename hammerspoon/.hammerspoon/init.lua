@@ -43,6 +43,10 @@ herdrkeys.start()
 windowtiler = require("windowtiler")
 windowtiler.start()
 
+-- Command-shift-1 screenshots Chrome's page content only; other apps keep Shottr's window capture.
+chromeshot = require("chromeshot")
+chromeshot.start()
+
 -- Option-minus toggles external displays; Option-plus toggles the laptop.
 -- Both use Lunar to switch between 0% and 80%.
 -- Run asynchronously so Lunar's DDC calls don't block other global hotkeys.
