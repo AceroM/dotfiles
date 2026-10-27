@@ -1,5 +1,19 @@
 require("hs.ipc") -- enables the `hs` CLI (hs -c "...") and config reloads
 
+-- Keep the native Hammerspoon menu, with a simpler template icon.
+-- Retain the image globally so Lua's collector doesn't remove its cached name.
+menuBarIcon = hs.image.imageFromPath(hs.configdir .. "/icons/hammer.svg")
+if menuBarIcon then
+  menuBarIcon:size({ w = 18, h = 18 }):template(true)
+  local previousIcon = hs.image.imageFromName("statusicon")
+  if previousIcon then
+    previousIcon:name("statusicon-previous-" .. hs.timer.absoluteTime())
+  end
+  assert(menuBarIcon:name("statusicon"), "Could not replace Hammerspoon menu icon")
+  hs.menuIcon(false)
+  hs.menuIcon(true)
+end
+
 toast = require("toast")
 notifications = require("notifications")
 
