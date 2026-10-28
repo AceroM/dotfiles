@@ -49,6 +49,13 @@ function setBadge(on) {
   chrome.action.setTitle({ title: on ? "browser-use: connected" : "browser-use: native host not connected — run `browser-use install`" }).catch(() => {});
 }
 
+// Show a short result on the toolbar icon, then fall back to the connection badge.
+function flashBadge(text, color) {
+  chrome.action.setBadgeText({ text }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ color }).catch(() => {});
+  setTimeout(() => setBadge(!!port), 1500);
+}
+
 function browserName() {
   const brands = navigator.userAgentData?.brands?.map((b) => b.brand) ?? [];
   const known = brands.find((b) => !/Not.A.Brand|Chromium/i.test(b));
@@ -56,6 +63,7 @@ function browserName() {
 }
 
 async function onHostMessage(msg) {
+  if (msg?.type === "clipboard") return flashBadge(msg.ok ? "✓" : "err", msg.ok ? "#15803d" : "#b91c1c");
   if (msg?.type !== "request") return;
   const { id, cmd, args = {}, owner = "shell" } = msg;
   try {
@@ -74,6 +82,24 @@ chrome.alarms.create("keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => connect());
 chrome.action.onClicked.addListener(() => connect());
 connect();
+
+// ---------------------------------------------------------------- ⌘⇧S: viewport → clipboard
+
+// The human's shortcut, not an agent command: capture just the page viewport of the active tab and
+// hand it to the native host, which puts the PNG on the system clipboard (a service worker can't
+// write images to the clipboard itself). The host answers with a "clipboard" message.
+chrome.commands.onCommand.addListener(async (command, tab) => {
+  if (command !== "capture-viewport") return;
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab?.windowId ?? chrome.windows.WINDOW_ID_CURRENT, { format: "png" });
+    connect();
+    if (!port) throw new Error("native host not connected — run `browser-use install`");
+    port.postMessage({ type: "clipboard-image", data: dataUrl.slice(dataUrl.indexOf(",") + 1) });
+  } catch (e) {
+    console.warn("capture-viewport:", e?.message ?? e);
+    flashBadge("err", "#b91c1c");
+  }
+});
 
 // ---------------------------------------------------------------- shared state (survives worker + extension reloads)
 

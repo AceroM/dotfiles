@@ -8,6 +8,8 @@ export const EXTENSION_ID = "aneibjcaiaipkjajpalppgijoekiedko";
 export const STATE_DIR = `${process.env.XDG_STATE_HOME ?? `${homedir()}/.local/state`}/browser-use`;
 export const HOSTS_DIR = `${STATE_DIR}/hosts`;
 export const LOG_FILE = `${STATE_DIR}/host.log`;
+// Latest ⌘⇧S viewport capture (also on the clipboard); overwritten each time.
+export const VIEWPORT_SHOT = `${STATE_DIR}/viewport.png`;
 
 // Real source dir (Bun resolves the stow symlink, so this lands in ~/.dotfiles/browser-use/...).
 export const SRC_DIR = dirname(realpathSync(new URL(import.meta.url).pathname));

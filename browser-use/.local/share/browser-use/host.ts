@@ -5,9 +5,10 @@
 //
 // Nothing may be written to stdout except framed messages; diagnostics go to host.log.
 
+import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { HOSTS_DIR, LOG_FILE, STATE_DIR } from "./paths.ts";
+import { HOSTS_DIR, LOG_FILE, STATE_DIR, VIEWPORT_SHOT } from "./paths.ts";
 
 mkdirSync(HOSTS_DIR, { recursive: true });
 const sockPath = `${HOSTS_DIR}/${process.pid}.sock`;
@@ -62,7 +63,20 @@ function onExtensionMessage(msg: any) {
     const client = pending.get(msg.id);
     pending.delete(msg.id);
     if (client && !client.destroyed) client.write(JSON.stringify(msg) + "\n");
+    return;
   }
+  if (msg.type === "clipboard-image") copyImage(msg.data);
+}
+
+// ⌘⇧S in the browser: the extension sends the viewport PNG; put it on the macOS clipboard as image
+// data (so it pastes into Claude Code, Slack, …). Absolute osascript path: browsers spawn hosts
+// with a minimal PATH.
+function copyImage(base64: string) {
+  writeFileSync(VIEWPORT_SHOT, Buffer.from(base64, "base64"));
+  execFile("/usr/bin/osascript", ["-e", `set the clipboard to (read (POSIX file "${VIEWPORT_SHOT}") as «class PNGf»)`], (err) => {
+    if (err) log("clipboard copy failed:", err.message);
+    sendToExtension({ type: "clipboard", ok: !err, path: VIEWPORT_SHOT, error: err?.message });
+  });
 }
 
 // ------------------------------------------------------------ CLI side (unix socket)

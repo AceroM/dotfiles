@@ -49,6 +49,9 @@ Global flags
   --browser <name>      pick a connected browser when several are (also BROWSER_USE_BROWSER)
 
 Your "current tab" is tracked per owner: $BROWSER_USE_OWNER, else the herdr pane ($HERDR_PANE_ID).
+
+For the human: ⌘⇧S in the browser copies the visible page (no tab strip / URL bar / side panel)
+to the clipboard as a PNG; the latest one is also at ~/.local/state/browser-use/viewport.png.
 `;
 
 // ------------------------------------------------------------ argv

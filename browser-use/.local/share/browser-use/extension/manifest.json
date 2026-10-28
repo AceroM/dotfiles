@@ -7,5 +7,11 @@
   "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms", "nativeMessaging"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "browser-use" }
+  "action": { "default_title": "browser-use" },
+  "commands": {
+    "capture-viewport": {
+      "suggested_key": { "default": "Ctrl+Shift+S", "mac": "Command+Shift+S" },
+      "description": "Copy a screenshot of the visible page (no tab strip, URL bar or side panel) to the clipboard"
+    }
+  }
 }
