@@ -571,7 +571,7 @@ TSEOF
 
 # oc ~/Documents/Obsidian/Numeral/Product\ Categorization.md
 # New Herdr tab in the current space and cwd, running claude with the note's
-# contents as the opening prompt. The tab is labeled after the note's filename.
+# path and contents as the opening prompt. The tab is labeled after the note's filename.
 function oc() {
   local note="${1:A}"
   [[ -f "$note" ]] || { print -u2 "usage: oc <note.md>"; return 1 }
@@ -583,5 +583,6 @@ function oc() {
     --label "${label[1,28]}" --focus | jq -r '.result.root_pane.pane_id')"
   [[ -n "$pane" && "$pane" != null ]] || { print -u2 "oc: tab create failed"; return 1 }
 
-  herdr pane run "$pane" "claude --dangerously-skip-permissions \"\$(cat ${(q)note})\""
+  local preamble="Source Obsidian note: $note"
+  herdr pane run "$pane" "claude --dangerously-skip-permissions \"\$(printf '%s\\n\\n' ${(q)preamble}; cat ${(q)note})\""
 }
