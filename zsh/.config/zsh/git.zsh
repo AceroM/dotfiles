@@ -23,6 +23,12 @@ function jt() {
     awk '/^diff --git / { skip = ($3 ~ /(^|\/)__tests__\// || $3 ~ /\.test\.ts$/) } !skip' |
     delta
 }
+# jv [pr] — `jt` in diffnav, which adds a GitHub-style file tree sidebar.
+function jv() {
+  gh pr diff "$@" --color=never |
+    awk '/^diff --git / { skip = ($3 ~ /(^|\/)__tests__\// || $3 ~ /\.test\.ts$/) } !skip' |
+    diffnav
+}
 function jc() {
   gh pr checkout "$@"
 }

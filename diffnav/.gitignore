@@ -1,0 +1,6 @@
+debug.log
+diffnav
+
+dist/
+.task/
+/sponsors.json
