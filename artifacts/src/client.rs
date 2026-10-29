@@ -254,6 +254,42 @@ pub async fn up(_raw: &[String]) -> Result<(), String> {
     Err(format!("started in herdr pane {pane} but it is not answering; read it with `herdr pane read {pane}`"))
 }
 
+/// `c` on a page: start Claude on `prompt` in a new herdr tab at `dir`, in `workspace` (the one
+/// the page was written from) if it still exists, else the focused one. The tab keeps herdr's
+/// generated name until the Stop hook names it after the chat. Returns where it went.
+pub fn ask_claude(dir: &str, workspace: Option<&str>, prompt: &str) -> Result<Value, String> {
+    let workspaces = herdr_json(&["workspace", "list"])?;
+    let list = workspaces["result"]["workspaces"].as_array().cloned().unwrap_or_default();
+    let target = workspace
+        .and_then(|id| list.iter().find(|w| w["workspace_id"].as_str() == Some(id)))
+        .or_else(|| list.iter().find(|w| w["focused"].as_bool() == Some(true)))
+        .ok_or("no herdr workspace to start it in")?;
+    let id = target["workspace_id"].as_str().ok_or("herdr listed a workspace with no id")?;
+    let tab = herdr_json(&["tab", "create", "--workspace", id, "--cwd", dir, "--no-focus"])?;
+    let pane = tab["result"]["root_pane"]["pane_id"].as_str().ok_or("herdr tab create returned no pane")?;
+    // ANSI-C quoted, so the whole prompt reaches claude as one argument on one typed line.
+    let mut quoted = String::from("$'");
+    for ch in prompt.chars() {
+        match ch {
+            '\\' => quoted.push_str(r"\\"),
+            '\'' => quoted.push_str(r"\'"),
+            '\n' => quoted.push_str(r"\n"),
+            '\t' => quoted.push_str(r"\t"),
+            '\r' => {}
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    let status = std::process::Command::new("herdr")
+        .args(["pane", "run", pane, &format!("claude {quoted}")])
+        .status()
+        .map_err(|e| format!("herdr pane run: {e}"))?;
+    if !status.success() {
+        return Err(format!("herdr pane run {pane} failed"));
+    }
+    Ok(json!({ "workspace": target["label"].as_str().unwrap_or(id), "pane": pane, "cwd": dir }))
+}
+
 fn age(ts: i64) -> String {
     let s = now() - ts;
     match s {

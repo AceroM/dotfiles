@@ -9,7 +9,8 @@ name = "artifacts-app"
 path = "src/main.rs"
 
 [dependencies]
-gpui-kit = "0.8.1"
+# syntect: the code panel's highlighting (bat's ~200 languages, no tree-sitter grammars or LSP).
+gpui-kit = { version = "0.8.1", features = ["syntect"] }
 gpui-webview = "0.8.1"
 # The wry gpui-webview builds on, for its WebViewBuilder.
 wry = { package = "lb-wry", version = "0.53.3" }

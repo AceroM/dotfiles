@@ -72,6 +72,7 @@ pub async fn serve(raw: &[String]) -> Result<(), String> {
         .route("/api/artifacts", get(api_list).post(api_create))
         .route("/api/artifacts/:slug", get(api_get).delete(api_delete))
         .route("/api/artifacts/:slug/assets/*name", put(api_put_asset))
+        .route("/api/artifacts/:slug/ask", post(api_ask))
         .route("/api/run", post(api_run))
         .route("/api/tags", get(api_tags).post(api_add_tag))
         .route("/api/tags/:tag", axum::routing::delete(api_remove_tag))
@@ -242,6 +243,34 @@ async fn api_get(State(s): State<Shared>, Path(slug): Path<String>) -> Response 
         .into_response(),
         Ok(None) => fail(StatusCode::NOT_FOUND, format!("no page {slug:?}")),
         Err(e) => db_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct AskRequest {
+    prompt: String,
+}
+
+/// `c` on a page: Claude on the prompt, in a new herdr tab at the checkout the page was written in.
+async fn api_ask(State(s): State<Shared>, Path(slug): Path<String>, Json(req): Json<AskRequest>) -> Response {
+    let prompt = req.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "the prompt is empty");
+    }
+    let found = s.db.lock().expect("db lock").get(&slug);
+    let ctx: Context = match found {
+        Ok(Some(a)) => serde_json::from_str(&a.ctx).unwrap_or_default(),
+        Ok(None) => return fail(StatusCode::NOT_FOUND, format!("no page {slug:?}")),
+        Err(e) => return db_error(e),
+    };
+    let Some(dir) = ctx.repo_root.clone().or(ctx.cwd.clone()) else {
+        return fail(StatusCode::BAD_REQUEST, "this page wasn't written from a checkout");
+    };
+    let workspace = ctx.herdr_workspace.clone();
+    match tokio::task::spawn_blocking(move || crate::client::ask_claude(&dir, workspace.as_deref(), &prompt)).await {
+        Ok(Ok(started)) => Json(started).into_response(),
+        Ok(Err(e)) => fail(StatusCode::BAD_GATEWAY, e),
+        Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 

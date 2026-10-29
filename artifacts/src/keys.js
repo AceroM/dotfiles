@@ -404,6 +404,51 @@
   // The app's ⌘F opens this page's find bar.
   if (APP) APP.find = openFind;
 
+  // ---- ask Claude ----------------------------------------------------------------------------
+  // `c`: a prompt in the middle of the page. Enter starts Claude on it in a new herdr tab, in the
+  // checkout this page was written in; the server picks the tab's workspace.
+  let ask = null;
+  const closeAsk = () => { if (!ask) return; ask.box.classList.remove('open'); ask.input.blur(); ask = null; };
+  const openAsk = () => {
+    if (!SLUG) return toast('Ask from a page');
+    if (!body.dataset.root) return toast('This page wasn\'t written from a checkout');
+    const box = el('kb-ask');
+    if (!box.firstChild) {
+      box.innerHTML = '<div class="panel"><div class="head">Ask Claude <span></span></div><textarea rows="3" placeholder="Prompt Claude…"></textarea>'
+        + '<div class="foot">Enter starts it in a new herdr tab · Shift-Enter for a new line · Esc cancels</div></div>';
+      box.addEventListener('mousedown', (e) => { if (e.target === box) closeAsk(); });
+    }
+    box.querySelector('.head span').textContent = 'in ' + body.dataset.root;
+    ask = { box, input: box.querySelector('textarea') };
+    ask.input.disabled = false;
+    ask.input.value = '';
+    box.classList.add('open');
+    ask.input.focus();
+  };
+  const sendAsk = async () => {
+    const prompt = ask.input.value.trim();
+    if (!prompt) return;
+    ask.input.disabled = true;
+    try {
+      const r = await fetch('/api/artifacts/' + encodeURIComponent(SLUG) + '/ask', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const started = await r.json();
+      closeAsk();
+      toast('Claude started in a new tab in herdr ' + started.workspace);
+    } catch (err) {
+      if (ask) { ask.input.disabled = false; ask.input.focus(); }
+      toast('Couldn\'t start Claude: ' + err.message);
+    }
+  };
+  const askKey = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); return closeAsk(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAsk(); }
+  };
+  // The app's `c` in its page list opens it here.
+  if (APP) APP.ask = openAsk;
+
   // ---- help ----------------------------------------------------------------------------------
   const HELP = [
     ['Scroll', [['j  k', 'down / up 100px'], ['d  u', 'down / up half a page'], ['gg  G', 'top / bottom'], ['}  {', 'next / previous section, hop or day'], ["''", 'back to where you jumped from']]],
@@ -413,6 +458,7 @@
     ['Index', [['/', 'filter the list as you type; Enter or Esc to leave the box'], ['j  k', 'next / previous item (more load as you go)'], ['J  K', 'scroll 100px'], ['gg  G', 'first / last loaded item'], ['l  o  Enter', 'open it'], ['O', 'open it in a new tab']]],
     ['Code paths', [['za', 'toggle the hop at the top of the screen'], ['zo  zc', 'open / close it'], ['zR  zM', 'open / close every hop'], ['yl', 'copy its path:line (or the first one on screen)']]],
     ['Links and copy', [['f  F', 'link hints (F opens in a new tab)'], ['yy', 'copy this URL'], ['yr', 'copy the claude --resume command'], ['ys', 'copy the slug']]],
+    ['Claude', [['c', 'ask Claude: starts it on your prompt in a new herdr tab, in this page\'s checkout']]],
     ['Other', [['m{a-z}', 'set a mark'], ["'{a-z}", 'jump to a mark'], ['t', 'theme: system, light, dark'], ['5j  3}', 'counts repeat a motion'], ['?', 'this help'], ['Esc', 'close, cancel, or leave the search box']]],
   ];
   const help = () => {
@@ -475,6 +521,7 @@
     N: (n) => step(-1, n),
     r: () => location.reload(),
     t: cycleTheme,
+    c: openAsk,
     f: () => startHints(false),
     F: () => startHints(true),
     '?': help,
@@ -491,6 +538,7 @@
     const k = e.key;
     if (hint) return hintKey(e);
     if (bar && e.target === bar.input) return findKey(e);
+    if (ask && e.target === ask.input) return askKey(e);
     if (typing(e.target)) { if (k === 'Escape') { e.preventDefault(); e.target.blur(); } return; }
     if (k === 'Shift') return;
     if (k === 'Escape') {

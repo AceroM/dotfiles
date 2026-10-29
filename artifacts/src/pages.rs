@@ -82,6 +82,7 @@ p.page-sum { color: var(--muted); margin: 0 0 12px; font-size: 16px; }
 .md pre.mermaid { background: var(--surface); text-align: center; }
 .loc { font-family: var(--mono); color: var(--accent); border-bottom: 1px dotted var(--accent); cursor: copy; }
 .loc:hover, .loc.copied { border-bottom-style: solid; }
+.in-app .loc, .in-app .dcp .dcp-loc { cursor: pointer; }
 /* detailed code path */
 .dcp { display: flex; flex-direction: column; gap: 16px; }
 .dcp h3 { margin: 18px 0 0; font-size: 17px; }
@@ -163,6 +164,17 @@ ul.list li.row.sel { background: var(--surface); border-color: var(--accent); }
 #kb-find.miss .n { color: var(--warn); }
 ::highlight(kb-find) { background-color: rgba(246,216,96,.5); }
 ::highlight(kb-find-cur) { background-color: #f59e0b; color: #1d2126; }
+#kb-ask { position: fixed; inset: 0; z-index: 65; display: none; align-items: center; justify-content: center; background: rgba(15,23,42,.55); padding: 16px; }
+#kb-ask.open { display: flex; }
+#kb-ask .panel { background: var(--surface); color: var(--ink); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px 12px; width: min(640px, 100%);
+  box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+#kb-ask .head { font-weight: 600; margin-bottom: 8px; display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+#kb-ask .head span { font: 400 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#kb-ask textarea { display: block; width: 100%; box-sizing: border-box; min-height: 84px; resize: vertical; font: inherit; font-size: 14px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; outline: none; }
+#kb-ask textarea:focus { border-color: var(--accent); }
+#kb-ask textarea:disabled { opacity: .6; }
+#kb-ask .foot { margin-top: 8px; font-size: 12px; color: var(--faint); }
 #kb-help { position: fixed; inset: 0; z-index: 80; display: none; align-items: flex-start; justify-content: center; background: rgba(15,23,42,.55); padding: 56px 16px; overflow: auto; }
 #kb-help.open { display: flex; }
 #kb-help .panel { background: var(--surface); color: var(--ink); border: 1px solid var(--rule); border-radius: 10px; padding: 8px 22px 18px; max-width: 820px; width: 100%;
@@ -332,8 +344,25 @@ const SCRIPT: &str = r#"<script>
     if (es.readyState === EventSource.CLOSED) connect(); else catchUp();
   });
 
+  // A `path:line` as an absolute path and line, for the app's code panel. Pages rendered before
+  // `data-path` resolve it against the checkout they were written in.
+  const codeRef = (c) => {
+    const m = /^(.+):(\d+)$/.exec(c.dataset.copy || '');
+    if (!m) return null;
+    let path = c.dataset.path || m[1];
+    if (!path.startsWith('/') && !path.startsWith('~/')) {
+      const root = document.body.dataset.root;
+      if (!root) return null;
+      path = root.replace(/\/$/, '') + '/' + path;
+    }
+    return { path, line: +(c.dataset.line || m[2]) };
+  };
+
   document.addEventListener('click', (e) => {
     const c = e.target.closest('[data-copy]');
+    // In the app, a `path:line` opens in its code panel instead of copying.
+    const ref = c && window.artifactsApp && c.matches('.loc, .dcp-loc') && codeRef(c);
+    if (ref) { e.preventDefault(); window.artifactsApp.post('code:' + JSON.stringify(ref)); return; }
     if (c) { e.preventDefault(); navigator.clipboard.writeText(c.dataset.copy); c.classList.add('copied'); setTimeout(() => c.classList.remove('copied'), 900); return; }
     const x = e.target.closest('.dcp-expand, .dcp-collapse');
     if (x) { const open = x.classList.contains('dcp-expand'); for (const d of x.closest('.dcp').querySelectorAll('details')) d.open = open; return; }
@@ -604,6 +633,8 @@ pub fn artifact(v: View) -> String {
         ("up", Some(if v.old.is_some() { current.as_str() } else { "/" })),
         ("newer", v.newer.as_deref()),
         ("older", v.older.as_deref()),
+        // The checkout it was written in, for `path:line`s rendered before they carried `data-path`.
+        ("root", v.ctx.repo_root.as_deref().or(v.ctx.cwd.as_deref())),
     ];
     shell(title, &body, "", &main, needs_mermaid)
 }

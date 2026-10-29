@@ -315,9 +315,10 @@ pub fn code_path(spec: &Value, ctx: &Context) -> Result<CodePath, String> {
                     String::new()
                 };
                 out.push_str(&format!(
-                    r#"<li><details{open}><summary><span class="dcp-label">{}</span><span class="dcp-loc" data-copy="{loc}" title="Copy {loc}">{loc}</span>{gh}</summary><pre class="dcp-src"><code>{rows}</code></pre>{io}{runs}</details></li>"#,
+                    r#"<li><details{open}><summary><span class="dcp-label">{}</span><span class="dcp-loc" data-copy="{loc}" data-path="{abs}" data-line="{first}" title="Copy {loc}">{loc}</span>{gh}</summary><pre class="dcp-src"><code>{rows}</code></pre>{io}{runs}</details></li>"#,
                     escape(label),
-                    loc = escape(&format!("{path}:{first}"))
+                    loc = escape(&format!("{path}:{first}")),
+                    abs = escape(&format!("{}/{path}", checkout.trim_end_matches('/')))
                 ));
             }
             out.push_str("</ol></div>");
@@ -340,10 +341,12 @@ fn location_re() -> &'static Regex {
 
 /// Make every `path/to/file.ts:123` in already-escaped text copy itself on click, for pasting
 /// into Zed. Only on pages written from a checkout, where repo-relative paths mean something.
+/// The text stays as written; `data-path` carries the absolute path (the app's code panel opens
+/// it) and `data-line` the line.
 fn linkify(escaped: &str, base: Option<&str>) -> String {
-    if base.is_none() {
+    let Some(base) = base else {
         return escaped.to_string();
-    }
+    };
     let mut out = String::with_capacity(escaped.len());
     let mut last = 0;
     for m in location_re().find_iter(escaped) {
@@ -352,8 +355,14 @@ fn linkify(escaped: &str, base: Option<&str>) -> String {
             continue;
         }
         let text = m.as_str();
+        let (path, line) = text.rsplit_once(':').expect("the location regex ends in :<line>");
+        let abs = match path.strip_prefix("~/") {
+            _ if path.starts_with('/') => path.to_string(),
+            Some(rest) => format!("{}/{rest}", escape(&home())),
+            None => format!("{}/{path}", escape(base.trim_end_matches('/'))),
+        };
         out.push_str(&escaped[last..m.start()]);
-        out.push_str(&format!(r#"<span class="loc" data-copy="{text}" title="Copy {text}">{text}</span>"#));
+        out.push_str(&format!(r#"<span class="loc" data-copy="{text}" data-path="{abs}" data-line="{line}" title="Copy {text}">{text}</span>"#));
         last = m.end();
     }
     out.push_str(&escaped[last..]);

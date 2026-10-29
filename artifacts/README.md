@@ -118,9 +118,11 @@ The list has a cursor of its own: moving it (`j` `k`, with vim counts like `10j`
 relative line numbers in its gutter) doesn't touch the page until `l` or `Enter` opens it in the
 active tab. A click opens a page too, and ⌘-click or `⌘L` (on the row under the mouse, else the
 cursor's) opens it in a new tab. Dots mark pages open in tabs: bright for the active one. Each
-tab keeps its own scroll and history. The sidebar's edge drags (220–640px). Inside the app, pages
-drop their own header. Links that ask for a new window open a new
-tab. The open tabs, the zoom and the sidebar width come back on the next launch (`~/.local/share/artifacts/app.json`).
+tab keeps its own scroll and history. The sidebar's edge drags (220–640px), and `⌘B` hides or
+shows it. While it's hidden, sending the keyboard into it (`⌘T`, `⌘/`, `h`) shows it until the
+keyboard is back on the page. Inside the app, pages drop their own header. Links that ask for a
+new window open a new tab. The open tabs, the zoom and the sidebar (its width and whether it's
+hidden) come back on the next launch (`~/.local/share/artifacts/app.json`).
 
 `⌘T` (or `⌘N`, or the `+` button) starts a new tab by searching for its page: the search box
 takes the keyboard, reads NEW TAB, and has its text selected, so typing starts a new search.
@@ -128,14 +130,25 @@ takes the keyboard, reads NEW TAB, and has its text selected, so typing starts a
 opens the page in a new tab and clears the search, and `Esc` cancels and puts the keyboard back
 where it was.
 
+The **code panel** (`⌘J`, on the right) shows the file behind a page's `path:line`: in the app, a
+click on one opens the whole file there, syntax-highlighted and read-only, at that line (in a
+browser the click still copies). Pages keep the path as written but carry the absolute one in
+`data-path` (resolved against the checkout they were written in, `data-root` on `<body>`), and the
+file is read fresh on every click, so it shows the checkout as it is now. The line itself is
+filled, and the panel's one editor is warmed up at launch so the first file opens quickly.
+
+`c` (on a page, or in the app's list) opens a prompt in the middle of the page: `Enter` starts
+`claude` on it in a new herdr tab (unfocused), in the checkout the page was written in and the
+workspace it was written from (else the focused one). `Shift-Enter` adds a line, `Esc` cancels.
+
 The keyboard is in one of three places, and a ring shows which: the **list**, its **search box**,
-or the **page**.
+or the **page** (and the code panel, once you click into it).
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `⌘/` search pages · `⌘F` find in page · `⌘L` open the hovered (else cursor's) page in a new tab · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
+| Anywhere | `⌘B` hide / show the sidebar · `⌘J` hide / show the code panel · `⌘/` search pages · `⌘F` find in page · `⌘L` open the hovered (else cursor's) page in a new tab · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
 | Tabs, anywhere | `⌘T` `⌘N` new · `⌘W` close (the last one hides the app) · `⌘⇧T` reopen · `⌘⌥W` close the others · `⌘⇧[` `⌘⇧]` or `⌃⇧Tab` `⌃Tab` previous / next · `⌘1`–`⌘8` that tab · `⌘9` the last · `⌃⇧PgUp` `⌃⇧PgDn` move |
-| List | `j` `k` move the cursor (`10j`, `15k`) · `gg` `G` first / last (`5G` the fifth) · `l` `→` `Enter` `Tab` open it and read · `Esc` back to the page · `/` search pages · `H` `L` previous / next tag · `o` open in browser |
+| List | `j` `k` move the cursor (`10j`, `15k`) · `gg` `G` first / last (`5G` the fifth) · `l` `→` `Enter` `Tab` open it and read · `Esc` back to the page · `/` search pages · `H` `L` previous / next tag · `c` ask Claude about the open page · `o` open in browser |
 | Tabs, from the list or the page | `H` `L` previous / next (in the page) · `x` `X` close / reopen · `^` the last-used tab · `<` `>` move · `t` (list) or `yt` (page) duplicate |
 | Search pages | type to filter · `ctrl-j` `ctrl-k` move the cursor as you type · `Enter` open it · `Esc` back to the list |
 | Page | the page's own keys (`?` lists them) · `h` or `Esc` back to the list · `[` `]` previous / next page in the list · `/` find in page |

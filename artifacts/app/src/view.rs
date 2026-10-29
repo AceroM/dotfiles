@@ -11,7 +11,9 @@ use crate::api::{self, Fetched, Item, Query};
 use crate::saved::{self, Saved};
 use async_channel::{Receiver, Sender};
 use chrono::{Local, TimeZone};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{
+    Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
+};
 use gpui_kit::component::theme::{Theme, ThemeColor};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme};
 use gpui_kit::prelude::FluentBuilder;
@@ -24,6 +26,7 @@ gpui_kit::actions!(
     [
         SearchPages,
         FindInPage,
+        AskClaude,
         FocusList,
         OpenCursor,
         ListEscape,
@@ -62,6 +65,8 @@ gpui_kit::actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        ToggleSidebar,
+        ToggleCode,
         HideWindow,
         Quit,
     ]
@@ -122,6 +127,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-+", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
         KeyBinding::new("cmd-0", ZoomReset, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-j", ToggleCode, None),
         KeyBinding::new("cmd-h", HideWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
         // The list. Digits before a motion are a count (`10j`), read by the list's key handler.
@@ -139,6 +146,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("/", SearchPages, Some(LIST)),
         KeyBinding::new("shift-h", PrevTag, Some(LIST)),
         KeyBinding::new("shift-l", NextTag, Some(LIST)),
+        KeyBinding::new("c", AskClaude, Some(LIST)),
         KeyBinding::new("o", OpenInBrowser, Some(LIST)),
         KeyBinding::new("r", Reload, Some(LIST)),
         KeyBinding::new("t", DuplicateTab, Some(LIST)),
@@ -162,6 +170,8 @@ enum Pane {
     List,
     Search,
     Page,
+    /// The code panel (⌘J), once you click into its file.
+    Code,
 }
 
 /// What a page tells the app, from `PAGE_BRIDGE`, `keys.js` and the navigation handlers.
@@ -173,6 +183,8 @@ enum PageMsg {
     Navigated(String),
     OpenTab(String),
     OpenOutside(String),
+    /// A `path:line` clicked on the page: an absolute path and a 1-based line.
+    OpenCode(CodeRef),
     NextTab,
     PrevTab,
     CloseTab,
@@ -182,6 +194,31 @@ enum PageMsg {
     MoveTabLeft,
     MoveTabRight,
 }
+
+#[derive(serde::Deserialize)]
+struct CodeRef {
+    path: String,
+    line: usize,
+}
+
+/// What the code panel shows: one file, whole, highlighted and read-only.
+struct Code {
+    path: String,
+    line: usize,
+    /// The file as read, so clicking into the same unchanged file only moves to the line.
+    text: Result<String, String>,
+}
+
+/// Highlighted at launch, so syntect has its syntaxes loaded and TypeScript's patterns compiled
+/// before the first click (they cost a few hundred milliseconds the first time).
+const CODE_WARM_UP: &str = r#"import { useState } from "react";
+// A comment.
+type Props = { name: string; count?: number };
+export function Hello({ name, count = 0 }: Props) {
+  const [n, setN] = useState<number>(count);
+  return <div className="hello" onClick={() => setN(n + 1)}>{`Hi ${name}`} {n}</div>;
+}
+"#;
 
 /// A page message, tagged with the tab whose webview sent it.
 struct FromPage {
@@ -211,6 +248,9 @@ impl Render for DragPreview {
 pub struct ArtifactsView {
     search: Entity<InputState>,
     list_focus: FocusHandle,
+    /// GPUI's own focus while WebKit has the keyboard. Menu shortcuts dispatch from the focused
+    /// element, and one that isn't drawn (the list, with the sidebar hidden) reaches nothing.
+    page_focus: FocusHandle,
     scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
     tabs: Vec<Tab>,
@@ -223,6 +263,20 @@ pub struct ArtifactsView {
     tx: Sender<FromPage>,
     zoom: f64,
     sidebar_width: f32,
+    /// Whether the sidebar is shown (⌘B).
+    sidebar: bool,
+    /// The sidebar is hidden but showing anyway, because the keyboard went into it (⌘T, ⌘/, `h`).
+    /// It hides again once the keyboard is back on the page.
+    peeking: bool,
+    /// Whether the code panel is shown (⌘J), and the file it shows.
+    code_open: bool,
+    code: Option<Code>,
+    code_load: Task<()>,
+    /// The code panel's one editor, drawn even while the panel is closed: its highlighter only
+    /// attaches once it has been drawn, and a file set before that never gets colored.
+    code_editor: Entity<EditorState>,
+    /// The fill over the line a click points at.
+    code_mark: RangeDecorationCollection,
     pane: Pane,
     query: Query,
     items: Vec<Item>,
@@ -272,9 +326,12 @@ impl ArtifactsView {
             cx.observe_window_appearance(window, |_, window, cx| Theme::sync_system_appearance(Some(window), cx)),
         ];
         let saved = saved::load();
+        let code_editor = cx.new(|cx| EditorState::new(window, cx).language("tsx").soft_wrap(false));
+        let code_mark = code_editor.update(cx, |e, cx| e.create_range_decorations_collection(vec![], cx));
         let mut this = Self {
             search,
             list_focus: cx.focus_handle(),
+            page_focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             tabs: vec![],
@@ -285,6 +342,13 @@ impl ArtifactsView {
             tx,
             zoom: saved.zoom.unwrap_or(1.0),
             sidebar_width: saved.sidebar_width.unwrap_or(SIDEBAR_WIDTH).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            sidebar: !saved.sidebar_hidden,
+            peeking: false,
+            code_open: false,
+            code: None,
+            code_load: Task::ready(()),
+            code_editor,
+            code_mark,
             pane: Pane::List,
             query: Query::default(),
             items: vec![],
@@ -313,8 +377,14 @@ impl ArtifactsView {
         this.active = active;
         this.activate(active, window, cx);
         this._tasks = vec![this.watch(cx), this.listen(rx, window, cx)];
-        this.focus_pane(Pane::List, window, cx);
+        this.focus_pane(if this.sidebar { Pane::List } else { Pane::Page }, window, cx);
         this.refresh(false, cx);
+        // After the first frame, which drew the editor and attached its highlighter.
+        cx.on_next_frame(window, |this, window, cx| {
+            if this.code.is_none() {
+                this.code_editor.update(cx, |e, cx| e.set_value(CODE_WARM_UP, window, cx));
+            }
+        });
         this
     }
 
@@ -618,6 +688,7 @@ impl ArtifactsView {
             active: self.active,
             zoom: Some(self.zoom),
             sidebar_width: Some(self.sidebar_width),
+            sidebar_hidden: !self.sidebar,
         });
     }
 
@@ -651,11 +722,14 @@ impl ArtifactsView {
             }
             PageMsg::OpenTab(slug) => self.open_tab(slug, window, cx),
             PageMsg::OpenOutside(url) => cx.open_url(&url),
+            PageMsg::OpenCode(code) => self.open_code(code, window, cx),
             // Keys from a page in the background don't count.
             _ if !from_active => {}
             PageMsg::Focused => {
+                self.page_focus.focus(window, cx);
                 self.pane = Pane::Page;
                 self.new_tab = false;
+                self.peeking = false;
                 cx.notify();
             }
             PageMsg::ToList => self.focus_pane(Pane::List, window, cx),
@@ -685,9 +759,94 @@ impl ArtifactsView {
         match pane {
             Pane::List => self.list_focus.focus(window, cx),
             Pane::Search => self.search.update(cx, |s, cx| s.focus(window, cx)),
-            Pane::Page => {}
+            Pane::Page => self.page_focus.focus(window, cx),
+            Pane::Code => match self.code.as_ref().filter(|_| self.code_open).map(|c| &c.text) {
+                Some(Ok(_)) => self.code_editor.update(cx, |e, cx| e.focus(window, cx)),
+                _ => return self.focus_pane(Pane::Page, window, cx),
+            },
         }
+        self.peeking = !self.sidebar && matches!(pane, Pane::List | Pane::Search);
         self.pane = pane;
+        cx.notify();
+    }
+
+    /// ⌘B. Hiding the sidebar takes the keyboard out of it, to the page.
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar = !(self.sidebar || self.peeking);
+        self.peeking = false;
+        if !self.sidebar {
+            // Its rows are gone, so none is under the mouse for ⌘L.
+            self.hovered = None;
+            if self.pane != Pane::Page {
+                self.focus_pane(Pane::Page, window, cx);
+            }
+        }
+        self.save();
+        cx.notify();
+    }
+
+    /// ⌘J. Closing the panel with the keyboard in it hands the keyboard back to the page.
+    fn toggle_code(&mut self, _: &ToggleCode, window: &mut Window, cx: &mut Context<Self>) {
+        self.code_open = !self.code_open;
+        if !self.code_open && self.pane == Pane::Code {
+            self.focus_pane(Pane::Page, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Show a page's `path:line` in the code panel, opening it. The file is read fresh each time.
+    fn open_code(&mut self, code: CodeRef, window: &mut Window, cx: &mut Context<Self>) {
+        self.code_open = true;
+        let path = match code.path.strip_prefix("~/") {
+            Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+            None => code.path,
+        };
+        let read = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { std::fs::read_to_string(&path).map_err(|e| e.to_string()) }
+        });
+        self.code_load = cx.spawn_in(window, async move |this, cx| {
+            let text = read.await;
+            this.update_in(cx, |this, window, cx| this.show_code(path, code.line, text, window, cx)).ok();
+        });
+        cx.notify();
+    }
+
+    fn show_code(&mut self, path: String, line: usize, text: Result<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(source) = &text else {
+            self.code = Some(Code { path, line, text });
+            return cx.notify();
+        };
+        let unchanged = self.code.as_ref().is_some_and(|c| c.path == path && c.text.as_ref() == Ok(source));
+        if !unchanged {
+            // The extension names the syntax (`tsx`, `rs`); a bare name covers `Makefile` and co.
+            let name = std::path::Path::new(&path);
+            let language = name.extension().or(name.file_name()).map_or(String::new(), |l| l.to_string_lossy().into_owned());
+            self.code_editor.update(cx, |e, cx| {
+                if e.language_name().as_ref() != language {
+                    e.set_highlighter(language, cx);
+                }
+                e.set_value(source.clone(), window, cx);
+            });
+        }
+        // The line, through its newline, so the fill runs to the end of the row.
+        let start: usize = source.split_inclusive('\n').take(line.saturating_sub(1)).map(str::len).sum();
+        let end = source[start..].find('\n').map_or(source.len(), |n| start + n + 1);
+        let fill = cx.theme().warning.opacity(0.25);
+        self.code_mark.set(vec![RangeDecoration::new(start..end).with_style(RangeDecorationStyle::Fill).with_color(fill)], cx);
+        // Scrolling needs the editor laid out with this text and at the panel's size: wait for
+        // the frame that draws it, then put the line a third of the way down.
+        let editor = self.code_editor.clone();
+        window.on_next_frame(move |_, cx| {
+            editor.update(cx, |e, cx| {
+                e.set_selected_range(start..start, cx);
+                if let (Some(height), Some(rows)) = (e.line_height(), e.visible_row_range()) {
+                    let top = line.saturating_sub(1).saturating_sub(rows.len() / 3);
+                    e.set_scroll_offset(point(px(0.), px(-f32::from(height) * top as f32)), cx);
+                }
+            })
+        });
+        self.code = Some(Code { path, line, text });
         cx.notify();
     }
 
@@ -760,6 +919,14 @@ impl ArtifactsView {
         self.focus_pane(Pane::Page, window, cx);
         if let Some(webview) = self.active_webview() {
             let _ = webview.read(cx).raw().evaluate_script("window.artifactsApp?.find?.()");
+        }
+    }
+
+    /// `c` in the list: the open page's prompt for Claude (`keys.js`), which takes the keyboard.
+    fn ask_claude(&mut self, _: &AskClaude, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_pane(Pane::Page, window, cx);
+        if let Some(webview) = self.active_webview() {
+            let _ = webview.read(cx).raw().evaluate_script("window.artifactsApp?.ask?.()");
         }
     }
 
@@ -1096,6 +1263,74 @@ impl ArtifactsView {
         rows
     }
 
+    /// The code panel: the file's name and line over the whole file, read-only. A click in it
+    /// takes the keyboard, so its arrows, search and copy work.
+    fn code_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = cx.theme().colors.clone();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let header = match &self.code {
+            Some(code) => {
+                let path = std::path::Path::new(&code.path);
+                let name = path.file_name().map_or(code.path.clone(), |n| n.to_string_lossy().into_owned());
+                let dir = path.parent().map_or(String::new(), |d| d.to_string_lossy().replacen(&home, "~", 1));
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).child(format!("{name}:{}", code.line)))
+                    .child(div().min_w_0().truncate().text_xs().text_color(c.muted_foreground).child(dir))
+            }
+            None => h_flex().flex_1().text_color(c.muted_foreground).child("Code"),
+        };
+        let ring = if self.pane == Pane::Code { c.ring } else { transparent_black() };
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .border_l_1()
+            .border_color(c.border)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    if this.pane != Pane::Code {
+                        this.focus_pane(Pane::Code, window, cx);
+                    }
+                }),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h(px(38.))
+                    .px_3()
+                    .gap_2()
+                    .text_sm()
+                    .child(header)
+                    .child(
+                        div()
+                            .id("close-code")
+                            .flex_none()
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(c.list_hover).text_color(c.foreground))
+                            .child("✕")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_code(&ToggleCode, window, cx))),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().px_1().pb_1().child(div().size_full().border_2().border_color(ring).map(|d| {
+                match self.code.as_ref().map(|code| (&code.path, &code.text)) {
+                    Some((_, Ok(_))) => d.child(Editor::new(&self.code_editor).readonly(true).bordered(false).size_full()),
+                    Some((path, Err(e))) => d.p_4().text_sm().text_color(c.danger).child(format!("Couldn't read {path}: {e}")),
+                    None => d.p_4().text_sm().text_color(c.muted_foreground).child("Click a path:line on a page to open its file here."),
+                }
+            })))
+    }
+
     fn tab_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let c = cx.theme().colors.clone();
         let page_focused = self.pane == Pane::Page;
@@ -1230,7 +1465,8 @@ fn build_webview(tab: u64, url: &str, tx: Sender<FromPage>, window: &mut Window,
         .with_url(url)
         .with_initialization_script(PAGE_BRIDGE)
         .with_ipc_handler(move |req: wry::http::Request<String>| {
-            let msg = match req.body().as_str() {
+            let body = req.body().as_str();
+            let msg = match body {
                 "focus" => PageMsg::Focused,
                 "sidebar" => PageMsg::ToList,
                 "next" => PageMsg::Next,
@@ -1243,7 +1479,11 @@ fn build_webview(tab: u64, url: &str, tx: Sender<FromPage>, window: &mut Window,
                 "lastTab" => PageMsg::LastUsedTab,
                 "moveTabLeft" => PageMsg::MoveTabLeft,
                 "moveTabRight" => PageMsg::MoveTabRight,
-                _ => return,
+                // `code:{"path": …, "line": …}`, from a click on a `path:line`.
+                _ => match body.strip_prefix("code:").and_then(|json| serde_json::from_str(json).ok()) {
+                    Some(code) => PageMsg::OpenCode(code),
+                    None => return,
+                },
             };
             let _ = ipc.try_send(FromPage { tab, msg });
         })
@@ -1291,7 +1531,9 @@ impl Render for ArtifactsView {
 
         let c = cx.theme().colors.clone();
         let ring = |active: bool| if active { c.ring } else { transparent_black() };
-        let rows = self.rows(cx);
+        let shown = self.sidebar || self.peeking;
+        // Hidden, the list keeps a pending scroll to its cursor for when it shows again.
+        let rows = if shown { self.rows(cx) } else { vec![] };
         let empty = rows.is_empty() && self.error.is_none();
         let choosing = self.new_tab;
         let list = div()
@@ -1329,7 +1571,7 @@ impl Render for ArtifactsView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    if this.pane == Pane::Page {
+                    if matches!(this.pane, Pane::Page | Pane::Code) {
                         this.focus_pane(Pane::List, window, cx);
                     }
                 }),
@@ -1370,7 +1612,8 @@ impl Render for ArtifactsView {
         let tab_bar = self.tab_bar(cx);
         let page = v_flex().flex_1().h_full().min_w_0().child(tab_bar).child(
             div().flex_1().min_h_0().px_1().pb_1().child(
-                div().size_full().border_2().border_color(page_ring).map(|d| match self.active_webview() {
+                // The native view covers this div, so no click lands on it to move GPUI's focus.
+                div().size_full().track_focus(&self.page_focus).border_2().border_color(page_ring).map(|d| match self.active_webview() {
                     Some(webview) => d.child(webview.clone()),
                     None => d.p_4().text_color(c.muted_foreground).child(self.error.clone().unwrap_or_default()),
                 }),
@@ -1384,6 +1627,7 @@ impl Render for ArtifactsView {
             .on_drag_move(cx.listener(Self::resize_sidebar))
             .on_action(cx.listener(Self::search_pages))
             .on_action(cx.listener(Self::find_in_page))
+            .on_action(cx.listener(Self::ask_claude))
             .on_action(cx.listener(Self::focus_list))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::cancel_new_tab))
@@ -1413,9 +1657,15 @@ impl Render for ArtifactsView {
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
-            .child(sidebar)
-            .child(handle)
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::toggle_code))
+            .when(shown, |d| d.child(sidebar).child(handle))
             .child(page)
+            .when(self.code_open, |d| d.child(self.code_panel(cx)))
+            // Not showing a file, the editor is still drawn, out of sight: see `code_editor`.
+            .when(!(self.code_open && self.code.as_ref().is_some_and(|c| c.text.is_ok())), |d| {
+                d.child(div().absolute().size_0().overflow_hidden().child(Editor::new(&self.code_editor).readonly(true)))
+            })
     }
 }
 
