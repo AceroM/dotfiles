@@ -569,7 +569,6 @@ if (windowMode) {
 TSEOF
 }
 
-# oc ~/Documents/Obsidian/Numeral/Product\ Categorization.md
 # New Herdr tab in the current space and cwd, running claude with the note's
 # path and contents as the opening prompt. The tab is labeled after the note's filename.
 function oc() {

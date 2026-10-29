@@ -8,7 +8,8 @@
 #   either → the pane's terminal title, as a fallback
 #
 # Rules (from ~/.claude/CLAUDE.md "Name the work after the work"):
-#   - cwd == ~/Numeral is the coordinator: never rename anything.
+#   - a cwd listed in HERDR_AUTONAME_COORDINATOR_DIRS (colon-separated, exact match) is a
+#     coordinator: never rename anything.
 #   - one chat in the tab (including editor/shell splits) → rename the tab;
 #     several chats → rename this pane only.
 #   - only overwrite a tab label that is herdr-generated (a bare number), one we set
@@ -39,7 +40,10 @@ session=$(field .session_id)
 [ -n "$inherited_session" ] && [ "$inherited_session" != "$session" ] && exit 0
 
 cwd=$(field .cwd); cwd=${cwd:-$PWD}
-if [ "${cwd%/}" = "$HOME/Numeral" ]; then log "coordinator cwd, skipping"; exit 0; fi
+case ":${HERDR_AUTONAME_COORDINATOR_DIRS:-}:" in
+  ::) ;;
+  *":${cwd%/}:"*) log "coordinator cwd, skipping"; exit 0 ;;
+esac
 
 # --- title -------------------------------------------------------------------------
 title=""

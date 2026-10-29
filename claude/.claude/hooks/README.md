@@ -20,7 +20,8 @@ Tabs with one recognized chat get tab labels, including splits with editors or
 shells. Tabs with several chats get a label on the current pane. If pane inventory
 is unavailable, split tabs conservatively get pane labels only.
 Bare ticket IDs and temporary `PROD-3083 · slot 1` labels migrate to topic names.
-Human tab labels, `main`, `coordinator`, and `~/Numeral` are protected.
+Human tab labels, `main`, `coordinator`, and any cwd listed in
+`HERDR_AUTONAME_COORDINATOR_DIRS` (colon-separated, exact match) are protected.
 `HERDR_AUTONAME=0` disables naming; `HERDR_AUTONAME_DEBUG=1` logs decisions.
 
 Run verification from the dotfiles root:

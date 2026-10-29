@@ -14,7 +14,8 @@ HOOK = ROOT / "claude/.claude/hooks/herdr-autoname.sh"
 
 class AutonameTests(unittest.TestCase):
     def run_hook(self, label="ENG-7647", panes=1, chats=1, mine="",
-                 title_source="claude", cwd=None, inventory_ok=True, agent_id=""):
+                 title_source="claude", cwd=None, inventory_ok=True, agent_id="",
+                 coordinators=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copy(HOOK, root / HOOK.name)
@@ -40,7 +41,7 @@ elif args[:2] == ['pane', 'list']:
     print(json.dumps({'result': {'panes': panes}}))
 elif args[:2] == ['pane', 'get']:
     print(json.dumps({'result': {'pane': {'terminal_title_stripped':
-                     'Determine blocked-step unblocking | tax-holiday.9'}}}))
+                     'Determine blocked-step unblocking | app.9'}}}))
 elif args[1] == 'rename':
     with open(os.environ['TEST_COMMANDS'], 'a') as stream:
         stream.write(json.dumps(args) + '\\n')
@@ -65,8 +66,9 @@ else:
                        HERDR_WORKSPACE_ID="w1", HERDR_AUTONAME="1",
                        CODEX_THREAD_ID="", TEST_LABEL=label, TEST_PANES=str(panes),
                        TEST_CHATS=str(chats), TEST_INVENTORY=str(int(inventory_ok)),
-                       TEST_COMMANDS=str(commands))
-            payload = {"cwd": cwd or str(root / "Numeral/tax-holiday.9")}
+                       TEST_COMMANDS=str(commands),
+                       HERDR_AUTONAME_COORDINATOR_DIRS=coordinators)
+            payload = {"cwd": cwd or str(root / "work/app.9")}
             if title_source == "claude":
                 payload["transcript_path"] = str(transcript)
             elif title_source == "codex":
@@ -110,6 +112,11 @@ else:
         for label in ("main", "coordinator", "salesforce", "ENG-7647 · custom topic"):
             with self.subTest(label=label):
                 self.assertEqual(self.run_hook(label=label), [])
+
+    def test_coordinator_dirs_match_exactly(self):
+        self.assertEqual(self.run_hook(cwd="/work/", coordinators="/other:/work"), [])
+        self.assertEqual(self.run_hook(cwd="/work/app.9", coordinators="/other:/work"),
+                         [["tab", "rename", "w1:t1", "step_unblocking"]])
 
     def test_subagent_does_not_rename(self):
         self.assertEqual(self.run_hook(agent_id="child"), [])
