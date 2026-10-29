@@ -35,6 +35,13 @@ also links the skill into
 `~/.claude/skills`. No account, MCP server or remote-debugging port is needed; it needs `bun`. Run
 `browser-use --help` for commands, and `browser-use reload` after editing the extension.
 
+## artifacts (local page server)
+
+`artifacts/` is a Rust server for agent-written pages at `localhost:4620`. It is not stowed:
+`cd artifacts && cargo build --release`, then link `target/release/artifacts` into `~/.local/bin`.
+Work-specific settings (`ARTIFACTS_SLOT_REPO`, `ARTIFACTS_TICKET_URL`) go in the private profile.
+See `artifacts/README.md`.
+
 ## Private references
 
 Keep machine-specific configuration and secrets under the ignored `private/` directory.

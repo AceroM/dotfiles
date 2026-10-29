@@ -1,0 +1,19 @@
+[package]
+name = "artifacts"
+version = "0.1.0"
+edition = "2021"
+description = "One local server for every code path and artifact agents write, stored in SQLite"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[profile.release]
+debug = false

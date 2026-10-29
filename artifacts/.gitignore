@@ -1,0 +1,18 @@
+# Cargo build output. Cargo.lock stays tracked: this is a binary.
+/target/
+
+# rustfmt backups and MSVC debug info
+**/*.rs.bk
+*.pdb
+
+# Page stores. The default lives in ~/.local/share/artifacts; these catch --db / ARTIFACTS_DB
+# pointed inside the checkout.
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Pages carry private content; never commit one by accident.
+*.html
+
+.DS_Store
