@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Lets local coding agents (Claude Code, Codex) drive tabs in the shared \"Agents\" tab group. No account, no cloud.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtzfeQHOrgElM+erdJ3I5x3hGQmxH0NYMGJyVGa0DeaEmjZh9ruBi+gHu7By62Yt69w+rREa33e14N9KFcICUpADyiWPFnLM62+aDF3Nbd6D7bPKN4/xYoCUdFzT7G3P176Thjs8054GUrqRxzU3I+kjj4oCC/JB6TJcq1ccX5wZZE7SrNbzd1QqGzRG/A7T5XngNBhMKi8sr9g0cFhLKkjuwBDF3dOH0ufDO40ACn58FjcsKoQZ7VRsBbOX72Kq2UpSnUtP8WJsFmRl5brCdDiU+FX3nJePvAvr1ZT6KBDe9YgdtF9hNoQR52/NqvKOp0HUrvt45liZr7Ez0dDoNNQIDAQAB",
-  "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms", "nativeMessaging"],
+  "permissions": ["debugger", "tabs", "tabGroups", "webNavigation", "storage", "alarms", "nativeMessaging"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "browser-use" },

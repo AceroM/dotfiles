@@ -28,8 +28,10 @@ Developer mode → **Load unpacked** → `~/.dotfiles/browser-use/.local/share/b
 (stable id `aneibjcaiaipkjajpalppgijoekiedko`). Claude Code and Codex both drive the browser through
 the `browser-use` CLI and the shared skill in `~/.agents/skills/browser-use`; their tabs live in one
 **Agents** tab group, so every herdr pane sees the same tabs. That is the only tab group it ever
-makes: tabs it opens join that group, and a second Agents group gets merged back into it. If a
-window won't accept groups, the group gets its own window. `install` also links the skill into
+makes: tabs it opens join that group, as do new tabs and popups opened by pages already in the
+group (including links with `target="_blank"` or `rel="noopener"`). A second Agents group gets
+merged back into it. If a window won't accept groups, the group gets its own window. `install`
+also links the skill into
 `~/.claude/skills`. No account, MCP server or remote-debugging port is needed; it needs `bun`. Run
 `browser-use --help` for commands, and `browser-use reload` after editing the extension.
 

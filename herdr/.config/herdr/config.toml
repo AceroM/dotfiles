@@ -400,7 +400,7 @@ prompt_new_workspace_name = false
 enabled = false
 
 [ui.sidebar.spaces]
-rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+rows = [["state_icon", "workspace", "git_status"]]
 
 [update]
 channel = "stable"

@@ -192,6 +192,34 @@ async function groupTabs() {
   return group ? chrome.tabs.query({ groupId: group.id }) : [];
 }
 
+// Links and window.open() can create tabs outside their source tab's group. Track the source
+// explicitly; the active tab/window may already have changed when these events arrive.
+const inheritingGroup = new Map(); // tabId → pending grouping (also orders chains of new tabs)
+
+function inheritAgentsGroup(tabId, sourceTabId) {
+  if (sourceTabId == null || sourceTabId === tabId) return;
+  if (inheritingGroup.has(tabId)) return inheritingGroup.get(tabId);
+  const pending = (async () => {
+    await inheritingGroup.get(sourceTabId);
+    // A popup or its source can close before Chrome delivers the event.
+    const source = await chrome.tabs.get(sourceTabId).catch(() => null);
+    if (!source || source.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) return;
+    const group = await chrome.tabGroups.get(source.groupId).catch(() => null);
+    if (group?.title !== GROUP_TITLE) return;
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab && tab.groupId !== group.id) await addToGroup(tabId);
+  })().catch((e) => {
+    console.warn("inherit Agents group:", e?.message ?? e);
+  }).finally(() => inheritingGroup.delete(tabId));
+  inheritingGroup.set(tabId, pending);
+  return pending;
+}
+
+chrome.tabs.onCreated.addListener((tab) => inheritAgentsGroup(tab.id, tab.openerTabId));
+// Navigation targets retain the source even for target="_blank" / rel="noopener" links.
+chrome.webNavigation.onCreatedNavigationTarget.addListener(({ tabId, sourceTabId }) =>
+  inheritAgentsGroup(tabId, sourceTabId));
+
 // Resolve the tab a command acts on: explicit `tab`, else this owner's last-used tab.
 async function resolveTab(args, owner, { requireGroup = true } = {}) {
   let tabId = args.tab != null ? Number(args.tab) : (await getState()).lastTab[owner];
