@@ -1,5 +1,7 @@
 //! SQLite storage. One row per page with its current source and rendered HTML; every overwrite
 //! moves the previous version into `revisions`, and screenshots live in `assets` as blobs.
+//! `tag_rules` is this machine's tagging: a page carries every tag whose glob matches the
+//! checkout it was written in, worked out when it's listed, so changing a rule retags old pages.
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::path::Path;
@@ -20,7 +22,6 @@ CREATE TABLE IF NOT EXISTS artifacts (
   html        TEXT NOT NULL,
   ctx         TEXT NOT NULL,
   repo        TEXT,
-  slot        INTEGER,
   branch      TEXT,
   sha         TEXT,
   ticket      TEXT,
@@ -49,7 +50,18 @@ CREATE TABLE IF NOT EXISTS assets (
   bytes        BLOB NOT NULL,
   PRIMARY KEY (artifact_id, name)
 );
+CREATE TABLE IF NOT EXISTS tag_rules (
+  tag     TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  PRIMARY KEY (tag, pattern)
+);
 "#;
+
+/// The checkout a page was written in (else the directory), which tag globs match against.
+const ROOT: &str = "COALESCE(json_extract(a.ctx, '$.repo_root'), json_extract(a.ctx, '$.cwd'), '')";
+
+/// Separates tags in the `group_concat` a list row carries them in.
+const TAG_SEP: char = '\u{1f}';
 
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -80,7 +92,7 @@ pub struct ListItem {
     pub title: String,
     pub summary: Option<String>,
     pub repo: Option<String>,
-    pub slot: Option<i64>,
+    pub tags: Vec<String>,
     pub branch: Option<String>,
     pub ticket: Option<String>,
     pub revision: i64,
@@ -108,7 +120,6 @@ pub struct Write<'a> {
     pub html: &'a str,
     pub ctx: &'a str,
     pub repo: Option<&'a str>,
-    pub slot: Option<i64>,
     pub branch: Option<&'a str>,
     pub sha: Option<&'a str>,
     pub ticket: Option<&'a str>,
@@ -120,7 +131,7 @@ pub struct Write<'a> {
 pub struct Filter {
     pub q: Option<String>,
     pub kind: Option<String>,
-    pub slot: Option<i64>,
+    pub tag: Option<String>,
     pub limit: i64,
     pub offset: i64,
 }
@@ -193,12 +204,12 @@ impl Db {
             tx.execute(
                 "UPDATE artifacts SET kind = ?2, title = ?3, summary = COALESCE(?4, summary),
                    question = COALESCE(?5, question), source = ?6, html = ?7, ctx = ?8, repo = ?9,
-                   slot = ?10, branch = ?11, sha = ?12, ticket = COALESCE(?13, ticket),
-                   source_file = ?14, session_id = ?15, revision = revision + 1, updated_at = ?16
+                   branch = ?10, sha = ?11, ticket = COALESCE(?12, ticket),
+                   source_file = ?13, session_id = ?14, revision = revision + 1, updated_at = ?15
                  WHERE id = ?1",
                 params![
                     id, w.kind, w.title, w.summary, w.question, w.source, w.html, w.ctx, w.repo,
-                    w.slot, w.branch, w.sha, w.ticket, w.source_file, w.session_id, now
+                    w.branch, w.sha, w.ticket, w.source_file, w.session_id, now
                 ],
             )?;
             tx.query_row("SELECT slug, revision FROM artifacts WHERE id = ?1", [id], |r| {
@@ -211,11 +222,11 @@ impl Db {
             };
             tx.execute(
                 "INSERT INTO artifacts (slug, kind, title, summary, question, source, html, ctx, repo,
-                   slot, branch, sha, ticket, source_file, session_id, revision, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1, ?16, ?16)",
+                   branch, sha, ticket, source_file, session_id, revision, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1, ?15, ?15)",
                 params![
                     slug, w.kind, w.title, w.summary, w.question, w.source, w.html, w.ctx, w.repo,
-                    w.slot, w.branch, w.sha, w.ticket, w.source_file, w.session_id, now
+                    w.branch, w.sha, w.ticket, w.source_file, w.session_id, now
                 ],
             )?;
             // Past MAX_PAGES, the least recently updated pages go, and their revisions and assets
@@ -232,8 +243,12 @@ impl Db {
     }
 
     pub fn list(&self, f: &Filter) -> rusqlite::Result<Vec<ListItem>> {
-        let mut sql = String::from(
-            "SELECT slug, kind, title, summary, repo, slot, branch, ticket, revision, updated_at FROM artifacts WHERE 1 = 1",
+        let mut sql = format!(
+            "SELECT slug, kind, title, summary, repo,
+               (SELECT group_concat(tag, char(31)) FROM
+                  (SELECT DISTINCT r.tag FROM tag_rules r WHERE {ROOT} GLOB r.pattern ORDER BY r.tag)),
+               branch, ticket, revision, updated_at
+             FROM artifacts a WHERE 1 = 1",
         );
         let mut args: Vec<rusqlite::types::Value> = vec![];
         if let Some(q) = f.q.as_deref().filter(|q| !q.is_empty()) {
@@ -247,9 +262,9 @@ impl Db {
             sql.push_str(" AND kind = ?");
             args.push(rusqlite::types::Value::Text(kind.to_string()));
         }
-        if let Some(slot) = f.slot {
-            sql.push_str(" AND slot = ?");
-            args.push(rusqlite::types::Value::Integer(slot));
+        if let Some(tag) = f.tag.as_deref().filter(|t| !t.is_empty()) {
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM tag_rules r WHERE r.tag = ? AND {ROOT} GLOB r.pattern)"));
+            args.push(rusqlite::types::Value::Text(tag.to_string()));
         }
         sql.push_str(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?");
         args.push(rusqlite::types::Value::Integer(if f.limit > 0 { f.limit } else { 200 }));
@@ -263,7 +278,10 @@ impl Db {
                 title: r.get(2)?,
                 summary: r.get(3)?,
                 repo: r.get(4)?,
-                slot: r.get(5)?,
+                tags: r
+                    .get::<_, Option<String>>(5)?
+                    .map(|t| t.split(TAG_SEP).map(str::to_string).collect())
+                    .unwrap_or_default(),
                 branch: r.get(6)?,
                 ticket: r.get(7)?,
                 revision: r.get(8)?,
@@ -375,10 +393,70 @@ impl Db {
         Ok((newer, older))
     }
 
-    pub fn slots(&self) -> rusqlite::Result<Vec<i64>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT slot FROM artifacts WHERE slot IS NOT NULL ORDER BY slot")?;
-        let rows = stmt.query_map([], |r| r.get(0))?;
-        rows.collect()
+    /// Tags that match at least one page, for the filters.
+    pub fn tags(&self) -> rusqlite::Result<Vec<String>> {
+        let sql = format!(
+            "SELECT DISTINCT r.tag FROM tag_rules r WHERE EXISTS (SELECT 1 FROM artifacts a WHERE {ROOT} GLOB r.pattern) ORDER BY r.tag"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut tags: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        tags.sort_by(|a, b| natural_cmp(a, b));
+        Ok(tags)
+    }
+
+    /// Every rule, as (tag, glob).
+    pub fn tag_rules(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT tag, pattern FROM tag_rules")?;
+        let mut rules: Vec<(String, String)> =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        rules.sort_by(|a, b| natural_cmp(&a.0, &b.0).then_with(|| a.1.cmp(&b.1)));
+        Ok(rules)
+    }
+
+    pub fn add_tag_rule(&self, tag: &str, pattern: &str) -> rusqlite::Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO tag_rules (tag, pattern) VALUES (?1, ?2)", params![tag, pattern])?;
+        Ok(())
+    }
+
+    /// Remove one rule, or every rule for the tag when `pattern` is None. Returns how many went.
+    pub fn remove_tag_rule(&self, tag: &str, pattern: Option<&str>) -> rusqlite::Result<usize> {
+        match pattern {
+            Some(p) => self.conn.execute("DELETE FROM tag_rules WHERE tag = ?1 AND pattern = ?2", params![tag, p]),
+            None => self.conn.execute("DELETE FROM tag_rules WHERE tag = ?1", params![tag]),
+        }
+    }
+}
+
+/// `s2` before `s10`: runs of digits compare as numbers.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, _) => return std::cmp::Ordering::Less,
+            (_, None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let number = |it: &mut std::iter::Peekable<std::str::Chars>| {
+                    let mut n: u64 = 0;
+                    while let Some(d) = it.peek().and_then(|c| c.to_digit(10)) {
+                        n = n.saturating_mul(10).saturating_add(d as u64);
+                        it.next();
+                    }
+                    n
+                };
+                let ord = number(&mut a).cmp(&number(&mut b));
+                if ord.is_ne() {
+                    return ord;
+                }
+            }
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return x.cmp(&y);
+                }
+                a.next();
+                b.next();
+            }
+        }
     }
 }
 

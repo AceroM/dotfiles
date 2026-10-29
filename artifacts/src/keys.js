@@ -407,7 +407,7 @@
   // ---- help ----------------------------------------------------------------------------------
   const HELP = [
     ['Scroll', [['j  k', 'down / up 100px'], ['d  u', 'down / up half a page'], ['gg  G', 'top / bottom'], ['}  {', 'next / previous section, hop or day'], ["''", 'back to where you jumped from']]],
-    ['Go', [['h', APP ? 'back to the page list (Esc too)' : 'back, or up a level'], ['l', 'forward; on the index, open the selection; else the next page'], ['[  ]', APP ? 'newer / older page in the list' : 'newer / older page (in the list you came from)'], ['gh', 'home'], ['gu', 'up a level'], ['gs', 'this page\'s source'], ['gi', 'search every page (the index)'], ['s1…s9  sa', 'filter by slot / all slots'], ['r', 'reload']]],
+    ['Go', [['h', APP ? 'back to the page list (Esc too)' : 'back, or up a level'], ['l', 'forward; on the index, open the selection; else the next page'], ['[  ]', APP ? 'newer / older page in the list' : 'newer / older page (in the list you came from)'], ['gh', 'home'], ['gu', 'up a level'], ['gs', 'this page\'s source'], ['gi', 'search every page (the index)'], ['r', 'reload']]],
     ...(APP ? [['Tabs', [['H  L', 'previous / next tab'], ['x  X', 'close / reopen a tab'], ['yt', 'duplicate this tab'], ['^', 'the last-used tab'], ['<  >', 'move this tab left / right']]]] : []),
     ['Find', [['/', 'find in this page as you type (a capital makes it case-sensitive)'], ['Enter  Esc', 'keep the matches / cancel and go back'], ['n  N', 'next / previous match'], ['Esc', 'clear the matches']]],
     ['Index', [['/', 'filter the list as you type; Enter or Esc to leave the box'], ['j  k', 'next / previous item (more load as you go)'], ['J  K', 'scroll 100px'], ['gg  G', 'first / last loaded item'], ['l  o  Enter', 'open it'], ['O', 'open it in a new tab']]],
@@ -511,11 +511,10 @@
       e.preventDefault();
       if (p === 'm') return /^[a-z]$/.test(k) ? setMark(k) : undefined;
       if (p === "'" || p === '`') return k === "'" || k === '`' ? jumpBack() : /^[a-z]$/.test(k) ? gotoMark(k) : undefined;
-      if (p === 's') return /^[1-9]$/.test(k) ? go('/?slot=' + k) : k === 'a' || k === '0' ? go('/') : undefined;
       return sequences[p]?.[k]?.();
     }
     if (/^[0-9]$/.test(k) && (count || k !== '0')) { count += k; showCmd(); e.preventDefault(); return; }
-    if ('gyzms\'`'.includes(k)) {
+    if ('gyzm\'`'.includes(k)) {
       pending = k;
       showCmd();
       clearTimeout(pendingTimer);

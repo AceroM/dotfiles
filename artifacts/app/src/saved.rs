@@ -1,4 +1,4 @@
-//! What the app keeps across launches: the open tabs and the page zoom, in
+//! What the app keeps across launches: the open tabs, the page zoom and the sidebar width, in
 //! `$XDG_DATA_HOME/artifacts/app.json` (else `~/.local/share/artifacts/app.json`), beside the
 //! server's page store.
 
@@ -12,6 +12,7 @@ pub struct Saved {
     pub tabs: Vec<String>,
     pub active: usize,
     pub zoom: Option<f64>,
+    pub sidebar_width: Option<f32>,
 }
 
 fn path() -> PathBuf {

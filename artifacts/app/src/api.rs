@@ -9,8 +9,9 @@ pub struct Item {
     pub slug: String,
     pub kind: String,
     pub title: String,
+    /// This machine's tags for the page (`artifacts tag`); none until rules exist.
     #[serde(default)]
-    pub slot: Option<i64>,
+    pub tags: Vec<String>,
     #[serde(default)]
     pub ticket: Option<String>,
     pub updated_at: i64,
@@ -22,7 +23,7 @@ pub struct Item {
 pub struct Query {
     pub q: String,
     pub kind: Option<String>,
-    pub slot: Option<i64>,
+    pub tag: Option<String>,
 }
 
 pub fn base_url() -> String {
@@ -59,8 +60,8 @@ fn list(query: &Query) -> Result<Vec<Item>, String> {
     if let Some(kind) = &query.kind {
         req = req.query("kind", kind);
     }
-    if let Some(slot) = query.slot {
-        req = req.query("slot", &slot.to_string());
+    if let Some(tag) = &query.tag {
+        req = req.query("tag", tag);
     }
     let resp = req.call().map_err(|e| e.to_string())?;
     resp.into_json().map_err(|e| e.to_string())
@@ -69,14 +70,26 @@ fn list(query: &Query) -> Result<Vec<Item>, String> {
 pub struct Fetched {
     /// The pages matching the query, for the list.
     pub items: Vec<Item>,
-    /// Every page: the slot filter and the tab titles shouldn't shrink to the current results.
+    /// Every page: the tab titles shouldn't shrink to the current results.
     pub all: Vec<Item>,
+    /// The tags that match at least one page, for the filter.
+    pub tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Tags {
+    tags: Vec<String>,
 }
 
 pub fn fetch(query: &Query) -> Result<Fetched, String> {
     let all = list(&Query::default())?;
     let items = if *query == Query::default() { all.clone() } else { list(query)? };
-    Ok(Fetched { items, all })
+    let tags: Tags = ureq::get(&format!("{}/api/tags", base_url()))
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    Ok(Fetched { items, all, tags: tags.tags })
 }
 
 /// The server's event stream: one `data:` line whenever a page is added, updated or removed.

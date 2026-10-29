@@ -2,7 +2,7 @@
 //!
 //! `artifacts serve` keeps them in one SQLite file and serves them at http://localhost:4620: the
 //! home page lists the recent ones, and each lives at /a/<slug>/. `artifacts add <file>` sends a
-//! page along with the context it was written in (slot, branch, SHA, ticket, herdr tab, agent
+//! page along with the context it was written in (checkout, branch, SHA, ticket, herdr tab, agent
 //! session), so every page says where it came from. Open pages reload themselves when they change.
 
 mod client;
@@ -10,6 +10,7 @@ mod context;
 mod db;
 mod pages;
 mod render;
+mod run;
 mod server;
 
 use std::process::ExitCode;
@@ -22,9 +23,10 @@ usage:
   artifacts serve [--port 4620] [--db <path>]
   artifacts add <file|-> [--kind code-path|md|html] [--title T] [--summary S] [--question Q]
                          [--slug S] [--new] [--cwd DIR] [--asset FILE]... [--check] [--open]
-  artifacts ls [--limit N] [--slot N] [--q TEXT]
+  artifacts ls [--limit N] [--tag T] [--q TEXT]
   artifacts get <slug>        print the source, to edit and re-add with --slug
   artifacts rm <slug>
+  artifacts tag [ls]          this machine's tags: tag add <tag> <glob>, tag rm <tag> [<glob>]
 
 kinds: code-path (.json spec, rendered from git), md (.md), html (.html). Inferred from the extension.
 Re-adding the same file updates its page (for a temp file, only from the same agent session); --new forces a new one.
@@ -65,6 +67,7 @@ async fn main() -> ExitCode {
         Some("ls") => client::ls(rest).await,
         Some("get") => client::get(rest).await,
         Some("rm") => client::rm(rest).await,
+        Some("tag") => client::tag(rest).await,
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;

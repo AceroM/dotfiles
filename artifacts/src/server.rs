@@ -12,7 +12,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Redirect, Response,
     },
-    routing::{get, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -27,6 +27,7 @@ struct AppState {
     db: Mutex<Db>,
     events: broadcast::Sender<String>,
     base_url: String,
+    port: u16,
 }
 
 type Shared = Arc<AppState>;
@@ -63,7 +64,7 @@ pub async fn serve(raw: &[String]) -> Result<(), String> {
         .unwrap_or_else(default_db_path);
     let db = Db::open(std::path::Path::new(&db_path)).map_err(|e| format!("opening {db_path}: {e}"))?;
     let (events, _) = broadcast::channel(64);
-    let state: Shared = Arc::new(AppState { db: Mutex::new(db), events, base_url: format!("http://localhost:{port}") });
+    let state: Shared = Arc::new(AppState { db: Mutex::new(db), events, base_url: format!("http://localhost:{port}"), port });
 
     let app = Router::new()
         .route("/", get(index))
@@ -71,6 +72,9 @@ pub async fn serve(raw: &[String]) -> Result<(), String> {
         .route("/api/artifacts", get(api_list).post(api_create))
         .route("/api/artifacts/:slug", get(api_get).delete(api_delete))
         .route("/api/artifacts/:slug/assets/*name", put(api_put_asset))
+        .route("/api/run", post(api_run))
+        .route("/api/tags", get(api_tags).post(api_add_tag))
+        .route("/api/tags/:tag", axum::routing::delete(api_remove_tag))
         .route("/a/:slug", get(|Path(slug): Path<String>| async move { Redirect::permanent(&format!("/a/{slug}/")) }))
         .route("/a/:slug/", get(page))
         .route("/a/:slug/*rest", get(page_rest))
@@ -93,7 +97,7 @@ fn filter_from(query: &HashMap<String, String>) -> Filter {
     Filter {
         q: query.get("q").filter(|v| !v.is_empty()).cloned(),
         kind: query.get("kind").filter(|v| !v.is_empty()).cloned(),
-        slot: query.get("slot").and_then(|v| v.parse().ok()),
+        tag: query.get("tag").filter(|v| !v.is_empty()).cloned(),
         limit: query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(pages::PAGE_SIZE),
         offset: query.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
     }
@@ -109,8 +113,8 @@ async fn index(State(s): State<Shared>, Query(query): Query<HashMap<String, Stri
     if query.contains_key("partial") {
         return Html(pages::list_rows(&items)).into_response();
     }
-    let slots = db.slots().unwrap_or_default();
-    Html(pages::index(&items, &filter, &slots)).into_response()
+    let tags = db.tags().unwrap_or_default();
+    Html(pages::index(&items, &filter, &tags)).into_response()
 }
 
 async fn events_stream(State(s): State<Shared>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -191,7 +195,6 @@ async fn api_create(State(s): State<Shared>, Json(req): Json<CreateRequest>) -> 
             html: &html,
             ctx: &ctx_json,
             repo: req.ctx.repo.as_deref(),
-            slot: req.ctx.slot,
             branch: req.ctx.branch.as_deref(),
             sha: req.ctx.sha.as_deref(),
             ticket: req.ctx.ticket.as_deref(),
@@ -216,7 +219,7 @@ async fn api_list(State(s): State<Shared>, Query(query): Query<HashMap<String, S
                 .map(|i| {
                     json!({
                         "slug": i.slug, "kind": i.kind, "title": i.title, "summary": i.summary, "repo": i.repo,
-                        "slot": i.slot, "branch": i.branch, "ticket": i.ticket, "revision": i.revision,
+                        "tags": i.tags, "branch": i.branch, "ticket": i.ticket, "revision": i.revision,
                         "updated_at": i.updated_at, "url": format!("{}/a/{}/", s.base_url, i.slug),
                     })
                 })
@@ -251,6 +254,92 @@ async fn api_delete(State(s): State<Shared>, Path(slug): Path<String>) -> Respon
         }
         Ok(false) => fail(StatusCode::NOT_FOUND, format!("no page {slug:?}")),
         Err(e) => db_error(e),
+    }
+}
+
+/// The tag rules, and the tags that match at least one page.
+async fn api_tags(State(s): State<Shared>) -> Response {
+    let db = s.db.lock().expect("db lock");
+    match (db.tag_rules(), db.tags()) {
+        (Ok(rules), Ok(tags)) => Json(json!({
+            "rules": rules.iter().map(|(tag, pattern)| json!({ "tag": tag, "pattern": pattern })).collect::<Vec<_>>(),
+            "tags": tags,
+        }))
+        .into_response(),
+        (Err(e), _) | (_, Err(e)) => db_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct TagRule {
+    tag: String,
+    pattern: String,
+}
+
+async fn api_add_tag(State(s): State<Shared>, Json(rule): Json<TagRule>) -> Response {
+    let tag = rule.tag.trim();
+    if tag.is_empty() || tag.contains(['\u{1f}', '/']) || rule.pattern.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "a tag needs a name (no '/') and a glob");
+    }
+    let added = s.db.lock().expect("db lock").add_tag_rule(tag, rule.pattern.trim());
+    match added {
+        Ok(()) => {
+            announce(&s, json!({ "tags": true }));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => db_error(e),
+    }
+}
+
+async fn api_remove_tag(
+    State(s): State<Shared>,
+    Path(tag): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let removed = s.db.lock().expect("db lock").remove_tag_rule(&tag, query.get("pattern").map(String::as_str));
+    match removed {
+        Ok(0) => fail(StatusCode::NOT_FOUND, format!("no tag rule {tag:?}")),
+        Ok(_) => {
+            announce(&s, json!({ "tags": true }));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => db_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RunRequest {
+    code: String,
+    /// The page it was run from: the block runs in that page's directory.
+    slug: Option<String>,
+    /// The block's own directory, absolute or relative to the page's.
+    cwd: Option<String>,
+    shell: Option<String>,
+}
+
+async fn api_run(State(s): State<Shared>, headers: HeaderMap, Json(req): Json<RunRequest>) -> Response {
+    if !crate::run::same_origin(&headers, s.port) {
+        return fail(StatusCode::FORBIDDEN, "blocks only run from this server's own pages");
+    }
+    let page_dir = req.slug.as_deref().and_then(|slug| {
+        let a = s.db.lock().expect("db lock").get(slug).ok().flatten()?;
+        let ctx: Context = serde_json::from_str(&a.ctx).ok()?;
+        ctx.cwd.or(ctx.repo_root)
+    });
+    let dir = match crate::run::resolve_dir(req.cwd.as_deref(), page_dir.as_deref()) {
+        Ok(dir) => dir,
+        Err(e) => return fail(StatusCode::UNPROCESSABLE_ENTITY, e),
+    };
+    let shell = crate::run::shell_for(req.shell.as_deref());
+    let first = req.code.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    println!("run  {} · {} · {first}", req.slug.as_deref().unwrap_or("-"), dir.display());
+    match crate::run::start(crate::run::Run { code: &req.code, shell, dir: &dir, slug: req.slug.as_deref() }) {
+        Ok(body) => (
+            [(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"), (header::CACHE_CONTROL, "no-store")],
+            body,
+        )
+            .into_response(),
+        Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

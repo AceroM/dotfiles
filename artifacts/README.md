@@ -5,9 +5,9 @@ It replaces Claude Artifacts for anything that doesn't need to be shared. Pages 
 one SQLite file (`~/.local/share/artifacts/artifacts.db`), render in milliseconds, and reload
 themselves when an agent updates them.
 
-- **Home** lists recent pages, newest first, grouped by day. Filter by kind or slot, or search
+- **Home** lists recent pages, newest first, grouped by day. Filter by kind or tag, or search
   titles, tickets, branches and source: `/` focuses the search box and the list filters as you type.
-- **Each page** (`/a/<slug>/`) has a context bar showing where it was written: the slot, branch,
+- **Each page** (`/a/<slug>/`) has a context bar showing where it was written: the checkout, branch,
   SHA (marked dirty if the tree was), ticket, herdr tab, and the agent session. Clicking the
   session chip copies a `claude --resume` command. Earlier versions stay at `/a/<slug>/r/<n>/`, and
   the source is at `/a/<slug>/source`.
@@ -66,6 +66,36 @@ The keys live in `src/keys.js`.
 
 A spec side may leave out `checkout` and `ref`. They default to the checkout `add` ran in and its HEAD.
 
+## Run
+
+Every code block on every page (markdown, HTML fragments, full HTML documents in their frame, a
+code path's source) has a copy button. Shell blocks also get ▶, which runs the block **on this
+machine**, in the page's directory (the checkout `add` ran in, or `--cwd`), and streams stdout and
+stderr in underneath with the exit code and time. ▶ again while it runs stops it, killing its
+whole process group; so does leaving the page. So write pages with commands to press: the query
+that shows the row, the curl that hits the endpoint, the test that proves the fix.
+
+It's HTML, so mark blocks however you write them:
+
+```html
+<pre><code class="language-bash">psql "$DATABASE_URL" -c 'select 1'</code></pre>   <!-- bash, sh, shell or zsh: runnable -->
+<pre data-run>pnpm test src/lib/tax.test.ts</pre>                                <!-- anything else, run with bash -->
+<pre data-run data-cwd="apps/web">ls</pre>          <!-- where: absolute, ~/…, or relative to the page's directory -->
+<pre data-run data-shell="zsh">print -l $path</pre> <!-- zsh instead of bash -->
+<pre data-norun><code class="language-bash">rm -rf build</code></pre>       <!-- copy only -->
+```
+
+In markdown, a ` ```bash ` fence renders to the first form. A code path takes a `run` field on the
+spec (shown under the intro) or on any hop (shown under its source; it runs in that side's
+`checkout`): a string, `{"code", "title", "cwd", "shell"}`, or a list of them. `--check` prints
+each one with the directory it will run in.
+
+Blocks run with `bash -c` (or `zsh -c`), no rc files, so aliases and shell functions aren't there;
+everything on the server's PATH is. No TTY: stdin is closed, `PAGER`/`GIT_PAGER` are `cat`,
+`NO_COLOR=1`, and `$ARTIFACTS_SLUG` names the page. Each run is logged in the server's pane.
+`POST /api/run` only answers this server's own pages: the Host and Origin must both be
+`localhost:4620` or `127.0.0.1:4620`, so another site (or a DNS-rebinding one) can't run anything.
+
 ## Build and run
 
 ```bash
@@ -79,14 +109,18 @@ It runs in herdr `servers`, tab `artifacts :4620`. After a rebuild, close that t
 ## App
 
 `app/` is a native window for the same server, built on GPUI: the page list (search, kind and
-slot filters, grouped by day) on the left, and pages in tabs on the right, each tab a WebKit view
+tag filters, grouped by day) on the left, and pages in tabs on the right, each tab a WebKit view
 showing its page exactly as a browser does. It follows the server live, so new pages appear as
 agents add them. Install it with `app/bundle.sh` (builds and writes
 `~/Applications/Artifacts.app`); Option-A toggles it (Hammerspoon). Closing the window quits it.
 
-The list follows the active tab: moving through it moves that tab, and a dot marks pages open in
-other tabs. Each tab keeps its own scroll and history. Links that ask for a new window open a new
-tab. The open tabs and the zoom come back on the next launch (`~/.local/share/artifacts/app.json`).
+The list has a cursor of its own: moving it (`j` `k`, with vim counts like `10j` against the
+relative line numbers in its gutter) doesn't touch the page until `l` or `Enter` opens it in the
+active tab. A click opens a page too, and ⌘-click or `⌘L` (on the row under the mouse, else the
+cursor's) opens it in a new tab. Dots mark pages open in tabs: bright for the active one. Each
+tab keeps its own scroll and history. The sidebar's edge drags (220–640px). Inside the app, pages
+drop their own header. Links that ask for a new window open a new
+tab. The open tabs, the zoom and the sidebar width come back on the next launch (`~/.local/share/artifacts/app.json`).
 
 `⌘T` (or `⌘N`, or the `+` button) starts a new tab by searching for its page: the search box
 takes the keyboard, reads NEW TAB, and has its text selected, so typing starts a new search.
@@ -99,11 +133,11 @@ or the **page**.
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `⌘/` search pages · `⌘F` find in page · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
+| Anywhere | `⌘/` search pages · `⌘F` find in page · `⌘L` open the hovered (else cursor's) page in a new tab · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
 | Tabs, anywhere | `⌘T` `⌘N` new · `⌘W` close (the last one hides the app) · `⌘⇧T` reopen · `⌘⌥W` close the others · `⌘⇧[` `⌘⇧]` or `⌃⇧Tab` `⌃Tab` previous / next · `⌘1`–`⌘8` that tab · `⌘9` the last · `⌃⇧PgUp` `⌃⇧PgDn` move |
-| List | `j` `k` move · `gg` `G` first / last · `l` `→` `Enter` `Tab` read the page · `/` search pages · `o` open in browser |
-| Tabs, from the list or the page | `H` `L` previous / next · `x` `X` close / reopen · `^` the last-used tab · `<` `>` move · `t` (list) or `yt` (page) duplicate |
-| Search pages | type to filter · `ctrl-j` `ctrl-k` move through the results as you type · `Enter` `Esc` back to the list |
+| List | `j` `k` move the cursor (`10j`, `15k`) · `gg` `G` first / last (`5G` the fifth) · `l` `→` `Enter` `Tab` open it and read · `Esc` back to the page · `/` search pages · `H` `L` previous / next tag · `o` open in browser |
+| Tabs, from the list or the page | `H` `L` previous / next (in the page) · `x` `X` close / reopen · `^` the last-used tab · `<` `>` move · `t` (list) or `yt` (page) duplicate |
+| Search pages | type to filter · `ctrl-j` `ctrl-k` move the cursor as you type · `Enter` open it · `Esc` back to the list |
 | Page | the page's own keys (`?` lists them) · `h` or `Esc` back to the list · `[` `]` previous / next page in the list · `/` find in page |
 
 **Search pages** (`/` from the list, `⌘/` from anywhere) filters the list across every page:
@@ -119,9 +153,25 @@ All optional, read from the environment:
 | `ARTIFACTS_PORT` / `--port` | `4620` | server port |
 | `ARTIFACTS_DB` / `--db` | `~/.local/share/artifacts/artifacts.db` | the SQLite store (`$XDG_DATA_HOME` if set) |
 | `ARTIFACTS_URL` | `http://localhost:4620` | where the CLI sends pages |
-| `ARTIFACTS_SLOT_REPO` | unset | worktree slots: a checkout named `<name>` is slot 1, `<name>.<N>` is slot N |
 | `ARTIFACTS_TICKET_URL` | unset | links the ticket chip, e.g. `https://linear.app/<workspace>/issue/{ticket}` |
 
 The ticket is read from the branch name (`me/abc-123-fix-login` → `ABC-123`). Without
 `ARTIFACTS_TICKET_URL` it shows as plain text. Branch and SHA chips link to GitHub when `origin`
 is a GitHub remote.
+
+## Tags
+
+Tags group pages by where they were written, and they're this machine's own: rules live in the
+SQLite store, not in config files. A page carries every tag whose glob matches its checkout (the
+repo root, else the directory `add` ran in). There are none until you add some, and changing a
+rule retags old pages too.
+
+```bash
+artifacts tag add work ~/src/app*        # `*` matches anything, so worktrees like app.2 count
+artifacts tag add s2 ~/src/app.2         # or one tag per worktree
+artifacts tag                             # list the rules
+artifacts tag rm s2                       # drop a tag (or `rm <tag> <glob>` for one rule)
+```
+
+The index and the app filter by tag (`?tag=`, `artifacts ls --tag`); in the app, `H` `L` on the
+list step through them.

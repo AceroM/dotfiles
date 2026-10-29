@@ -1,4 +1,4 @@
-//! Where a page was written: the checkout, slot, branch and SHA, the ticket the branch names, and
+//! Where a page was written: the checkout, branch and SHA, the ticket the branch names, and
 //! the herdr tab and agent session that wrote it. Gathered by the CLI, stored with every revision.
 
 use regex::Regex;
@@ -13,7 +13,6 @@ pub struct Context {
     pub cwd: Option<String>,
     pub repo_root: Option<String>,
     pub repo: Option<String>,
-    pub slot: Option<i64>,
     pub branch: Option<String>,
     pub sha: Option<String>,
     pub dirty: Option<bool>,
@@ -42,17 +41,6 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.is_empty())
 }
 
-/// With `ARTIFACTS_SLOT_REPO=<name>`, a checkout named `<name>` is slot 1 and `<name>.<N>` is slot N.
-/// Any other checkout, or no variable, has no slot.
-pub fn slot_of(repo_root: &str) -> Option<i64> {
-    let base = non_empty(std::env::var("ARTIFACTS_SLOT_REPO").ok())?;
-    let name = Path::new(repo_root).file_name()?.to_str()?;
-    if name == base {
-        return Some(1);
-    }
-    name.strip_prefix(base.as_str())?.strip_prefix('.')?.parse().ok()
-}
-
 /// `me/abc-123-fix-login` → `ABC-123`.
 pub fn ticket_of(branch: &str) -> Option<String> {
     let re = Regex::new(r"(?i)(?:^|/)([a-z]{2,5})-(\d{2,6})(?:-|$)").ok()?;
@@ -75,7 +63,6 @@ pub fn gather(cwd: &Path) -> Context {
     if let Some(root) = non_empty(run("git", cwd, &["rev-parse", "--show-toplevel"])) {
         let root_path = Path::new(&root);
         ctx.repo = root_path.file_name().and_then(|n| n.to_str()).map(str::to_string);
-        ctx.slot = slot_of(&root);
         ctx.branch = non_empty(run("git", root_path, &["branch", "--show-current"]));
         ctx.sha = non_empty(run("git", root_path, &["rev-parse", "HEAD"]));
         ctx.dirty = run("git", root_path, &["status", "--porcelain", "-uno"]).map(|s| !s.is_empty());

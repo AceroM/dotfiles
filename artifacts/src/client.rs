@@ -181,11 +181,7 @@ pub async fn add(raw: &[String]) -> Result<(), String> {
     let url = saved["url"].as_str().unwrap_or_default();
     println!("{url}");
     let revision = saved["revision"].as_i64().unwrap_or(1);
-    let place = match (ctx.slot, ctx.branch.as_deref()) {
-        (Some(slot), Some(branch)) => format!(" · slot {slot} · {branch}"),
-        (Some(slot), None) => format!(" · slot {slot}"),
-        _ => String::new(),
-    };
+    let place = ctx.branch.as_deref().map(|b| format!(" · {b}")).unwrap_or_default();
     eprintln!(
         "{} v{revision}{place}{}",
         if revision > 1 { "updated" } else { "created" },
@@ -271,7 +267,7 @@ fn age(ts: i64) -> String {
 pub async fn ls(raw: &[String]) -> Result<(), String> {
     let args = Args::parse(raw, &[])?;
     let mut query: Vec<(String, String)> = vec![("limit".into(), args.get("limit").unwrap_or_else(|| "30".into()))];
-    for key in ["slot", "q", "kind"] {
+    for key in ["tag", "q", "kind"] {
         if let Some(v) = args.get(key) {
             query.push((key.into(), v));
         }
@@ -284,11 +280,11 @@ pub async fn ls(raw: &[String]) -> Result<(), String> {
         .map_err(not_running)?;
     let items: Vec<Value> = ok(resp).await?.json().await.map_err(|e| e.to_string())?;
     for item in items {
-        let slot = item["slot"].as_i64().map(|s| format!("s{s}")).unwrap_or_else(|| "-".into());
+        let tags: Vec<&str> = item["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         println!(
-            "{:<5} {:<4} {:<9} {:<42} {}",
+            "{:<5} {:<8} {:<9} {:<42} {}",
             age(item["updated_at"].as_i64().unwrap_or(0)),
-            slot,
+            if tags.is_empty() { "-".to_string() } else { tags.join(",") },
             item["kind"].as_str().unwrap_or(""),
             item["slug"].as_str().unwrap_or(""),
             item["title"].as_str().unwrap_or("")
@@ -319,4 +315,47 @@ pub async fn rm(raw: &[String]) -> Result<(), String> {
     ok(resp).await?;
     eprintln!("deleted {slug}");
     Ok(())
+}
+
+/// `artifacts tag` lists this machine's tag rules; `tag add <tag> <glob>` tags every page written
+/// in a checkout the glob matches (`~` expands; `*` matches anything, so `~/src/app*` covers the
+/// app's worktrees too); `tag rm <tag> [<glob>]` drops one rule, or all of the tag's.
+pub async fn tag(raw: &[String]) -> Result<(), String> {
+    let args = Args::parse(raw, &[])?;
+    let client = reqwest::Client::new();
+    match args.positionals.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        [] | ["ls"] => {
+            let resp = client.get(format!("{}/api/tags", server_url())).send().await.map_err(not_running)?;
+            let body: Value = ok(resp).await?.json().await.map_err(|e| e.to_string())?;
+            let rules = body["rules"].as_array().cloned().unwrap_or_default();
+            if rules.is_empty() {
+                println!("no tags yet: artifacts tag add <tag> <glob>");
+            }
+            for rule in rules {
+                println!("{:<12} {}", rule["tag"].as_str().unwrap_or(""), rule["pattern"].as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        ["add", tag, glob] => {
+            let pattern = expand_home(glob);
+            let resp = client
+                .post(format!("{}/api/tags", server_url()))
+                .json(&serde_json::json!({ "tag": tag, "pattern": pattern }))
+                .send()
+                .await
+                .map_err(not_running)?;
+            ok(resp).await?;
+            println!("{tag}  {pattern}");
+            Ok(())
+        }
+        ["rm", tag, rest @ ..] if rest.len() <= 1 => {
+            let mut req = client.delete(format!("{}/api/tags/{tag}", server_url()));
+            if let Some(glob) = rest.first() {
+                req = req.query(&[("pattern", expand_home(glob))]);
+            }
+            ok(req.send().await.map_err(not_running)?).await?;
+            Ok(())
+        }
+        _ => Err("usage: artifacts tag [ls] | tag add <tag> <glob> | tag rm <tag> [<glob>]".into()),
+    }
 }

@@ -15,10 +15,13 @@ const STYLE: &str = r#"<style>
   --accent:#7fc0aa; --accent-soft:#1f3530; --warn:#e0a07c; --warn-soft:#3a2a21; color-scheme: dark; }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans);
+  --ab-bg: var(--surface); --ab-rule: var(--rule); --ab-ink: var(--ink); --ab-muted: var(--muted); --ab-ok: var(--accent); --ab-err: var(--warn); --ab-mono: var(--mono); }
 a { color: var(--accent); }
 .top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--rule); }
+/* Inside the native app (artifacts-app), the window has its own chrome. */
+html.in-app .top { display: none; }
 .top-in { max-width: 1120px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .brand { font-weight: 600; color: var(--ink); text-decoration: none; letter-spacing: -0.01em; }
 .brand span { color: var(--faint); font-weight: 400; }
@@ -122,6 +125,12 @@ p.page-sum { color: var(--muted); margin: 0 0 12px; font-size: 16px; }
 .dcp .dcp-io dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
 .dcp .dcp-io dt { color: var(--muted); }
 .dcp .dcp-io dd { margin: 0; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dcp .dcp-run { border-top: 1px solid var(--rule); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.dcp > .dcp-run { border: 0; padding: 0; }
+.dcp .dcp-run-h { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; color: var(--muted); }
+.dcp .dcp-run pre { margin: 0; background: var(--bg); border: 1px solid var(--rule); border-radius: 6px; padding: 8px 12px; overflow-x: auto;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+.dcp > .dcp-run pre { background: var(--surface); }
 .dcp .dcp-io-note { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 8px 12px; font-size: 13.5px; color: var(--muted); }
 @media (max-width: 640px) { .dcp .dcp-io { grid-template-columns: 1fr; } .dcp .dcp-io > div + div { border-left: 0; border-top: 1px solid var(--rule); } }
 /* lightbox */
@@ -165,6 +174,7 @@ ul.list li.row.sel { background: var(--surface); border-color: var(--accent); }
 </style>"#;
 
 const KEYS: &str = include_str!("keys.js");
+const BLOCKS: &str = include_str!("blocks.js");
 
 /// Applies a saved theme before first paint, so `t` doesn't flash the other one on load.
 const THEME: &str = r#"<script>try{const t=JSON.parse(localStorage.getItem('artifacts:theme'));if(t)document.documentElement.dataset.theme=t}catch(e){}</script>"#;
@@ -360,7 +370,7 @@ fn shell(title: &str, body: &[(&str, Option<&str>)], top: &str, main: &str, need
 <header class="top"><div class="top-in"><span class="live" title="Live: reloads when this changes"></span><a class="brand" href="/">artifacts <span>:4620</span></a>{top}<span class="keys-hint"><kbd>?</kbd> keys</span></div></header>
 <main>{main}</main>
 <div id="lb"><img alt=""></div>
-{SCRIPT}<script>{KEYS}</script>{}</body></html>"#,
+{SCRIPT}<script>{KEYS}</script><script>{BLOCKS}</script>{}</body></html>"#,
         escape(title),
         if needs_mermaid { MERMAID } else { "" }
     )
@@ -372,19 +382,25 @@ fn kind_label(kind: &str) -> &str {
     KINDS.iter().find(|(k, _)| *k == kind).map(|(_, l)| *l).unwrap_or(kind)
 }
 
-fn filters(f: &Filter, slots: &[i64]) -> String {
+fn filters(f: &Filter, tags: &[String]) -> String {
     let mut kind_opts = String::from(r#"<option value="">all kinds</option>"#);
     for (k, label) in KINDS {
         let sel = if f.kind.as_deref() == Some(k) { " selected" } else { "" };
         kind_opts.push_str(&format!(r#"<option value="{k}"{sel}>{label}</option>"#));
     }
-    let mut slot_opts = String::from(r#"<option value="">all slots</option>"#);
-    for s in slots {
-        let sel = if f.slot == Some(*s) { " selected" } else { "" };
-        slot_opts.push_str(&format!(r#"<option value="{s}"{sel}>slot {s}</option>"#));
-    }
+    // Tags exist only once this machine has rules (`artifacts tag add`).
+    let tag_select = if tags.is_empty() {
+        String::new()
+    } else {
+        let mut opts = String::from(r#"<option value="">all tags</option>"#);
+        for t in tags {
+            let sel = if f.tag.as_deref() == Some(t.as_str()) { " selected" } else { "" };
+            opts.push_str(&format!(r#"<option value="{0}"{sel}>{0}</option>"#, escape(t)));
+        }
+        format!(r#"<select name="tag" onchange="this.form.submit()">{opts}</select>"#)
+    };
     format!(
-        r#"<form class="filters" method="get" action="/"><input type="search" name="q" placeholder="Search titles, tickets, branches, source  ( / )" value="{}"><select name="kind" onchange="this.form.submit()">{kind_opts}</select><select name="slot" onchange="this.form.submit()">{slot_opts}</select></form>"#,
+        r#"<form class="filters" method="get" action="/"><input type="search" name="q" placeholder="Search titles, tickets, branches, source  ( / )" value="{}"><select name="kind" onchange="this.form.submit()">{kind_opts}</select>{tag_select}</form>"#,
         escape(f.q.as_deref().unwrap_or(""))
     )
 }
@@ -393,10 +409,13 @@ pub fn list_rows(items: &[ListItem]) -> String {
     let mut out = String::new();
     for item in items {
         let mut meta = format!(r#"<span class="chip kind">{}</span>"#, kind_label(&item.kind));
-        if let Some(slot) = item.slot {
-            meta.push_str(&format!(r#"<a class="chip" href="/?slot={slot}">slot {slot}</a>"#));
-        } else if let Some(repo) = &item.repo {
-            meta.push_str(&format!(r#"<span class="chip">{}</span>"#, escape(repo)));
+        for tag in &item.tags {
+            meta.push_str(&format!(r#"<a class="chip" href="/?tag={0}">{0}</a>"#, escape(tag)));
+        }
+        if item.tags.is_empty() {
+            if let Some(repo) = &item.repo {
+                meta.push_str(&format!(r#"<span class="chip">{}</span>"#, escape(repo)));
+            }
         }
         if let Some(ticket) = &item.ticket {
             meta.push_str(&format!(r#"<a class="chip" href="/?q={0}">{0}</a>"#, escape(ticket)));
@@ -420,10 +439,10 @@ pub fn list_rows(items: &[ListItem]) -> String {
 /// Rows per fetch on the index; the rest load as you scroll or move the selection down.
 pub const PAGE_SIZE: i64 = 100;
 
-pub fn index(items: &[ListItem], f: &Filter, slots: &[i64]) -> String {
-    let filtered = f.q.is_some() || f.kind.is_some() || f.slot.is_some();
+pub fn index(items: &[ListItem], f: &Filter, tags: &[String]) -> String {
+    let filtered = f.q.is_some() || f.kind.is_some() || f.tag.is_some();
     let empty = if items.is_empty() && !filtered {
-        r#"<p class="empty" id="empty">Nothing yet. From any slot: <code>artifacts add notes.md</code> or <code>artifacts add spec.json</code></p>"#.to_string()
+        r#"<p class="empty" id="empty">Nothing yet. From any checkout: <code>artifacts add notes.md</code> or <code>artifacts add spec.json</code></p>"#.to_string()
     } else {
         // Typing in the search box refills the list in place, so this is toggled rather than rendered.
         let hidden = if items.is_empty() { "" } else { " hidden" };
@@ -434,7 +453,7 @@ pub fn index(items: &[ListItem], f: &Filter, slots: &[i64]) -> String {
         (items.len() as i64) < PAGE_SIZE,
         list_rows(items)
     );
-    shell("artifacts", &[("page", Some("index"))], &filters(f, slots), &main, false)
+    shell("artifacts", &[("page", Some("index"))], &filters(f, tags), &main, false)
 }
 
 fn chip_link(href: &str, text: &str, title: &str) -> String {
@@ -459,10 +478,7 @@ fn context_bar(ctx: &Context) -> String {
     let mut chips: Vec<String> = vec![];
     let github = ctx.github.as_deref();
     if let Some(root) = &ctx.repo_root {
-        let label = match ctx.slot {
-            Some(slot) => format!("slot {slot}"),
-            None => ctx.repo.clone().unwrap_or_else(|| root.clone()),
-        };
+        let label = ctx.repo.clone().unwrap_or_else(|| root.clone());
         chips.push(format!(r#"<a class="chip" href="{}" title="Open {} in Zed">{}</a>"#, escape(&format!("zed://file{root}")), escape(root), escape(&label)));
     } else if let Some(cwd) = &ctx.cwd {
         chips.push(format!(r#"<span class="chip" title="cwd">{}</span>"#, escape(cwd)));

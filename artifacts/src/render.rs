@@ -179,6 +179,45 @@ fn render_io(io: &Value, captures: &Map<String, Value>, check: &mut String) -> R
     Ok(format!(r#"<div class="dcp-io">{cols}{note}</div>"#))
 }
 
+/// `"run"` on the spec or on a hop: shell blocks with a ▶ that runs them on this machine. Each is
+/// the code as a string, or `{"code", "title", "cwd", "shell"}`; one block or a list. A hop's
+/// blocks run in its side's checkout unless they name a `cwd` (relative paths are taken from there).
+fn render_runs(value: Option<&Value>, base: Option<&str>, check: &mut String) -> Result<String, String> {
+    let items: Vec<&Value> = match value {
+        None => return Ok(String::new()),
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(one) => vec![one],
+    };
+    let mut out = String::new();
+    for item in items {
+        let (code, title, own_cwd, shell) = match item {
+            Value::String(code) => (code.as_str(), None, None, None),
+            Value::Object(_) => (
+                str_field(item, "code").ok_or("a run block has no \"code\"")?,
+                str_field(item, "title"),
+                str_field(item, "cwd"),
+                str_field(item, "shell"),
+            ),
+            _ => return Err("a run block is a string or {\"code\": …}".into()),
+        };
+        let cwd = match (own_cwd, base) {
+            (Some(own), Some(base)) if !own.starts_with('/') && !own.starts_with('~') => Some(format!("{base}/{own}")),
+            (Some(own), _) => Some(own.to_string()),
+            (None, base) => base.map(str::to_string),
+        };
+        let first: String = code.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(90).collect();
+        check.push_str(&format!("{:<9} {} $ {first}\n", "run", cwd.as_deref().unwrap_or("(page)")));
+        let title = title.map(|t| format!(r#"<span class="dcp-run-h">{}</span>"#, escape(t))).unwrap_or_default();
+        let cwd = cwd.map(|c| format!(r#" data-cwd="{}""#, escape(&c))).unwrap_or_default();
+        let shell = shell.map(|s| format!(r#" data-shell="{}""#, escape(s))).unwrap_or_default();
+        out.push_str(&format!(
+            r#"<div class="dcp-run">{title}<pre data-run{cwd}{shell}><code class="language-bash">{}</code></pre></div>"#,
+            escape(code.trim_end())
+        ));
+    }
+    Ok(out)
+}
+
 pub fn code_path(spec: &Value, ctx: &Context) -> Result<CodePath, String> {
     let github = str_field(spec, "github").map(str::to_string).or_else(|| ctx.github.clone());
     let captures = spec.get("captures_data").and_then(Value::as_object).cloned().unwrap_or_default();
@@ -194,6 +233,7 @@ pub fn code_path(spec: &Value, ctx: &Context) -> Result<CodePath, String> {
     if let Some(note) = str_field(spec, "capture_note") {
         out.push_str(&format!(r#"<p class="dcp-capture">{}</p>"#, escape(note)));
     }
+    out.push_str(&render_runs(spec.get("run"), None, &mut check)?);
     out.push_str(r#"<div class="dcp-controls"><button type="button" class="dcp-expand">Expand all</button><button type="button" class="dcp-collapse">Collapse all</button></div>"#);
 
     for group in groups {
@@ -266,6 +306,7 @@ pub fn code_path(spec: &Value, ctx: &Context) -> Result<CodePath, String> {
                     Some(io) => render_io(io, &captures, &mut check)?,
                     None => String::new(),
                 };
+                let runs = render_runs(hop.get("run"), Some(&checkout), &mut check)?;
                 let gh = if let (true, Some(github)) = (pushed, &github) {
                     format!(
                         r#"<a class="dcp-gh" href="https://github.com/{github}/blob/{sha}/{path}#L{from}-L{to}" target="_blank" rel="noopener">GitHub ↗</a>"#
@@ -274,7 +315,7 @@ pub fn code_path(spec: &Value, ctx: &Context) -> Result<CodePath, String> {
                     String::new()
                 };
                 out.push_str(&format!(
-                    r#"<li><details{open}><summary><span class="dcp-label">{}</span><span class="dcp-loc" data-copy="{loc}" title="Copy {loc}">{loc}</span>{gh}</summary><pre class="dcp-src"><code>{rows}</code></pre>{io}</details></li>"#,
+                    r#"<li><details{open}><summary><span class="dcp-label">{}</span><span class="dcp-loc" data-copy="{loc}" title="Copy {loc}">{loc}</span>{gh}</summary><pre class="dcp-src"><code>{rows}</code></pre>{io}{runs}</details></li>"#,
                     escape(label),
                     loc = escape(&format!("{path}:{first}"))
                 ));
