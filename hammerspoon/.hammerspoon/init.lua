@@ -57,7 +57,8 @@ herdrkeys.start()
 windowtiler = require("windowtiler")
 windowtiler.start()
 
--- Option-A toggles the Artifacts app; Option-Shift-A focuses PhotoCraft.
+-- Option-A toggles the Artifacts app; Option-Shift-A focuses PhotoCraft;
+-- Option-T toggles ExcalidrawZ.
 appkeys = require("appkeys")
 appkeys.start()
 

@@ -25,6 +25,7 @@ brew "koekeishiya/formulae/yabai"
 
 cask "1password-cli"
 cask "claude-code"
+cask "excalidrawz"
 cask "gcloud-cli"
 cask "lunar"
 cask "mitmproxy"
