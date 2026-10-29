@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "One local server for every code path and artifact agents write, stored in SQLite"
 
+[workspace]
+members = ["app"]
+
 [dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }

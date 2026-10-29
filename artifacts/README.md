@@ -76,6 +76,28 @@ ln -sf ~/.dotfiles/artifacts/target/release/artifacts ~/.local/bin/artifacts
 It runs in herdr `servers`, tab `artifacts :4620`. After a rebuild, close that tab and run
 `artifacts up`. It binds 127.0.0.1 only.
 
+## App
+
+`app/` is a native window for the same server, built on GPUI: the page list (search, kind and
+slot filters, grouped by day) on the left, and the selected page on the right in a WebKit view,
+exactly as a browser shows it. It follows the server live, so new pages appear as agents add
+them. Install it with `app/bundle.sh` (builds and writes `~/Applications/Artifacts.app`); Option-A
+toggles it (Hammerspoon). Closing the window quits it.
+
+The keyboard is in one of three places, and a ring shows which: the **list**, its **search box**,
+or the **page**. The footer lists the keys that work where you are.
+
+| Where | Keys |
+| --- | --- |
+| Anywhere | `⌘P` search pages · `⌘F` find in page · `⌘1` list · `⌘2` page · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘W` hide |
+| List | `j` `k` move · `gg` `G` first / last · `l` `→` `Enter` `Tab` read the page · `/` search pages · `o` open in browser |
+| Search pages | type to filter · `Enter` `↓` `Esc` back to the list |
+| Page | the page's own keys (`?` lists them) · `h` or `Esc` back to the list · `[` `]` previous / next page in the list · `/` find in page |
+
+**Search pages** filters the list across every page (titles, tickets, branches, source). **Find
+in page** searches the open page's text. Links to other pages stay in the app and move the
+selection; GitHub, Linear and `zed://` links open in their own apps.
+
 ## Config
 
 All optional, read from the environment:

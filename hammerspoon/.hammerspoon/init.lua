@@ -57,7 +57,7 @@ herdrkeys.start()
 windowtiler = require("windowtiler")
 windowtiler.start()
 
--- Option-A opens the artifacts server in Chrome; Option-Shift-A focuses PhotoCraft.
+-- Option-A toggles the Artifacts app; Option-Shift-A focuses PhotoCraft.
 appkeys = require("appkeys")
 appkeys.start()
 

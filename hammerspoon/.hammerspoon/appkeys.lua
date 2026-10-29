@@ -1,7 +1,7 @@
 -- Option-key launchers, from a raw keyDown tap.
 --
---   alt+a         the artifacts server (localhost:4620): focus the Chrome tab
---                 already showing it, or open one
+--   alt+a         toggle the Artifacts app (~/.dotfiles/artifacts/app); without
+--                 it installed, focus the Chrome tab showing localhost:4620
 --   alt+shift+a   launch or focus PhotoCraft
 --
 -- An event tap sees the key before app hotkeys (Raycast's included), so these
@@ -15,6 +15,7 @@ local M = {}
 
 local CHROME = "com.google.Chrome"
 local ARTIFACTS = "http://localhost:4620"
+local ARTIFACTS_APP = "local.artifacts" -- bundle id set by artifacts/app/bundle.sh
 
 -- Looks for the page under either host name, since the CLI prints both.
 local FOCUS_ARTIFACTS = [[
@@ -37,6 +38,9 @@ end tell
 ]]
 
 function M.artifacts()
+  local app = hs.application.get(ARTIFACTS_APP)
+  if app and app:isFrontmost() then return app:hide() end
+  if hs.application.launchOrFocusByBundleID(ARTIFACTS_APP) then return end
   local ok, found = hs.osascript.applescript(FOCUS_ARTIFACTS)
   if ok and found then return end
   -- No tab yet, or no Automation permission for Chrome: open a fresh one.

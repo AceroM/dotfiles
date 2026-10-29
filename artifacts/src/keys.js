@@ -3,6 +3,9 @@
   const body = document.body;
   const PAGE = body.dataset.page || 'index';
   const SLUG = body.dataset.slug || null;
+  // Inside the native app (artifacts-app injects this), the app owns the page list: h and Esc hand
+  // the keyboard back to it, and [ ] step its selection instead of navigating behind its back.
+  const APP = window.artifactsApp || null;
   const STEP = 100;
   const HINT_CHARS = 'sadfjklewcmpgh';
 
@@ -106,6 +109,7 @@
   };
   // Newer (-1) or older (+1) page, in the order of the index you came from (filters included).
   const neighbor = (delta) => {
+    if (APP) return APP.post(delta < 0 ? 'prev' : 'next');
     const list = sGet('artifacts:list');
     if (Array.isArray(list) && SLUG && list.includes(SLUG)) {
       const target = list[list.indexOf(SLUG) + delta];
@@ -341,7 +345,7 @@
   const openFind = () => {
     if (!bar) {
       const b = el('kb-find');
-      b.innerHTML = '<span>/</span><input type="text" spellcheck="false" autocomplete="off" aria-label="Find in page"><span class="n"></span>';
+      b.innerHTML = '<span>Find in page</span><input type="text" spellcheck="false" autocomplete="off" aria-label="Find in page"><span class="n"></span>';
       bar = { b, input: b.querySelector('input'), n: b.querySelector('.n'), typed: false };
       bar.input.addEventListener('input', () => { bar.typed = true; update(); });
       bar.input.addEventListener('blur', () => closeFind(true));
@@ -397,11 +401,13 @@
     toast(wrapped + '/' + found.q + '  ' + counter());
   };
   const clearFind = () => { if (!found) return false; found = null; paint(); return true; };
+  // The app's ⌘F opens this page's find bar.
+  if (APP) APP.find = openFind;
 
   // ---- help ----------------------------------------------------------------------------------
   const HELP = [
     ['Scroll', [['j  k', 'down / up 100px'], ['d  u', 'down / up half a page'], ['gg  G', 'top / bottom'], ['}  {', 'next / previous section, hop or day'], ["''", 'back to where you jumped from']]],
-    ['Go', [['h', 'back, or up a level'], ['l', 'forward; on the index, open the selection; else the next page'], ['[  ]', 'newer / older page (in the list you came from)'], ['gh', 'home'], ['gu', 'up a level'], ['gs', 'this page\'s source'], ['gi', 'search every page (the index)'], ['s1…s9  sa', 'filter by slot / all slots'], ['r', 'reload']]],
+    ['Go', [['h', APP ? 'back to the page list (Esc too)' : 'back, or up a level'], ['l', 'forward; on the index, open the selection; else the next page'], ['[  ]', APP ? 'newer / older page in the list' : 'newer / older page (in the list you came from)'], ['gh', 'home'], ['gu', 'up a level'], ['gs', 'this page\'s source'], ['gi', 'search every page (the index)'], ['s1…s9  sa', 'filter by slot / all slots'], ['r', 'reload']]],
     ['Find', [['/', 'find in this page as you type (a capital makes it case-sensitive)'], ['Enter  Esc', 'keep the matches / cancel and go back'], ['n  N', 'next / previous match'], ['Esc', 'clear the matches']]],
     ['Index', [['/', 'filter the list as you type; Enter or Esc to leave the box'], ['j  k', 'next / previous item (more load as you go)'], ['J  K', 'scroll 100px'], ['gg  G', 'first / last loaded item'], ['l  o  Enter', 'open it'], ['O', 'open it in a new tab']]],
     ['Code paths', [['za', 'toggle the hop at the top of the screen'], ['zo  zc', 'open / close it'], ['zR  zM', 'open / close every hop'], ['yl', 'copy its path:line (or the first one on screen)']]],
@@ -438,7 +444,7 @@
     d: (n) => { scrollBy(Math.round(innerHeight / 2) * n); followViewport(1); },
     u: (n) => { scrollBy(-Math.round(innerHeight / 2) * n); followViewport(-1); },
     G: () => { jumpTo(document.documentElement.scrollHeight); selectEdge(true); },
-    h: back,
+    h: () => (APP ? APP.post('sidebar') : back()),
     l: forward,
     J: (n) => { scrollBy(STEP * n); followViewport(1); },
     K: (n) => { scrollBy(-STEP * n); followViewport(-1); },
@@ -477,9 +483,12 @@
     if (typing(e.target)) { if (k === 'Escape') { e.preventDefault(); e.target.blur(); } return; }
     if (k === 'Shift') return;
     if (k === 'Escape') {
-      clearFind();
+      const lightbox = document.getElementById('lb');
+      const busy = clearFind() || helpOpen() || !!lightbox?.classList.contains('open') || !!(pending || count);
       document.getElementById('kb-help')?.classList.remove('open');
-      document.getElementById('lb')?.classList.remove('open');
+      lightbox?.classList.remove('open');
+      // Nothing left to close: in the app, Esc goes back to the page list.
+      if (!busy && APP) APP.post('sidebar');
       return reset();
     }
     if (helpOpen() && k !== '?') return;
