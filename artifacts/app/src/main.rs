@@ -36,7 +36,6 @@ fn menus() -> Vec<Menu> {
         ]),
         // Menu items are how shortcuts reach the app while the page holds the keyboard.
         Menu::new("Go").items([
-            MenuItem::action("Search Pages", SearchPages),
             MenuItem::action("Find in Page", FindInPage),
             MenuItem::separator(),
             MenuItem::action("Page List", FocusList),

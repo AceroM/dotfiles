@@ -41,6 +41,9 @@ gpui_kit::actions!(
 
 const LIST: &str = "ArtifactList";
 const SEARCH: &str = "ArtifactSearch";
+/// The text input inside the search box. Its own bindings (Escape, arrows) sit at this depth, so
+/// ours have to as well; registered after the input's, they win.
+const SEARCH_INPUT: &str = "ArtifactSearch > Input";
 const KINDS: [(&str, &str); 3] = [("code-path", "code path"), ("md", "notes"), ("html", "page")];
 
 /// Runs in every page before its own scripts: `keys.js` finds `artifactsApp` and routes its
@@ -53,8 +56,6 @@ window.addEventListener('focus', () => window.ipc.postMessage('focus'));
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         // Global: these are menu shortcuts too, so they work while the page has the keyboard.
-        KeyBinding::new("cmd-p", SearchPages, None),
-        KeyBinding::new("cmd-k", SearchPages, None),
         KeyBinding::new("cmd-f", FindInPage, None),
         KeyBinding::new("cmd-1", FocusList, None),
         KeyBinding::new("cmd-2", FocusPage, None),
@@ -82,9 +83,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("/", SearchPages, Some(LIST)),
         KeyBinding::new("o", OpenInBrowser, Some(LIST)),
         KeyBinding::new("r", Reload, Some(LIST)),
-        // The search box: back down to the results.
-        KeyBinding::new("escape", FocusList, Some(SEARCH)),
-        KeyBinding::new("down", FocusList, Some(SEARCH)),
+        // The search box: move through the results while typing, Esc back to them.
+        KeyBinding::new("ctrl-j", SelectNext, Some(SEARCH_INPUT)),
+        KeyBinding::new("ctrl-k", SelectPrev, Some(SEARCH_INPUT)),
+        KeyBinding::new("escape", FocusList, Some(SEARCH_INPUT)),
     ]);
 }
 
@@ -512,34 +514,6 @@ impl ArtifactsView {
         }
         rows
     }
-
-    /// The keys that work where the keyboard is now.
-    fn hints(&self, cx: &App) -> impl IntoElement {
-        let c = cx.theme();
-        let zoom = self.webview.as_ref().map_or(1.0, |w| w.read(cx).zoom());
-        let keys: &[(&str, &str)] = match self.pane {
-            Pane::List => &[("j k", "move"), ("l", "read"), ("/", "search pages"), ("⌘F", "find in page"), ("o", "browser")],
-            Pane::Search => &[("↵", "results"), ("esc", "list"), ("⌘F", "find in page")],
-            Pane::Page => &[("h esc", "list"), ("/", "find in page"), ("[ ]", "prev / next"), ("⌘P", "search pages"), ("?", "keys")],
-        };
-        h_flex()
-            .px_3()
-            .py_2()
-            .gap_x_3()
-            .gap_y_1()
-            .flex_wrap()
-            .border_t_1()
-            .border_color(c.sidebar_border)
-            .text_xs()
-            .text_color(c.muted_foreground)
-            .children(keys.iter().map(|(key, label)| {
-                h_flex()
-                    .gap_1()
-                    .child(div().px_1().rounded_sm().bg(c.muted).text_color(c.foreground).child(*key))
-                    .child(*label)
-            }))
-            .when((zoom - 1.0).abs() > 0.01, |d| d.child(format!("page {:.0}% · ⌘0 resets", zoom * 100.0)))
-    }
 }
 
 /// The page view: link clicks inside the server stay here and the list follows them, the index
@@ -605,9 +579,7 @@ impl Render for ArtifactsView {
         let ring = |active: bool| if active { c.ring } else { transparent_black() };
         let rows = self.rows(cx);
         let empty = rows.is_empty() && self.error.is_none();
-        let search = Input::new(&self.search)
-            .cleanable(true)
-            .suffix(div().text_xs().text_color(c.muted_foreground).child("⌘P"));
+        let search = Input::new(&self.search).cleanable(true);
         let sidebar = v_flex()
             .w(px(340.))
             .h_full()
@@ -616,6 +588,10 @@ impl Render for ArtifactsView {
             .text_color(c.sidebar_foreground)
             .border_r_1()
             .border_color(c.sidebar_border)
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_prev))
+            .on_action(cx.listener(Self::select_first))
+            .on_action(cx.listener(Self::select_last))
             // Clicking anywhere in the sidebar takes the keyboard back from the page.
             .on_mouse_down(
                 MouseButton::Left,
@@ -644,16 +620,11 @@ impl Render for ArtifactsView {
                     .border_color(ring(self.pane == Pane::List))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .on_action(cx.listener(Self::select_next))
-                    .on_action(cx.listener(Self::select_prev))
-                    .on_action(cx.listener(Self::select_first))
-                    .on_action(cx.listener(Self::select_last))
                     .when(empty, |d| {
                         d.child(div().p_3().text_sm().text_color(c.muted_foreground).child("Nothing here. `artifacts add notes.md` from any checkout."))
                     })
                     .children(rows),
-            )
-            .child(self.hints(cx));
+            );
 
         // The ring sits outside the webview's bounds: the native view covers anything inside them.
         let page = div()

@@ -85,18 +85,19 @@ them. Install it with `app/bundle.sh` (builds and writes `~/Applications/Artifac
 toggles it (Hammerspoon). Closing the window quits it.
 
 The keyboard is in one of three places, and a ring shows which: the **list**, its **search box**,
-or the **page**. The footer lists the keys that work where you are.
+or the **page**.
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `⌘P` search pages · `⌘F` find in page · `⌘1` list · `⌘2` page · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘W` hide |
+| Anywhere | `⌘F` find in page · `⌘1` list · `⌘2` page · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘W` hide |
 | List | `j` `k` move · `gg` `G` first / last · `l` `→` `Enter` `Tab` read the page · `/` search pages · `o` open in browser |
-| Search pages | type to filter · `Enter` `↓` `Esc` back to the list |
+| Search pages | type to filter · `ctrl-j` `ctrl-k` move through the results as you type · `Enter` `Esc` back to the list |
 | Page | the page's own keys (`?` lists them) · `h` or `Esc` back to the list · `[` `]` previous / next page in the list · `/` find in page |
 
-**Search pages** filters the list across every page (titles, tickets, branches, source). **Find
-in page** searches the open page's text. Links to other pages stay in the app and move the
-selection; GitHub, Linear and `zed://` links open in their own apps.
+**Search pages** (`/` from the list) filters the list across every page: titles, tickets,
+branches, source. **Find in page** (`/` in the page, or `⌘F`) searches the open page's text.
+Links to other pages stay in the app and move the selection; GitHub, Linear and `zed://` links
+open in their own apps.
 
 ## Config
 
