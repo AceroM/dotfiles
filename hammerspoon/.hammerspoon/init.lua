@@ -57,6 +57,10 @@ herdrkeys.start()
 windowtiler = require("windowtiler")
 windowtiler.start()
 
+-- Option-A opens the artifacts server in Chrome; Option-Shift-A focuses PhotoCraft.
+appkeys = require("appkeys")
+appkeys.start()
+
 -- Command-shift-1 screenshots Chrome's page content only; other apps keep Shottr's window capture.
 chromeshot = require("chromeshot")
 chromeshot.start()

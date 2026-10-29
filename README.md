@@ -2,13 +2,15 @@
 
 These are my dotfiles.
 
-## Fn shortcuts (Hammerspoon)
+## Shortcuts (Hammerspoon)
 
 With `stow hammerspoon` and Hammerspoon running:
 
 - **Fn+E** opens and focuses a Herdr tab immediately to the right of the current
   tab, using the current pane’s directory (while Ghostty is focused).
 - **Fn+Q** toggles Quick Record.
+- **Option+A** opens the artifacts server (`localhost:4620`) in Chrome, reusing its tab if one is
+  open. **Option+Shift+A** launches or focuses PhotoCraft.
 - **Fn+B** toggles horizontal scrolling from any app. While enabled, vertical
   mouse-wheel or trackpad scrolling moves sideways. Press it again to restore
   normal scrolling; a Hammerspoon reload also resets it to off.
