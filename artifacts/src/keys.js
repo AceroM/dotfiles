@@ -408,6 +408,7 @@
   const HELP = [
     ['Scroll', [['j  k', 'down / up 100px'], ['d  u', 'down / up half a page'], ['gg  G', 'top / bottom'], ['}  {', 'next / previous section, hop or day'], ["''", 'back to where you jumped from']]],
     ['Go', [['h', APP ? 'back to the page list (Esc too)' : 'back, or up a level'], ['l', 'forward; on the index, open the selection; else the next page'], ['[  ]', APP ? 'newer / older page in the list' : 'newer / older page (in the list you came from)'], ['gh', 'home'], ['gu', 'up a level'], ['gs', 'this page\'s source'], ['gi', 'search every page (the index)'], ['s1…s9  sa', 'filter by slot / all slots'], ['r', 'reload']]],
+    ...(APP ? [['Tabs', [['H  L', 'previous / next tab'], ['x  X', 'close / reopen a tab'], ['yt', 'duplicate this tab'], ['^', 'the last-used tab'], ['<  >', 'move this tab left / right']]]] : []),
     ['Find', [['/', 'find in this page as you type (a capital makes it case-sensitive)'], ['Enter  Esc', 'keep the matches / cancel and go back'], ['n  N', 'next / previous match'], ['Esc', 'clear the matches']]],
     ['Index', [['/', 'filter the list as you type; Enter or Esc to leave the box'], ['j  k', 'next / previous item (more load as you go)'], ['J  K', 'scroll 100px'], ['gg  G', 'first / last loaded item'], ['l  o  Enter', 'open it'], ['O', 'open it in a new tab']]],
     ['Code paths', [['za', 'toggle the hop at the top of the screen'], ['zo  zc', 'open / close it'], ['zR  zM', 'open / close every hop'], ['yl', 'copy its path:line (or the first one on screen)']]],
@@ -453,6 +454,16 @@
     O: () => { const href = PAGE === 'index' && selectedHref(); if (href) window.open(href, '_blank', 'noopener'); },
     '[': () => neighbor(-1),
     ']': () => neighbor(1),
+    // Tabs, inside the app.
+    ...(APP ? {
+      H: () => APP.post('prevTab'),
+      L: () => APP.post('nextTab'),
+      x: () => APP.post('closeTab'),
+      X: () => APP.post('reopenTab'),
+      '^': () => APP.post('lastTab'),
+      '<': () => APP.post('moveTabLeft'),
+      '>': () => APP.post('moveTabRight'),
+    } : {}),
     '}': (n) => { for (let i = 0; i < n; i++) jumpSection(1); },
     '{': (n) => { for (let i = 0; i < n; i++) jumpSection(-1); },
     // On the index the search box filters the list; on a page it finds text.
@@ -470,7 +481,7 @@
   };
   const sequences = {
     g: { g: () => { jumpTo(0); selectEdge(false); }, h: () => go('/'), u: up, s: () => SLUG && go('/a/' + SLUG + '/source'), i: () => { const q = document.querySelector('form.filters input[type=search]'); if (q) { q.focus(); q.select(); } else go('/#search'); } },
-    y: { y: () => copy(location.href, 'URL'), r: () => { const c = document.querySelector('.ctx [data-copy]'); c ? copy(c.dataset.copy, 'resume command') : toast('No agent session on this page'); }, l: () => { const a = currentLoc(); const text = a && (a.dataset.copy || a.textContent.trim()); text ? copy(text, text) : toast('No path:line on screen'); }, s: () => SLUG && copy(SLUG, 'slug') },
+    y: { y: () => copy(location.href, 'URL'), r: () => { const c = document.querySelector('.ctx [data-copy]'); c ? copy(c.dataset.copy, 'resume command') : toast('No agent session on this page'); }, l: () => { const a = currentLoc(); const text = a && (a.dataset.copy || a.textContent.trim()); text ? copy(text, text) : toast('No path:line on screen'); }, s: () => SLUG && copy(SLUG, 'slug'), t: () => APP && APP.post('duplicateTab') },
     z: { a: () => fold('toggle'), o: () => fold('open'), c: () => fold('close'), R: () => fold('all-open'), M: () => fold('all-closed') },
   };
 

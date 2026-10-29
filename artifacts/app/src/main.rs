@@ -1,11 +1,12 @@
 //! `artifacts-app`: a native window for the artifacts server. The page list sits on the left,
-//! and the selected page renders on the right in a WebKit view, exactly as it does in a browser.
+//! and pages open on the right in tabs, each a WebKit view showing it exactly as a browser would.
 //! It reads the running server over HTTP ($ARTIFACTS_URL, default http://127.0.0.1:4620).
 
 // GPUI's derive macros expand to `gpui::…` paths; the Kit stands in for GPUI.
 extern crate gpui_kit as gpui;
 
 mod api;
+mod saved;
 mod view;
 
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
@@ -36,15 +37,29 @@ fn menus() -> Vec<Menu> {
         ]),
         // Menu items are how shortcuts reach the app while the page holds the keyboard.
         Menu::new("Go").items([
+            MenuItem::action("Search Pages", SearchPages),
             MenuItem::action("Find in Page", FindInPage),
-            MenuItem::separator(),
-            MenuItem::action("Page List", FocusList),
-            MenuItem::action("Page", FocusPage),
             MenuItem::separator(),
             MenuItem::action("Back", Back),
             MenuItem::action("Forward", Forward),
             MenuItem::action("Reload", Reload),
             MenuItem::action("Open in Browser", OpenInBrowser),
+        ]),
+        Menu::new("Tabs").items([
+            MenuItem::action("New Tab", NewTab),
+            MenuItem::action("Duplicate Tab", DuplicateTab),
+            MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
+            MenuItem::separator(),
+            MenuItem::action("Close Tab", CloseTab),
+            MenuItem::action("Close Other Tabs", CloseOtherTabs),
+            MenuItem::separator(),
+            MenuItem::action("Next Tab", NextTab),
+            MenuItem::action("Previous Tab", PrevTab),
+            MenuItem::action("Last-Used Tab", LastUsedTab),
+            MenuItem::action("Move Tab Left", MoveTabLeft),
+            MenuItem::action("Move Tab Right", MoveTabRight),
+            MenuItem::separator(),
+            MenuItem::action("Last Tab", GoToLastTab),
         ]),
     ]
 }

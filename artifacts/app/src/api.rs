@@ -66,15 +66,17 @@ fn list(query: &Query) -> Result<Vec<Item>, String> {
     resp.into_json().map_err(|e| e.to_string())
 }
 
-/// The pages matching `query`, and every slot any page was written from (for the slot filter,
-/// which shouldn't shrink to the current results).
-pub fn fetch(query: &Query) -> Result<(Vec<Item>, Vec<i64>), String> {
+pub struct Fetched {
+    /// The pages matching the query, for the list.
+    pub items: Vec<Item>,
+    /// Every page: the slot filter and the tab titles shouldn't shrink to the current results.
+    pub all: Vec<Item>,
+}
+
+pub fn fetch(query: &Query) -> Result<Fetched, String> {
     let all = list(&Query::default())?;
-    let mut slots: Vec<i64> = all.iter().filter_map(|i| i.slot).collect();
-    slots.sort_unstable();
-    slots.dedup();
-    let items = if *query == Query::default() { all } else { list(query)? };
-    Ok((items, slots))
+    let items = if *query == Query::default() { all.clone() } else { list(query)? };
+    Ok(Fetched { items, all })
 }
 
 /// The server's event stream: one `data:` line whenever a page is added, updated or removed.

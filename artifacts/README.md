@@ -79,25 +79,30 @@ It runs in herdr `servers`, tab `artifacts :4620`. After a rebuild, close that t
 ## App
 
 `app/` is a native window for the same server, built on GPUI: the page list (search, kind and
-slot filters, grouped by day) on the left, and the selected page on the right in a WebKit view,
-exactly as a browser shows it. It follows the server live, so new pages appear as agents add
-them. Install it with `app/bundle.sh` (builds and writes `~/Applications/Artifacts.app`); Option-A
-toggles it (Hammerspoon). Closing the window quits it.
+slot filters, grouped by day) on the left, and pages in tabs on the right, each tab a WebKit view
+showing its page exactly as a browser does. It follows the server live, so new pages appear as
+agents add them. Install it with `app/bundle.sh` (builds and writes
+`~/Applications/Artifacts.app`); Option-A toggles it (Hammerspoon). Closing the window quits it.
+
+The list follows the active tab: moving through it moves that tab, and a dot marks pages open in
+other tabs. Each tab keeps its own scroll and history. Links that ask for a new window open a new
+tab. The open tabs and the zoom come back on the next launch (`~/.local/share/artifacts/app.json`).
 
 The keyboard is in one of three places, and a ring shows which: the **list**, its **search box**,
 or the **page**.
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `⌘F` find in page · `⌘1` list · `⌘2` page · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘W` hide |
+| Anywhere | `⌘/` search pages · `⌘F` find in page · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
+| Tabs, anywhere | `⌘T` new · `⌘W` close (the last one hides the app) · `⌘⇧T` reopen · `⌘⌥W` close the others · `⌘⇧[` `⌘⇧]` or `⌃⇧Tab` `⌃Tab` previous / next · `⌘1`–`⌘8` that tab · `⌘9` the last · `⌃⇧PgUp` `⌃⇧PgDn` move |
 | List | `j` `k` move · `gg` `G` first / last · `l` `→` `Enter` `Tab` read the page · `/` search pages · `o` open in browser |
+| Tabs, from the list or the page | `H` `L` previous / next · `x` `X` close / reopen · `^` the last-used tab · `<` `>` move · `t` (list) or `yt` (page) duplicate |
 | Search pages | type to filter · `ctrl-j` `ctrl-k` move through the results as you type · `Enter` `Esc` back to the list |
 | Page | the page's own keys (`?` lists them) · `h` or `Esc` back to the list · `[` `]` previous / next page in the list · `/` find in page |
 
-**Search pages** (`/` from the list) filters the list across every page: titles, tickets,
-branches, source. **Find in page** (`/` in the page, or `⌘F`) searches the open page's text.
-Links to other pages stay in the app and move the selection; GitHub, Linear and `zed://` links
-open in their own apps.
+**Search pages** (`/` from the list, `⌘/` from anywhere) filters the list across every page:
+titles, tickets, branches, source. **Find in page** (`/` in the page, or `⌘F`) searches the open
+page's text. GitHub, Linear and `zed://` links open in their own apps.
 
 ## Config
 
