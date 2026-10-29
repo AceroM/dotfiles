@@ -30,6 +30,7 @@ gpui_kit::actions!(
         SelectFirst,
         SelectLast,
         NewTab,
+        CancelNewTab,
         DuplicateTab,
         CloseTab,
         CloseOtherTabs,
@@ -80,6 +81,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-/", SearchPages, None),
         KeyBinding::new("cmd-f", FindInPage, None),
         KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("cmd-n", NewTab, None),
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("cmd-shift-t", ReopenClosedTab, None),
         KeyBinding::new("cmd-alt-w", CloseOtherTabs, None),
@@ -122,6 +124,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", FocusPage, Some(LIST)),
         KeyBinding::new("tab", FocusPage, Some(LIST)),
         KeyBinding::new("/", SearchPages, Some(LIST)),
+        KeyBinding::new("escape", CancelNewTab, Some(LIST)),
         KeyBinding::new("o", OpenInBrowser, Some(LIST)),
         KeyBinding::new("r", Reload, Some(LIST)),
         KeyBinding::new("shift-h", PrevTab, Some(LIST)),
@@ -135,7 +138,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-,", MoveTabLeft, Some(LIST)),
         KeyBinding::new(">", MoveTabRight, Some(LIST)),
         KeyBinding::new("shift-.", MoveTabRight, Some(LIST)),
-        // The search box: move through the results while typing, Esc back to them.
+        // The search box: move through the results while typing, Esc back to them (or, choosing a
+        // new tab, back to where you were).
         KeyBinding::new("ctrl-j", SelectNext, Some(SEARCH_INPUT)),
         KeyBinding::new("ctrl-k", SelectPrev, Some(SEARCH_INPUT)),
         KeyBinding::new("escape", FocusList, Some(SEARCH_INPUT)),
@@ -192,6 +196,12 @@ pub struct ArtifactsView {
     last_used: Option<u64>,
     /// Slugs of closed tabs, most recent last, for reopening.
     closed: Vec<String>,
+    /// While choosing a page for a new tab (⌘T, from the search box): the list's cursor, which
+    /// moves without touching the open tab. Enter opens it in a new tab; Esc, or going to the
+    /// page, cancels.
+    new_tab: Option<String>,
+    /// Where the keyboard was when ⌘T started choosing, for Esc to put it back.
+    before_new_tab: Pane,
     next_id: u64,
     tx: Sender<FromPage>,
     zoom: f64,
@@ -222,6 +232,7 @@ impl ArtifactsView {
                     this.query.q = state.read(cx).value().to_string();
                     this.refresh(true, cx);
                 }
+                InputEvent::PressEnter { .. } if this.new_tab.is_some() => this.commit_new_tab(window, cx),
                 InputEvent::PressEnter { .. } => this.focus_pane(Pane::List, window, cx),
                 InputEvent::Focus => {
                     this.pane = Pane::Search;
@@ -241,6 +252,8 @@ impl ArtifactsView {
             active: 0,
             last_used: None,
             closed: vec![],
+            new_tab: None,
+            before_new_tab: Pane::List,
             next_id: 0,
             tx,
             zoom: saved.zoom.unwrap_or(1.0),
@@ -295,11 +308,11 @@ impl ArtifactsView {
                 self.slots = slots;
                 self.error = None;
                 let pick = std::mem::take(&mut self.pick);
-                let current = self.active_slug().to_string();
+                let current = self.cursor().to_string();
                 let listed = self.items.iter().any(|i| i.slug == current);
                 if current.is_empty() || (pick && !listed) {
                     if let Some(first) = self.items.first() {
-                        self.select(first.slug.clone(), cx);
+                        self.go_to(first.slug.clone(), cx);
                     }
                 }
             }
@@ -364,12 +377,45 @@ impl ArtifactsView {
             return;
         }
         let last = self.items.len() - 1;
-        let current = self.active_slug();
+        let current = self.cursor();
         let ix = match self.items.iter().position(|i| i.slug == current) {
             Some(ix) => ix.saturating_add_signed(delta).min(last),
             None => 0,
         };
-        self.select(self.items[ix].slug.clone(), cx);
+        self.go_to(self.items[ix].slug.clone(), cx);
+    }
+
+    /// Where the list's highlight is: the new-tab cursor while choosing, else the active tab.
+    fn cursor(&self) -> &str {
+        self.new_tab.as_deref().unwrap_or_else(|| self.active_slug())
+    }
+
+    /// Move the list's highlight: the new-tab cursor while choosing, else the active tab's page.
+    fn go_to(&mut self, slug: String, cx: &mut Context<Self>) {
+        match &mut self.new_tab {
+            Some(cursor) => {
+                *cursor = slug;
+                self.scroll_to_selected = true;
+                cx.notify();
+            }
+            None => self.select(slug, cx),
+        }
+    }
+
+    /// Open the new-tab cursor's page in a new tab, and read it. That search is done, so the box
+    /// clears.
+    fn commit_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(slug) = self.new_tab.take() {
+            self.open_tab(slug, window, cx);
+            self.focus_pane(Pane::Page, window, cx);
+            if !self.query.q.is_empty() {
+                // `set_value` doesn't emit a change, so refetch here, without picking: the new
+                // tab keeps its page even when the unfiltered list doesn't reach it.
+                self.search.update(cx, |s, cx| s.set_value("", window, cx));
+                self.query.q.clear();
+                self.refresh(false, cx);
+            }
+        }
     }
 
     // ---- tabs ----------------------------------------------------------------------------------
@@ -417,6 +463,7 @@ impl ArtifactsView {
         if ix >= self.tabs.len() {
             return;
         }
+        self.new_tab = None;
         if ix != self.active {
             if let Some(previous) = self.tabs.get(self.active) {
                 self.last_used = Some(previous.id);
@@ -536,6 +583,7 @@ impl ArtifactsView {
             // Keys from a page in the background don't count.
             _ if !from_active => {}
             PageMsg::Focused => {
+                self.new_tab = None;
                 self.pane = Pane::Page;
                 cx.notify();
             }
@@ -555,6 +603,9 @@ impl ArtifactsView {
 
     /// Move the keyboard, natively too: WebKit holds it while the page is focused.
     fn focus_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        if pane == Pane::Page {
+            self.new_tab = None;
+        }
         if let Some(webview) = self.active_webview() {
             let raw = webview.read(cx).raw();
             let _ = if pane == Pane::Page { raw.focus() } else { raw.focus_parent() };
@@ -589,13 +640,13 @@ impl ArtifactsView {
 
     fn select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.items.first() {
-            self.select(item.slug.clone(), cx);
+            self.go_to(item.slug.clone(), cx);
         }
     }
 
     fn select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.items.last() {
-            self.select(item.slug.clone(), cx);
+            self.go_to(item.slug.clone(), cx);
         }
     }
 
@@ -611,17 +662,40 @@ impl ArtifactsView {
     }
 
     fn focus_list(&mut self, _: &FocusList, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_tab.is_some() {
+            return self.cancel_new_tab(&CancelNewTab, window, cx);
+        }
         self.focus_pane(Pane::List, window, cx);
     }
 
     fn focus_page(&mut self, _: &FocusPage, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_tab.is_some() {
+            return self.commit_new_tab(window, cx);
+        }
         self.focus_pane(Pane::Page, window, cx);
     }
 
-    /// A new tab on the same page, with the search box ready to pick another.
+    /// Start choosing a page for a new tab: the search box takes the keyboard with its text
+    /// selected, so typing starts a new search, and the list's cursor starts on the open page.
+    /// Pressed again, it cancels.
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_tab(self.active_slug().to_string(), window, cx);
+        if self.new_tab.is_some() {
+            return self.cancel_new_tab(&CancelNewTab, window, cx);
+        }
+        self.before_new_tab = self.pane;
+        self.new_tab = Some(self.active_slug().to_string());
+        self.scroll_to_selected = true;
+        self.scroll_to_tab = true;
         self.focus_pane(Pane::Search, window, cx);
+        self.search.update(cx, |s, cx| s.select_all(window, cx));
+    }
+
+    /// Stop choosing, and put the keyboard back where it was before ⌘T.
+    fn cancel_new_tab(&mut self, _: &CancelNewTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_tab.take().is_some() {
+            self.scroll_to_selected = true;
+            self.focus_pane(self.before_new_tab, window, cx);
+        }
     }
 
     fn duplicate_tab(&mut self, _: &DuplicateTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -776,8 +850,11 @@ impl ArtifactsView {
 
     fn rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let c = cx.theme().colors.clone();
-        let focused = self.pane == Pane::List;
-        let current = self.active_slug().to_string();
+        let choosing = self.new_tab.is_some();
+        // Choosing a new tab from the search box, the row Enter will open stays lit.
+        let focused = self.pane == Pane::List || choosing;
+        let mark = if choosing { c.primary } else { c.ring };
+        let current = self.cursor().to_string();
         let open: Vec<String> = self.tabs.iter().map(|t| t.slug.clone()).collect();
         let now = Local::now().timestamp();
         let mut rows = vec![];
@@ -803,7 +880,7 @@ impl ArtifactsView {
             if selected {
                 selected_row = Some(rows.len());
             }
-            // A page open in another tab gets a dot.
+            // A page open in a tab (other than the highlighted one) gets a dot.
             let in_tab = !selected && open.contains(&item.slug);
             let mut meta = vec![kind_label(&item.kind).to_string()];
             meta.extend(item.slot.map(|s| format!("s{s}")));
@@ -820,7 +897,7 @@ impl ArtifactsView {
                     .border_l_2()
                     .cursor_pointer()
                     // The selection is bright while the list has the keyboard, and dim otherwise.
-                    .when(selected && focused, |d| d.bg(c.list_active).border_color(c.ring))
+                    .when(selected && focused, |d| d.bg(c.list_active).border_color(mark))
                     .when(selected && !focused, |d| d.bg(c.muted).border_color(transparent_black()))
                     .when(!selected, |d| d.border_color(transparent_black()).hover(|d| d.bg(c.list_hover)))
                     .child(
@@ -831,6 +908,10 @@ impl ArtifactsView {
                     )
                     .child(div().text_xs().text_color(c.muted_foreground).truncate().child(meta.join(" · ")))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if this.new_tab.is_some() {
+                            this.new_tab = Some(slug.clone());
+                            return this.commit_new_tab(window, cx);
+                        }
                         this.select(slug.clone(), cx);
                         this.focus_pane(Pane::List, window, cx);
                     }))
@@ -919,8 +1000,27 @@ impl ArtifactsView {
                     .into_any_element(),
             );
         }
+        let choosing = self.new_tab.is_some();
+        if choosing {
+            tabs.push(
+                h_flex()
+                    .flex_none()
+                    .w(px(140.))
+                    .h(px(28.))
+                    .px_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(c.primary)
+                    .text_sm()
+                    .italic()
+                    .text_color(c.primary)
+                    .child("New tab")
+                    .into_any_element(),
+            );
+        }
         if std::mem::take(&mut self.scroll_to_tab) {
-            self.tab_scroll.scroll_to_item(self.active);
+            self.tab_scroll.scroll_to_item(if choosing { self.tabs.len() } else { self.active });
         }
         h_flex()
             .id("tabs")
@@ -1030,6 +1130,7 @@ impl Render for ArtifactsView {
         let ring = |active: bool| if active { c.ring } else { transparent_black() };
         let rows = self.rows(cx);
         let empty = rows.is_empty() && self.error.is_none();
+        let choosing = self.new_tab.is_some();
         let sidebar = v_flex()
             .w(px(340.))
             .h_full()
@@ -1051,29 +1152,46 @@ impl Render for ArtifactsView {
                     }
                 }),
             )
-            .child(div().p_2().key_context(SEARCH).child(Input::new(&self.search).cleanable(true)))
+            // Choosing a new tab, the search box says what Enter will do.
+            .child(div().p_2().key_context(SEARCH).child(Input::new(&self.search).cleanable(true).when(choosing, |i| {
+                i.prefix(
+                    div()
+                        .px_1p5()
+                        .rounded_sm()
+                        .bg(c.primary)
+                        .text_color(c.primary_foreground)
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .child("NEW TAB"),
+                )
+            })))
             .child(self.filters(cx))
             .when_some(self.error.clone(), |d, error| {
                 d.child(div().mx_2().mb_2().p_2().rounded_md().text_xs().bg(c.danger.opacity(0.12)).text_color(c.danger).child(error))
             })
             .child(
                 div()
-                    .id("list")
-                    .key_context(LIST)
-                    .track_focus(&self.list_focus)
                     .flex_1()
+                    .min_h_0()
                     .mx_1()
                     .mb_1()
-                    .pb_1()
                     .rounded_md()
                     .border_2()
-                    .border_color(ring(self.pane == Pane::List))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .when(empty, |d| {
-                        d.child(div().p_3().text_sm().text_color(c.muted_foreground).child("Nothing here. `artifacts add notes.md` from any checkout."))
-                    })
-                    .children(rows),
+                    .border_color(if choosing { c.primary } else { ring(self.pane == Pane::List) })
+                    .child(
+                        div()
+                            .id("list")
+                            .key_context(LIST)
+                            .track_focus(&self.list_focus)
+                            .size_full()
+                            .pb_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .when(empty, |d| {
+                                d.child(div().p_3().text_sm().text_color(c.muted_foreground).child("Nothing here. `artifacts add notes.md` from any checkout."))
+                            })
+                            .children(rows),
+                    ),
             );
 
         // The ring sits outside the webview's bounds: the native view covers anything inside them.
@@ -1097,6 +1215,7 @@ impl Render for ArtifactsView {
             .on_action(cx.listener(Self::focus_list))
             .on_action(cx.listener(Self::focus_page))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::cancel_new_tab))
             .on_action(cx.listener(Self::duplicate_tab))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::close_other_tabs))

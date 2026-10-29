@@ -88,13 +88,19 @@ The list follows the active tab: moving through it moves that tab, and a dot mar
 other tabs. Each tab keeps its own scroll and history. Links that ask for a new window open a new
 tab. The open tabs and the zoom come back on the next launch (`~/.local/share/artifacts/app.json`).
 
+`⌘T` (or `⌘N`, or the `+` button) starts a new tab by searching for its page: the search box
+takes the keyboard, reads NEW TAB, and has its text selected, so typing starts a new search.
+`ctrl-j` `ctrl-k` move through the results without touching the open tab; `Enter` (or a click)
+opens the page in a new tab and clears the search, and `Esc` cancels and puts the keyboard back
+where it was.
+
 The keyboard is in one of three places, and a ring shows which: the **list**, its **search box**,
 or the **page**.
 
 | Where | Keys |
 | --- | --- |
 | Anywhere | `⌘/` search pages · `⌘F` find in page · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
-| Tabs, anywhere | `⌘T` new · `⌘W` close (the last one hides the app) · `⌘⇧T` reopen · `⌘⌥W` close the others · `⌘⇧[` `⌘⇧]` or `⌃⇧Tab` `⌃Tab` previous / next · `⌘1`–`⌘8` that tab · `⌘9` the last · `⌃⇧PgUp` `⌃⇧PgDn` move |
+| Tabs, anywhere | `⌘T` `⌘N` new · `⌘W` close (the last one hides the app) · `⌘⇧T` reopen · `⌘⌥W` close the others · `⌘⇧[` `⌘⇧]` or `⌃⇧Tab` `⌃Tab` previous / next · `⌘1`–`⌘8` that tab · `⌘9` the last · `⌃⇧PgUp` `⌃⇧PgDn` move |
 | List | `j` `k` move · `gg` `G` first / last · `l` `→` `Enter` `Tab` read the page · `/` search pages · `o` open in browser |
 | Tabs, from the list or the page | `H` `L` previous / next · `x` `X` close / reopen · `^` the last-used tab · `<` `>` move · `t` (list) or `yt` (page) duplicate |
 | Search pages | type to filter · `ctrl-j` `ctrl-k` move through the results as you type · `Enter` `Esc` back to the list |

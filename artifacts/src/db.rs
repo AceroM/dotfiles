@@ -5,6 +5,9 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The most pages the store keeps: adding one past it deletes the least recently updated.
+const MAX_PAGES: i64 = 5_000;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS artifacts (
   id          INTEGER PRIMARY KEY,
@@ -214,6 +217,13 @@ impl Db {
                     slug, w.kind, w.title, w.summary, w.question, w.source, w.html, w.ctx, w.repo,
                     w.slot, w.branch, w.sha, w.ticket, w.source_file, w.session_id, now
                 ],
+            )?;
+            // Past MAX_PAGES, the least recently updated pages go, and their revisions and assets
+            // with them (ON DELETE CASCADE).
+            tx.execute(
+                "DELETE FROM artifacts WHERE id IN
+                   (SELECT id FROM artifacts ORDER BY updated_at DESC, id DESC LIMIT -1 OFFSET ?1)",
+                [MAX_PAGES],
             )?;
             (slug, 1)
         };
