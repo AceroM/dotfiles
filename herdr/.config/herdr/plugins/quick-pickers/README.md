@@ -9,8 +9,8 @@
   `1-9` to send it to that row, or filter and press Enter. All panes, running
   sessions, and split sizes move together, and focus follows the tab. Choosing
   its current space keeps it there; Escape cancels.
-- `fn-1..9` / `fn-shift-1..9`: jump to the numbered tab / space while Ghostty is focused.
-- `fn-j` / `fn-k`: next / previous space while Ghostty is focused; add Shift for next / previous agent.
+- `fn-1..9` / `fn-shift-1..9`: jump to the numbered tab / space while Ghostty or the Herdr desktop app is focused.
+- `fn-j` / `fn-k`: next / previous space while Ghostty or the Herdr desktop app is focused; add Shift for next / previous agent.
 - `fn-t`: every tab in every space, in sidebar order; filter also matches pane titles and cwds.
 - `fn-shift-;`: the 20 most recently written Claude (`~/.claude/projects`) and Codex
   (`~/.codex/sessions`) transcripts (`sessions.ts`). Enter opens a new tab in the
@@ -19,7 +19,7 @@
   --dangerously-bypass-approvals-and-sandbox <id>`. Rows marked `*` are already
   running under Herdr, so Enter focuses that pane instead. `claude -p` runs and
   Codex subagent/exec threads are skipped.
-  Hammerspoon also takes over `Ctrl-Option-;` while Ghostty is focused and opens
+  Hammerspoon also takes over `Ctrl-Option-;` while Ghostty or the Herdr desktop app is focused and opens
   the popup over Herdr's socket with the snapshot preloaded; the Herdr bindings
   and `open.sh` are the slower fallback when Hammerspoon isn't running.
 

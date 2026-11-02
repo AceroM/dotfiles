@@ -1,0 +1,42 @@
+# Herdr GPUI overrides. Saved changes reload automatically.
+# Unset keys inherit config-gpui.toml; tables merge key by key.
+# Stowed with: stow herdr  ->  ~/.config/herdr/config-gpui.local.toml
+#
+# Herdr UI (/Applications/Herdr.app) is a second front end on the same daemon
+# that Ghostty attaches to, so config.toml's [keys] (custom commands included)
+# and [ui.sound] already reach it. What is here mirrors the Ghostty side of the
+# setup instead, which the daemon config never sees. Edit with
+# `/Applications/Herdr.app/Contents/MacOS/Herdr config set KEY VALUE`, which
+# writes through this symlink and refuses values the app would not load.
+
+# New installs start with the roomy rounded sidebar. Remove this line for
+# the managed default, or pick another layout listed in config-gpui.toml.
+layout = "comfortable-rounded"
+confirm_close_pane = false
+
+# The same palette Ghostty paints under the TUI (ghostty/config's
+# theme = zed-one-dark): Zed's One Dark at #282c34, the color Herdr's one-dark
+# chrome and Zed's panels sit on.
+theme = "~/.config/ghostty/themes/zed-one-dark"
+
+# Ghostty's macos-option-as-alt = true. Every Herdr chord in config.toml is
+# ctrl+alt or cmd+alt+shift; the default "auto" leaves the right Option typing
+# accents.
+option_as_alt = true
+
+# ctrl+alt+x closes a tab without asking (herdr-close-tab), and Ghostty runs
+# with confirm-close-surface = false.
+confirm_close_tab = false
+
+[features]
+acp_chats = true
+
+[chat]
+layout = "timeline"
+
+[keybindings]
+# cmd+alt+shift+a..z jump to the space with that initial (config.toml), and
+# these two defaults sit on the w and n of that row. ghostty/config unbinds
+# super+alt+shift+w for the same reason.
+close_window = ""
+new_window = ""

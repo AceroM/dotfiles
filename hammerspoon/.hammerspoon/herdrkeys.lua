@@ -16,31 +16,39 @@
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+shift+q    same, but also records microphone + system audio
 --   fn+b          toggle horizontal wheel/trackpad scrolling (from any app)
---   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Ghostty: close tab, close pane,
+--   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Herdr: close tab, close pane,
 --                 last pane back/forth
---   fn+shift+w    becomes ctrl+alt+shift+w in Ghostty: close workspace
---   fn+h/l        become ctrl+alt+h/l in Ghostty: previous / next tab
---   fn+1..8       become ctrl+alt+1..8 in Ghostty: jump to the Nth tab
---   fn+shift+1..8 become cmd+alt+shift+1..8 in Ghostty: jump to the Nth space
+--   fn+shift+w    becomes ctrl+alt+shift+w in Herdr: close workspace
+--   fn+h/l        become ctrl+alt+h/l in Herdr: previous / next tab
+--   fn+1..8       become ctrl+alt+1..8 in Herdr: jump to the Nth tab
+--   fn+shift+1..8 become cmd+alt+shift+1..8 in Herdr: jump to the Nth space
 --   fn+9         focus the last tab in the current space
 --   fn+shift+9   focus the last space in the sidebar
---   fn+j/k        become ctrl+alt+j/k in Ghostty: next / previous space
---   fn+shift+j/k  become ctrl+alt+shift+j/k in Ghostty: next / previous agent
---   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Ghostty: split
+--   fn+j/k        become ctrl+alt+j/k in Herdr: next / previous space
+--   fn+shift+j/k  become ctrl+alt+shift+j/k in Herdr: next / previous agent
+--   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Herdr: split
 --                 vertically / horizontally
---   fn+z          becomes ctrl+alt+z in Ghostty: zoom the pane
---   fn+c          becomes ctrl+alt+b in Ghostty: toggle the sidebar
---   fn+r          becomes ctrl+alt+r in Ghostty: rename tab
---   fn+shift+r    becomes ctrl+alt+shift+r in Ghostty: rename space
---   fn+n          becomes ctrl+alt+n in Ghostty: new tab
+--   fn+z          becomes ctrl+alt+z in Herdr: zoom the pane
+--   fn+c          becomes ctrl+alt+b in Herdr: toggle the sidebar
+--   fn+r          becomes ctrl+alt+r in Herdr: rename tab
+--   fn+shift+r    becomes ctrl+alt+shift+r in Herdr: rename space
+--   fn+n          becomes ctrl+alt+n in Herdr: new tab
 --   fn+e          opens a tab immediately to the right of the current tab
---   fn+shift+n    becomes ctrl+alt+shift+n in Ghostty: new space
---   fn+arrows     become ctrl+alt+arrows in Ghostty: focus the pane that way.
+--   fn+shift+n    becomes ctrl+alt+shift+n in Herdr: new space
+--   fn+arrows     become ctrl+alt+arrows in Herdr: focus the pane that way.
 --                 macOS has already turned fn+arrow into home/end/pgup/pgdn
 --                 by the time the tap sees it, so those keycodes are mapped
---                 back to arrows (outside Ghostty they keep their usual job)
---   ctrl+alt+;    (and +shift) handled here too while Ghostty is focused, so
+--                 back to arrows (outside Herdr they keep their usual job)
+--   ctrl+alt+;    (and +shift) handled here too while Herdr is focused, so
 --                 Herdr's own binding -- a slower shell hop -- is only a fallback
+--
+-- "In Herdr" means either Herdr is focused: the TUI in Ghostty, or the desktop
+-- app (~/Applications/Herdr.app). The TUI reads its chords from
+-- ~/.config/herdr/config.toml, the app from ~/.config/herdr-app/keys.json.
+-- The app runs on herdr-core rather than herdr.sock, so the socket features
+-- go through its CLI there: fn+a, fn+9, fn+e, fn+y, and the agents/spaces/
+-- tabs pickers (its one picker). fn+o/i, fn+m, fn+/, fn+; and fn+shift+;/y
+-- have no counterpart in the app.
 --
 -- Everything talks to the Herdr socket via nc: every spawned process costs
 -- ~20-30ms on this machine, and the pickers used to chain nine of them.
@@ -57,6 +65,8 @@ local socket
 local socketCheckedAt = 0
 local PIDFILE = HOME .. "/.cache/herdr-quick-picker.pid"
 local GHOSTTY = "com.mitchellh.ghostty"
+local HERDR_APP = "dev.herdr.app" -- ~/Applications/Herdr.app, the desktop app
+local HERDR_APP_CLI = HOME .. "/.local/bin/herdr-app"
 local PLUGIN = "miguel.quick-pickers"
 local JEV_PLUGIN = "miguel.jev-focus"
 local WIDTH = 40 -- ~300px at font-size 14
@@ -185,6 +195,180 @@ local function requestOnSocket(method, params, cb)
   tryPath(1)
 end
 
+-- Two Herdrs: the TUI inside Ghostty, and the desktop app. The focused one is
+-- in use; from any other app, the desktop app wins while it is open.
+local function frontEnd()
+  local win = hs.window.focusedWindow()
+  local app = win and win:application()
+  local id = app and app:bundleID()
+  if id == GHOSTTY or id == HERDR_APP then return id end
+  return hs.application.get(HERDR_APP) and HERDR_APP or GHOSTTY
+end
+
+local function herdrFocused()
+  local win = hs.window.focusedWindow()
+  local app = win and win:application()
+  local id = app and app:bundleID()
+  return id == GHOSTTY or id == HERDR_APP
+end
+
+local function bringForward(id)
+  if not herdrFocused() then hs.task.new("/usr/bin/open", nil, { "-b", id }):start() end
+end
+
+-- The desktop app runs its terminals on herdr-core, not on the server behind
+-- herdr.sock, so everything below that talks to the socket would act on the
+-- TUI's session instead. The app is driven through its own CLI (~15ms a
+-- call), spooled through a file for the same 64KB reason as requestOnSocket.
+-- cb(decoded JSON), or cb(nil) when the call failed.
+local function appRun(args, cb)
+  local out = os.tmpname()
+  local task
+  task = hs.task.new("/bin/sh", function(exitCode)
+    inflight[task] = nil
+    local file = io.open(out, "r")
+    local raw = file and file:read("*a") or ""
+    if file then file:close() end
+    os.remove(out)
+    local ok, response = pcall(hs.json.decode, raw)
+    if exitCode ~= 0 or not ok or type(response) ~= "table" then
+      hs.printf("herdr-app %s failed: %s", table.concat(args, " "), raw)
+      if cb then cb(nil) end
+      return
+    end
+    if cb then cb(response) end
+  end, { "-c", 'out="$1" cli="$2"; shift 2; exec "$cli" "$@" > "$out" 2>/dev/null', "sh", out, HERDR_APP_CLI, table.unpack(args) })
+  if not task then
+    os.remove(out)
+    if cb then cb(nil) end
+    return
+  end
+  inflight[task] = true
+  if not task:start() then
+    inflight[task] = nil
+    os.remove(out)
+    if cb then cb(nil) end
+  end
+end
+
+local function appActiveSpace(ls)
+  for _, space in ipairs(ls.spaces or {}) do
+    if space.active then return space end
+  end
+end
+
+-- Every terminal with a pane, in sidebar order.
+local function appTerminals(ls)
+  local list = {}
+  for _, space in ipairs(ls.spaces or {}) do
+    for _, tab in ipairs(space.tabs or {}) do
+      for _, term in ipairs(tab.terminals or {}) do list[#list + 1] = term end
+    end
+  end
+  return list
+end
+
+local function appFocusLast(workspace)
+  appRun({ "ls" }, function(ls)
+    if not ls then return hs.alert.show("Couldn’t read the Herdr app’s spaces", 2) end
+    if workspace then
+      local last = ls.spaces and ls.spaces[#ls.spaces]
+      if last then appRun({ "do", "space.select", "--id", last.id }) end
+      return
+    end
+    local space, last = appActiveSpace(ls), nil
+    for _, tab in ipairs(space and space.tabs or {}) do
+      if not tab.settled then last = tab end
+    end
+    if last then appRun({ "do", "tab.select", "--id", last.id }) end
+  end)
+end
+
+-- Same rule as herdr-agent-attention: the next blocked agent after the focused
+-- pane, else the next done one, wrapping around, so repeated presses rotate.
+local function appFocusNextAgent()
+  appRun({ "status" }, function(status)
+    appRun({ "ls" }, function(ls)
+      if not ls then return hs.alert.show("Couldn’t read the Herdr app’s agents", 2) end
+      local terms, here = appTerminals(ls), 0
+      for i, term in ipairs(terms) do
+        if status and term.pane == status.focused_pane then here = i end
+      end
+      for _, wanted in ipairs({ "blocked", "done" }) do
+        local first, after
+        for i, term in ipairs(terms) do
+          if term.status == wanted then
+            first = first or term
+            if i > here and not after then after = term end
+          end
+        end
+        local target = after or first
+        if target then return appRun({ "do", "agent.focus", "--terminal", target.terminal }) end
+      end
+      hs.alert.show("No agent is waiting", 1)
+    end)
+  end)
+end
+
+-- The app's tab.new appends; move the new tab in right after the shown one.
+local appCreatingTab = false
+local function appNewTabNext()
+  if appCreatingTab then return end
+  appCreatingTab = true
+  local function failed(what)
+    appCreatingTab = false
+    hs.alert.show("Couldn’t open adjacent tab" .. (what and (": " .. what) or ""), 3)
+  end
+  appRun({ "ls" }, function(ls)
+    local space = ls and appActiveSpace(ls)
+    local index
+    for i, tab in ipairs(space and space.tabs or {}) do
+      if tab.active then index = i end
+    end
+    if not index then return failed() end
+    appRun({ "do", "tab.new", "--space", space.id }, function(made)
+      if not made or not made.tab then return failed() end
+      appRun({ "do", "tab.move", "--id", made.tab, "--index", tostring(index + 1) }, function(moved)
+        if not moved then return failed() end
+        appCreatingTab = false
+      end)
+    end)
+  end)
+end
+
+-- The app has one picker (its own cmd-p) for agents, spaces and tabs; the
+-- same key closes it again.
+local appPickers = { agents = true, spaces = true, tabs = true }
+local function appToggle(mode)
+  if not appPickers[mode] then
+    return hs.alert.show("That picker isn’t in the Herdr app", 1.5)
+  end
+  appRun({ "status" }, function(status)
+    for _, overlay in ipairs(status and status.overlays or {}) do
+      -- status names overlays by mod, not by the id overlay.close takes
+      -- (--id picker answers ok and closes nothing), so close the top one.
+      if overlay == "picker" then return appRun({ "do", "overlay.close" }) end
+    end
+    appRun({ "do", "mod.open", "--name", "picker" })
+  end)
+end
+
+-- The focused terminal's address (t17), what `hc read` and `hc send` take.
+local function appCopyTerminal()
+  appRun({ "status" }, function(status)
+    appRun({ "ls" }, function(ls)
+      for _, term in ipairs(ls and appTerminals(ls) or {}) do
+        if status and term.pane == status.focused_pane then
+          hs.pasteboard.setContents(term.terminal)
+          hs.alert.show("Copied terminal " .. term.terminal, 1)
+          return
+        end
+      end
+      hs.alert.show("No focused terminal in the Herdr app", 1)
+    end)
+  end)
+end
+
 -- Hammerspoon has no shell environment. With multiple live servers the
 -- default socket may belong to a background session, so follow Ghostty's
 -- Herdr client instead. Cache briefly to keep chained requests inexpensive.
@@ -209,13 +393,8 @@ local function request(method, params, cb)
   end
 end
 
-local function ghosttyFocused()
-  local win = hs.window.focusedWindow()
-  local app = win and win:application()
-  return app ~= nil and app:bundleID() == GHOSTTY
-end
-
 local function focusLast(workspace)
+  if frontEnd() == HERDR_APP then return appFocusLast(workspace) end
   request("session.snapshot", nil, function(response)
     local snap = response.result and response.result.snapshot
     if not snap then
@@ -238,6 +417,7 @@ end
 
 local creatingTab = false
 local function newTabNext()
+  if frontEnd() == HERDR_APP then return appNewTabNext() end
   if creatingTab then return end
   creatingTab = true
   local function failed(response)
@@ -283,9 +463,9 @@ local function newTabNext()
 end
 
 local function focusNextAgent()
-  if not ghosttyFocused() then
-    hs.task.new("/usr/bin/open", nil, { "-b", GHOSTTY }):start()
-  end
+  local front = frontEnd()
+  bringForward(front)
+  if front == HERDR_APP then return appFocusNextAgent() end
   local task
   task = hs.task.new("/bin/bash", function(exitCode, _, stderr)
     inflight[task] = nil
@@ -340,9 +520,9 @@ end
 -- Same key closes the picker, the other key swaps it. The pidfile is only a
 -- hint: Herdr SIGKILLs popups, so it can go stale; popup.close is the truth.
 local function toggle(mode)
-  if not ghosttyFocused() then
-    hs.task.new("/usr/bin/open", nil, { "-b", GHOSTTY }):start()
-  end
+  local front = frontEnd()
+  bringForward(front)
+  if front == HERDR_APP then return appToggle(mode) end
   local file = io.open(PIDFILE, "r")
   local record = file and file:read("*l") or ""
   if file then file:close() end
@@ -470,6 +650,7 @@ local function copyProcessSession(paneId, expectedAgent)
 end
 
 local function copySessionId()
+  if frontEnd() == HERDR_APP then return hs.alert.show("Session IDs aren’t read from the Herdr app yet", 1.5) end
   request("session.snapshot", nil, function(response)
     local snap = response.result and response.result.snapshot
     if not snap or not snap.focused_pane_id then
@@ -493,6 +674,7 @@ local function copySessionId()
 end
 
 local function copyPaneId()
+  if frontEnd() == HERDR_APP then return appCopyTerminal() end
   request("session.snapshot", nil, function(response)
     local snap = response.result and response.result.snapshot
     local pane = snap and snap.focused_pane_id
@@ -510,13 +692,13 @@ local function handleKey(event)
   local flags = event:getFlags()
 
   if flags.ctrl and flags.alt and not flags.cmd and not flags.shift and code == keys.e then
-    if not ghosttyFocused() then return false end
+    if not herdrFocused() then return false end
     if event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then newTabNext() end
     return true
   end
 
   if flags.ctrl and flags.alt and not flags.cmd and code == keys[";"] then
-    if not ghosttyFocused() then return false end
+    if not herdrFocused() then return false end
     toggle(flags.shift and "spaces" or "agents")
     return true
   end
@@ -548,15 +730,19 @@ local function handleKey(event)
     end
     return true
   elseif code == keys.e then
-    if not ghosttyFocused() then return false end
+    if not herdrFocused() then return false end
     if not autorepeat then newTabNext() end
     return true
   elseif code == keys["9"] then
-    if not ghosttyFocused() then return false end
+    if not herdrFocused() then return false end
     if not autorepeat then focusLast(flags.shift) end
     return true
-  elseif ghosttyFocused() then
+  elseif herdrFocused() then
+    -- The desktop app has no last-pane command (fn+o/i); keep ctrl+alt+o/i
+    -- out of the shell rather than rewriting them into it.
+    if frontEnd() == HERDR_APP and (code == keys.o or code == keys.i) then return true end
     -- Rewrite in place using Herdr's indexed-space chord for shifted digits.
+    -- The desktop app binds the same chords in ~/.config/herdr-app/keys.json.
     if flags.shift and workspaceKeys[code] then
       event:setFlags({ cmd = true, alt = true, shift = true })
     else

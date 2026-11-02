@@ -24,6 +24,14 @@ auto_switch = false
 # dark_name = "one-dark"
 # light_name = "rose-pine-dawn"
 
+[theme.custom]
+# one-dark draws the sidebar's right border (and the spaces/agents divider and
+# scrollbar tracks) in surface_dim = #282c34. That showed against Ghostty's old
+# Atom One Dark #1e2127, but it is the exact background of zed-one-dark, so
+# the lines vanished. Zed One Dark's border.variant puts them back, one step
+# lighter than the background, as before.
+surface_dim = "#363c46"
+
 [keys]
 # --- Tabs ---------------------------------------------------------------
 # ctrl+alt+n opens a tab at the end; ctrl+alt+h/l walk between tabs (same
@@ -401,6 +409,11 @@ enabled = false
 
 [ui.sidebar.spaces]
 rows = [["state_icon", "workspace", "git_status"]]
+
+# One line per agent: the default rows plus a second line holding only the
+# agent kind ("claude", "codex"), which is dropped here.
+[ui.sidebar.agents]
+rows = [["state_icon", "machine", "workspace", "tab"]]
 
 [update]
 channel = "stable"
