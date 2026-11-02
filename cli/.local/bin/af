@@ -6,6 +6,9 @@
 #   af ls [count]   list more (all of them by default)
 #   af path <n>     print page n's path:  nvim "$(af path 1)"
 #   af <file>       open any HTML file the same way
+#   af add <file>…  copy HTML files in (with a same-named folder of images, if there is one)
+#   pbpaste | af add - <name>
+#                   save HTML from stdin as <name>.html
 #   af dir          print the pages directory
 #
 # A page is a plain .html file at the top of $AF_DIR (default ~/artifacts). Agents write
@@ -18,7 +21,7 @@ set -euo pipefail
 
 dir="${AF_DIR:-$HOME/artifacts}"
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 
 # "mtime<TAB>path" per page, newest first.
 pages() {
@@ -67,6 +70,31 @@ nth() {
   printf '%s' "$path"
 }
 
+add() {
+  [ $# -ge 1 ] || { echo "usage: af add <file.html>… | af add - <name>" >&2; exit 2; }
+  mkdir -p "$dir"
+  if [ "$1" = - ]; then
+    [ -n "${2:-}" ] || { echo "usage: af add - <name>" >&2; exit 2; }
+    local out="$dir/${2%.html}.html"
+    cat > "$out"
+    echo "$out"
+    return
+  fi
+  local f base dest
+  for f in "$@"; do
+    case "$f" in *.html|*.htm) ;; *) echo "af: not an HTML file: $f" >&2; exit 1 ;; esac
+    [ -f "$f" ] || { echo "af: no such file: $f" >&2; exit 1; }
+    base=$(basename "$f"); base=${base%.htm}; base=${base%.html}
+    dest="$dir/$base.html"
+    if [ "$f" -ef "$dest" ]; then touch "$dest"; else cp "$f" "$dest"; fi
+    # Its images, by the same convention agents use: foo.html + foo/
+    if [ -d "$(dirname "$f")/$base" ] && ! [ "$(dirname "$f")/$base" -ef "$dir/$base" ]; then
+      cp -R "$(dirname "$f")/$base" "$dir/"
+    fi
+    echo "$dest"
+  done
+}
+
 # Bring an open tab showing the file forward and reload it; otherwise open a new one.
 open_page() {
   local path url
@@ -103,6 +131,7 @@ case "${1:-}" in
   "")            list 5 ;;
   -h|--help|help) usage ;;
   ls)            list "${2:-0}" ;;
+  add)           shift; add "$@" ;;
   dir)           echo "$dir" ;;
   path)          [ -n "${2:-}" ] || { usage >&2; exit 2; }; page=$(nth "$2") || exit 1; echo "$page" ;;
   *[!0-9]*)      [ -f "$1" ] || { echo "af: no such page or file: $1" >&2; exit 1; }; open_page "$1" ;;

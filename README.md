@@ -9,8 +9,7 @@ With `stow hammerspoon` and Hammerspoon running:
 - **Fn+E** opens and focuses a Herdr tab immediately to the right of the current
   tab, using the current pane’s directory (while Ghostty is focused).
 - **Fn+Q** toggles Quick Record.
-- **Option+A** toggles the Artifacts app (`artifacts/app`; without it, the `localhost:4620` tab in
-  Chrome). **Option+Shift+A** launches or focuses PhotoCraft.
+- **Option+Shift+A** launches or focuses PhotoCraft.
 - **Fn+B** toggles horizontal scrolling from any app. While enabled, vertical
   mouse-wheel or trackpad scrolling moves sideways. Press it again to restore
   normal scrolling; a Hammerspoon reload also resets it to off.
@@ -42,8 +41,10 @@ also links the skill into
 Agents write pages as plain, self-contained `.html` files in `~/artifacts` (`$AF_DIR`); the rules
 they follow are in `miguelacero/.claude/CLAUDE.md` → "Pages". `af` (in `cli/`, `stow cli`) lists
 the five most recently changed, `af 1` opens the newest in Chrome (focusing and reloading its tab
-if it is already open), `af ls` lists them all and `af path 1` prints a page's path. There is no
-server or index: the list is the directory sorted by modification time.
+if it is already open), `af ls` lists them all and `af path 1` prints a page's path. `af add
+file.html` copies a page in (with a same-named folder of images), and `pbpaste | af add - name`
+saves HTML from stdin. There is no server or index: the list is the directory sorted by
+modification time.
 
 Vimium needs file access to work on these pages: open
 `chrome://extensions/?id=dbepggeogbaibhgnhhndojpepiihcmeb` and turn on **Allow access to file
