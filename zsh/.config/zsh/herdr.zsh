@@ -12,7 +12,7 @@
 #   hp   [<t>]             panes in one tab      hwait <t> <pat>   wait for output
 #   hname [<t>] <name>     label a pane          hkill <t>         close a pane
 #   hfolder [<text>|-]     space subtitle        (ctrl+alt+shift+f prompts)
-#   hspawn <name> [cmd]    new labeled pane
+#   hspawn <name> [cmd]    new labeled pane      ce                close other tabs
 #   hx   <t> <cmd>         run + capture stdout/stderr + exit code
 #   hask <agent> <prompt>  prompt an agent, wait, print its reply
 #   hc                     reload config.toml    eh                edit config.toml
@@ -609,6 +609,32 @@ function hkill() {
     return 1
   fi
   herdr pane close "$id" >/dev/null && print -r -- "closed $id"
+}
+
+# ce — close every other tab in this space, keeping the one the shell lives in.
+# "This one" is $HERDR_TAB_ID, not whichever tab the client has focused, so it
+# behaves the same when run from a background tab. A tab whose agent is still
+# working or blocked is closed too, but flagged in the output.
+function ce() {
+  _h_guard || return 1
+
+  local -a rows
+  rows=("${(@f)$(herdr tab list --workspace "$HERDR_WORKSPACE_ID" |
+    jq -r --arg t "$HERDR_TAB_ID" \
+      '.result.tabs[] | select(.tab_id != $t) | [.tab_id, .label, (.agent_status // "")] | @tsv')}")
+  rows=(${rows:#})
+  (( $#rows )) || { print -r -- "no other tabs"; return 0 }
+
+  local row id label agent
+  for row in $rows; do
+    IFS=$'\t' read -r id label agent <<< "$row"
+    herdr tab close "$id" >/dev/null || { print -u2 -- "failed to close $label ($id)"; continue }
+    if [[ "$agent" == (working|blocked) ]]; then
+      print -r -- "closed $label  [$agent]"
+    else
+      print -r -- "closed $label"
+    fi
+  done
 }
 
 # ── completion: {space}:{tab} addresses, then space names ───────────

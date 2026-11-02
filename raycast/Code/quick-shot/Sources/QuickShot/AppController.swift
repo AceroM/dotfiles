@@ -3,6 +3,12 @@ import Carbon.HIToolbox
 import OSLog
 import ServiceManagement
 
+/// Where a finished capture goes: the annotation editor, or OCR straight to the clipboard.
+enum CaptureOutput {
+    case editor
+    case text
+}
+
 @MainActor
 final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let logger = Logger(subsystem: "com.acerom.quickshot", category: "app")
@@ -20,6 +26,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hotKeys.add(1, keyCode: kVK_ANSI_2, modifiers: commandShift) { [weak self] in self?.capture(.area) }
         hotKeys.add(2, keyCode: kVK_ANSI_1, modifiers: commandShift) { [weak self] in self?.captureFullScreen() }
         hotKeys.add(3, keyCode: kVK_ANSI_2, modifiers: cmdKey | optionKey) { [weak self] in self?.captureAppWindow() }
+        hotKeys.add(4, keyCode: kVK_ANSI_0, modifiers: commandShift) { [weak self] in self?.capture(.area, output: .text) }
         missingHotKeys = hotKeys.registerMissing()
         if !missingHotKeys.isEmpty { logger.error("Hotkeys unavailable: \(self.missingHotKeys, privacy: .public)") }
 
@@ -45,6 +52,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let app = menu.addItem(withTitle: "Capture Current App", action: #selector(captureAppWindow), keyEquivalent: "2")
         app.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(withTitle: "Capture Window", action: #selector(captureWindow), keyEquivalent: "")
+        let text = menu.addItem(withTitle: "Copy Text from Area", action: #selector(captureText), keyEquivalent: "0")
+        text.keyEquivalentModifierMask = [.command, .shift]
         if !missingHotKeys.isEmpty {
             menu.addItem(.separator())
             let warning = menu.addItem(withTitle: "Shortcut taken by another app (quit Shottr?)", action: nil,
@@ -62,6 +71,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func captureArea() { capture(.area) }
     @objc private func captureWindow() { capture(.window) }
+    @objc private func captureText() { capture(.area, output: .text) }
 
     @objc private func openFolder() {
         try? FileManager.default.createDirectory(at: ShotEditor.saveFolder, withIntermediateDirectories: true)
@@ -85,6 +95,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "window": capture(.window)
         case "full": captureFullScreen()
         case "app": captureAppWindow()
+        case "text": capture(.area, output: .text)
         case "quit": NSApp.terminate(nil)
         default: logger.error("Unknown command \(string, privacy: .public)")
         }
@@ -148,7 +159,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// The same shortcut again cancels an open selector.
-    func capture(_ mode: CaptureMode) {
+    func capture(_ mode: CaptureMode, output: CaptureOutput = .editor) {
         if selector.isActive { selector.cancel(); return }
         guard !isCapturing, hasScreenAccess() else { return }
         isCapturing = true
@@ -156,8 +167,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             do {
                 let frozen = mode == .area ? try await Capture.displays() : [:]
-                selector.show(mode: mode, frozen: frozen) { [weak self] selection in
-                    self?.finish(selection, frozen: frozen)
+                let prompt = output == .text
+                    ? "Drag over text to copy it  ·  Click a window  ·  F for full screen  ·  Esc to cancel" : nil
+                selector.show(mode: mode, frozen: frozen, prompt: prompt) { [weak self] selection in
+                    self?.finish(selection, frozen: frozen, output: output)
                 }
             } catch {
                 isCapturing = false
@@ -166,7 +179,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func finish(_ selection: Selection?, frozen: [CGDirectDisplayID: Shot]) {
+    private func finish(_ selection: Selection?, frozen: [CGDirectDisplayID: Shot], output: CaptureOutput) {
         switch selection {
         case nil:
             isCapturing = false
@@ -180,12 +193,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 restoreFocus()
                 return
             }
-            open(Shot(image: image, scale: shot.scale, region: ScreenRegion(displayID: displayID, rect: rect)))
+            deliver(Shot(image: image, scale: shot.scale, region: ScreenRegion(displayID: displayID, rect: rect)),
+                    to: output)
         case .window(let id):
             Task {
                 defer { isCapturing = false }
-                do { open(try await Capture.window(id: id)) }
+                do { deliver(try await Capture.window(id: id), to: output) }
                 catch { alert("Capture failed", error.localizedDescription) }
+            }
+        }
+    }
+
+    private func deliver(_ shot: Shot, to output: CaptureOutput) {
+        switch output {
+        case .editor: open(shot)
+        case .text: copyText(from: shot)
+        }
+    }
+
+    /// OCRs the shot onto the clipboard as plain text; the clipboard is left alone when nothing is found.
+    private func copyText(from shot: Shot) {
+        restoreFocus()
+        Task {
+            do {
+                let text = try await TextRecognition.text(in: shot.image)
+                guard !text.isEmpty else {
+                    Toast.show("No text found")
+                    return
+                }
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                let lines = text.split(separator: "\n").count
+                Toast.show("Copied \(lines) line\(lines == 1 ? "" : "s") of text")
+            } catch {
+                alert("Text recognition failed", error.localizedDescription)
             }
         }
     }

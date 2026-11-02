@@ -18,7 +18,9 @@ final class RegionSelector {
     var isActive: Bool { completion != nil }
 
     /// Area mode draws each display's frozen shot under the overlay; window mode stays live.
-    func show(mode: CaptureMode, frozen: [CGDirectDisplayID: Shot], completion: @escaping (Selection?) -> Void) {
+    /// `prompt` replaces the default hint shown before a drag starts.
+    func show(mode: CaptureMode, frozen: [CGDirectDisplayID: Shot], prompt: String? = nil,
+              completion: @escaping (Selection?) -> Void) {
         self.completion = completion
         // Snapshot before showing overlays, which would otherwise obscure the targets.
         let targets = visibleWindows()
@@ -43,7 +45,7 @@ final class RegionSelector {
                 container.layer?.contents = shot.image
                 container.layer?.contentsGravity = .resize
             }
-            let view = SelectionView(frame: bounds, mode: mode, windowRects: localRects)
+            let view = SelectionView(frame: bounds, mode: mode, windowRects: localRects, prompt: prompt)
             view.hover(at: CGPoint(x: NSEvent.mouseLocation.x - screen.frame.minX,
                                   y: screen.frame.maxY - NSEvent.mouseLocation.y))
             view.onSelect = { [weak self] result in
@@ -109,6 +111,7 @@ private final class SelectionView: NSView {
     var onCancel: (() -> Void)?
     var onFullScreen: (() -> Void)?
     private let mode: CaptureMode
+    private let prompt: String?
     private var gesture: CaptureSelection
     private var cursor: CGPoint?
     private var tracking: NSTrackingArea?
@@ -116,8 +119,9 @@ private final class SelectionView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    init(frame: NSRect, mode: CaptureMode, windowRects: [CGRect]) {
+    init(frame: NSRect, mode: CaptureMode, windowRects: [CGRect], prompt: String?) {
         self.mode = mode
+        self.prompt = prompt
         gesture = CaptureSelection(bounds: CGRect(origin: .zero, size: frame.size), windowRects: windowRects,
                                    allowsDrag: mode == .area)
         super.init(frame: frame)
@@ -213,8 +217,8 @@ private final class SelectionView: NSView {
             guides.stroke()
         }
         if gesture.anchor == nil {
-            label(mode == .area ? "Drag an area  ·  Click a window  ·  F for full screen  ·  Esc to cancel"
-                                : "Click a window  ·  Esc to cancel",
+            label(prompt ?? (mode == .area ? "Drag an area  ·  Click a window  ·  F for full screen  ·  Esc to cancel"
+                                           : "Click a window  ·  Esc to cancel"),
                   at: CGPoint(x: bounds.midX, y: 72))
         }
     }

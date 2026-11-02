@@ -37,9 +37,21 @@ also links the skill into
 `~/.claude/skills`. No account, MCP server or remote-debugging port is needed; it needs `bun`. Run
 `browser-use --help` for commands, and `browser-use reload` after editing the extension.
 
+## af (agent pages)
+
+Agents write pages as plain, self-contained `.html` files in `~/artifacts` (`$AF_DIR`); the rules
+they follow are in `miguelacero/.claude/CLAUDE.md` → "Pages". `af` (in `cli/`, `stow cli`) lists
+the five most recently changed, `af 1` opens the newest in Chrome (focusing and reloading its tab
+if it is already open), `af ls` lists them all and `af path 1` prints a page's path. There is no
+server or index: the list is the directory sorted by modification time.
+
+Vimium needs file access to work on these pages: open
+`chrome://extensions/?id=dbepggeogbaibhgnhhndojpepiihcmeb` and turn on **Allow access to file
+URLs**, once per Chrome profile.
+
 ## artifacts (local page server)
 
-`artifacts/` is a Rust server for agent-written pages at `localhost:4620`. It is not stowed:
+`af` replaces this for new pages. `artifacts/` is a Rust server for agent-written pages at `localhost:4620`. It is not stowed:
 `cd artifacts && cargo build --release`, then link `target/release/artifacts` into `~/.local/bin`.
 `artifacts/app/bundle.sh` installs the native app (`~/Applications/Artifacts.app`).
 Work-specific settings (`ARTIFACTS_SLOT_REPO`, `ARTIFACTS_TICKET_URL`) go in the private profile.

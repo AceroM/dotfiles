@@ -23,6 +23,10 @@ same shortcuts. Use **Open at Login** in the menu-bar menu to keep the hotkeys a
 - **⌥⌘2: Capture Current App.** Instantly captures the frontmost app's front window, whole
   even where it's covered, and opens the editor. Falls back to the full screen when the app
   has no window.
+- **⌘⇧0: Copy Text.** The same frozen selector as Capture Area (drag, click a window, or **F**),
+  but instead of opening the editor it runs on-device OCR (Vision) and puts the text on the
+  clipboard as plain text, one recognized line per line. A brief HUD under the pointer says how
+  many lines it copied; when there's no text it says so and leaves the clipboard alone.
 - **Capture Window** (menu bar or `quickshot://window`): click a window to capture it
   alone, including covered parts, without its shadow.
 - Pressing the same shortcut, **Escape**, or a right click cancels a selection.
@@ -44,7 +48,7 @@ Output keeps Retina resolution, and the PNG/TIFF DPI is set so pasted images kee
 on-screen size. Hotkeys use Carbon `RegisterEventHotKey`, so only scrolling capture needs
 Accessibility permission. The first capture asks for **Screen & System Audio Recording** permission.
 
-`quickshot://area`, `quickshot://full`, `quickshot://app`, `quickshot://window`, and `quickshot://quit` drive the app from
+`quickshot://area`, `quickshot://full`, `quickshot://app`, `quickshot://window`, `quickshot://text`, and `quickshot://quit` drive the app from
 Raycast or Hammerspoon. Logs use the subsystem `com.acerom.quickshot`.
 
 ## Development

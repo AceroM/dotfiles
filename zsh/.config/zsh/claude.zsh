@@ -15,15 +15,6 @@ function _cl_tmux() {
 function _cl_sid() { uuidgen | tr 'A-Z' 'a-z' }
 function _cl_tag() { _cl_tmux "${3:-}" set-option -t "$1" @claude_session "$2" 2>/dev/null }
 
-function ce() {
-  local s="claude-$(uuidgen | cut -d- -f1)"
-  local sid=$(_cl_sid)
-  _cl_tmux bg new-session -d -s "$s" -c "$PWD" "CLAUDE_CODE_NO_FLICKER=1 direnv exec '$PWD' claude --session-id $sid --dangerously-skip-permissions"
-  _cl_tag "$s" "$sid" bg
-  sleep 1
-  _cl_tmux bg send-keys -t "$s:0.0" "$1" C-m
-}
-
 function pm() {
   local s="claude-pm-$(uuidgen | cut -d- -f1)"
   local prompt='Review the staged + unstaged diff and the recent git log for style. Write a Conventional Commits message (type(scope): summary, with a body if the change warrants it) that accurately describes the change — never use a placeholder like "changes". Then commit and push. Do NOT add a Co-Authored-By footer or any AI attribution.'

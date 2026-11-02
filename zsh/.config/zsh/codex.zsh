@@ -1,4 +1,4 @@
-# Codex sessions in tmux — the codex twin of claude.zsh's `p` / `pa` / `ce`.
+# Codex sessions in tmux — the codex twin of claude.zsh's `p` / `pa`.
 #
 # Unlike claude (`claude --session-id <uuid>`), the codex CLI mints its OWN session
 # uuid at launch and writes it to
@@ -183,7 +183,7 @@ function xa() {
 }
 
 # xe — autonomous codex: a detached bg session with approvals + sandbox bypassed, fed a
-# first prompt. The codex twin of `ce`.
+# first prompt.
 function xe() {
   local name="$(_cx_pick_name bg)"
   local before="$(_cx_uuids)"
