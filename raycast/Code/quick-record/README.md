@@ -32,6 +32,10 @@ Extensions → Script Commands. Assign a hotkey to **Toggle Recording** there.
   the capture, and overlapping windows remain visible in the recording.
 - **Record Last Region:** record your previous box immediately. Run again to stop.
   If that display is disconnected or the box no longer fits, select a new region.
+- Hold **Shift** while dragging for a square, or **Option** for 16:9 (9:16 when you
+  drag taller than wide). Pressing or releasing the key mid-drag reshapes the box in
+  place. Sizes snap to exact multiples of the ratio, so a 16:9 box encodes at exactly
+  16:9; the size label shows the lock.
 - **F** while selecting records the whole display under the pointer.
 - The selector opens with your last region pre-selected (dimmed around it, dashed
   while you hover a window). Press **Return** to record it; click or drag to pick
@@ -83,7 +87,7 @@ Local diagnostics are in
 last successful file, the last error, and release-to-record latency. Additional
 events use the macOS log subsystem `com.acerom.quickrecord`.
 
-Tests cover window hover ordering, click-versus-drag selection, display clipping,
+Tests cover window hover ordering, click-versus-drag selection, ratio-locked drags, display clipping,
 saved-region validation, display bounds changes, Retina dimensions,
 and encoder size limits. Verify the real selection/start/stop flow and the resulting
 MP4 after granting screen permission; pure geometry tests cannot verify macOS

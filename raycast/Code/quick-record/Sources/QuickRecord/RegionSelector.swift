@@ -100,7 +100,7 @@ private final class SelectionView: NSView {
         self.defaultRect = defaultRect
         gesture = CaptureSelection(bounds: CGRect(origin: .zero, size: frame.size), windowRects: windowRects)
         super.init(frame: frame)
-        setAccessibilityLabel("Click a highlighted window or hold and drag a region. Release to start recording. F records the full screen. Escape cancels.")
+        setAccessibilityLabel("Click a highlighted window or hold and drag a region. Hold Shift for a square or Option for 16:9. Release to start recording. F records the full screen. Escape cancels.")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -130,21 +130,36 @@ private final class SelectionView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeKey()
+        gesture.aspect = aspect(for: event.modifierFlags)
         gesture.press(at: point(event))
         logger.notice("Selection press at \(String(describing: self.gesture.anchor), privacy: .public), target \(String(describing: self.gesture.selection), privacy: .public)")
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
+        gesture.aspect = aspect(for: event.modifierFlags)
         gesture.drag(to: point(event))
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        gesture.aspect = aspect(for: event.modifierFlags)
         let selection = gesture.release(at: point(event))
         logger.notice("Selection release at \(String(describing: self.point(event)), privacy: .public), result \(String(describing: selection), privacy: .public)")
         if let selection { onSelect?(selection) }
         needsDisplay = true
+    }
+
+    /// Pressing or letting go of ⇧/⌥ mid-drag reshapes the selection without waiting for the mouse to move.
+    override func flagsChanged(with event: NSEvent) {
+        gesture.aspect = aspect(for: event.modifierFlags)
+        needsDisplay = true
+    }
+
+    private func aspect(for flags: NSEvent.ModifierFlags) -> Aspect? {
+        if flags.contains(.shift) { return .square }
+        if flags.contains(.option) { return .widescreen }
+        return nil
     }
 
     override func rightMouseDown(with event: NSEvent) { onCancel?() }
@@ -179,8 +194,10 @@ private final class SelectionView: NSView {
             let outline = NSBezierPath(rect: selection.insetBy(dx: 0.5, dy: 0.5))
             outline.lineWidth = 1
             outline.stroke()
-            label("\(Int(selection.width)) × \(Int(selection.height))\(showingDefault ? "  ·  Return to record last region" : "")", at:
-                    CGPoint(x: selection.midX, y: min(bounds.height - 44, selection.maxY + 12)))
+            var size = "\(Int(selection.width)) × \(Int(selection.height))"
+            if gesture.isDragging, let aspect = gesture.aspect { size += "  ·  \(aspect.label(for: selection))" }
+            if showingDefault { size += "  ·  Return to record last region" }
+            label(size, at: CGPoint(x: selection.midX, y: min(bounds.height - 44, selection.maxY + 12)))
         }
         if let defaultRect, !showingDefault, gesture.anchor == nil {
             NSColor.white.withAlphaComponent(0.7).setStroke()
@@ -190,7 +207,7 @@ private final class SelectionView: NSView {
             outline.stroke()
         }
         if gesture.anchor == nil {
-            label("Click a window  ·  Hold + drag a region  ·  F for full screen\(defaultRect == nil ? "" : "  ·  Return for last region")  ·  Esc to cancel",
+            label("Click a window  ·  Hold + drag a region (⇧ square, ⌥ 16:9)  ·  F for full screen\(defaultRect == nil ? "" : "  ·  Return for last region")  ·  Esc to cancel",
                   at: CGPoint(x: bounds.midX, y: 72))
         }
     }

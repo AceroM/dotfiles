@@ -52,6 +52,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let app = menu.addItem(withTitle: "Capture Current App", action: #selector(captureAppWindow), keyEquivalent: "2")
         app.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(withTitle: "Capture Window", action: #selector(captureWindow), keyEquivalent: "")
+        menu.addItem(withTitle: "Capture Last Area", action: #selector(captureLastArea), keyEquivalent: "")
         let text = menu.addItem(withTitle: "Copy Text from Area", action: #selector(captureText), keyEquivalent: "0")
         text.keyEquivalentModifierMask = [.command, .shift]
         if !missingHotKeys.isEmpty {
@@ -95,6 +96,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "window": capture(.window)
         case "full": captureFullScreen()
         case "app": captureAppWindow()
+        case "last": captureLastArea()
         case "text": capture(.area, output: .text)
         case "quit": NSApp.terminate(nil)
         default: logger.error("Unknown command \(string, privacy: .public)")
@@ -142,6 +144,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// The area of the last shot, live and with no selector, for an "after" that lines up with its "before".
+    @objc func captureLastArea() {
+        if selector.isActive { selector.cancel() }
+        guard !isCapturing, hasScreenAccess() else { return }
+        guard let region = LastArea.load() else {
+            Toast.show("No area to repeat yet")
+            return
+        }
+        isCapturing = true
+        rememberFrontApp()
+        Task {
+            defer { isCapturing = false }
+            do { open(try await Capture.region(region)) }
+            catch {
+                restoreFocus()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
     private func hasScreenAccess() -> Bool {
         guard CGPreflightScreenCaptureAccess() else {
             CGRequestScreenCaptureAccess()
@@ -167,9 +189,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             do {
                 let frozen = mode == .area ? try await Capture.displays() : [:]
-                let prompt = output == .text
-                    ? "Drag over text to copy it  ·  Click a window  ·  F for full screen  ·  Esc to cancel" : nil
-                selector.show(mode: mode, frozen: frozen, prompt: prompt) { [weak self] selection in
+                let prompt = output == .text ? "Drag over text to copy it" : nil
+                selector.show(mode: mode, frozen: frozen, prompt: prompt,
+                              last: mode == .area ? LastArea.load() : nil) { [weak self] selection in
                     self?.finish(selection, frozen: frozen, output: output)
                 }
             } catch {
@@ -193,8 +215,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 restoreFocus()
                 return
             }
-            deliver(Shot(image: image, scale: shot.scale, region: ScreenRegion(displayID: displayID, rect: rect)),
-                    to: output)
+            let region = ScreenRegion(displayID: displayID, rect: rect)
+            // Only shots remember their area, so copying text between a before and an after doesn't move it.
+            if output == .editor { LastArea.save(region) }
+            deliver(Shot(image: image, scale: shot.scale, region: region), to: output)
         case .window(let id):
             Task {
                 defer { isCapturing = false }

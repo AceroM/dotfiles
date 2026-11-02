@@ -7,6 +7,29 @@ enum SelectionResult: Equatable {
     case window(Int)
 }
 
+/// A shape a drag is held to while its modifier is down.
+enum Aspect: Equatable {
+    /// ⇧: 1:1.
+    case square
+    /// ⌥: 16:9, or 9:16 when the drag is taller than it is wide.
+    case widescreen
+
+    /// Whole-point units, so every locked size is an exact multiple and the ratio survives rounding.
+    func units(landscape: Bool) -> (width: CGFloat, height: CGFloat) {
+        switch self {
+        case .square: (1, 1)
+        case .widescreen: landscape ? (16, 9) : (9, 16)
+        }
+    }
+
+    func label(for rect: CGRect) -> String {
+        switch self {
+        case .square: "1:1"
+        case .widescreen: rect.width >= rect.height ? "16:9" : "9:16"
+        }
+    }
+}
+
 /// Window rectangles are display-local, top-left coordinates, ordered front to back.
 /// Area mode drags a region (a click takes the window's visible area); window mode only clicks.
 struct CaptureSelection {
@@ -18,6 +41,11 @@ struct CaptureSelection {
     private(set) var isDragging = false
     private var hovered: (index: Int, rect: CGRect)?
     private var pressed: (index: Int, rect: CGRect)?
+    private var dragPoint: CGPoint?
+    /// Held while its modifier is down; changing it mid-drag reshapes the selection without a mouse move.
+    var aspect: Aspect? {
+        didSet { if aspect != oldValue, let dragPoint { drag(to: dragPoint) } }
+    }
 
     init(bounds: CGRect, windowRects: [CGRect], allowsDrag: Bool) {
         self.bounds = bounds
@@ -50,17 +78,37 @@ struct CaptureSelection {
         hover(at: point)
         pressed = hovered
         anchor = point
+        dragPoint = nil
         isDragging = false
     }
 
     mutating func drag(to point: CGPoint) {
         guard allowsDrag, let anchor else { return }
+        dragPoint = point
         // Allow small click jitter. Once a drag starts, never fall back to a window.
         if hypot(point.x - anchor.x, point.y - anchor.y) >= 4 { isDragging = true }
         guard isDragging else { return }
-        selection = CGRect(x: min(anchor.x, point.x), y: min(anchor.y, point.y),
-                           width: abs(point.x - anchor.x), height: abs(point.y - anchor.y))
-            .integral.intersection(bounds)
+        if let aspect {
+            selection = Self.locked(from: anchor, to: point, aspect: aspect, in: bounds)
+        } else {
+            selection = CGRect(x: min(anchor.x, point.x), y: min(anchor.y, point.y),
+                               width: abs(point.x - anchor.x), height: abs(point.y - anchor.y))
+                .integral.intersection(bounds)
+        }
+    }
+
+    /// Grows from the anchor toward the pointer until it covers it, shrinking instead of leaving the display.
+    static func locked(from anchor: CGPoint, to point: CGPoint, aspect: Aspect, in bounds: CGRect) -> CGRect {
+        let start = CGPoint(x: anchor.x.rounded(), y: anchor.y.rounded())
+        let dx = point.x - start.x, dy = point.y - start.y
+        let unit = aspect.units(landscape: abs(dx) >= abs(dy))
+        let roomX = dx < 0 ? start.x - bounds.minX : bounds.maxX - start.x
+        let roomY = dy < 0 ? start.y - bounds.minY : bounds.maxY - start.y
+        let steps = max(0, min(max(abs(dx) / unit.width, abs(dy) / unit.height),
+                               roomX / unit.width, roomY / unit.height).rounded(.down))
+        let size = CGSize(width: steps * unit.width, height: steps * unit.height)
+        return CGRect(x: dx < 0 ? start.x - size.width : start.x, y: dy < 0 ? start.y - size.height : start.y,
+                      width: size.width, height: size.height)
     }
 
     mutating func release(at point: CGPoint) -> SelectionResult? {
@@ -75,6 +123,7 @@ struct CaptureSelection {
             result = nil
         }
         anchor = nil
+        dragPoint = nil
         isDragging = false
         pressed = nil
         hover(at: point)

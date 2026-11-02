@@ -18,10 +18,15 @@ final class RegionSelector {
     var isActive: Bool { completion != nil }
 
     /// Area mode draws each display's frozen shot under the overlay; window mode stays live.
-    /// `prompt` replaces the default hint shown before a drag starts.
-    func show(mode: CaptureMode, frozen: [CGDirectDisplayID: Shot], prompt: String? = nil,
+    /// `prompt` replaces the hint's opening "Drag an area". In area mode, `last` is outlined and Return takes it.
+    func show(mode: CaptureMode, frozen: [CGDirectDisplayID: Shot], prompt: String? = nil, last: ScreenRegion? = nil,
               completion: @escaping (Selection?) -> Void) {
         self.completion = completion
+        let last = mode == .area ? last : nil
+        var hints = mode == .window ? ["Click a window"]
+            : [prompt ?? "Drag an area (⇧ square, ⌥ 16:9)", "Click a window", "F for full screen"]
+        if last != nil { hints.append("Return for last area") }
+        hints.append("Esc to cancel")
         // Snapshot before showing overlays, which would otherwise obscure the targets.
         let targets = visibleWindows()
         for screen in NSScreen.screens {
@@ -45,7 +50,9 @@ final class RegionSelector {
                 container.layer?.contents = shot.image
                 container.layer?.contentsGravity = .resize
             }
-            let view = SelectionView(frame: bounds, mode: mode, windowRects: localRects, prompt: prompt)
+            let view = SelectionView(frame: bounds, mode: mode, windowRects: localRects,
+                                     prompt: hints.joined(separator: "  ·  "),
+                                     lastRect: last?.displayID == displayID ? last?.rect : nil)
             view.hover(at: CGPoint(x: NSEvent.mouseLocation.x - screen.frame.minX,
                                   y: screen.frame.maxY - NSEvent.mouseLocation.y))
             view.onSelect = { [weak self] result in
@@ -56,6 +63,9 @@ final class RegionSelector {
             }
             view.onCancel = { [weak self] in self?.finish(nil) }
             view.onFullScreen = { [weak self] in self?.selectFullScreen() }
+            view.onLast = { [weak self] in
+                if let last { self?.finish(.region(last.displayID, last.rect)) } else { NSSound.beep() }
+            }
             container.addSubview(view)
             window.contentView = container
             windows.append(window)
@@ -110,8 +120,11 @@ private final class SelectionView: NSView {
     var onSelect: ((SelectionResult) -> Void)?
     var onCancel: (() -> Void)?
     var onFullScreen: (() -> Void)?
+    var onLast: (() -> Void)?
     private let mode: CaptureMode
-    private let prompt: String?
+    private let prompt: String
+    /// The last area shot on this display, outlined until a drag starts.
+    private let lastRect: CGRect?
     private var gesture: CaptureSelection
     private var cursor: CGPoint?
     private var tracking: NSTrackingArea?
@@ -119,14 +132,16 @@ private final class SelectionView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    init(frame: NSRect, mode: CaptureMode, windowRects: [CGRect], prompt: String?) {
+    init(frame: NSRect, mode: CaptureMode, windowRects: [CGRect], prompt: String, lastRect: CGRect?) {
         self.mode = mode
         self.prompt = prompt
+        self.lastRect = lastRect
         gesture = CaptureSelection(bounds: CGRect(origin: .zero, size: frame.size), windowRects: windowRects,
                                    allowsDrag: mode == .area)
         super.init(frame: frame)
         setAccessibilityLabel(mode == .area
-            ? "Drag a region or click a window to capture it. F captures the full screen. Escape cancels."
+            ? "Drag a region or click a window to capture it. Hold Shift for a square or Option for 16:9. "
+              + "F captures the full screen, Return the last area. Escape cancels."
             : "Click a highlighted window to capture it. Escape cancels.")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -159,19 +174,34 @@ private final class SelectionView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeKey()
+        gesture.aspect = aspect(for: event.modifierFlags)
         gesture.press(at: point(event))
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         cursor = point(event)
+        gesture.aspect = aspect(for: event.modifierFlags)
         gesture.drag(to: point(event))
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        gesture.aspect = aspect(for: event.modifierFlags)
         if let result = gesture.release(at: point(event)) { onSelect?(result) }
         needsDisplay = true
+    }
+
+    /// Pressing or letting go of ⇧/⌥ mid-drag reshapes the selection without waiting for the mouse to move.
+    override func flagsChanged(with event: NSEvent) {
+        gesture.aspect = aspect(for: event.modifierFlags)
+        needsDisplay = true
+    }
+
+    private func aspect(for flags: NSEvent.ModifierFlags) -> Aspect? {
+        if flags.contains(.shift) { return .square }
+        if flags.contains(.option) { return .widescreen }
+        return nil
     }
 
     override func rightMouseDown(with event: NSEvent) { onCancel?() }
@@ -179,6 +209,7 @@ private final class SelectionView: NSView {
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { onCancel?() }
         else if mode == .area, event.charactersIgnoringModifiers?.lowercased() == "f" { onFullScreen?() }
+        else if mode == .area, event.keyCode == 36 || event.keyCode == 76 { onLast?() }
         else { super.keyDown(with: event) }
     }
 
@@ -192,6 +223,13 @@ private final class SelectionView: NSView {
         NSColor.black.withAlphaComponent(0.01).setFill()
         NSBezierPath(rect: bounds).fill()
         let selection = gesture.selection
+        if let lastRect, gesture.anchor == nil {
+            NSColor.white.withAlphaComponent(0.85).setStroke()
+            let outline = NSBezierPath(rect: lastRect.insetBy(dx: 0.5, dy: 0.5))
+            outline.setLineDash([6, 4], count: 2, phase: 0)
+            outline.lineWidth = 1
+            outline.stroke()
+        }
         let mask = NSBezierPath(rect: bounds)
         if let selection { mask.appendRect(selection) }
         mask.windingRule = .evenOdd
@@ -202,8 +240,9 @@ private final class SelectionView: NSView {
             let outline = NSBezierPath(rect: selection.insetBy(dx: 0.5, dy: 0.5))
             outline.lineWidth = 1
             outline.stroke()
-            label("\(Int(selection.width)) × \(Int(selection.height))",
-                  at: CGPoint(x: selection.midX, y: min(bounds.height - 44, selection.maxY + 12)))
+            var size = "\(Int(selection.width)) × \(Int(selection.height))"
+            if gesture.isDragging, let aspect = gesture.aspect { size += "  ·  \(aspect.label(for: selection))" }
+            label(size, at: CGPoint(x: selection.midX, y: min(bounds.height - 44, selection.maxY + 12)))
         }
         // Crosshair guides for precise starts, until a drag takes over.
         if mode == .area, gesture.isDragging == false, let cursor {
@@ -216,11 +255,7 @@ private final class SelectionView: NSView {
             guides.lineWidth = 1
             guides.stroke()
         }
-        if gesture.anchor == nil {
-            label(prompt ?? (mode == .area ? "Drag an area  ·  Click a window  ·  F for full screen  ·  Esc to cancel"
-                                           : "Click a window  ·  Esc to cancel"),
-                  at: CGPoint(x: bounds.midX, y: 72))
-        }
+        if gesture.anchor == nil { label(prompt, at: CGPoint(x: bounds.midX, y: 72)) }
     }
 
     private func label(_ text: String, at point: CGPoint) {

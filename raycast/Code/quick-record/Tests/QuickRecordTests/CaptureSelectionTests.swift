@@ -76,4 +76,63 @@ final class CaptureSelectionTests: XCTestCase {
         ])
         XCTAssertEqual(selection.windowRects, [window])
     }
+
+    func testShiftDragIsSquareCoveringThePointer() {
+        var selection = CaptureSelection(bounds: bounds, windowRects: [window])
+        selection.aspect = .square
+        selection.press(at: CGPoint(x: 100, y: 100))
+        XCTAssertEqual(selection.release(at: CGPoint(x: 300, y: 180)), CGRect(x: 100, y: 100, width: 200, height: 200))
+    }
+
+    func testSquareDragUpAndLeftEndsAtTheAnchor() {
+        var selection = CaptureSelection(bounds: bounds, windowRects: [])
+        selection.aspect = .square
+        selection.press(at: CGPoint(x: 500, y: 400))
+        XCTAssertEqual(selection.release(at: CGPoint(x: 450, y: 300)), CGRect(x: 400, y: 300, width: 100, height: 100))
+    }
+
+    func testSquareShrinksInsteadOfLeavingTheDisplay() {
+        var selection = CaptureSelection(bounds: bounds, windowRects: [])
+        selection.aspect = .square
+        selection.press(at: CGPoint(x: 1870, y: 500))
+        XCTAssertEqual(selection.release(at: CGPoint(x: 1920, y: 700)), CGRect(x: 1870, y: 500, width: 50, height: 50))
+    }
+
+    func testOptionDragIsWidescreenOrPortraitByDirection() {
+        var wide = CaptureSelection(bounds: bounds, windowRects: [])
+        wide.aspect = .widescreen
+        wide.press(at: CGPoint(x: 10, y: 10))
+        XCTAssertEqual(wide.release(at: CGPoint(x: 330, y: 110)), CGRect(x: 10, y: 10, width: 320, height: 180))
+
+        var tall = CaptureSelection(bounds: bounds, windowRects: [])
+        tall.aspect = .widescreen
+        tall.press(at: CGPoint(x: 10, y: 10))
+        XCTAssertEqual(tall.release(at: CGPoint(x: 110, y: 330)), CGRect(x: 10, y: 10, width: 180, height: 320))
+    }
+
+    func testWidescreenRecordingEncodesAtExactly16By9() {
+        let rect = CaptureSelection.locked(from: CGPoint(x: 0.5, y: 0.5), to: CGPoint(x: 1333.7, y: 20),
+                                           aspect: .widescreen, in: bounds)
+        XCTAssertEqual(rect.width * 9, rect.height * 16)
+        let output = CaptureRegion(displayUUID: "d", rect: rect).outputSize(scale: 2)
+        XCTAssertEqual(output.width * 9, output.height * 16)
+    }
+
+    func testTogglingTheModifierMidDragReshapesWithoutMoving() {
+        var selection = CaptureSelection(bounds: bounds, windowRects: [])
+        selection.press(at: CGPoint(x: 100, y: 100))
+        selection.drag(to: CGPoint(x: 300, y: 180))
+        XCTAssertEqual(selection.selection, CGRect(x: 100, y: 100, width: 200, height: 80))
+        selection.aspect = .square
+        XCTAssertEqual(selection.selection, CGRect(x: 100, y: 100, width: 200, height: 200))
+        selection.aspect = nil
+        XCTAssertEqual(selection.selection, CGRect(x: 100, y: 100, width: 200, height: 80))
+    }
+
+    func testModifierBeforeADragLeavesTheHoveredWindowAlone() {
+        var selection = CaptureSelection(bounds: bounds, windowRects: [window])
+        selection.hover(at: CGPoint(x: 150, y: 150))
+        selection.aspect = .square
+        XCTAssertEqual(selection.selection, window)
+    }
 }
