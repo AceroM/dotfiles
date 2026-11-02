@@ -101,16 +101,17 @@ impl Events {
         Ok(Self(BufReader::new(resp.into_reader())))
     }
 
-    /// Blocks until the next event. An error means the stream ended (the server stopped).
-    pub fn next(&mut self) -> Result<(), String> {
+    /// Blocks until the next event, and returns its data (JSON naming the page). An error means
+    /// the stream ended (the server stopped).
+    pub fn next(&mut self) -> Result<String, String> {
         let mut line = String::new();
         loop {
             line.clear();
             if self.0.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
                 return Err("the event stream closed".into());
             }
-            if line.starts_with("data:") {
-                return Ok(());
+            if let Some(data) = line.strip_prefix("data:") {
+                return Ok(data.trim().to_string());
             }
         }
     }

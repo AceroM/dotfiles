@@ -5,7 +5,7 @@
 //!   the line with the focus lines highlighted, a pinned GitHub permalink and a `path:line` that
 //!   copies on click.
 //! - `md`: markdown, with mermaid blocks, and every repo-relative `path:line` copyable on click.
-//! - `html`: stored as sent. A full document is shown in a frame, a fragment inline.
+//! - `html`: stored as sent. A full document is served as the page itself, a fragment inline.
 
 use crate::context::Context;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};

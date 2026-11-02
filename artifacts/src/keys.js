@@ -234,42 +234,33 @@
   // `/` on a page searches as you type, with vim's smartcase (any capital makes it case-sensitive).
   // Matches are painted with the CSS Custom Highlight API, so the page's DOM is never rewritten.
   // Enter keeps them for n/N, Esc puts you back where you were.
-  const FIND_CSS = '::highlight(kb-find){background-color:rgba(246,216,96,.5)}::highlight(kb-find-cur){background-color:#f59e0b;color:#1d2126}';
   const MAX_MATCHES = 5000;
-  const docFrame = () => document.querySelector('iframe.doc-frame');
-  let found = null;    // { q, matches: [{ range, frame }], cur }
+  let found = null;    // { q, matches: [{ range }], cur }
   let lastQuery = '';
-  let runs = null;
+  let run = null;
   let findFrom = 0;
   let foundBefore = null;
   let bar = null;
 
-  // The page's text, one run per document (this page, then a framed full HTML page). A newline goes
-  // between text in different blocks (paragraphs, code lines), so a match can't span two of them.
-  const textRuns = () => {
-    const out = [];
-    const walk = (root, frame) => {
-      if (!root) return;
-      const nodes = [], starts = [];
-      let text = '', prev = null;
-      const skip = 'script, style, noscript, template, .ln';
-      const w = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode: (n) => (n.parentElement.closest(skip) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
-      });
-      for (let n; (n = w.nextNode()); prev = n) {
-        if (prev && !prev.parentElement.contains(n) && !n.parentElement.contains(prev)) text += '\n';
-        starts.push(text.length);
-        nodes.push(n);
-        text += n.data;
-      }
-      out.push({ nodes, starts, text, frame });
-    };
-    walk(document.querySelector('main'), null);
-    const f = docFrame();
-    try { if (f) walk(f.contentDocument.body, f); } catch (_) {}
-    return out;
+  // The page's text: its `main`, or the whole body of a full HTML document that has none. A newline
+  // goes between text in different blocks (paragraphs, code lines), so a match can't span two of them.
+  const pageText = () => {
+    const root = document.querySelector('body > main') || document.body;
+    const nodes = [], starts = [];
+    let text = '', prev = null;
+    const skip = 'script, style, noscript, template, .ln, [id^="kb-"]';
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement.closest(skip) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    for (let n; (n = w.nextNode()); prev = n) {
+      if (prev && !prev.parentElement.contains(n) && !n.parentElement.contains(prev)) text += '\n';
+      starts.push(text.length);
+      nodes.push(n);
+      text += n.data;
+    }
+    return { nodes, starts, text };
   };
-  const locate = (run, i) => {
+  const locate = (i) => {
     let lo = 0, hi = run.starts.length - 1;
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (run.starts[mid] <= i) lo = mid; else hi = mid - 1; }
     return [run.nodes[lo], i - run.starts[lo]];
@@ -277,16 +268,14 @@
   const search = (q) => {
     const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), /[A-Z]/.test(q) ? 'g' : 'gi');
     const matches = [];
-    for (const run of runs) {
-      for (const m of run.text.matchAll(re)) {
-        const [sn, so] = locate(run, m.index);
-        const [en, eo] = locate(run, m.index + m[0].length - 1);
-        const range = sn.ownerDocument.createRange();
-        range.setStart(sn, so);
-        range.setEnd(en, eo + 1);
-        matches.push({ range, frame: run.frame });
-        if (matches.length >= MAX_MATCHES) return matches;
-      }
+    for (const m of run.text.matchAll(re)) {
+      const [sn, so] = locate(m.index);
+      const [en, eo] = locate(m.index + m[0].length - 1);
+      const range = document.createRange();
+      range.setStart(sn, so);
+      range.setEnd(en, eo + 1);
+      matches.push({ range });
+      if (matches.length >= MAX_MATCHES) break;
     }
     return matches;
   };
@@ -294,27 +283,19 @@
   const matchY = (m) => {
     let b = m.range.getBoundingClientRect();
     if (!b.height) { const d = m.range.startContainer.parentElement?.closest('details:not([open])'); if (d) b = d.getBoundingClientRect(); }
-    return b.top + (m.frame ? m.frame.getBoundingClientRect().top : 0) + window.scrollY;
+    return b.top + window.scrollY;
   };
   const firstBelow = (matches, y) => { const i = matches.findIndex((m) => matchY(m) >= y + headerH()); return i < 0 ? matches.length : i; };
 
   const paint = () => {
-    const f = docFrame();
-    for (const [win, frame] of f ? [[window, null], [f.contentWindow, f]] : [[window, null]]) {
-      let reg;
-      try { reg = win.CSS && win.CSS.highlights; } catch (_) { continue; }
-      if (!reg) continue;
-      reg.delete('kb-find');
-      reg.delete('kb-find-cur');
-      if (!found) continue;
-      if (frame && !win.document.getElementById('kb-find-css')) {
-        const s = win.document.createElement('style'); s.id = 'kb-find-css'; s.textContent = FIND_CSS; win.document.head.append(s);
-      }
-      const mine = found.matches.filter((m) => m.frame === frame).map((m) => m.range);
-      if (mine.length) reg.set('kb-find', new win.Highlight(...mine));
-      const cur = found.matches[found.cur];
-      if (cur && cur.frame === frame) { const h = new win.Highlight(cur.range); h.priority = 1; reg.set('kb-find-cur', h); }
-    }
+    const reg = window.CSS && CSS.highlights;
+    if (!reg) return;
+    reg.delete('kb-find');
+    reg.delete('kb-find-cur');
+    if (!found) return;
+    if (found.matches.length) reg.set('kb-find', new Highlight(...found.matches.map((m) => m.range)));
+    const cur = found.matches[found.cur];
+    if (cur) { const h = new Highlight(cur.range); h.priority = 1; reg.set('kb-find-cur', h); }
   };
   // Open any hop the match is folded into, bring it into view sideways in code, then vertically.
   const reveal = (m) => {
@@ -325,8 +306,7 @@
       const p = pre.getBoundingClientRect();
       if (b.left < p.left || b.right > p.right) { pre.scrollLeft += b.left - p.left - p.width / 3; b = m.range.getBoundingClientRect(); }
     }
-    const top = b.top + (m.frame ? m.frame.getBoundingClientRect().top + m.frame.clientTop : 0);
-    if (top < headerH() + 40 || top + b.height > innerHeight - 60) window.scrollTo({ top: window.scrollY + top - innerHeight / 3, behavior: 'instant' });
+    if (b.top < headerH() + 40 || b.bottom > innerHeight - 60) window.scrollTo({ top: window.scrollY + b.top - innerHeight / 3, behavior: 'instant' });
   };
   const counter = () => (found ? (found.cur + 1) + '/' + found.matches.length + (found.matches.length >= MAX_MATCHES ? '+' : '') : '');
 
@@ -350,7 +330,7 @@
       bar.input.addEventListener('input', () => { bar.typed = true; update(); });
       bar.input.addEventListener('blur', () => closeFind(true));
     }
-    runs = textRuns();
+    run = pageText();
     findFrom = window.scrollY;
     foundBefore = found;
     bar.typed = false;
@@ -385,7 +365,7 @@
   const step = (dir, n) => {
     if (!found) {
       if (!lastQuery) return toast('No search yet: press /');
-      runs = textRuns();
+      run = pageText();
       const matches = search(lastQuery);
       if (!matches.length) return toast('Not found: ' + lastQuery);
       const at = firstBelow(matches, window.scrollY);
@@ -577,12 +557,4 @@
     if (action) { e.preventDefault(); action(n); }
   };
   document.addEventListener('keydown', onKey, true);
-
-  // A full HTML page sits in a same-origin frame: its keys drive this page too.
-  const frame = document.querySelector('iframe.doc-frame');
-  if (frame) {
-    const hook = () => { try { frame.contentWindow.addEventListener('keydown', onKey, true); } catch (_) {} };
-    frame.addEventListener('load', hook);
-    if (frame.contentDocument?.readyState === 'complete') hook();
-  }
 })();

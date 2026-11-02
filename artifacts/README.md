@@ -12,6 +12,11 @@ themselves when an agent updates them.
   session chip copies a `claude --resume` command. Earlier versions stay at `/a/<slug>/r/<n>/`, and
   the source is at `/a/<slug>/source`.
 
+Live reload uses one connection however many pages are open. A browser allows six connections to a
+host and the event stream holds one for as long as its page is open, so a stream per tab left the
+seventh tab waiting. Instead one tab holds the stream and passes each change to the rest (a Web
+Lock and a BroadcastChannel), and in the app the app passes on its own.
+
 ## Use
 
 ```bash
@@ -62,14 +67,14 @@ The keys live in `src/keys.js`.
 | --- | --- | --- |
 | `code-path` | `.json` spec, same format as `~/.claude/skills/code-path/scripts/detailed_code_path.py` | one accordion per hop, pulled with `git show <sha>:<path>`. Highlighted lines, a GitHub permalink when the commit is on `origin/main` or its branch's remote, a click-to-copy `path:line`, In/Out panels from inlined captures. |
 | `md` | `.md` | markdown with mermaid. Every `path/to/file.ts:123` copies itself when clicked. |
-| `html` | `.html` | as sent. A full document gets a frame, a fragment is shown inline. |
+| `html` | `.html` | as sent. A full document is the page itself, with the keys, the code-block buttons and the live reload added at the end of its body (no context bar, no frame); a fragment is shown inline. |
 
 A spec side may leave out `checkout` and `ref`. They default to the checkout `add` ran in and its HEAD.
 
 ## Run
 
-Every code block on every page (markdown, HTML fragments, full HTML documents in their frame, a
-code path's source) has a copy button. Shell blocks also get ▶, which runs the block **on this
+Every code block on every page (markdown, HTML fragments, full HTML documents, a code path's
+source) has a copy button. Shell blocks also get ▶, which runs the block **on this
 machine**, in the page's directory (the checkout `add` ran in, or `--cwd`), and streams stdout and
 stderr in underneath with the exit code and time. ▶ again while it runs stops it, killing its
 whole process group; so does leaving the page. So write pages with commands to press: the query
@@ -137,6 +142,11 @@ browser the click still copies). Pages keep the path as written but carry the ab
 file is read fresh on every click, so it shows the checkout as it is now. The line itself is
 filled, and the panel's one editor is warmed up at launch so the first file opens quickly.
 
+`⌘K` runs any of the app's actions or goes to any page: type to filter both, `Enter` runs the
+action or goes to the page (its tab, if one already shows it), `⌘Enter` opens the page in a new
+tab, `Esc` or a click elsewhere closes it. Each action shows its shortcut. It's a small window of
+its own over the app's, since nothing the app draws can sit on top of a page.
+
 `c` (on a page, or in the app's list) opens a prompt in the middle of the page: `Enter` starts
 `claude` on it in a new herdr tab (unfocused), in the checkout the page was written in and the
 workspace it was written from (else the focused one). `Shift-Enter` adds a line, `Esc` cancels.
@@ -146,8 +156,8 @@ or the **page** (and the code panel, once you click into it).
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `⌘B` hide / show the sidebar · `⌘J` hide / show the code panel · `⌘/` search pages · `⌘F` find in page · `⌘L` open the hovered (else cursor's) page in a new tab · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
-| Tabs, anywhere | `⌘T` `⌘N` new · `⌘W` close (the last one hides the app) · `⌘⇧T` reopen · `⌘⌥W` close the others · `⌘⇧[` `⌘⇧]` or `⌃⇧Tab` `⌃Tab` previous / next · `⌘1`–`⌘8` that tab · `⌘9` the last · `⌃⇧PgUp` `⌃⇧PgDn` move |
+| Anywhere | `⌘K` run an action or go to a page · `⌘B` hide / show the sidebar · `⌘J` hide / show the code panel · `⌘/` search pages · `⌘F` find in page · `⌘L` open the hovered (else cursor's) page in a new tab · `⌘[` `⌘]` back / forward · `⌘=` `⌘-` `⌘0` zoom · `⌘R` reload · `⌘O` open in browser · `⌘H` hide |
+| Tabs, anywhere | `⌘T` `⌘N` new · `⌘W` close (the last one hides the app) · `⌘⇧T` reopen · `⌘⇧W` (or `⌘⌥W`) close the others · `⌘⇧[` `⌘⇧]` or `⌃⇧Tab` `⌃Tab` previous / next · `⌘1`–`⌘8` that tab · `⌘9` the last · `⌃⇧PgUp` `⌃⇧PgDn` move |
 | List | `j` `k` move the cursor (`10j`, `15k`) · `gg` `G` first / last (`5G` the fifth) · `l` `→` `Enter` `Tab` open it and read · `Esc` back to the page · `/` search pages · `H` `L` previous / next tag · `c` ask Claude about the open page · `o` open in browser |
 | Tabs, from the list or the page | `H` `L` previous / next (in the page) · `x` `X` close / reopen · `^` the last-used tab · `<` `>` move · `t` (list) or `yt` (page) duplicate |
 | Search pages | type to filter · `ctrl-j` `ctrl-k` move the cursor as you type · `Enter` open it · `Esc` back to the list |

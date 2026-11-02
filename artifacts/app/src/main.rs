@@ -6,6 +6,7 @@
 extern crate gpui_kit as gpui;
 
 mod api;
+mod palette;
 mod saved;
 mod view;
 
@@ -40,6 +41,7 @@ fn menus() -> Vec<Menu> {
         ]),
         // Menu items are how shortcuts reach the app while the page holds the keyboard.
         Menu::new("Go").items([
+            MenuItem::action("Run an Action or Go to a Page…", CommandPalette),
             MenuItem::action("Search Pages", SearchPages),
             MenuItem::action("Find in Page", FindInPage),
             MenuItem::separator(),
@@ -71,6 +73,7 @@ fn main() {
     gpui_kit::application().run(|cx: &mut App| {
         gpui_kit::init(cx);
         bind_keys(cx);
+        palette::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &HideWindow, cx| cx.hide());
         cx.set_menus(menus());

@@ -8,6 +8,7 @@
 //! `h`/Esc return to the list, `[` `]` step through it, and `H` `L` switch tabs.
 
 use crate::api::{self, Fetched, Item, Query};
+use crate::palette::{Palette, PALETTE_SIZE};
 use crate::saved::{self, Saved};
 use async_channel::{Receiver, Sender};
 use chrono::{Local, TimeZone};
@@ -67,6 +68,7 @@ gpui_kit::actions!(
         ZoomReset,
         ToggleSidebar,
         ToggleCode,
+        CommandPalette,
         HideWindow,
         Quit,
     ]
@@ -84,7 +86,9 @@ const SIDEBAR_MAX: f32 = 640.;
 
 /// Runs in every page before its own scripts. The `in-app` class drops the page's own header (the
 /// window has its own chrome), `keys.js` finds `artifactsApp` and routes its list and tab keys
-/// here, and focus events tell the app when the page takes the keyboard.
+/// here, and focus events tell the app when the page takes the keyboard. Pages that find
+/// `artifactsApp` also leave the server's event stream to the app (`watch`): WebKit allows six
+/// connections to the server across every tab, and a stream per page used them all up.
 const PAGE_BRIDGE: &str = r#"
 document.documentElement.classList.add('in-app');
 window.artifactsApp = { post: (m) => window.ipc.postMessage(m) };
@@ -101,7 +105,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-l", OpenInNewTab, None),
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("cmd-shift-t", ReopenClosedTab, None),
+        // The last binding is the one menus and ⌘K show.
         KeyBinding::new("cmd-alt-w", CloseOtherTabs, None),
+        KeyBinding::new("cmd-shift-w", CloseOtherTabs, None),
+        KeyBinding::new("cmd-k", CommandPalette, None),
         KeyBinding::new("cmd-shift-]", NextTab, None),
         KeyBinding::new("cmd-shift-[", PrevTab, None),
         KeyBinding::new("cmd-}", NextTab, None),
@@ -293,6 +300,8 @@ pub struct ArtifactsView {
     new_tab: bool,
     /// Where the keyboard was when ⌘T started choosing, for Esc to put it back.
     before_new_tab: Pane,
+    /// The ⌘K window, while it's open.
+    palette: Option<AnyWindowHandle>,
     /// The next fetch came from a new query: if the cursor isn't among its results, move it to
     /// the first one (a live refresh mustn't move it).
     pick: bool,
@@ -359,6 +368,7 @@ impl ArtifactsView {
             count: String::new(),
             new_tab: false,
             before_new_tab: Pane::List,
+            palette: None,
             pick: false,
             error: None,
             scroll_to_cursor: false,
@@ -433,37 +443,55 @@ impl ArtifactsView {
         cx.notify();
     }
 
-    /// Follow the server's event stream, refreshing on every change. When the server goes away,
-    /// keep retrying, and refresh again on reconnect since pages may have changed meanwhile.
+    /// Follow the server's event stream, refreshing on every change and handing each one to the
+    /// open pages, which don't open streams of their own (see `PAGE_BRIDGE`). When the server goes
+    /// away, keep retrying; on reconnect, refresh, and have the pages check whether they changed.
     fn watch(&self, cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| loop {
-            let ex = cx.background_executor().clone();
-            let Ok(mut events) = ex.spawn(async { api::Events::connect() }).await else {
-                ex.timer(Duration::from_secs(2)).await;
-                continue;
-            };
-            if this.update(cx, |this, cx| this.refresh(false, cx)).is_err() {
-                return;
-            }
+        cx.spawn(async move |this, cx| {
+            let mut first = true;
             loop {
-                let (back, next) = ex
-                    .spawn(async move {
-                        let next = events.next();
-                        (events, next)
-                    })
-                    .await;
-                events = back;
-                if next.is_err() {
-                    break;
+                let ex = cx.background_executor().clone();
+                let Ok(mut events) = ex.spawn(async { api::Events::connect() }).await else {
+                    ex.timer(Duration::from_secs(2)).await;
+                    continue;
+                };
+                let reconnected = !std::mem::replace(&mut first, false);
+                let caught_up = this.update(cx, |this, cx| {
+                    this.refresh(false, cx);
+                    if reconnected {
+                        this.tell_pages("window.artifactsApp?.reconnected?.()", cx);
+                    }
+                });
+                if caught_up.is_err() {
+                    return;
+                }
+                loop {
+                    let (back, next) = ex
+                        .spawn(async move {
+                            let next = events.next();
+                            (events, next)
+                        })
+                        .await;
+                    events = back;
+                    let Ok(data) = next else { break };
+                    // The event's JSON, as a JS string for the page to parse.
+                    let js = format!("window.artifactsApp?.event?.({})", serde_json::Value::String(data));
+                    if this.update(cx, |this, cx| { this.refresh(false, cx); this.tell_pages(&js, cx) }).is_err() {
+                        return;
+                    }
                 }
                 if this.update(cx, |this, cx| this.refresh(false, cx)).is_err() {
                     return;
                 }
             }
-            if this.update(cx, |this, cx| this.refresh(false, cx)).is_err() {
-                return;
-            }
         })
+    }
+
+    /// Run `js` in every tab's page.
+    fn tell_pages(&self, js: &str, cx: &App) {
+        for webview in self.tabs.iter().filter_map(|t| t.webview.as_ref()) {
+            let _ = webview.read(cx).raw().evaluate_script(js);
+        }
     }
 
     /// Show `slug` in the active tab, with the cursor on it.
@@ -792,6 +820,48 @@ impl ArtifactsView {
             self.focus_pane(Pane::Page, window, cx);
         }
         cx.notify();
+    }
+
+    /// ⌘K: a window of its own over this one's top, since nothing GPUI draws here can sit above
+    /// the page (see `palette`). ⌘K again closes it.
+    fn command_palette(&mut self, _: &CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = self.palette.take() {
+            if open.update(cx, |_, window, _| window.remove_window()).is_ok() {
+                return;
+            }
+        }
+        let main = window.bounds();
+        let width = px(PALETTE_SIZE.0).min(main.size.width - px(32.));
+        let bounds = Bounds::new(
+            point(main.origin.x + (main.size.width - width) / 2., main.origin.y + px(72.)),
+            size(width, px(PALETTE_SIZE.1)),
+        );
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: window.display(cx).map(|d| d.id()),
+            ..Default::default()
+        };
+        let (view, handle, pages) = (cx.entity().downgrade(), window.window_handle(), self.all.clone());
+        match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Palette::new(view, handle, pages, window, cx))) {
+            Ok((palette, _)) => self.palette = Some(palette),
+            Err(e) => self.error = Some(format!("couldn't open ⌘K: {e}")),
+        }
+    }
+
+    /// A page picked in ⌘K: its tab if one shows it, else the active tab, or a new tab (⌘Enter).
+    pub fn open_page(&mut self, slug: String, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab = false;
+        match self.tabs.iter().position(|t| t.slug == slug) {
+            Some(ix) if !new_tab => self.activate(ix, window, cx),
+            _ if new_tab => self.open_tab(slug, window, cx),
+            _ => self.select(slug, cx),
+        }
+        self.focus_pane(Pane::Page, window, cx);
     }
 
     /// Show a page's `path:line` in the code panel, opening it. The file is read fresh each time.
@@ -1463,6 +1533,9 @@ fn build_webview(tab: u64, url: &str, tx: Sender<FromPage>, window: &mut Window,
     let popups = tx.clone();
     let builder = wry::WebViewBuilder::new()
         .with_url(url)
+        // WebKit otherwise suspends a hidden tab's page and lets the system purge what it drew;
+        // coming back, parts of the page could stay blank until something repainted them.
+        .with_background_throttling(wry::BackgroundThrottlingPolicy::Disabled)
         .with_initialization_script(PAGE_BRIDGE)
         .with_ipc_handler(move |req: wry::http::Request<String>| {
             let body = req.body().as_str();
@@ -1659,6 +1732,7 @@ impl Render for ArtifactsView {
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_code))
+            .on_action(cx.listener(Self::command_palette))
             .when(shown, |d| d.child(sidebar).child(handle))
             .child(page)
             .when(self.code_open, |d| d.child(self.code_panel(cx)))

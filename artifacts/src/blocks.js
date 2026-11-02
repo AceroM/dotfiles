@@ -1,5 +1,5 @@
-// Copy and run buttons on every code block, on every kind of page (inside a full HTML document's
-// frame too). A shell block gets ▶ as well: it runs on this machine through POST /api/run, in the
+// Copy and run buttons on every code block, on every kind of page (full HTML documents included).
+// A shell block gets ▶ as well: it runs on this machine through POST /api/run, in the
 // page's checkout, and its output streams in underneath. ▶ again while it runs stops it.
 //
 // What counts as a shell block, in HTML (markdown ```bash fences render to the same thing):
@@ -257,10 +257,4 @@
 
   window.artifactsBlocks = decorate;
   decorate(document);
-  // A full HTML document is shown in a same-origin frame; give its blocks the same buttons.
-  for (const frame of document.querySelectorAll('iframe.doc-frame')) {
-    const go = () => { try { decorate(frame.contentDocument); } catch (_) {} };
-    frame.addEventListener('load', go);
-    if (frame.contentDocument?.readyState === 'complete' && frame.contentDocument.URL !== 'about:blank') go();
-  }
 })();

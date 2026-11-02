@@ -63,7 +63,6 @@ p.page-sum { color: var(--muted); margin: 0 0 12px; font-size: 16px; }
 .banner { border: 1px solid var(--warn); background: var(--warn-soft); color: var(--warn); border-radius: 8px; padding: 8px 12px; margin: 0 0 16px; }
 .revs { margin-top: 40px; color: var(--muted); font-size: 13px; }
 .revs a { margin-right: 10px; font-family: var(--mono); }
-.doc-frame { width: 100%; border: 1px solid var(--rule); border-radius: 8px; background: #fff; min-height: 70vh; display: block; }
 /* markdown */
 .md { overflow-wrap: anywhere; }
 .md h1, .md h2, .md h3 { letter-spacing: -0.01em; line-height: 1.3; margin: 1.6em 0 0.5em; }
@@ -144,6 +143,11 @@ p.page-sum { color: var(--muted); margin: 0 0 12px; font-size: 16px; }
 .keys-hint kbd { font: inherit; border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; background: var(--surface); color: var(--muted); }
 ul.list li.row.sel { background: var(--surface); border-color: var(--accent); }
 .more { color: var(--faint); font-size: 12.5px; padding: 16px 12px 0; }
+</style>"#;
+
+/// What the keys draw on top of a page: link hints, the toast, find, the ask box and the help.
+/// Full HTML documents get these too, so they only use ids of their own.
+const KEYS_STYLE: &str = r#"<style>
 #kb-hints { position: fixed; inset: 0; z-index: 60; pointer-events: none; display: none; }
 #kb-hints.on { display: block; }
 #kb-hints span { position: fixed; font: 700 11px/1 var(--mono); padding: 2px 4px; border-radius: 3px; background: #f6d860; color: #1d2126;
@@ -183,6 +187,15 @@ ul.list li.row.sel { background: var(--surface); border-color: var(--accent); }
 #kb-help dl { margin: 0; display: grid; grid-template-columns: 7.5em 1fr; gap: 4px 12px; font-size: 13.5px; }
 #kb-help dt { font-family: var(--mono); font-size: 12.5px; color: var(--accent); white-space: pre; }
 #kb-help dd { margin: 0; color: var(--muted); }
+</style>"#;
+
+/// A full HTML document has its own `:root` colours (or none), so there the keys' layers bring theirs.
+const KEYS_COLORS: &str = r#"<style>
+:is(#kb-hints, #kb-toast, #kb-cmd, #kb-find, #kb-ask, #kb-help) { --bg:#f7f7f5; --surface:#ffffff; --ink:#1d2126; --muted:#5d6670; --faint:#8a9299;
+  --rule:#e3e5e3; --accent:#2f5d50; --warn:#8a4b2a; --mono:"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; line-height: 1.55; }
+@media (prefers-color-scheme: dark) { :is(#kb-hints, #kb-toast, #kb-cmd, #kb-find, #kb-ask, #kb-help) { --bg:#121517; --surface:#1a1e22;
+  --ink:#e7eaec; --muted:#9aa4ad; --faint:#6f7880; --rule:#2c3237; --accent:#7fc0aa; --warn:#e0a07c; } }
 </style>"#;
 
 const KEYS: &str = include_str!("keys.js");
@@ -324,24 +337,44 @@ const SCRIPT: &str = r#"<script>
     } else if (opened && !SLUG) refresh(null);
     opened = true;
   };
-  let es = null;
+  const onEvent = (data) => {
+    const m = JSON.parse(data);
+    if (SLUG && m.slug !== SLUG) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => refresh(m.slug), 250);
+  };
+  const live = (on) => dot && dot.classList.toggle('on', on);
+  // One stream for every open page. A browser allows 6 connections to a host and a stream keeps
+  // one for as long as its page is open, so a 7th page would wait for a free one, and never load.
+  // The app forwards its own stream (`artifactsApp.event`). In a browser one tab holds the stream
+  // (a Web Lock, passed on when that tab goes) and shares it with the rest on a BroadcastChannel.
+  let es = null, share = null;
   const connect = () => {
     es = new EventSource('/events');
-    es.onopen = () => { dot && dot.classList.add('on'); catchUp(); };
-    es.onerror = () => dot && dot.classList.remove('on');
-    es.onmessage = (e) => {
-      const m = JSON.parse(e.data);
-      if (SLUG && m.slug !== SLUG) return;
-      clearTimeout(timer);
-      timer = setTimeout(() => refresh(m.slug), 250);
-    };
+    es.onopen = () => { live(true); catchUp(); share?.postMessage({ open: true }); };
+    es.onerror = () => { live(false); share?.postMessage({ open: false }); };
+    es.onmessage = (e) => { onEvent(e.data); share?.postMessage({ data: e.data }); };
   };
-  connect();
+  if (window.artifactsApp) {
+    opened = true;
+    Object.assign(window.artifactsApp, { event: onEvent, reconnected: catchUp });
+  } else if (navigator.locks && window.BroadcastChannel) {
+    share = new BroadcastChannel('artifacts:events');
+    share.onmessage = ({ data: m }) => {
+      if (m.data) onEvent(m.data);
+      else if (m.hello) es && share.postMessage({ open: es.readyState === EventSource.OPEN, now: true });
+      // `now` answers this page's hello: the stream was already up when it loaded, nothing missed.
+      else { live(m.open); if (m.open) m.now ? (opened = true) : catchUp(); }
+    };
+    share.postMessage({ hello: true });
+    // The lock is held until this page goes away, since the promise never settles.
+    navigator.locks.request('artifacts:events', () => new Promise(() => connect()));
+  } else connect();
   // Coming back through the back/forward cache: the stream may have been closed, and the page
   // is whatever it was when you left.
   window.addEventListener('pageshow', (e) => {
     if (!e.persisted) return;
-    if (es.readyState === EventSource.CLOSED) connect(); else catchUp();
+    if (es && es.readyState === EventSource.CLOSED) connect(); else catchUp();
   });
 
   // A `path:line` as an absolute path and line, for the app's code panel. Pages rendered before
@@ -370,12 +403,6 @@ const SCRIPT: &str = r#"<script>
     if (img && !img.closest('a')) { const lb = document.getElementById('lb'); lb.querySelector('img').src = img.currentSrc || img.src; lb.classList.add('open'); return; }
     if (e.target.closest('#lb')) document.getElementById('lb').classList.remove('open');
   });
-
-  const frame = document.querySelector('iframe.doc-frame');
-  if (frame) {
-    const fit = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 'px'; } catch (_) {} };
-    frame.addEventListener('load', () => { fit(); try { new ResizeObserver(fit).observe(frame.contentDocument.body); } catch (_) {} });
-  }
 })();
 </script>"#;
 
@@ -395,7 +422,7 @@ fn shell(title: &str, body: &[(&str, Option<&str>)], top: &str, main: &str, need
         .collect();
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{}</title>{THEME}{STYLE}</head><body{data}>
+<title>{}</title>{THEME}{STYLE}{KEYS_STYLE}</head><body{data}>
 <header class="top"><div class="top-in"><span class="live" title="Live: reloads when this changes"></span><a class="brand" href="/">artifacts <span>:4620</span></a>{top}<span class="keys-hint"><kbd>?</kbd> keys</span></div></header>
 <main>{main}</main>
 <div id="lb"><img alt=""></div>
@@ -403,6 +430,25 @@ fn shell(title: &str, body: &[(&str, Option<&str>)], top: &str, main: &str, need
         escape(title),
         if needs_mermaid { MERMAID } else { "" }
     )
+}
+
+/// A full HTML document is the page itself, not a frame inside one, so it reads and scrolls as
+/// written. It gets the keys, the code-block buttons and the live reload, and the styles their
+/// layers need, all at the end of its body; `body` becomes its `data-` attributes, as in `shell`.
+fn document(html: &str, body: &[(&str, Option<&str>)]) -> String {
+    let data: serde_json::Map<String, serde_json::Value> =
+        body.iter().filter_map(|(name, value)| value.map(|v| (name.to_string(), v.into()))).collect();
+    // `</` would end the script early.
+    let data = serde_json::Value::Object(data).to_string().replace("</", r"<\/");
+    let tail = format!(
+        "{KEYS_STYLE}{KEYS_COLORS}<script>Object.assign(document.body.dataset, {data})</script>\n\
+         {SCRIPT}<script>{KEYS}</script><script>{BLOCKS}</script>"
+    );
+    // ASCII lowercasing keeps byte offsets, so the match indexes `html` too.
+    match html.to_ascii_lowercase().rfind("</body>") {
+        Some(at) => format!("{}{tail}{}", &html[..at], &html[at..]),
+        None => format!("{html}{tail}"),
+    }
 }
 
 const KINDS: [(&str, &str); 3] = [("code-path", "code path"), ("md", "notes"), ("html", "page")];
@@ -574,6 +620,22 @@ pub fn artifact(v: View) -> String {
         Some((_, title, html, at)) => (title, html, at),
         None => (a.title.as_str(), a.html.as_str(), a.updated_at),
     };
+    let current = format!("/a/{}/", a.slug);
+    let rev = a.revision.to_string();
+    let data = [
+        ("page", Some(if v.old.is_some() { "revision" } else { "artifact" })),
+        ("slug", Some(a.slug.as_str())),
+        // What the live check compares against; an earlier revision never goes stale.
+        ("rev", v.old.is_none().then_some(rev.as_str())),
+        ("up", Some(if v.old.is_some() { current.as_str() } else { "/" })),
+        ("newer", v.newer.as_deref()),
+        ("older", v.older.as_deref()),
+        // The checkout it was written in, for `path:line`s rendered before they carried `data-path`.
+        ("root", v.ctx.repo_root.as_deref().or(v.ctx.cwd.as_deref())),
+    ];
+    if !matches!(a.kind.as_str(), "code-path" | "md") && is_full_document(html) {
+        return document(html, &data);
+    }
     let mut main = String::new();
     if let Some((rev, ..)) = v.old {
         main.push_str(&format!(
@@ -598,13 +660,6 @@ pub fn artifact(v: View) -> String {
     let body = match a.kind.as_str() {
         "code-path" => html.to_string(),
         "md" => format!(r#"<article class="md">{html}</article>"#),
-        _ if is_full_document(html) => {
-            let src = match v.old {
-                Some((rev, ..)) => format!("/a/{}/r/{rev}/raw", a.slug),
-                None => format!("/a/{}/raw", a.slug),
-            };
-            format!(r#"<iframe class="doc-frame" src="{}"></iframe>"#, escape(&src))
-        }
         _ => format!(r#"<article class="frag">{html}</article>"#),
     };
     main.push_str(&body);
@@ -623,20 +678,7 @@ pub fn artifact(v: View) -> String {
     main.push_str(&revs);
 
     let needs_mermaid = html.contains(r#"class="mermaid""#);
-    let current = format!("/a/{}/", a.slug);
-    let rev = a.revision.to_string();
-    let body = [
-        ("page", Some(if v.old.is_some() { "revision" } else { "artifact" })),
-        ("slug", Some(a.slug.as_str())),
-        // What the live check compares against; an earlier revision never goes stale.
-        ("rev", v.old.is_none().then_some(rev.as_str())),
-        ("up", Some(if v.old.is_some() { current.as_str() } else { "/" })),
-        ("newer", v.newer.as_deref()),
-        ("older", v.older.as_deref()),
-        // The checkout it was written in, for `path:line`s rendered before they carried `data-path`.
-        ("root", v.ctx.repo_root.as_deref().or(v.ctx.cwd.as_deref())),
-    ];
-    shell(title, &body, "", &main, needs_mermaid)
+    shell(title, &data, "", &main, needs_mermaid)
 }
 
 pub fn not_found(what: &str) -> String {
