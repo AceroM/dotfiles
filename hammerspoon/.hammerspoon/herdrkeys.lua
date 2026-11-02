@@ -13,6 +13,9 @@
 --                 screen (no scrollback) line by line; Enter focuses that pane
 --   fn+y          copy the focused pane's Herdr pane id
 --   fn+shift+y    copy just the session ID for the focused pane
+--   fn+\          stash the focused space: herdr-stash writes its agents
+--                 (session id | agent | title | cwd) to a Markdown table in
+--                 ~/.local/share/herdr-stash/. The space itself is left alone
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+shift+q    same, but also records microphone + system audio
 --   fn+b          toggle horizontal wheel/trackpad scrolling (from any app)
@@ -26,6 +29,12 @@
 --   fn+shift+9   focus the last space in the sidebar
 --   fn+j/k        become ctrl+alt+j/k in Herdr: next / previous space
 --   fn+shift+j/k  become ctrl+alt+shift+j/k in Herdr: next / previous agent
+--   fn+cmd+1..8   focus the Nth agent tab (from any app). Agent tabs are the
+--                 tabs hosting at least one agent, across every space, in
+--                 sidebar order: one stop per tab, however many agents it holds
+--   fn+cmd+9      focus the last agent tab
+--   fn+cmd+j/k    focus the next / previous agent tab, wrapping around; from
+--                 a tab without an agent, the nearest one in that direction
 --   fn+d / fn+-   become ctrl+alt+v / ctrl+alt+minus in Herdr: split
 --                 vertically / horizontally
 --   fn+z          becomes ctrl+alt+z in Herdr: zoom the pane
@@ -47,8 +56,8 @@
 -- ~/.config/herdr/config.toml, the app from ~/.config/herdr-app/keys.json.
 -- The app runs on herdr-core rather than herdr.sock, so the socket features
 -- go through its CLI there: fn+a, fn+9, fn+e, fn+y, and the agents/spaces/
--- tabs pickers (its one picker). fn+o/i, fn+m, fn+/, fn+; and fn+shift+;/y
--- have no counterpart in the app.
+-- tabs pickers (its one picker). fn+o/i, fn+m, fn+/, fn+;, fn+\ and
+-- fn+shift+;/y have no counterpart in the app.
 --
 -- Everything talks to the Herdr socket via nc: every spawned process costs
 -- ~20-30ms on this machine, and the pickers used to chain nine of them.
@@ -103,6 +112,9 @@ for number = 1, 9 do
   workspaceKeys[code] = true
   shiftable[code] = true
 end
+-- fn+cmd chords: which agent tab each one targets.
+local agentTabKeys = { [keys["9"]] = "last", [keys.j] = "next", [keys.k] = "prev" }
+for number = 1, 8 do agentTabKeys[keys[tostring(number)]] = number end
 
 local tap
 local inflight = {} -- keeps background tasks alive until they answer
@@ -415,6 +427,57 @@ local function focusLast(workspace)
   end)
 end
 
+-- target: a 1-based position in the agent-tab list, "last", "next" or "prev".
+local function focusAgentTab(target)
+  local front = frontEnd()
+  bringForward(front)
+  if front == HERDR_APP then return hs.alert.show("Agent tabs aren’t wired to the Herdr app yet", 1.5) end
+  request("session.snapshot", nil, function(response)
+    local snap = response.result and response.result.snapshot
+    if not snap then return hs.alert.show("Couldn’t read Herdr’s tabs", 2) end
+    -- A tab's own agent_status reads "unknown" both for a plain shell and for
+    -- an unclassified agent, so membership comes from the agents list.
+    local hosts = {}
+    for _, agent in ipairs(snap.agents or {}) do hosts[agent.tab_id] = true end
+    -- Every tab top to bottom: spaces in sidebar order, each space's tabs in
+    -- display order. here is the focused tab's place in agentTabs: its index
+    -- when it hosts an agent, else halfway between its neighbours (0.5 when
+    -- it comes first or isn't found), so j/k step off a plain tab to the
+    -- nearest agent tab either way.
+    local agentTabs, here = {}, 0.5
+    for _, space in ipairs(snap.workspaces or {}) do
+      for _, tab in ipairs(snap.tabs or {}) do
+        if tab.workspace_id == space.workspace_id then
+          if tab.tab_id == snap.focused_tab_id then here = #agentTabs + 0.5 end
+          if hosts[tab.tab_id] then
+            agentTabs[#agentTabs + 1] = tab
+            if tab.tab_id == snap.focused_tab_id then here = #agentTabs end
+          end
+        end
+      end
+    end
+    local count = #agentTabs
+    if count == 0 then return hs.alert.show("No agent tabs", 1) end
+    local index
+    if target == "last" then
+      index = count
+    elseif target == "next" then
+      index = math.floor(here) % count + 1
+    elseif target == "prev" then
+      index = (math.ceil(here) - 2) % count + 1
+    elseif target <= count then
+      index = target
+    else
+      return hs.alert.show("Only " .. count .. " agent tab" .. (count == 1 and "" or "s"), 1)
+    end
+    local tab = agentTabs[index]
+    if tab.tab_id == snap.focused_tab_id then return end
+    request("tab.focus", { tab_id = tab.tab_id }, function(focused)
+      if focused.error then hs.alert.show("Couldn’t focus agent tab " .. (tab.label or tab.tab_id), 2) end
+    end)
+  end)
+end
+
 local creatingTab = false
 local function newTabNext()
   if frontEnd() == HERDR_APP then return appNewTabNext() end
@@ -687,6 +750,59 @@ local function copyPaneId()
   end)
 end
 
+-- Hands herdr-stash the snapshot from this socket (the Ghostty client's), so
+-- it stashes the space on screen rather than one in the default session. The
+-- snapshot goes through a file: it can run past a pipe's 64KB.
+local stashing = false
+local function stashSpace()
+  if frontEnd() == HERDR_APP then return hs.alert.show("Stashing isn’t wired to the Herdr app yet", 1.5) end
+  if stashing then return end
+  stashing = true
+  request("session.snapshot", nil, function(response, raw)
+    local snap = response.result and response.result.snapshot
+    if not snap or not snap.focused_workspace_id then
+      stashing = false
+      return hs.alert.show("Couldn’t read the focused Herdr space", 2)
+    end
+    local input = os.tmpname()
+    local file = io.open(input, "w")
+    if not file then
+      stashing = false
+      return hs.alert.show("Couldn’t stash the space", 2)
+    end
+    file:write(raw)
+    file:close()
+    local task
+    task = hs.task.new("/bin/sh", function(exitCode, stdout, stderr)
+      inflight[task] = nil
+      stashing = false
+      os.remove(input)
+      local summary = (stderr or ""):match("([^\r\n]+)%s*$") or "herdr-stash failed"
+      if exitCode ~= 0 then
+        hs.printf("herdr-stash failed: %s", stderr or "")
+        return hs.alert.show(summary:gsub("^herdr%-stash: ", "Couldn’t stash: "), 3)
+      end
+      local name = (stdout or ""):match("([^/\r\n]+)%s*$") or ""
+      hs.alert.show(summary .. "\n" .. name, 2.5)
+    end, {
+      "-c", 'exec /usr/bin/python3 "$1" --snapshot - --workspace "$2" < "$3"',
+      "sh", HOME .. "/.local/bin/herdr-stash", snap.focused_workspace_id, input,
+    })
+    if not task then
+      stashing = false
+      os.remove(input)
+      return hs.alert.show("Couldn’t start herdr-stash", 2)
+    end
+    inflight[task] = true
+    if not task:start() then
+      inflight[task] = nil
+      stashing = false
+      os.remove(input)
+      hs.alert.show("Couldn’t start herdr-stash", 2)
+    end
+  end)
+end
+
 local function handleKey(event)
   local code = event:getKeyCode()
   local flags = event:getFlags()
@@ -703,10 +819,17 @@ local function handleKey(event)
     return true
   end
 
+  if flags.fn and flags.cmd and not (flags.alt or flags.ctrl or flags.shift) and agentTabKeys[code] then
+    if event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then
+      focusAgentTab(agentTabKeys[code])
+    end
+    return true
+  end
+
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
   if flags.shift and not shiftable[code] then return false end
   local mode = pickers[code]
-  if not mode and code ~= keys.y and code ~= keys.q and code ~= keys.b and code ~= keys.e and not remapped[code] then return false end
+  if not mode and code ~= keys.y and code ~= keys.q and code ~= keys.b and code ~= keys.e and code ~= keys["\\"] and not remapped[code] then return false end
   local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
 
   if code == keys.q then
@@ -728,6 +851,9 @@ local function handleKey(event)
     if not autorepeat then
       if flags.shift then copySessionId() else copyPaneId() end
     end
+    return true
+  elseif code == keys["\\"] then
+    if not autorepeat then stashSpace() end
     return true
   elseif code == keys.e then
     if not herdrFocused() then return false end
@@ -769,5 +895,7 @@ M.copySessionId = copySessionId
 M.copyPaneId = copyPaneId
 M.toggleRecording = toggleRecording
 M.newTabNext = newTabNext
+M.stashSpace = stashSpace
+M.focusAgentTab = focusAgentTab
 
 return M
