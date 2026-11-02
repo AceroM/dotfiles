@@ -5,6 +5,7 @@
 #   af <n>          open page n in Chrome (focuses and reloads its tab if it's already open)
 #   af ls [count]   list more (all of them by default)
 #   af path <n>     print page n's path:  nvim "$(af path 1)"
+#   af cat <n>      print page n's HTML (av <n> for short), e.g. for an agent to read
 #   af <file>       open any HTML file the same way
 #   af add <file>…  copy HTML files in (with a same-named folder of images, if there is one)
 #   pbpaste | af add - <name>
@@ -70,6 +71,14 @@ nth() {
   printf '%s' "$path"
 }
 
+# A page number, or a path to an HTML file.
+resolve() {
+  case "$1" in
+    *[!0-9]*) [ -f "$1" ] || { echo "af: no such page or file: $1" >&2; exit 1; }; printf '%s' "$1" ;;
+    *)        nth "$1" ;;
+  esac
+}
+
 add() {
   [ $# -ge 1 ] || { echo "usage: af add <file.html>… | af add - <name>" >&2; exit 2; }
   mkdir -p "$dir"
@@ -133,7 +142,7 @@ case "${1:-}" in
   ls)            list "${2:-0}" ;;
   add)           shift; add "$@" ;;
   dir)           echo "$dir" ;;
-  path)          [ -n "${2:-}" ] || { usage >&2; exit 2; }; page=$(nth "$2") || exit 1; echo "$page" ;;
-  *[!0-9]*)      [ -f "$1" ] || { echo "af: no such page or file: $1" >&2; exit 1; }; open_page "$1" ;;
-  *)             page=$(nth "$1") || exit 1; open_page "$page" ;;
+  path)          [ -n "${2:-}" ] || { usage >&2; exit 2; }; page=$(resolve "$2") || exit 1; echo "$page" ;;
+  cat)           [ -n "${2:-}" ] || { usage >&2; exit 2; }; page=$(resolve "$2") || exit 1; cat "$page" ;;
+  *)             page=$(resolve "$1") || exit 1; open_page "$page" ;;
 esac

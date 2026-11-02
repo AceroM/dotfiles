@@ -43,7 +43,8 @@ they follow are in `miguelacero/.claude/CLAUDE.md` → "Pages". `af` (in `cli/`,
 the five most recently changed, `af 1` opens the newest in Chrome (focusing and reloading its tab
 if it is already open), `af ls` lists them all and `af path 1` prints a page's path. `af add
 file.html` copies a page in (with a same-named folder of images), and `pbpaste | af add - name`
-saves HTML from stdin. There is no server or index: the list is the directory sorted by
+saves HTML from stdin. `av` is the same list, but `av 1` prints the page's HTML instead of
+opening it (`! av 1` puts it in front of Claude Code). There is no server or index: the list is the directory sorted by
 modification time.
 
 Vimium needs file access to work on these pages: open

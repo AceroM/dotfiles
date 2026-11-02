@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# av — af, but it prints a page's HTML instead of opening it, so an agent can read it.
+#
+#   av              the 5 most recently changed pages (the same list as af)
+#   av <n>          print page n's HTML:  ! av 1   (in Claude Code)
+#   av <file>       print that file
+#   av ls [count]   list more
+#
+# Same pages, same numbers as af: av 1 is the page af 1 opens.
+set -euo pipefail
+
+case "${1:-}" in
+  "")                 exec af ;;
+  ls)                 exec af "$@" ;;
+  -h|--help|help)     awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
+  *)                  exec af cat "$1" ;;
+esac
