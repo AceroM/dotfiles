@@ -45,12 +45,23 @@ return {
     -- invalidates the previous call's snippets, and because every filetype was
     -- handed the same snippet objects that used to wipe out all of them.
     -- Extra filetypes are wired up with filetype_extend instead.
+    --
+    -- Gating, broadest to narrowest:
+    --   universal  snippets/universal.lua  every buffer, even text
+    --   global     snippets/all.lua        every filetype but text/extensionless;
+    --                                      language-agnostic only (URLs, dates)
+    --   javascript snippets/init.lua       JS/TS family
+    --   web        snippets/web.lua        JS/TS family (React, Tailwind, Convex)
     ls.add_snippets("universal", require("snippets.universal"), { type = "autosnippets", key = "snippets_universal" })
     ls.add_snippets("global", require("snippets.all"), { type = "autosnippets", key = "snippets_all" })
     ls.add_snippets("javascript", require("snippets.init"), { type = "autosnippets", key = "snippets_init" })
+    ls.add_snippets("web", require("snippets.web"), { type = "autosnippets", key = "snippets_web" })
 
+    -- Redirects are one level deep, so each filetype lists both sets. The
+    -- javascript set comes first and wins on shared triggers ("c ", "l ").
+    ls.filetype_extend("javascript", { "web" })
     for _, ft in ipairs({ "typescript", "javascriptreact", "typescriptreact" }) do
-      ls.filetype_extend(ft, { "javascript" })
+      ls.filetype_extend(ft, { "javascript", "web" })
     end
 
     vim.keymap.set({ "i" }, "<C-K>", function()

@@ -27,9 +27,10 @@ return {
       -- Reduce aggressive completion triggers
       opts.completion.trigger.show_on_insert_on_trigger_character = false
 
-      -- Disable completion popups in files with no extension, and in .txt files
+      -- Disable completion popups in files with no extension, and in .txt/.md files
       opts.enabled = function()
-        if vim.bo.filetype == "text" then return false end
+        local ft = vim.bo.filetype
+        if ft == "text" or ft == "markdown" then return false end
         local name = vim.api.nvim_buf_get_name(0)
         if name == "" then return false end
         local ext = vim.fn.fnamemodify(name, ":e")

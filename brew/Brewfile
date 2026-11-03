@@ -11,6 +11,7 @@ brew "git-delta"
 brew "lazydocker"
 brew "lazygit"
 brew "neovim"
+brew "pngpaste"
 brew "postgresql@18", restart_service: :changed
 brew "railway"
 brew "ripgrep"

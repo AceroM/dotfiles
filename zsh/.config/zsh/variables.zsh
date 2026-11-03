@@ -1,5 +1,8 @@
 PATH="$PATH:/Applications/WezTerm.app/Contents/MacOS"
-EDITOR="zed --wait"
+# Exported so child processes (Claude Code / Codex ctrl+g, git) see them;
+# Claude Code checks VISUAL first, then EDITOR.
+export EDITOR="nvim"
+export VISUAL="nvim"
 DROP_TABLES_SQL="DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
 # Shared adjective/noun pools for tmux/Claude session names.

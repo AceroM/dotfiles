@@ -46,3 +46,12 @@ vim.api.nvim_create_autocmd("OptionSet", {
     end
   end,
 })
+
+-- Claude Code's ctrl+g prompt file: keep prettierd from rewriting the prompt
+-- (bullets, escapes, blank lines) on save.
+vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
+  pattern = "*/claude-prompt-*.md",
+  callback = function(args)
+    vim.b[args.buf].autoformat = false
+  end,
+})
