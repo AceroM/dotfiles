@@ -21,6 +21,12 @@ notifications = require("notifications")
 -- not (needs Full Disk Access; see notifications.lua). Also feeds `sn`.
 notifications.start()
 
+-- Secure Input blinds every keyboard event tap (all the fn shortcuts below).
+-- Shows 🔒 in the menu bar while it's on, toasts the holder if it sticks, and
+-- logs on/off/wake/unlock to ~/.cache/hammerspoon-secure-input.log.
+secureinput = require("secureinput")
+secureinput.start()
+
 -- Generic toast entry point for scripts:
 --   open -g "hammerspoon://toast?title=nvim&msg=done&placement=center&timeout=5"
 hs.urlevent.bind("toast", function(_, params)
