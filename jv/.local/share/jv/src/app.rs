@@ -1,0 +1,1286 @@
+//! State and input handling. Drawing lives in ui.rs and only reads from here.
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
+
+use crate::diff::{self, FileDiff, Kind, Status};
+use crate::doc::{self, Doc, Geo, Note, Row};
+use crate::fuzzy;
+use crate::highlight::{FileHl, Hl};
+use crate::source::{self, PrMeta, Source};
+use crate::theme::Palette;
+use crate::tree::{self, RowKind};
+use crate::viewed::Viewed;
+
+/// Files with more changed lines than this start folded, like GitHub's
+/// "Large diffs are not rendered by default".
+pub const LARGE: usize = 1500;
+/// Diff panes at least this wide start in split view.
+const SPLIT_MIN: u16 = 150;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Tree,
+    Diff,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Search,
+    GoTo,
+    Help,
+}
+
+pub enum Act {
+    None,
+    Quit,
+    /// Leave the alternate screen and run this command (a terminal editor).
+    Suspend(Vec<String>),
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct Lay {
+    pub top: Rect,
+    pub tree: Rect,
+    pub sep: Rect,
+    pub diff: Rect,
+    pub status: Rect,
+}
+
+pub struct Match {
+    pub f: usize,
+    pub h: usize,
+    pub l: usize,
+    pub range: Range<usize>,
+}
+
+pub struct Search {
+    pub query: String,
+    pub matches: Vec<Match>,
+    pub cur: usize,
+    by_line: HashMap<(usize, usize, usize), Vec<usize>>,
+}
+
+#[derive(Clone, Copy)]
+enum Anchor {
+    File(usize),
+    Hunk(usize, usize),
+    Line(usize, usize, usize),
+}
+
+pub struct Opts {
+    pub split: Option<bool>,
+    pub wrap: bool,
+    pub show_tests: bool,
+}
+
+pub struct App {
+    pub source: Source,
+    pub files: Vec<FileDiff>,
+    pub meta: Option<PrMeta>,
+    pub meta_rx: Option<mpsc::Receiver<PrMeta>>,
+    hl: Hl,
+    pub hl_cache: HashMap<usize, FileHl>,
+    pub pal: Palette,
+    pub show_tests: bool,
+    /// Shown files, in tree order.
+    pub visible: Vec<usize>,
+    pub hidden_tests: usize,
+    tree_nodes: Vec<tree::Node>,
+    pub tree_rows: Vec<tree::Row>,
+    collapsed_dirs: HashSet<String>,
+    pub tree_cur: usize,
+    pub tree_top: usize,
+    tree_w: u16,
+    /// Width set with `<` / `>`; overrides the automatic one.
+    tree_fixed: Option<u16>,
+    /// Digits in the tree's relative line numbers.
+    pub tree_nw: usize,
+    pub show_tree: bool,
+    pub focus: Focus,
+    pub mode: Mode,
+    split_pref: Option<bool>,
+    pub wrap: bool,
+    pub doc: Doc,
+    pub scroll: usize,
+    pub hscroll: usize,
+    fold: HashMap<usize, bool>,
+    pub viewed: Viewed,
+    pub search: Option<Search>,
+    search_origin: usize,
+    /// Text being typed in the search prompt or go-to-file picker.
+    pub input: String,
+    pub goto: Vec<(usize, Vec<usize>)>,
+    pub goto_cur: usize,
+    pub msg: Option<(String, Instant)>,
+    pub lay: Lay,
+    repo_root: Option<PathBuf>,
+    nw: usize,
+    /// Vim count typed so far (`12` before `j`, `G`, …).
+    pub count: Option<usize>,
+    /// Where `^o` goes back to: positions before g/G/go-to/search jumps.
+    jumps: Vec<Anchor>,
+    /// Line picked with `{n}G`, marked in the gutter until the next key.
+    pub mark: Option<(usize, usize, usize)>,
+}
+
+fn digits(n: u32) -> usize {
+    n.max(1).ilog10() as usize + 1
+}
+
+impl App {
+    pub fn new(source: Source, text: &str, hl: Hl, pal: Palette, opts: Opts, viewed: Viewed) -> App {
+        let parsed = diff::parse(text);
+        let mut app = App {
+            source,
+            files: parsed.files,
+            meta: None,
+            meta_rx: None,
+            hl,
+            hl_cache: HashMap::new(),
+            pal,
+            show_tests: opts.show_tests,
+            visible: Vec::new(),
+            hidden_tests: 0,
+            tree_nodes: Vec::new(),
+            tree_rows: Vec::new(),
+            collapsed_dirs: HashSet::new(),
+            tree_cur: 0,
+            tree_top: 0,
+            tree_w: 30,
+            tree_fixed: None,
+            tree_nw: 2,
+            show_tree: true,
+            focus: Focus::Tree,
+            mode: Mode::Normal,
+            split_pref: opts.split,
+            wrap: opts.wrap,
+            doc: Doc::empty(),
+            scroll: 0,
+            hscroll: 0,
+            fold: HashMap::new(),
+            viewed,
+            search: None,
+            search_origin: 0,
+            input: String::new(),
+            goto: Vec::new(),
+            goto_cur: 0,
+            msg: None,
+            lay: Lay::default(),
+            repo_root: source::repo_root(),
+            nw: 3,
+            count: None,
+            jumps: Vec::new(),
+            mark: None,
+        };
+        app.rebuild_tree();
+        app.rebuild_doc();
+        app.sync_tree();
+        app
+    }
+
+    // ---- derived state -------------------------------------------------
+
+    pub fn is_collapsed(&self, f: usize) -> bool {
+        let file = &self.files[f];
+        let default = self.viewed.has(file.hash) || file.generated || file.line_count() > LARGE;
+        self.fold.get(&f).copied().unwrap_or(default)
+    }
+
+    fn note_for(&self, f: usize) -> Option<Note> {
+        if !self.is_collapsed(f) {
+            return None;
+        }
+        let file = &self.files[f];
+        Some(if self.viewed.has(file.hash) {
+            Note::Viewed
+        } else if file.generated || file.line_count() > LARGE {
+            Note::Large
+        } else {
+            Note::Collapsed
+        })
+    }
+
+    /// The file whose rows are at the top of the diff pane.
+    pub fn cur_file(&self) -> Option<usize> {
+        let rows = &self.doc.rows;
+        rows.get(self.scroll..)
+            .and_then(|s| s.iter().find_map(|r| r.file()))
+            .or_else(|| rows[..self.scroll.min(rows.len())].iter().rev().find_map(|r| r.file()))
+    }
+
+    /// File whose header should pin to the top row (its own header scrolled off).
+    pub fn sticky(&self) -> Option<usize> {
+        match self.doc.rows.get(self.scroll)? {
+            Row::File { .. } | Row::Blank => None,
+            r => r.file(),
+        }
+    }
+
+    pub fn max_scroll(&self) -> usize {
+        let n = self.doc.rows.len();
+        let h = self.lay.diff.height as usize;
+        // Allow scrolling far enough that the last file's header reaches the top.
+        let last = self
+            .visible
+            .last()
+            .and_then(|&f| self.doc.file_row.get(f).copied())
+            .filter(|&r| r != usize::MAX)
+            .unwrap_or(0);
+        n.saturating_sub(h).max(last)
+    }
+
+    pub fn percent(&self) -> usize {
+        (self.scroll * 100).checked_div(self.max_scroll()).unwrap_or(100)
+    }
+
+    pub fn totals(&self) -> (usize, usize, usize) {
+        let (a, d) = self.visible.iter().fold((0, 0), |(a, d), &f| (a + self.files[f].adds, d + self.files[f].dels));
+        (self.visible.len(), a, d)
+    }
+
+    pub fn viewed_count(&self) -> usize {
+        self.visible.iter().filter(|&&f| self.viewed.has(self.files[f].hash)).count()
+    }
+
+    pub fn search_ranges(&self, f: usize, h: usize, l: usize) -> Vec<(Range<usize>, bool)> {
+        let Some(s) = &self.search else { return Vec::new() };
+        s.by_line
+            .get(&(f, h, l))
+            .map(|ids| ids.iter().map(|&i| (s.matches[i].range.clone(), i == s.cur)).collect())
+            .unwrap_or_default()
+    }
+
+    // ---- building ------------------------------------------------------
+
+    fn rebuild_tree(&mut self) {
+        let shown: Vec<usize> = (0..self.files.len()).filter(|&i| self.show_tests || !self.files[i].is_test).collect();
+        self.hidden_tests = self.files.len() - shown.len();
+        self.tree_nodes = tree::build(&self.files, &shown);
+        let mut order = Vec::new();
+        tree::order(&self.tree_nodes, &mut order);
+        self.visible = order;
+        self.nw = digits(self.files.iter().map(|f| f.max_line_no).max().unwrap_or(0)).max(3);
+
+        let mut all = Vec::new();
+        tree::flatten(&self.tree_nodes, &HashSet::new(), 0, &mut all);
+        self.tree_nw = digits(all.len() as u32).max(2);
+        let want = all
+            .iter()
+            .map(|r| {
+                let name = match &r.kind {
+                    RowKind::Dir { name, .. } => name.width() + 2,
+                    RowKind::File { idx, name } => {
+                        let f = &self.files[*idx];
+                        name.width() + 2 + format!("+{} -{}", f.adds, f.dels).len() + 1
+                    }
+                };
+                self.tree_nw + 1 + r.depth as usize * 2 + name + 3
+            })
+            .max()
+            .unwrap_or(30);
+        self.tree_w = (want as u16).clamp(30, 60);
+        self.refresh_tree_rows();
+    }
+
+    fn refresh_tree_rows(&mut self) {
+        let mut rows = Vec::new();
+        tree::flatten(&self.tree_nodes, &self.collapsed_dirs, 0, &mut rows);
+        self.tree_rows = rows;
+        self.tree_cur = self.tree_cur.min(self.tree_rows.len().saturating_sub(1));
+    }
+
+    pub fn rebuild_doc(&mut self) {
+        let anchor = self.anchor();
+        let width = self.lay.diff.width;
+        let geo = Geo { width, split: self.split_pref.unwrap_or(width >= SPLIT_MIN), wrap: self.wrap, nw: self.nw };
+        let doc = doc::build(&self.files, &self.visible, |f| self.note_for(f), geo);
+        self.doc = doc;
+        self.restore(anchor);
+    }
+
+    fn anchor(&self) -> Option<Anchor> {
+        self.anchor_at(self.scroll)
+    }
+
+    fn anchor_at(&self, row: usize) -> Option<Anchor> {
+        Some(match *self.doc.rows.get(row)? {
+            Row::File { f } | Row::Note { f, .. } => Anchor::File(f as usize),
+            Row::Hunk { f, h } => Anchor::Hunk(f as usize, h as usize),
+            Row::Uni { f, h, l, .. } => Anchor::Line(f as usize, h as usize, l as usize),
+            Row::Split { f, h, p, .. } => {
+                let (lo, ro) = self.files[f as usize].hunks[h as usize].pairs[p as usize];
+                Anchor::Line(f as usize, h as usize, lo.or(ro).unwrap_or(0))
+            }
+            Row::Blank => Anchor::File(self.cur_file()?),
+        })
+    }
+
+    fn restore(&mut self, a: Option<Anchor>) {
+        let Some(a) = a else {
+            self.scroll = 0;
+            return;
+        };
+        let f = match a {
+            Anchor::File(f) | Anchor::Hunk(f, _) | Anchor::Line(f, _, _) => f,
+        };
+        let start = match self.doc.file_row.get(f) {
+            Some(&r) if r != usize::MAX => r,
+            _ => {
+                self.scroll = 0;
+                return;
+            }
+        };
+        self.scroll = match a {
+            Anchor::File(_) => start,
+            Anchor::Hunk(_, h) => self.doc.rows[start..]
+                .iter()
+                .position(|r| matches!(*r, Row::Hunk { f: rf, h: rh } if rf as usize == f && rh as usize == h))
+                .map_or(start, |i| start + i),
+            Anchor::Line(_, h, l) => self.doc.line_row.get(&(f as u32, h as u32, l as u32)).copied().unwrap_or(start),
+        };
+        self.clamp_scroll();
+    }
+
+    pub fn layout_for(&mut self, area: Rect) {
+        let (w, h) = (area.width, area.height);
+        let main_h = h.saturating_sub(2);
+        let top = Rect::new(0, 0, w, h.min(1));
+        let status = Rect::new(0, h.saturating_sub(1), w, u16::from(h >= 2));
+        let (tree, sep, diff) = if self.show_tree && w >= 70 {
+            let tw = self.tree_fixed.unwrap_or(self.tree_w.min(w * 2 / 5)).clamp(16, w * 3 / 5);
+            (Rect::new(0, 1, tw, main_h), Rect::new(tw, 1, 1, main_h), Rect::new(tw + 1, 1, w - tw - 1, main_h))
+        } else {
+            (Rect::default(), Rect::default(), Rect::new(0, 1, w, main_h))
+        };
+        let resized = diff.width != self.doc.geo.width;
+        let taller = diff.height != self.lay.diff.height || tree.height != self.lay.tree.height;
+        self.lay = Lay { top, tree, sep, diff, status };
+        if resized {
+            self.rebuild_doc();
+        }
+        if resized || taller {
+            self.clamp_scroll();
+            self.ensure_tree_visible();
+        }
+        self.clamp_tree_top();
+    }
+
+    /// Highlight the files that are on screen (cached per file).
+    pub fn prepare(&mut self) {
+        let h = self.lay.diff.height as usize + 1;
+        let mut need = Vec::new();
+        for r in self.doc.rows.iter().skip(self.scroll).take(h) {
+            if matches!(r, Row::Uni { .. } | Row::Split { .. }) {
+                if let Some(f) = r.file() {
+                    if !need.contains(&f) && !self.hl_cache.contains_key(&f) {
+                        need.push(f);
+                    }
+                }
+            }
+        }
+        for f in need {
+            let hl = self.hl.file(&self.files[f]);
+            self.hl_cache.insert(f, hl);
+        }
+    }
+
+    pub fn poll_meta(&mut self) -> bool {
+        if let Some(rx) = &self.meta_rx {
+            match rx.try_recv() {
+                Ok(m) => {
+                    self.meta = Some(m);
+                    self.meta_rx = None;
+                    return true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.meta_rx = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        false
+    }
+
+    /// Expire the status-bar message. Returns true when a redraw is needed.
+    pub fn tick(&mut self) -> bool {
+        if self.msg.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(3)) {
+            self.msg = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn flash(&mut self, s: impl Into<String>) {
+        self.msg = Some((s.into(), Instant::now()));
+    }
+
+    // ---- scrolling & navigation ------------------------------------------
+
+    fn clamp_scroll(&mut self) {
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    fn scroll_by(&mut self, d: isize) {
+        let max = self.max_scroll() as isize;
+        self.scroll = (self.scroll as isize + d).clamp(0, max) as usize;
+        self.sync_tree();
+    }
+
+    fn jump_file(&mut self, f: usize) {
+        if let Some(&r) = self.doc.file_row.get(f) {
+            if r != usize::MAX {
+                self.scroll = r.min(self.max_scroll());
+            }
+        }
+        self.sync_tree();
+    }
+
+    fn next_file(&mut self, dir: isize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let cur = self.cur_file().unwrap_or(self.visible[0]);
+        let pos = self.visible.iter().position(|&x| x == cur).unwrap_or(0) as isize;
+        let at_header = self.doc.file_row.get(cur) == Some(&self.scroll);
+        // "previous" from the middle of a file goes to that file's top first.
+        let target = if dir < 0 && !at_header { pos } else { pos + dir };
+        let target = target.clamp(0, self.visible.len() as isize - 1) as usize;
+        self.jump_file(self.visible[target]);
+    }
+
+    fn next_hunk(&mut self, dir: isize) {
+        // A hunk header shows on row 1, under the sticky file header.
+        let cur = self.scroll + 1;
+        let rows = &self.doc.rows;
+        let is_hunk = |r: &Row| matches!(r, Row::Hunk { .. });
+        let found = if dir > 0 {
+            rows.iter().enumerate().skip(cur + 1).find(|(_, r)| is_hunk(r)).map(|(i, _)| i)
+        } else {
+            rows[..cur.min(rows.len())].iter().rposition(is_hunk)
+        };
+        if let Some(r) = found {
+            self.scroll = r.saturating_sub(1).min(self.max_scroll());
+            self.sync_tree();
+        }
+    }
+
+    // ---- jumps -------------------------------------------------------------
+
+    /// Remember where we are so `^o` can come back after a jump.
+    fn push_jump(&mut self) {
+        self.push_jump_at(self.scroll);
+    }
+
+    fn push_jump_at(&mut self, row: usize) {
+        if let Some(a) = self.anchor_at(row) {
+            self.jumps.push(a);
+            if self.jumps.len() > 100 {
+                self.jumps.remove(0);
+            }
+        }
+    }
+
+    fn jump_back(&mut self) {
+        match self.jumps.pop() {
+            Some(a) => {
+                self.restore(Some(a));
+                self.sync_tree();
+            }
+            None => self.flash("no earlier jump"),
+        }
+    }
+
+    fn tree_on(&self) -> bool {
+        self.focus == Focus::Tree && self.lay.tree.width > 0
+    }
+
+    fn go_top(&mut self) {
+        self.push_jump();
+        self.scroll = 0;
+        self.sync_tree();
+        if self.tree_on() {
+            self.tree_cur = 0;
+            self.ensure_tree_visible();
+        }
+    }
+
+    fn go_bottom(&mut self) {
+        self.push_jump();
+        self.scroll = self.max_scroll();
+        self.sync_tree();
+        if self.tree_on() {
+            self.tree_cur = self.tree_rows.len().saturating_sub(1);
+            self.ensure_tree_visible();
+        }
+    }
+
+    /// `{n}G`: row n of the tree when it has focus, else line n of this file.
+    fn goto_count(&mut self, n: usize) {
+        if self.tree_on() {
+            if self.tree_rows.is_empty() {
+                return;
+            }
+            self.push_jump();
+            let target = n.clamp(1, self.tree_rows.len()) - 1;
+            self.tree_move(target as isize - self.tree_cur as isize);
+        } else {
+            self.goto_line(n as u32);
+        }
+    }
+
+    /// Scroll to new-side line `n` of the current file (old side for a
+    /// deleted file), or the nearest line the diff has.
+    fn goto_line(&mut self, n: u32) {
+        let Some(f) = self.cur_file() else { return };
+        let file = &self.files[f];
+        let deleted = file.status == Status::Deleted;
+        let mut best: Option<(u32, usize, usize)> = None;
+        for (hi, h) in file.hunks.iter().enumerate() {
+            for (li, l) in h.lines.iter().enumerate() {
+                let ln = match l.kind {
+                    Kind::Del if !deleted => continue,
+                    Kind::Del => l.old,
+                    _ => l.new,
+                };
+                let d = ln.abs_diff(n);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, hi, li));
+                }
+            }
+        }
+        let Some((d, h, l)) = best else {
+            self.flash("no lines to go to in this file");
+            return;
+        };
+        self.push_jump();
+        if self.is_collapsed(f) {
+            self.fold.insert(f, false);
+            self.rebuild_doc();
+        }
+        let Some(&row) = self.doc.line_row.get(&(f as u32, h as u32, l as u32)) else { return };
+        let top = self.doc.file_row.get(f).copied().unwrap_or(0);
+        let hgt = self.lay.diff.height as usize;
+        self.scroll = row.saturating_sub(hgt / 3).max(top).min(self.max_scroll());
+        self.mark = Some((f, h, l));
+        self.sync_tree();
+        if d > 0 {
+            let line = &self.files[f].hunks[h].lines[l];
+            let got = if deleted { line.old } else { line.new };
+            self.flash(format!("line {n} isn't in the diff · nearest is {got}"));
+        }
+    }
+
+    fn sync_tree(&mut self) {
+        let Some(f) = self.cur_file() else { return };
+        let path = &self.files[f].path;
+        let mut best = None;
+        for (i, r) in self.tree_rows.iter().enumerate() {
+            match &r.kind {
+                RowKind::File { idx, .. } if *idx == f => {
+                    best = Some(i);
+                    break;
+                }
+                RowKind::Dir { path: p, open: false, .. }
+                    if path.len() > p.len() && path.starts_with(p.as_str()) && path.as_bytes()[p.len()] == b'/' =>
+                {
+                    best = Some(i);
+                }
+                _ => {}
+            }
+        }
+        if let Some(i) = best {
+            self.tree_cur = i;
+            self.ensure_tree_visible();
+        }
+    }
+
+    fn ensure_tree_visible(&mut self) {
+        let h = self.lay.tree.height as usize;
+        if h == 0 {
+            return;
+        }
+        let so = 2.min(h / 2);
+        if self.tree_cur < self.tree_top + so {
+            self.tree_top = self.tree_cur.saturating_sub(so);
+        }
+        if self.tree_cur + so >= self.tree_top + h {
+            self.tree_top = self.tree_cur + so + 1 - h;
+        }
+        self.clamp_tree_top();
+    }
+
+    fn clamp_tree_top(&mut self) {
+        let h = self.lay.tree.height as usize;
+        self.tree_top = self.tree_top.min(self.tree_rows.len().saturating_sub(h));
+    }
+
+    fn tree_move(&mut self, d: isize) {
+        if self.tree_rows.is_empty() {
+            return;
+        }
+        self.tree_cur = (self.tree_cur as isize + d).clamp(0, self.tree_rows.len() as isize - 1) as usize;
+        self.ensure_tree_visible();
+        if let RowKind::File { idx, .. } = self.tree_rows[self.tree_cur].kind {
+            self.jump_file(idx);
+        }
+    }
+
+    fn tree_left(&mut self) {
+        let Some(row) = self.tree_rows.get(self.tree_cur) else { return };
+        match &row.kind {
+            RowKind::Dir { path, open: true, .. } => {
+                self.collapsed_dirs.insert(path.clone());
+                self.refresh_tree_rows();
+            }
+            _ => {
+                let depth = row.depth;
+                if let Some(i) = (0..self.tree_cur).rev().find(|&i| self.tree_rows[i].depth < depth) {
+                    self.tree_cur = i;
+                }
+            }
+        }
+        self.ensure_tree_visible();
+    }
+
+    /// `l` / Enter in the tree: open a folder, or move focus into the diff.
+    fn tree_activate(&mut self, toggle: bool) {
+        let Some(row) = self.tree_rows.get(self.tree_cur) else { return };
+        match &row.kind {
+            RowKind::Dir { path, open, .. } => {
+                if *open && !toggle {
+                    self.tree_move(1);
+                    return;
+                }
+                if *open {
+                    self.collapsed_dirs.insert(path.clone());
+                } else {
+                    self.collapsed_dirs.remove(path);
+                }
+                self.refresh_tree_rows();
+                self.ensure_tree_visible();
+            }
+            RowKind::File { idx, .. } => {
+                let idx = *idx;
+                self.push_jump();
+                self.jump_file(idx);
+                self.focus = Focus::Diff;
+            }
+        }
+    }
+
+    // ---- actions ---------------------------------------------------------
+
+    fn toggle_fold(&mut self, f: usize) {
+        let now = self.is_collapsed(f);
+        self.fold.insert(f, !now);
+        self.rebuild_doc();
+        self.jump_file(f);
+    }
+
+    /// `Z`: fold every file; again to go back to the defaults (viewed and
+    /// large files stay folded), and once more to open those too.
+    fn fold_all(&mut self) {
+        let any_open = self.visible.iter().any(|&f| !self.is_collapsed(f));
+        let msg = if any_open {
+            for &f in &self.visible {
+                self.fold.insert(f, true);
+            }
+            "folded every file · Z unfolds"
+        } else {
+            self.fold.clear();
+            if self.visible.iter().all(|&f| self.is_collapsed(f)) {
+                for &f in &self.visible {
+                    self.fold.insert(f, false);
+                }
+                "unfolded every file"
+            } else {
+                "unfolded · viewed and large files stay folded (Z again opens them)"
+            }
+        };
+        self.rebuild_doc();
+        self.sync_tree();
+        self.flash(msg);
+    }
+
+    /// On a folder in the tree: mark (or unmark) every file under it.
+    fn toggle_viewed_dir(&mut self, dir: &str) {
+        let prefix = format!("{dir}/");
+        let files: Vec<usize> = self.visible.iter().copied().filter(|&f| self.files[f].path.starts_with(&prefix)).collect();
+        let hashes: Vec<u64> = files.iter().map(|&f| self.files[f].hash).collect();
+        let on = !hashes.iter().all(|&h| self.viewed.has(h));
+        self.viewed.set_many(&hashes, on);
+        for f in &files {
+            self.fold.remove(f);
+        }
+        self.rebuild_doc();
+        let n = files.len();
+        let s = if n == 1 { "" } else { "s" };
+        let name = dir.rsplit('/').next().unwrap_or(dir);
+        self.flash(if on { format!("✓ viewed {n} file{s} in {name}/") } else { format!("unmarked {n} file{s} in {name}/") });
+    }
+
+    fn toggle_viewed(&mut self) {
+        if self.tree_on() {
+            if let Some(RowKind::Dir { path, .. }) = self.tree_rows.get(self.tree_cur).map(|r| &r.kind) {
+                let dir = path.clone();
+                self.toggle_viewed_dir(&dir);
+                return;
+            }
+        }
+        let Some(f) = self.cur_file() else { return };
+        let h = self.files[f].hash;
+        let on = !self.viewed.has(h);
+        if on {
+            self.push_jump();
+        }
+        self.viewed.set(h, on);
+        self.fold.remove(&f);
+        self.rebuild_doc();
+        if on {
+            let pos = self.visible.iter().position(|&x| x == f).unwrap_or(0);
+            let next = self.visible[pos + 1..]
+                .iter()
+                .chain(self.visible[..pos].iter())
+                .find(|&&x| !self.viewed.has(self.files[x].hash))
+                .copied();
+            self.jump_file(next.unwrap_or(f));
+            let (n, v) = (self.visible.len(), self.viewed_count());
+            self.flash(if v == n { format!("✓ all {n} files viewed") } else { format!("✓ viewed {v}/{n}") });
+        } else {
+            self.jump_file(f);
+            self.flash("unmarked viewed");
+        }
+    }
+
+    fn toggle_tests(&mut self) {
+        self.show_tests = !self.show_tests;
+        self.rebuild_tree();
+        self.rebuild_doc();
+        if let Some(s) = self.search.take() {
+            self.search = self.run_search(&s.query);
+        }
+        self.sync_tree();
+        let n = self.files.iter().filter(|f| f.is_test).count();
+        self.flash(if self.show_tests { format!("showing {n} test files") } else { format!("hiding {n} test files") });
+    }
+
+    fn set_split(&mut self, split: bool) {
+        self.split_pref = Some(split);
+        self.rebuild_doc();
+        self.flash(if split { "split view" } else { "unified view" });
+    }
+
+    fn first_code_line(&self) -> Option<(usize, u32)> {
+        self.first_code_pos().map(|(f, n, _)| (f, n))
+    }
+
+    /// The top code line on screen: (file, line number, on the old side).
+    fn first_code_pos(&self) -> Option<(usize, u32, bool)> {
+        let h = self.lay.diff.height as usize;
+        let start = self.scroll + usize::from(self.sticky().is_some());
+        let num = |l: &diff::Line| if l.new > 0 { (l.new, false) } else { (l.old.max(1), true) };
+        for r in self.doc.rows.iter().skip(start).take(h.max(1)) {
+            let (f, line) = match *r {
+                Row::Uni { f, h, l, .. } => (f, &self.files[f as usize].hunks[h as usize].lines[l as usize]),
+                Row::Split { f, h, p, .. } => {
+                    let hk = &self.files[f as usize].hunks[h as usize];
+                    let (lo, ro) = hk.pairs[p as usize];
+                    (f, &hk.lines[ro.or(lo)?])
+                }
+                _ => continue,
+            };
+            let (n, old) = num(line);
+            return Some((f as usize, n, old));
+        }
+        self.cur_file().map(|f| (f, self.files[f].hunks.first().map_or(1, |h| h.new_start.max(1)), false))
+    }
+
+    /// `O`: this file, at the top line on screen, in the PR's diff on GitHub.
+    fn open_github(&mut self) {
+        let Some(url) = self.meta.as_ref().map(|m| m.url.clone()).filter(|u| !u.is_empty()) else {
+            self.flash(if self.meta_rx.is_some() { "still loading the PR…" } else { "O needs a PR (jv <number>)" });
+            return;
+        };
+        let Some((f, line, old)) = self.first_code_pos() else { return };
+        let path = self.files[f].path.clone();
+        let side = if old { 'L' } else { 'R' };
+        let target = format!("{url}/files#diff-{}{side}{line}", source::sha256_hex(path.as_bytes()));
+        let ok = source::open_url(&target);
+        self.flash(if ok { format!("opened {path}:{line} on GitHub") } else { "couldn't open a browser".to_string() });
+    }
+
+    fn open_editor(&mut self) -> Act {
+        let Some((f, line)) = self.first_code_line() else { return Act::None };
+        let rel = self.files[f].path.clone();
+        let abs = self.repo_root.clone().unwrap_or_else(|| PathBuf::from(".")).join(&rel);
+        if !abs.exists() {
+            self.flash(format!("{rel} isn't in this checkout"));
+            return Act::None;
+        }
+        if source::which("zed") {
+            let ok = Command::new("zed")
+                .arg(format!("{}:{line}", abs.display()))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .is_ok();
+            self.flash(if ok { format!("opened {rel}:{line} in Zed") } else { "couldn't start zed".to_string() });
+            return Act::None;
+        }
+        let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+        let mut cmd: Vec<String> = editor.split_whitespace().map(String::from).collect();
+        cmd.push(format!("+{line}"));
+        cmd.push(abs.display().to_string());
+        Act::Suspend(cmd)
+    }
+
+    fn copy(&mut self, with_line: bool) {
+        let Some((f, line)) = self.first_code_line() else { return };
+        let path = &self.files[f].path;
+        let text = if with_line { format!("{path}:{line}") } else { path.clone() };
+        let ok = source::copy(&text);
+        self.flash(if ok { format!("copied {text}") } else { "copy failed".to_string() });
+    }
+
+    fn reload(&mut self) {
+        if !self.source.reloadable() {
+            self.flash("stdin can't be reloaded");
+            return;
+        }
+        let keep = self.cur_file().map(|f| self.files[f].path.clone());
+        match self.source.fetch() {
+            Ok(text) => {
+                self.files = diff::parse(&text).files;
+                self.hl_cache.clear();
+                self.fold.clear();
+                self.search = None;
+                self.doc = Doc::empty();
+                self.scroll = 0;
+                self.rebuild_tree();
+                self.rebuild_doc();
+                if let Some(f) = keep.and_then(|p| self.files.iter().position(|x| x.path == p)) {
+                    self.jump_file(f);
+                }
+                self.flash(format!("reloaded · {} files", self.files.len()));
+            }
+            Err(e) => self.flash(format!("reload failed: {}", e.lines().next().unwrap_or(""))),
+        }
+    }
+
+    // ---- search ----------------------------------------------------------
+
+    fn run_search(&self, query: &str) -> Option<Search> {
+        if query.is_empty() {
+            return None;
+        }
+        let cs = query.chars().any(char::is_uppercase);
+        let q = if cs { query.to_string() } else { query.to_ascii_lowercase() };
+        let mut matches = Vec::new();
+        let mut by_line: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
+        'outer: for &f in &self.visible {
+            for (hi, h) in self.files[f].hunks.iter().enumerate() {
+                for (li, l) in h.lines.iter().enumerate() {
+                    let lower;
+                    let hay: &str = if cs {
+                        &l.text
+                    } else {
+                        lower = l.text.to_ascii_lowercase();
+                        &lower
+                    };
+                    let mut start = 0;
+                    while let Some(pos) = hay[start..].find(&q) {
+                        let s = start + pos;
+                        by_line.entry((f, hi, li)).or_default().push(matches.len());
+                        matches.push(Match { f, h: hi, l: li, range: s..s + q.len() });
+                        start = s + q.len();
+                        if matches.len() >= 20_000 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        Some(Search { query: query.to_string(), matches, cur: 0, by_line })
+    }
+
+    fn code_w_for(&self, f: usize, kind: Kind) -> usize {
+        let g = &self.doc.geo;
+        let file = &self.files[f];
+        if g.split && !file.one_sided() {
+            g.side_code_w(kind != Kind::Del)
+        } else {
+            g.uni_code_w(file.one_sided())
+        }
+    }
+
+    fn show_match(&mut self, i: usize) {
+        let Some(m) = self.search.as_ref().and_then(|s| s.matches.get(i)) else { return };
+        let (f, h, l, start) = (m.f, m.h, m.l, m.range.start);
+        if self.is_collapsed(f) {
+            self.fold.insert(f, false);
+            self.rebuild_doc();
+        }
+        if let Some(s) = self.search.as_mut() {
+            s.cur = i;
+        }
+        let Some(&row) = self.doc.line_row.get(&(f as u32, h as u32, l as u32)) else { return };
+        let line = &self.files[f].hunks[h].lines[l];
+        let w = self.code_w_for(f, line.kind);
+        let seg = if self.wrap {
+            doc::wrap_ranges(&line.text, w).iter().position(|r| r.contains(&start)).unwrap_or(0)
+        } else {
+            let col = line.text[..start].width();
+            if col < self.hscroll || col + 4 > self.hscroll + w {
+                self.hscroll = col.saturating_sub(8);
+            }
+            0
+        };
+        let target = row + seg;
+        let hgt = self.lay.diff.height as usize;
+        if target <= self.scroll || target >= self.scroll + hgt {
+            self.scroll = target.saturating_sub(hgt / 3).min(self.max_scroll());
+        }
+        self.sync_tree();
+    }
+
+    /// First match at or below where the search started.
+    fn search_from_origin(&mut self) {
+        let Some(s) = &self.search else { return };
+        if s.matches.is_empty() {
+            return;
+        }
+        let origin = self.search_origin;
+        let pos = s
+            .matches
+            .iter()
+            .position(|m| self.doc.line_row.get(&(m.f as u32, m.h as u32, m.l as u32)).is_some_and(|&r| r > origin))
+            .unwrap_or(0);
+        self.show_match(pos);
+    }
+
+    fn search_step(&mut self, dir: isize) {
+        let Some(s) = &self.search else { return };
+        let n = s.matches.len();
+        if n == 0 {
+            let q = s.query.clone();
+            self.flash(format!("no matches for {q}"));
+            return;
+        }
+        let i = (s.cur as isize + dir).rem_euclid(n as isize) as usize;
+        self.show_match(i);
+    }
+
+    fn update_search(&mut self) {
+        self.search = self.run_search(&self.input.clone());
+        if self.search.is_some() {
+            self.search_from_origin();
+        } else {
+            self.scroll = self.search_origin.min(self.max_scroll());
+        }
+    }
+
+    // ---- go to file ------------------------------------------------------
+
+    fn open_goto(&mut self) {
+        self.mode = Mode::GoTo;
+        self.input.clear();
+        self.goto_cur = 0;
+        self.update_goto();
+    }
+
+    fn update_goto(&mut self) {
+        let mut order = self.visible.clone();
+        let shown: HashSet<usize> = order.iter().copied().collect();
+        order.extend((0..self.files.len()).filter(|i| !shown.contains(i)));
+        if self.input.trim().is_empty() {
+            self.goto = order.into_iter().map(|i| (i, Vec::new())).collect();
+        } else {
+            let mut scored: Vec<(i64, usize, usize, Vec<usize>)> = order
+                .iter()
+                .enumerate()
+                .filter_map(|(rank, &i)| fuzzy::score(&self.input, &self.files[i].path).map(|(s, p)| (s, rank, i, p)))
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            self.goto = scored.into_iter().map(|(_, _, i, p)| (i, p)).collect();
+        }
+        self.goto_cur = self.goto_cur.min(self.goto.len().saturating_sub(1));
+    }
+
+    // ---- input -----------------------------------------------------------
+
+    pub fn handle(&mut self, ev: Event) -> Act {
+        match ev {
+            Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
+            Event::Mouse(m) => {
+                self.mouse(m);
+                Act::None
+            }
+            _ => Act::None,
+        }
+    }
+
+    fn key(&mut self, k: KeyEvent) -> Act {
+        match self.mode {
+            Mode::Help => {
+                self.mode = Mode::Normal;
+                return Act::None;
+            }
+            Mode::Search => {
+                self.key_search(k);
+                return Act::None;
+            }
+            Mode::GoTo => {
+                self.key_goto(k);
+                return Act::None;
+            }
+            Mode::Normal => {}
+        }
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // Vim counts: 5j, 3J, 2}, 12G. A leading 0 is its own key.
+        if let (KeyCode::Char(c @ '0'..='9'), false) = (k.code, ctrl) {
+            if c != '0' || self.count.is_some() {
+                let d = c as usize - '0' as usize;
+                self.count = Some((self.count.unwrap_or(0) * 10 + d).min(99_999));
+                return Act::None;
+            }
+        }
+        let count = self.count.take();
+        let n = count.unwrap_or(1).max(1) as isize;
+        self.mark = None;
+        let h = self.lay.diff.height as isize;
+        let (half, page) = ((h / 2).max(1), (h - 2).max(1));
+        match (k.code, ctrl) {
+            (KeyCode::Esc, _) if count.is_some() => {}
+            (KeyCode::Char('c'), true) | (KeyCode::Char('q'), false) => return Act::Quit,
+            (KeyCode::Char('d'), _) => self.scroll_by(half * n),
+            (KeyCode::Char('u'), _) => self.scroll_by(-half * n),
+            (KeyCode::Char('e'), true) => self.scroll_by(n),
+            (KeyCode::Char('y'), true) => self.scroll_by(-n),
+            (KeyCode::Char('f'), _) | (KeyCode::PageDown, _) | (KeyCode::Char(' '), false) => self.scroll_by(page * n),
+            (KeyCode::Char('b'), _) | (KeyCode::PageUp, _) => self.scroll_by(-page * n),
+            (KeyCode::Char('o'), true) => self.jump_back(),
+            (KeyCode::Char('p'), true) | (KeyCode::Char('t'), false) => self.open_goto(),
+            (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => self.mode = Mode::Help,
+            (KeyCode::Tab | KeyCode::BackTab, _) => {
+                self.focus = if self.focus == Focus::Tree || self.lay.tree.width == 0 { Focus::Diff } else { Focus::Tree };
+            }
+            (KeyCode::Char('e'), false) => {
+                self.show_tree = !self.show_tree;
+                self.focus = if self.show_tree { Focus::Tree } else { Focus::Diff };
+            }
+            (KeyCode::Char(c @ ('<' | '>')), _) => {
+                self.show_tree = true;
+                let step = if c == '>' { 4 } else { -4 } * n as i32;
+                let cur = if self.lay.tree.width > 0 { self.lay.tree.width } else { self.tree_w };
+                self.tree_fixed = Some((cur as i32 + step).max(16) as u16);
+            }
+            (KeyCode::Char('s'), false) => self.set_split(!self.doc.geo.split),
+            (KeyCode::Char('w'), false) => {
+                self.wrap = !self.wrap;
+                self.hscroll = 0;
+                self.rebuild_doc();
+                self.flash(if self.wrap { "wrapping long lines" } else { "not wrapping · h/l scroll sideways" });
+            }
+            (KeyCode::Char('0'), false) => self.hscroll = 0,
+            (KeyCode::Char('T'), _) => self.toggle_tests(),
+            (KeyCode::Char('/'), false) => {
+                self.mode = Mode::Search;
+                self.input.clear();
+                self.search_origin = self.scroll;
+            }
+            (KeyCode::Char('n'), false) if self.search.is_some() => self.search_step(n),
+            (KeyCode::Char('N'), _) if self.search.is_some() => self.search_step(-n),
+            (KeyCode::Char('J' | ']' | 'n'), _) => (0..n).for_each(|_| self.next_file(1)),
+            (KeyCode::Char('K' | '[' | 'N' | 'p'), _) => (0..n).for_each(|_| self.next_file(-1)),
+            (KeyCode::Char('}'), _) => (0..n).for_each(|_| self.next_hunk(1)),
+            (KeyCode::Char('{'), _) => (0..n).for_each(|_| self.next_hunk(-1)),
+            (KeyCode::Char('g'), false) | (KeyCode::Home, _) => match count {
+                Some(c) => self.goto_count(c),
+                None => self.go_top(),
+            },
+            (KeyCode::Char('G'), _) | (KeyCode::End, _) => match count {
+                Some(c) => self.goto_count(c),
+                None => self.go_bottom(),
+            },
+            (KeyCode::Char('x'), false) => self.toggle_viewed(),
+            (KeyCode::Char('z'), false) => {
+                if let Some(f) = self.cur_file() {
+                    self.toggle_fold(f);
+                }
+            }
+            (KeyCode::Char('Z'), _) => self.fold_all(),
+            (KeyCode::Char('o'), false) => return self.open_editor(),
+            (KeyCode::Char('O'), _) => self.open_github(),
+            (KeyCode::Char('y'), false) => self.copy(false),
+            (KeyCode::Char('Y'), _) => self.copy(true),
+            (KeyCode::Char('r'), false) => self.reload(),
+            (KeyCode::Esc, _) => {
+                if self.search.take().is_none() {
+                    self.msg = None;
+                }
+            }
+            _ => {
+                let focus = if self.lay.tree.width == 0 { Focus::Diff } else { self.focus };
+                match focus {
+                    Focus::Tree => self.key_tree(k, n),
+                    Focus::Diff => self.key_diff(k, n),
+                }
+            }
+        }
+        Act::None
+    }
+
+    fn key_tree(&mut self, k: KeyEvent, n: isize) {
+        match k.code {
+            KeyCode::Char('j') | KeyCode::Down => self.tree_move(n),
+            KeyCode::Char('k') | KeyCode::Up => self.tree_move(-n),
+            KeyCode::Char('h') | KeyCode::Left => self.tree_left(),
+            KeyCode::Char('l') | KeyCode::Right => self.tree_activate(false),
+            KeyCode::Enter => self.tree_activate(true),
+            _ => {}
+        }
+    }
+
+    fn key_diff(&mut self, k: KeyEvent, n: isize) {
+        let side = 8 * n as usize;
+        match k.code {
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_by(n),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_by(-n),
+            KeyCode::Char('h') | KeyCode::Left if !self.wrap => self.hscroll = self.hscroll.saturating_sub(side),
+            KeyCode::Char('l') | KeyCode::Right if !self.wrap => self.hscroll += side,
+            KeyCode::Char('h') | KeyCode::Left if self.lay.tree.width > 0 => self.focus = Focus::Tree,
+            _ => {}
+        }
+    }
+
+    fn edit_input(&mut self, k: &KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Char('u') if ctrl => self.input.clear(),
+            KeyCode::Char('w') if ctrl => {
+                let t = self.input.trim_end().len();
+                let cut = self.input[..t].rfind(|c: char| c.is_whitespace() || c == '/').map_or(0, |i| i + 1);
+                self.input.truncate(cut);
+            }
+            KeyCode::Char(c) if !ctrl => self.input.push(c),
+            _ => return false,
+        }
+        true
+    }
+
+    fn key_search(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.search = None;
+                self.scroll = self.search_origin.min(self.max_scroll());
+                self.sync_tree();
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                match &self.search {
+                    None => {}
+                    Some(s) if s.matches.is_empty() => {
+                        let q = s.query.clone();
+                        self.search = None;
+                        self.flash(format!("no matches for {q}"));
+                    }
+                    Some(_) => self.push_jump_at(self.search_origin),
+                }
+            }
+            _ => {
+                if self.edit_input(&k) {
+                    self.update_search();
+                }
+            }
+        }
+    }
+
+    fn key_goto(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                if let Some(&(f, _)) = self.goto.get(self.goto_cur) {
+                    if !self.visible.contains(&f) {
+                        self.show_tests = true;
+                        self.rebuild_tree();
+                        self.rebuild_doc();
+                    }
+                    if self.is_collapsed(f) {
+                        self.fold.insert(f, false);
+                        self.rebuild_doc();
+                    }
+                    self.push_jump();
+                    self.jump_file(f);
+                }
+            }
+            KeyCode::Up => self.goto_cur = self.goto_cur.saturating_sub(1),
+            KeyCode::Char('p' | 'k') if ctrl => self.goto_cur = self.goto_cur.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => self.goto_cur = (self.goto_cur + 1).min(self.goto.len().saturating_sub(1)),
+            KeyCode::Char('n' | 'j') if ctrl => self.goto_cur = (self.goto_cur + 1).min(self.goto.len().saturating_sub(1)),
+            _ => {
+                if self.edit_input(&k) {
+                    self.goto_cur = 0;
+                    self.update_goto();
+                }
+            }
+        }
+    }
+
+    fn mouse(&mut self, m: MouseEvent) {
+        if self.mode != Mode::Normal {
+            return;
+        }
+        let (x, y) = (m.column, m.row);
+        let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        let (tree, diff) = (self.lay.tree, self.lay.diff);
+        match m.kind {
+            MouseEventKind::ScrollDown if inside(tree) => {
+                self.tree_top += 3;
+                self.clamp_tree_top();
+            }
+            MouseEventKind::ScrollUp if inside(tree) => self.tree_top = self.tree_top.saturating_sub(3),
+            MouseEventKind::ScrollDown => self.scroll_by(3),
+            MouseEventKind::ScrollUp => self.scroll_by(-3),
+            MouseEventKind::ScrollRight if !self.wrap => self.hscroll += 4,
+            MouseEventKind::ScrollLeft if !self.wrap => self.hscroll = self.hscroll.saturating_sub(4),
+            MouseEventKind::Down(MouseButton::Left) if inside(tree) => {
+                self.focus = Focus::Tree;
+                let i = self.tree_top + (y - tree.y) as usize;
+                if i < self.tree_rows.len() {
+                    self.tree_cur = i;
+                    self.tree_activate(true);
+                    self.focus = Focus::Tree;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if inside(diff) => {
+                self.focus = Focus::Diff;
+                let ry = (y - diff.y) as usize;
+                let f = if ry == 0 { self.sticky() } else { None }.or_else(|| match self.doc.rows.get(self.scroll + ry) {
+                    Some(Row::File { f }) => Some(*f as usize),
+                    _ => None,
+                });
+                if let Some(f) = f {
+                    self.toggle_fold(f);
+                }
+            }
+            _ => {}
+        }
+    }
+}

@@ -23,12 +23,10 @@ function jt() {
     awk '/^diff --git / { skip = ($3 ~ /(^|\/)__tests__\// || $3 ~ /\.test\.ts$/) } !skip' |
     delta
 }
-# jv [pr] — `jt` in diffnav, which adds a GitHub-style file tree sidebar.
-function jv() {
-  gh pr diff "$@" --color=never |
-    awk '/^diff --git / { skip = ($3 ~ /(^|\/)__tests__\// || $3 ~ /\.test\.ts$/) } !skip' |
-    diffnav
-}
+# jv [pr] is a binary now (~/.dotfiles/jv, Rust): file tree + highlighted diff,
+# tests hidden by default (T toggles). Drop any jv function an older shell
+# still has loaded so the binary wins.
+(( $+functions[jv] )) && unfunction jv
 function jc() {
   gh pr checkout "$@"
 }
