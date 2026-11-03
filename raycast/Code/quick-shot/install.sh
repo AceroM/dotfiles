@@ -25,7 +25,7 @@ if /usr/bin/pgrep -x QuickShot >/dev/null; then
   /usr/bin/pkill -x QuickShot || true
 fi
 if /usr/bin/pgrep -x Shottr >/dev/null; then
-  echo "Shottr is running and may hold ⌘⇧1 / ⌘⇧2. Quit it (and remove it from Login Items)."
+  echo "Shottr is running and may hold ⌘⇧1 / ⌘⇧2 / ⌘⇧3. Quit it (and remove it from Login Items)."
 fi
 mkdir -p "$HOME/Applications"
 /usr/bin/ditto "$staged" "$app"

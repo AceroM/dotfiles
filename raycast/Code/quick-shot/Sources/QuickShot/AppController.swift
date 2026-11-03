@@ -25,7 +25,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let commandShift = cmdKey | shiftKey
         hotKeys.add(1, keyCode: kVK_ANSI_2, modifiers: commandShift) { [weak self] in self?.capture(.area) }
         hotKeys.add(2, keyCode: kVK_ANSI_1, modifiers: commandShift) { [weak self] in self?.captureAppWindow() }
-        hotKeys.add(3, keyCode: kVK_ANSI_2, modifiers: cmdKey | optionKey) { [weak self] in self?.captureFullScreen() }
+        hotKeys.add(3, keyCode: kVK_ANSI_3, modifiers: commandShift) { [weak self] in self?.captureFullScreen() }
         hotKeys.add(4, keyCode: kVK_ANSI_0, modifiers: commandShift) { [weak self] in self?.capture(.area, output: .text) }
         missingHotKeys = hotKeys.registerMissing()
         if !missingHotKeys.isEmpty { logger.error("Hotkeys unavailable: \(self.missingHotKeys, privacy: .public)") }
@@ -49,8 +49,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         area.keyEquivalentModifierMask = [.command, .shift]
         let app = menu.addItem(withTitle: "Capture Active Window", action: #selector(captureAppWindow), keyEquivalent: "1")
         app.keyEquivalentModifierMask = [.command, .shift]
-        let full = menu.addItem(withTitle: "Capture Full Screen", action: #selector(captureFullScreen), keyEquivalent: "2")
-        full.keyEquivalentModifierMask = [.command, .option]
+        let full = menu.addItem(withTitle: "Capture Full Screen", action: #selector(captureFullScreen), keyEquivalent: "3")
+        full.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(withTitle: "Capture Window", action: #selector(captureWindow), keyEquivalent: "")
         menu.addItem(withTitle: "Capture Last Area", action: #selector(captureLastArea), keyEquivalent: "")
         let text = menu.addItem(withTitle: "Copy Text from Area", action: #selector(captureText), keyEquivalent: "0")

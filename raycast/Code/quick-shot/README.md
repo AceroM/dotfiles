@@ -27,8 +27,9 @@ same shortcuts. Use **Open at Login** in the menu-bar menu to keep the hotkeys a
 - **⌘⇧1: Capture Active Window.** Instantly captures the frontmost app's front window, whole
   even where it's covered, and opens the editor. Falls back to the full screen when the app
   has no window.
-- **⌥⌘2: Capture Full Screen.** Instantly captures the display under the pointer and
-  opens the editor, no selection step.
+- **⌘⇧3: Capture Full Screen.** Instantly captures the display under the pointer and
+  opens the editor, no selection step. Turn off macOS's own ⌘⇧3 under System Settings →
+  Keyboard → Keyboard Shortcuts → Screenshots, or it keeps the combo.
 - **⌘⇧0: Copy Text.** The same frozen selector as Capture Area (drag, click a window, or **F**),
   but instead of opening the editor it runs on-device OCR (Vision) and puts the text on the
   clipboard as plain text, one recognized line per line. A brief HUD under the pointer says how
