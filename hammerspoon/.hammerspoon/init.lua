@@ -49,6 +49,7 @@ wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 -- fn+m opens the matching spaces picker to move the current tab.
 -- fn+q toggles Quick Record from any app through the same Fn-key handler.
 -- fn+b toggles vertical wheel/trackpad movement into horizontal scrolling.
+-- fn+p puts the focused pane's Claude or Codex into plan mode.
 herdrkeys = require("herdrkeys")
 herdrkeys.start()
 

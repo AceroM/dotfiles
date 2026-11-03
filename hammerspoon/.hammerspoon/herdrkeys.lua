@@ -19,6 +19,10 @@
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+shift+q    same, but also records microphone + system audio
 --   fn+b          toggle horizontal wheel/trackpad scrolling (from any app)
+--   fn+p          put the focused pane's Claude or Codex into plan mode:
+--                 presses shift+tab until its footer says plan (Claude cycles
+--                 bypass/auto/manual/accept edits/plan, Codex Default/Plan),
+--                 so a half-typed prompt is left alone
 --   fn+x/w/o/i    become ctrl+alt+x/w/o/i in Herdr: close tab, close pane,
 --                 last pane back/forth
 --   fn+shift+w    becomes ctrl+alt+shift+w in Herdr: close workspace
@@ -56,7 +60,7 @@
 -- ~/.config/herdr/config.toml, the app from ~/.config/herdr-app/keys.json.
 -- The app runs on herdr-core rather than herdr.sock, so the socket features
 -- go through its CLI there: fn+a, fn+9, fn+e, fn+y, and the agents/spaces/
--- tabs pickers (its one picker). fn+o/i, fn+m, fn+/, fn+;, fn+\ and
+-- tabs pickers (its one picker). fn+o/i, fn+m, fn+p, fn+/, fn+;, fn+\ and
 -- fn+shift+;/y have no counterpart in the app.
 --
 -- Everything talks to the Herdr socket via nc: every spawned process costs
@@ -803,6 +807,85 @@ local function stashSpace()
   end)
 end
 
+-- The mode an agent's footer shows, from the screen's last few lines. Claude:
+-- "⏸ plan mode on (shift+tab to cycle)", "⏵⏵ bypass permissions on", ...,
+-- or no mode line at all in a session without bypass. Codex: "Plan mode
+-- (⇧tab to cycle)" at the right of its status line, cut to "Plan mode" in a
+-- narrow pane, and nothing in Default mode. Composer lines (›/❯) are skipped
+-- so a draft that mentions plan mode isn't read as the mode.
+local function agentMode(kind, text)
+  local lines = {}
+  for line in text:gmatch("[^\r\n]+") do
+    if line:find("%S") then lines[#lines + 1] = line end
+  end
+  for i = #lines, math.max(1, #lines - 2), -1 do
+    local line = lines[i]
+    if not line:match("^%s*›") and not line:match("^%s*❯") then
+      if kind == "claude" then
+        local mode = line:match("⏸ (%a[%a ]-) on") or line:match("⏵⏵ (%a[%a ]-) on")
+        if mode then return mode end
+      elseif line:match("Plan mode%s*$") or line:find("Plan mode (", 1, true) then
+        return "plan mode"
+      end
+    end
+  end
+  return "default"
+end
+
+-- Each shift+tab moves the agent one mode along, so press, wait for the footer
+-- to show the next mode, and stop on plan. A press that changes nothing (a
+-- Codex turn is running, a menu is open) ends it rather than pressing blind.
+-- Two laps of the cycle bound it in case a press is ever missed.
+local PLAN_PRESSES = { claude = 10, codex = 4 }
+local PLAN_SETTLE = 0.6 -- seconds a press gets to show up in the footer
+local planning = false
+-- target: a pane id to act on instead of the focused pane (for testing from
+-- the hs CLI without moving focus).
+local function enterPlanMode(target)
+  if not target and frontEnd() == HERDR_APP then return hs.alert.show("Plan mode isn’t wired to the Herdr app yet", 1.5) end
+  if planning then return end
+  planning = true
+  local function finish(message, seconds)
+    planning = false
+    if message then hs.alert.show(message, seconds or 1) end
+  end
+  request("session.snapshot", nil, function(response)
+    local snap = response.result and response.result.snapshot
+    local pane = target or (snap and snap.focused_pane_id)
+    if not pane then return finish("Couldn’t read the focused Herdr pane", 2) end
+    local kind
+    for _, agent in ipairs(snap.agents or {}) do
+      if agent.pane_id == pane and (agent.agent == "claude" or agent.agent == "codex") then kind = agent.agent end
+    end
+    if not kind then return finish("No Claude or Codex in the focused pane", 1.5) end
+    local name = kind == "codex" and "Codex" or "Claude"
+    local presses = 0
+    local function check(previous, started)
+      request("pane.read", { pane_id = pane, source = "visible" }, function(read)
+        local text = read.result and read.result.read and read.result.read.text
+        if not text then return finish("Couldn’t read the focused pane", 2) end
+        local mode = agentMode(kind, text)
+        if mode == previous then
+          if hs.timer.secondsSinceEpoch() - started < PLAN_SETTLE then
+            return hs.timer.doAfter(0.05, function() check(previous, started) end)
+          end
+          return finish(name .. " didn’t change mode" .. (kind == "codex" and " (is a turn running?)" or ""), 2)
+        end
+        if mode == "plan mode" then
+          return finish(presses == 0 and (name .. " is already in plan mode") or (name .. ": plan mode"), 0.8)
+        end
+        if presses >= PLAN_PRESSES[kind] then return finish("Couldn’t get " .. name .. " into plan mode", 2) end
+        presses = presses + 1
+        request("pane.send_input", { pane_id = pane, keys = { "shift+tab" } }, function(sent)
+          if sent.error then return finish("Couldn’t send shift+tab to " .. name, 2) end
+          check(mode, hs.timer.secondsSinceEpoch())
+        end)
+      end)
+    end
+    check(nil, 0)
+  end)
+end
+
 local function handleKey(event)
   local code = event:getKeyCode()
   local flags = event:getFlags()
@@ -829,7 +912,7 @@ local function handleKey(event)
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
   if flags.shift and not shiftable[code] then return false end
   local mode = pickers[code]
-  if not mode and code ~= keys.y and code ~= keys.q and code ~= keys.b and code ~= keys.e and code ~= keys["\\"] and not remapped[code] then return false end
+  if not mode and code ~= keys.y and code ~= keys.q and code ~= keys.b and code ~= keys.e and code ~= keys.p and code ~= keys["\\"] and not remapped[code] then return false end
   local autorepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) ~= 0
 
   if code == keys.q then
@@ -858,6 +941,10 @@ local function handleKey(event)
   elseif code == keys.e then
     if not herdrFocused() then return false end
     if not autorepeat then newTabNext() end
+    return true
+  elseif code == keys.p then
+    if not herdrFocused() then return false end
+    if not autorepeat then enterPlanMode() end
     return true
   elseif code == keys["9"] then
     if not herdrFocused() then return false end
@@ -897,5 +984,6 @@ M.toggleRecording = toggleRecording
 M.newTabNext = newTabNext
 M.stashSpace = stashSpace
 M.focusAgentTab = focusAgentTab
+M.enterPlanMode = enterPlanMode
 
 return M
