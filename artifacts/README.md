@@ -1,6 +1,7 @@
 # Artifacts server
 
-One local server for every code path, write-up and page agents make: <http://localhost:4620>.
+One local server for every code path, write-up and page agents make: <https://artifacts.localhost>
+(through [portless](#portless); the server itself is on <http://localhost:4620>).
 It replaces Claude Artifacts for anything that doesn't need to be shared. Pages are stored in
 one SQLite file (`~/.local/share/artifacts/artifacts.db`), render in milliseconds, and reload
 themselves when an agent updates them.
@@ -42,7 +43,7 @@ Re-adding the same file updates its page and keeps the old version. A temp file 
 
 ## Keys
 
-Every page has vim-style keys (turn Vimium off for `http://localhost:4620/*`). `?` lists them all.
+Every page has vim-style keys (turn Vimium off for `https://artifacts.localhost/*` and `http://localhost:4620/*`). `?` lists them all.
 - **Scroll:** `j`/`k` move 100px instantly, `d`/`u` half a page, `gg`/`G` go to the top or bottom,
   and `}`/`{` jump between sections, hops and days.
 - **Index:** `j`/`k` move to the next or previous item instead of scrolling, and more rows load as
@@ -99,7 +100,9 @@ Blocks run with `bash -c` (or `zsh -c`), no rc files, so aliases and shell funct
 everything on the server's PATH is. No TTY: stdin is closed, `PAGER`/`GIT_PAGER` are `cat`,
 `NO_COLOR=1`, and `$ARTIFACTS_SLUG` names the page. Each run is logged in the server's pane.
 `POST /api/run` only answers this server's own pages: the Host and Origin must both be
-`localhost:4620` or `127.0.0.1:4620`, so another site (or a DNS-rebinding one) can't run anything.
+`localhost:4620`, `127.0.0.1:4620` or the public URL (`https://artifacts.localhost`), so another
+site (or a DNS-rebinding one) can't run anything. That stays loopback-only because portless listens
+on loopback only.
 
 ## Build and run
 
@@ -110,6 +113,20 @@ ln -sf ~/.dotfiles/artifacts/target/release/artifacts ~/.local/bin/artifacts
 
 It runs in herdr `servers`, tab `artifacts :4620`. After a rebuild, close that tab and run
 `artifacts up`. It binds 127.0.0.1 only.
+
+### portless
+
+Pages are reached at <https://artifacts.localhost> through the [portless](https://github.com/vercel-labs/portless)
+proxy, as a static alias to the fixed port, registered once per machine:
+
+```bash
+portless alias artifacts 4620    # no global install? ~/Code/drate7/node_modules/.bin/portless
+```
+
+The alias lives in `~/.portless/routes.json` and survives restarts (aliases are never pruned). The
+server keeps its fixed port, so the CLI and the app still talk to `127.0.0.1:4620` directly; only
+the links it hands out (`add`, `ls`, `up`) use the alias. Without portless, set
+`ARTIFACTS_PUBLIC_URL=http://localhost:4620`.
 
 ## App
 
@@ -176,6 +193,7 @@ All optional, read from the environment:
 | `ARTIFACTS_PORT` / `--port` | `4620` | server port |
 | `ARTIFACTS_DB` / `--db` | `~/.local/share/artifacts/artifacts.db` | the SQLite store (`$XDG_DATA_HOME` if set) |
 | `ARTIFACTS_URL` | `http://localhost:4620` | where the CLI sends pages |
+| `ARTIFACTS_PUBLIC_URL` | `https://artifacts.localhost` (`http://localhost:<port>` off the default port) | where page links point; its origin may also run blocks |
 | `ARTIFACTS_TICKET_URL` | unset | links the ticket chip, e.g. `https://linear.app/<workspace>/issue/{ticket}` |
 
 The ticket is read from the branch name (`me/abc-123-fix-login` → `ABC-123`). Without

@@ -9,8 +9,9 @@
 //! ```
 //!
 //! Closing the request (the page's stop button, or leaving the page) stops the whole group.
-//! Only this server's own pages can ask: the Host and Origin must both be this server, which
-//! keeps other sites, and DNS rebinding, from running anything.
+//! Only this server's own pages can ask: the Host and Origin must both be this server (directly,
+//! or the portless alias its links use), which keeps other sites, and DNS rebinding, from running
+//! anything. Portless passes the browser's Host through, so the alias arrives as itself.
 
 use crate::render::expand_home;
 use axum::{
@@ -26,13 +27,48 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
-/// Whether the request came from a page this server served, on either name it answers to.
-pub fn same_origin(headers: &HeaderMap, port: u16) -> bool {
-    let hosts = [format!("localhost:{port}"), format!("127.0.0.1:{port}")];
+/// Whether the request came from a page this server served, under one of its `origins`
+/// (`scheme://host[:port]`): the Host must name one of them and the Origin must be one.
+pub fn same_origin(headers: &HeaderMap, origins: &[String]) -> bool {
     let get = |name| headers.get(name).and_then(|v| v.to_str().ok());
-    let host_ok = get(header::HOST).is_some_and(|h| hosts.iter().any(|x| x == h));
-    let origin_ok = get(header::ORIGIN).is_some_and(|o| hosts.iter().any(|x| o == format!("http://{x}")));
+    let host_ok = get(header::HOST)
+        .is_some_and(|h| origins.iter().any(|o| o.split_once("://").is_some_and(|(_, authority)| authority == h)));
+    let origin_ok = get(header::ORIGIN).is_some_and(|o| origins.iter().any(|x| x == o));
     host_ok && origin_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers(host: &str, origin: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+        h.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+        h
+    }
+
+    fn origins() -> Vec<String> {
+        ["http://localhost:4620", "http://127.0.0.1:4620", "https://artifacts.localhost"].map(String::from).to_vec()
+    }
+
+    #[test]
+    fn allows_own_pages_directly_and_through_portless() {
+        assert!(same_origin(&headers("localhost:4620", "http://localhost:4620"), &origins()));
+        assert!(same_origin(&headers("127.0.0.1:4620", "http://127.0.0.1:4620"), &origins()));
+        assert!(same_origin(&headers("artifacts.localhost", "https://artifacts.localhost"), &origins()));
+    }
+
+    #[test]
+    fn refuses_other_sites_and_other_portless_apps() {
+        assert!(!same_origin(&headers("artifacts.localhost", "https://evil.example"), &origins()));
+        assert!(!same_origin(&headers("artifacts.localhost", "https://drate7.localhost"), &origins()));
+        assert!(!same_origin(&headers("artifacts.localhost", "http://artifacts.localhost"), &origins()));
+        assert!(!same_origin(&headers("evil.example", "https://artifacts.localhost"), &origins()));
+        assert!(!same_origin(&headers("localhost:4620", "null"), &origins()));
+        assert!(!same_origin(&HeaderMap::new(), &origins()));
+    }
 }
 
 /// `bash` for bash, sh and shell blocks, `zsh` for zsh. Neither loads rc files, so aliases and

@@ -24,11 +24,11 @@ same shortcuts. Use **Open at Login** in the menu-bar menu to keep the hotkeys a
   - **Return** takes the same area as the last shot again, for before/after pairs. It's
     drawn as a dashed outline until you start dragging. The area is remembered across
     relaunches; only shots that open the editor set it, so a Copy Text in between doesn't move it.
-- **⌘⇧1: Capture Full Screen.** Instantly captures the display under the pointer and
-  opens the editor, no selection step.
-- **⌥⌘2: Capture Current App.** Instantly captures the frontmost app's front window, whole
+- **⌘⇧1: Capture Active Window.** Instantly captures the frontmost app's front window, whole
   even where it's covered, and opens the editor. Falls back to the full screen when the app
   has no window.
+- **⌥⌘2: Capture Full Screen.** Instantly captures the display under the pointer and
+  opens the editor, no selection step.
 - **⌘⇧0: Copy Text.** The same frozen selector as Capture Area (drag, click a window, or **F**),
   but instead of opening the editor it runs on-device OCR (Vision) and puts the text on the
   clipboard as plain text, one recognized line per line. A brief HUD under the pointer says how
@@ -44,7 +44,7 @@ The shot opens in an editor, as in Shottr:
 - **Esc** copies to the clipboard and closes. **⌘W** closes without copying.
 - **⌘C** also copies and closes. **⌘S** saves a PNG to `~/Documents` and closes.
 - Drag to annotate: **A** draws an arrow (default), **R** draws a box, and **T** types text: click to place it, Return to finish, Option-Return for a new line. Text wraps at the image edge. Clicking text with **T**, or double-clicking it, edits it.
-- **J** starts a scrolling capture of the same area (area, full-screen, and current-app shots): the editor hides, and each
+- **J** starts a scrolling capture of the same area (area, full-screen, and active-window shots): the editor hides, and each
   **J** scrolls the app under the area down 100 points and captures it again (**Shift-J** scrolls
   500, or three quarters of the area if it's shorter, so frames still overlap). **Return** stitches the frames,
   matching their overlap and keeping sticky headers and footers once, and opens the tall shot in a new editor.

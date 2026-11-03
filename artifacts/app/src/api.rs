@@ -37,12 +37,18 @@ pub fn page_url(slug: &str) -> String {
     format!("{}/a/{slug}/", base_url())
 }
 
-/// The path of a URL on this server, under either host name (pages link relatively, the API
-/// answers with `localhost`). None for anywhere else.
+/// The path of a URL on this server, under either host name or the portless alias (pages link
+/// relatively, the API answers with the alias). None for anywhere else.
 pub fn local_path(url: &str) -> Option<String> {
     let base = base_url();
     let other = if base.contains("127.0.0.1") { base.replace("127.0.0.1", "localhost") } else { base.replace("localhost", "127.0.0.1") };
-    [base, other].iter().find_map(|b| {
+    let public = std::env::var("ARTIFACTS_PUBLIC_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "https://artifacts.localhost".into())
+        .trim_end_matches('/')
+        .to_string();
+    [base, other, public].iter().find_map(|b| {
         let rest = url.strip_prefix(b.as_str())?;
         match rest.chars().next() {
             None => Some("/".to_string()),

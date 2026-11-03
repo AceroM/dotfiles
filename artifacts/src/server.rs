@@ -27,7 +27,9 @@ struct AppState {
     db: Mutex<Db>,
     events: broadcast::Sender<String>,
     base_url: String,
-    port: u16,
+    /// The origins whose pages may run blocks: this server under either loopback name, and the
+    /// public URL its links use (the portless alias).
+    origins: Vec<String>,
 }
 
 type Shared = Arc<AppState>;
@@ -64,7 +66,12 @@ pub async fn serve(raw: &[String]) -> Result<(), String> {
         .unwrap_or_else(default_db_path);
     let db = Db::open(std::path::Path::new(&db_path)).map_err(|e| format!("opening {db_path}: {e}"))?;
     let (events, _) = broadcast::channel(64);
-    let state: Shared = Arc::new(AppState { db: Mutex::new(db), events, base_url: format!("http://localhost:{port}"), port });
+    let base_url = crate::public_url(port);
+    let mut origins = vec![format!("http://localhost:{port}"), format!("http://127.0.0.1:{port}")];
+    if !origins.contains(&base_url) {
+        origins.push(base_url.clone());
+    }
+    let state: Shared = Arc::new(AppState { db: Mutex::new(db), events, base_url, origins });
 
     let app = Router::new()
         .route("/", get(index))
@@ -85,7 +92,7 @@ pub async fn serve(raw: &[String]) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| format!("binding 127.0.0.1:{port}: {e}"))?;
-    println!("artifacts: http://localhost:{port}  ·  {db_path}");
+    println!("artifacts: http://localhost:{port}  ·  {}  ·  {db_path}", crate::public_url(port));
     axum::serve(listener, app).await.map_err(|e| e.to_string())
 }
 
@@ -347,7 +354,7 @@ struct RunRequest {
 }
 
 async fn api_run(State(s): State<Shared>, headers: HeaderMap, Json(req): Json<RunRequest>) -> Response {
-    if !crate::run::same_origin(&headers, s.port) {
+    if !crate::run::same_origin(&headers, &s.origins) {
         return fail(StatusCode::FORBIDDEN, "blocks only run from this server's own pages");
     }
     let page_dir = req.slug.as_deref().and_then(|slug| {

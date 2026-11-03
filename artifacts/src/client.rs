@@ -214,7 +214,7 @@ fn herdr_json(args: &[&str]) -> Result<Value, String> {
 /// workspace, where every long-running server lives.
 pub async fn up(_raw: &[String]) -> Result<(), String> {
     if is_up().await {
-        println!("running at {}", server_url().replace("127.0.0.1", "localhost"));
+        println!("running at {}", crate::public_url(crate::DEFAULT_PORT));
         return Ok(());
     }
     if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
@@ -246,7 +246,7 @@ pub async fn up(_raw: &[String]) -> Result<(), String> {
     }
     for _ in 0..40 {
         if is_up().await {
-            println!("started at {} (herdr {servers}, pane {pane})", server_url().replace("127.0.0.1", "localhost"));
+            println!("started at {} (herdr {servers}, pane {pane})", crate::public_url(crate::DEFAULT_PORT));
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;

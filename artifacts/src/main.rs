@@ -1,9 +1,10 @@
 //! One local server for every code path and artifact an agent writes.
 //!
-//! `artifacts serve` keeps them in one SQLite file and serves them at http://localhost:4620: the
-//! home page lists the recent ones, and each lives at /a/<slug>/. `artifacts add <file>` sends a
-//! page along with the context it was written in (checkout, branch, SHA, ticket, herdr tab, agent
-//! session), so every page says where it came from. Open pages reload themselves when they change.
+//! `artifacts serve` keeps them in one SQLite file and serves them at http://localhost:4620, and
+//! through portless at https://artifacts.localhost: the home page lists the recent ones, and each
+//! lives at /a/<slug>/. `artifacts add <file>` sends a page along with the context it was written
+//! in (checkout, branch, SHA, ticket, herdr tab, agent session), so every page says where it came
+//! from. Open pages reload themselves when they change.
 
 mod client;
 mod context;
@@ -30,10 +31,20 @@ usage:
 
 kinds: code-path (.json spec, rendered from git), md (.md), html (.html). Inferred from the extension.
 Re-adding the same file updates its page (for a temp file, only from the same agent session); --new forces a new one.
-Server: $ARTIFACTS_URL (default http://localhost:4620).";
+Server: $ARTIFACTS_URL (default http://localhost:4620). Page links: $ARTIFACTS_PUBLIC_URL
+(default https://artifacts.localhost, the portless alias `portless alias artifacts 4620`).";
 
 pub fn server_url() -> String {
     std::env::var("ARTIFACTS_URL").unwrap_or_else(|_| format!("http://127.0.0.1:{DEFAULT_PORT}"))
+}
+
+/// Where page links point. The portless alias only covers the default port, so a server on any
+/// other port links to itself directly.
+pub fn public_url(port: u16) -> String {
+    let url = std::env::var("ARTIFACTS_PUBLIC_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| {
+        if port == DEFAULT_PORT { "https://artifacts.localhost".into() } else { format!("http://localhost:{port}") }
+    });
+    url.trim_end_matches('/').to_string()
 }
 
 pub fn content_type(name: &str) -> &'static str {

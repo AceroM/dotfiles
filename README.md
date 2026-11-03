@@ -9,7 +9,8 @@ With `stow hammerspoon` and Hammerspoon running:
 - **Fn+E** opens and focuses a Herdr tab immediately to the right of the current
   tab, using the current pane’s directory (while Ghostty is focused).
 - **Fn+Q** toggles Quick Record.
-- **Option+Shift+A** launches or focuses PhotoCraft.
+- **Option+T** toggles ExcalidrawZ. Option+A types å (agent pages moved to `af`), and
+  **Option+Shift+A** is left to Lid Awake.
 - **Fn+B** toggles horizontal scrolling from any app. While enabled, vertical
   mouse-wheel or trackpad scrolling moves sideways. Press it again to restore
   normal scrolling; a Hammerspoon reload also resets it to off.
@@ -53,7 +54,9 @@ URLs**, once per Chrome profile.
 
 ## artifacts (local page server)
 
-`af` replaces this for new pages. `artifacts/` is a Rust server for agent-written pages at `localhost:4620`. It is not stowed:
+`af` replaces this for new pages. `artifacts/` is a Rust server for agent-written pages at
+`https://artifacts.localhost` (a portless alias to `localhost:4620`: `portless alias artifacts 4620`).
+It is not stowed:
 `cd artifacts && cargo build --release`, then link `target/release/artifacts` into `~/.local/bin`.
 `artifacts/app/bundle.sh` installs the native app (`~/Applications/Artifacts.app`).
 Work-specific settings (`ARTIFACTS_SLOT_REPO`, `ARTIFACTS_TICKET_URL`) go in the private profile.
