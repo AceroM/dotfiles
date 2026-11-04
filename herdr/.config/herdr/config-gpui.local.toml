@@ -24,7 +24,7 @@ theme = "~/.config/ghostty/themes/zed-one-dark"
 # accents.
 option_as_alt = true
 
-# ctrl+alt+x closes a tab without asking (herdr-close-tab), and Ghostty runs
+# ctrl+alt+x closes a tab without asking (herdr-close), and Ghostty runs
 # with confirm-close-surface = false.
 confirm_close_tab = false
 

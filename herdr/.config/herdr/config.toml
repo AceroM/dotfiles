@@ -36,10 +36,10 @@ surface_dim = "#363c46"
 # --- Tabs ---------------------------------------------------------------
 # ctrl+alt+n opens a tab at the end; ctrl+alt+h/l walk between tabs (same
 # left/right feel as vim's h/l). ctrl+alt+x (fn+x) closes the tab, but through
-# the herdr-close-tab [[keys.command]] below rather than close_tab: the stock
-# action waits out each agent's shutdown one pane at a time (~450ms apiece),
-# the script SIGKILLs the agents first. close_tab keeps its prefix+shift+x
-# default as the graceful fallback.
+# the herdr-close [[keys.command]] below rather than close_tab: the stock
+# action waits out each agent's graceful shutdown one pane at a time, and the
+# whole server freezes while it waits. The script SIGKILLs the agents first.
+# close_tab keeps its prefix+shift+x default as the graceful fallback.
 new_tab = "ctrl+alt+n"
 previous_tab = "ctrl+alt+h"
 next_tab = "ctrl+alt+l"
@@ -87,9 +87,11 @@ focus_pane_right = "ctrl+alt+right"
 last_pane = ["ctrl+alt+o", "ctrl+alt+i"]
 split_vertical = "ctrl+alt+v"
 split_horizontal = "ctrl+alt+minus"
-# ctrl+alt+w closes the focused pane; the tab only goes away once its last
-# pane is gone. ctrl+alt+x closes the whole tab.
-close_pane = "ctrl+alt+w"
+# ctrl+alt+w (fn+w) closes the focused pane; the tab only goes away once its
+# last pane is gone. Like ctrl+alt+x for the whole tab, it goes through the
+# herdr-close [[keys.command]] below rather than close_pane, which froze Herdr
+# for 0.3-1s on every agent pane. close_pane keeps its prefix+x default as the
+# graceful fallback.
 # rename_pane has no direct chord on purpose. It sat on ctrl+alt+shift+p, but
 # that swallowed cmd+alt+shift+p before the "jump to the p* space" command below
 # could see it -- the one letter of the 26 that misfired that way (cmd+alt+shift+r
@@ -120,6 +122,23 @@ switch_tab = "ctrl+alt+1..9"
 # mechanism switch_tab above relies on.
 switch_workspace = "cmd+alt+shift+1..9"
 
+# ctrl+alt+w / ctrl+alt+x (fn+w / fn+x) -- close the pane / tab at once.
+# herdr-close SIGKILLs any agent in it first, so Herdr's close only meets bare
+# shells and never sits out an agent's graceful shutdown. `type = "shell"` gets
+# spawned detached with the server's environment, so the command is wrapped in
+# an explicit /bin/sh rather than trusting $PATH to contain ~/.local/bin.
+[[keys.command]]
+key = "ctrl+alt+w"
+type = "shell"
+description = "Close pane (kill agent)"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-close pane"'
+
+[[keys.command]]
+key = "ctrl+alt+x"
+type = "shell"
+description = "Close tab (kill agents)"
+command = '/bin/sh -c "exec $HOME/.local/bin/herdr-close tab"'
+
 # ctrl+alt+u/g -- jump to the first/last space in the sidebar. ctrl+alt+j/k walk
 # the list one row at a time. The bottom-end shortcut moved back to g so
 # ctrl+alt+i can pair with ctrl+alt+o for pane switching.
@@ -127,16 +146,6 @@ switch_workspace = "cmd+alt+shift+1..9"
 # Herdr has no first_workspace/last_workspace action to bind -- switch_workspace
 # is an indexed 1..9 binding, which cannot name "whichever is last" -- so these go
 # through a script that reads `workspace list` and focuses the edge of the array.
-# `type = "shell"` gets spawned detached with the server's environment, so the
-# command is wrapped in an explicit /bin/sh rather than trusting $PATH to contain
-# ~/.local/bin.
-#
-[[keys.command]]
-key = "ctrl+alt+x"
-type = "shell"
-description = "Close tab (kill agents)"
-command = '/bin/sh -c "exec $HOME/.local/bin/herdr-close-tab"'
-
 [[keys.command]]
 key = "ctrl+alt+u"
 type = "shell"
