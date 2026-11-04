@@ -2,6 +2,7 @@
 //! chains folded into one row (`src/server/api`).
 
 use std::collections::{BTreeMap, HashSet};
+use std::ops::Range;
 
 use crate::diff::FileDiff;
 
@@ -101,4 +102,40 @@ pub fn flatten(nodes: &[Node], collapsed: &HashSet<String>, depth: u16, out: &mu
             }
         }
     }
+}
+
+// ---- filter --------------------------------------------------------------
+
+/// Smart case: a capital anywhere in the filter makes it case-sensitive.
+fn fold(filter: &str, s: &str) -> String {
+    if filter.chars().any(char::is_uppercase) {
+        s.to_string()
+    } else {
+        s.to_ascii_lowercase()
+    }
+}
+
+/// The tree filter: every space-separated term is a substring of the path
+/// (`api router` keeps `src/server/api/routers/x.ts`). An empty filter keeps all.
+pub fn matches(filter: &str, path: &str) -> bool {
+    let mut terms = filter.split_whitespace().peekable();
+    if terms.peek().is_none() {
+        return true;
+    }
+    let hay = fold(filter, path);
+    terms.all(|t| hay.contains(t))
+}
+
+/// Byte ranges of `text` that the filter's terms cover, for highlighting.
+pub fn hits(filter: &str, text: &str) -> Vec<Range<usize>> {
+    let hay = fold(filter, text);
+    let mut out = Vec::new();
+    for t in filter.split_whitespace() {
+        let mut start = 0;
+        while let Some(i) = hay[start..].find(t) {
+            out.push(start + i..start + i + t.len());
+            start += i + t.len();
+        }
+    }
+    out
 }

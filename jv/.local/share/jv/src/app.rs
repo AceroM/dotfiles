@@ -38,6 +38,8 @@ pub enum Focus {
 pub enum Mode {
     Normal,
     Search,
+    /// Typing the tree filter (`/` with the tree focused).
+    Filter,
     GoTo,
     Help,
 }
@@ -119,6 +121,13 @@ pub struct App {
     pub viewed: Viewed,
     pub search: Option<Search>,
     search_origin: usize,
+    /// Tree filter: only files whose path holds every space-separated term
+    /// are shown, in the tree and in the diff. Empty when off.
+    pub filter: String,
+    /// The filter as it was before `/`, put back by Esc.
+    filter_origin: String,
+    /// Files the tree would show without the filter.
+    pub unfiltered: usize,
     /// Text being typed in the search prompt or go-to-file picker.
     pub input: String,
     pub goto: Vec<(usize, Vec<usize>)>,
@@ -173,6 +182,9 @@ impl App {
             viewed,
             search: None,
             search_origin: 0,
+            filter: String::new(),
+            filter_origin: String::new(),
+            unfiltered: 0,
             input: String::new(),
             goto: Vec::new(),
             goto_cur: 0,
@@ -264,17 +276,28 @@ impl App {
 
     // ---- building ------------------------------------------------------
 
+    pub fn filter_on(&self) -> bool {
+        !self.filter.is_empty()
+    }
+
     fn rebuild_tree(&mut self) {
-        let shown: Vec<usize> = (0..self.files.len()).filter(|&i| self.show_tests || !self.files[i].is_test).collect();
-        self.hidden_tests = self.files.len() - shown.len();
-        self.tree_nodes = tree::build(&self.files, &shown);
+        let base: Vec<usize> = (0..self.files.len()).filter(|&i| self.show_tests || !self.files[i].is_test).collect();
+        let hit = |i: usize| tree::matches(&self.filter, &self.files[i].path);
+        let shown: Vec<usize> = base.iter().copied().filter(|&i| hit(i)).collect();
+        // Tests the filter matches but T hides; files the filter drops don't count.
+        self.hidden_tests = (0..self.files.len()).filter(|&i| hit(i)).count() - shown.len();
+        self.unfiltered = base.len();
+        self.nw = digits(self.files.iter().map(|f| f.max_line_no).max().unwrap_or(0)).max(3);
+
+        // Size the tree from the unfiltered files, so typing a filter doesn't
+        // resize the panes (and re-wrap the diff) on every key.
+        let full = tree::build(&self.files, &base);
+        let mut all = Vec::new();
+        tree::flatten(&full, &HashSet::new(), 0, &mut all);
+        self.tree_nodes = if shown.len() == base.len() { full } else { tree::build(&self.files, &shown) };
         let mut order = Vec::new();
         tree::order(&self.tree_nodes, &mut order);
         self.visible = order;
-        self.nw = digits(self.files.iter().map(|f| f.max_line_no).max().unwrap_or(0)).max(3);
-
-        let mut all = Vec::new();
-        tree::flatten(&self.tree_nodes, &HashSet::new(), 0, &mut all);
         self.tree_nw = digits(all.len() as u32).max(2);
         let want = all
             .iter()
@@ -635,6 +658,17 @@ impl App {
         }
     }
 
+    /// Vim's ^d / ^u in the tree: scroll `pages` half-screens and carry the
+    /// cursor the same distance, so it keeps its row on screen. At either end
+    /// the view stops and the cursor goes the rest of the way.
+    fn tree_half_page(&mut self, pages: isize) {
+        let h = self.lay.tree.height as isize;
+        let d = (h / 2).max(1) * pages;
+        let max_top = self.tree_rows.len().saturating_sub(h as usize) as isize;
+        self.tree_top = (self.tree_top as isize + d).clamp(0, max_top) as usize;
+        self.tree_move(d);
+    }
+
     fn tree_left(&mut self) {
         let Some(row) = self.tree_rows.get(self.tree_cur) else { return };
         match &row.kind {
@@ -762,14 +796,19 @@ impl App {
         }
     }
 
-    fn toggle_tests(&mut self) {
-        self.show_tests = !self.show_tests;
+    /// Rebuild after the set of shown files changes (T, the filter).
+    fn refilter(&mut self) {
         self.rebuild_tree();
         self.rebuild_doc();
         if let Some(s) = self.search.take() {
             self.search = self.run_search(&s.query);
         }
         self.sync_tree();
+    }
+
+    fn toggle_tests(&mut self) {
+        self.show_tests = !self.show_tests;
+        self.refilter();
         let n = self.files.iter().filter(|f| f.is_test).count();
         self.flash(if self.show_tests { format!("showing {n} test files") } else { format!("hiding {n} test files") });
     }
@@ -990,6 +1029,41 @@ impl App {
         }
     }
 
+    // ---- tree filter -----------------------------------------------------
+
+    fn open_filter(&mut self) {
+        self.mode = Mode::Filter;
+        self.filter_origin = self.filter.clone();
+        self.input = self.filter.clone();
+    }
+
+    fn set_filter(&mut self, q: &str) {
+        let q = q.trim();
+        if q == self.filter {
+            return;
+        }
+        self.filter = q.to_string();
+        if self.filter_on() {
+            // Open folders that hold a match, so the tree shows every hit.
+            let (files, filter) = (&self.files, &self.filter);
+            self.collapsed_dirs.retain(|d| {
+                let pre = format!("{d}/");
+                !files.iter().any(|f| f.path.starts_with(&pre) && tree::matches(filter, &f.path))
+            });
+        }
+        self.refilter();
+    }
+
+    /// Returns false when there was no filter to clear.
+    fn clear_filter(&mut self) -> bool {
+        if !self.filter_on() {
+            return false;
+        }
+        self.set_filter("");
+        self.flash("filter cleared");
+        true
+    }
+
     // ---- go to file ------------------------------------------------------
 
     fn open_goto(&mut self) {
@@ -1040,6 +1114,10 @@ impl App {
                 self.key_search(k);
                 return Act::None;
             }
+            Mode::Filter => {
+                self.key_filter(k);
+                return Act::None;
+            }
             Mode::GoTo => {
                 self.key_goto(k);
                 return Act::None;
@@ -1063,6 +1141,9 @@ impl App {
         match (k.code, ctrl) {
             (KeyCode::Esc, _) if count.is_some() => {}
             (KeyCode::Char('c'), true) | (KeyCode::Char('q'), false) => return Act::Quit,
+            // ^d ^u in the tree move it like vim; plain d u still scroll the diff.
+            (KeyCode::Char('d'), true) if self.tree_on() => self.tree_half_page(n),
+            (KeyCode::Char('u'), true) if self.tree_on() => self.tree_half_page(-n),
             (KeyCode::Char('d'), _) => self.scroll_by(half * n),
             (KeyCode::Char('u'), _) => self.scroll_by(-half * n),
             (KeyCode::Char('e'), true) => self.scroll_by(n),
@@ -1094,6 +1175,7 @@ impl App {
             }
             (KeyCode::Char('0'), false) => self.hscroll = 0,
             (KeyCode::Char('T'), _) => self.toggle_tests(),
+            (KeyCode::Char('/'), false) if self.tree_on() => self.open_filter(),
             (KeyCode::Char('/'), false) => {
                 self.mode = Mode::Search;
                 self.input.clear();
@@ -1125,8 +1207,13 @@ impl App {
             (KeyCode::Char('y'), false) => self.copy(false),
             (KeyCode::Char('Y'), _) => self.copy(true),
             (KeyCode::Char('r'), false) => self.reload(),
+            // The focused pane's filter or search goes first, then the other's.
             (KeyCode::Esc, _) => {
-                if self.search.take().is_none() {
+                let tree = self.tree_on();
+                let cleared = (tree && self.clear_filter())
+                    || self.search.take().is_some()
+                    || (!tree && self.clear_filter());
+                if !cleared {
                     self.msg = None;
                 }
             }
@@ -1210,6 +1297,34 @@ impl App {
         }
     }
 
+    fn key_filter(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                let origin = std::mem::take(&mut self.filter_origin);
+                self.set_filter(&origin);
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                if self.filter_on() && self.visible.is_empty() {
+                    let q = self.filter.clone();
+                    self.flash(format!("no files match {q} · esc clears"));
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => self.tree_move(1),
+            KeyCode::Up | KeyCode::BackTab => self.tree_move(-1),
+            KeyCode::Char('n' | 'j') if ctrl => self.tree_move(1),
+            KeyCode::Char('p' | 'k') if ctrl => self.tree_move(-1),
+            _ => {
+                if self.edit_input(&k) {
+                    let q = self.input.clone();
+                    self.set_filter(&q);
+                }
+            }
+        }
+    }
+
     fn key_goto(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
@@ -1218,9 +1333,14 @@ impl App {
                 self.mode = Mode::Normal;
                 if let Some(&(f, _)) = self.goto.get(self.goto_cur) {
                     if !self.visible.contains(&f) {
-                        self.show_tests = true;
-                        self.rebuild_tree();
-                        self.rebuild_doc();
+                        if !tree::matches(&self.filter, &self.files[f].path) {
+                            self.filter.clear();
+                            self.flash("filter cleared");
+                        }
+                        if self.files[f].is_test {
+                            self.show_tests = true;
+                        }
+                        self.refilter();
                     }
                     if self.is_collapsed(f) {
                         self.fold.insert(f, false);

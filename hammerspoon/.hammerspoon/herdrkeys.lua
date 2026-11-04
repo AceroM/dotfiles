@@ -52,6 +52,9 @@
 --                 macOS has already turned fn+arrow into home/end/pgup/pgdn
 --                 by the time the tap sees it, so those keycodes are mapped
 --                 back to arrows (outside Herdr they keep their usual job)
+--   fn+shift+up/down  page up / down in the focused pane: arrive as plain
+--                 pgup/pgdn, which is what fn+up/down sent before Herdr took
+--                 them (outside Herdr they stay shift+pgup/pgdn)
 --   ctrl+alt+;    (and +shift) handled here too while Herdr is focused, so
 --                 Herdr's own binding -- a slower shell hop -- is only a fallback
 --
@@ -907,6 +910,17 @@ local function handleKey(event)
       focusAgentTab(agentTabKeys[code])
     end
     return true
+  end
+
+  -- fn+shift+up/down: page the focused pane. Bare fn+arrows went to Herdr pane
+  -- focus, so paging moves one modifier over. Drop shift so the pane sees plain
+  -- pgup/pgdn (Claude's scroll:pageUp/pageDown); left as shift+pgup, Ghostty
+  -- would claim it for adjust_selection and Claude would not match it anyway.
+  if flags.fn and flags.shift and not (flags.cmd or flags.alt or flags.ctrl)
+    and (code == keys.pageup or code == keys.pagedown) then
+    if not herdrFocused() then return false end
+    event:setFlags({})
+    return false
   end
 
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end

@@ -16,7 +16,7 @@ use crate::diff::{Kind, Status};
 use crate::doc::{self, Note, Row};
 use crate::highlight::Tok;
 use crate::theme::Palette;
-use crate::tree::RowKind;
+use crate::tree::{self, RowKind};
 
 pub fn draw(app: &App, frame: &mut Frame) {
     let area = frame.area();
@@ -91,6 +91,20 @@ fn truncate_left(s: &str, w: usize) -> String {
     out.into_iter().rev().collect()
 }
 
+/// Restyle the cells of `s` (already drawn at x) that fall in `hits`.
+fn mark_hits(buf: &mut Buffer, x: u16, y: u16, max: u16, s: &str, hits: &[Range<usize>], st: Style) {
+    let mut cx = x;
+    for (i, c) in s.char_indices() {
+        if cx >= max {
+            break;
+        }
+        if hits.iter().any(|h| h.contains(&i)) {
+            buf[(cx, y)].set_style(st);
+        }
+        cx += c.width().unwrap_or(0) as u16;
+    }
+}
+
 fn status_glyph(s: Status, p: &Palette) -> (&'static str, Color) {
     match s {
         Status::Modified => ("M", p.yellow),
@@ -122,7 +136,11 @@ fn top_bar(app: &App, buf: &mut Buffer) {
     let p = &app.pal;
     fill(buf, r, p.panel);
     let (n, adds, dels) = app.totals();
-    let files = format!("{n} file{}  ", if n == 1 { "" } else { "s" });
+    let files = if app.filter_on() {
+        format!("{n}/{} files  ", app.unfiltered)
+    } else {
+        format!("{n} file{}  ", if n == 1 { "" } else { "s" })
+    };
     let st = stats(adds, dels, p);
     let rw = files.width() + st.iter().map(|(s, _)| s.width()).sum::<usize>() + 1;
     let rx = r.right().saturating_sub(rw as u16);
@@ -169,6 +187,16 @@ fn status(app: &App, buf: &mut Buffer) {
     fill(buf, r, p.panel);
     let max = r.right();
 
+    if app.mode == Mode::Filter {
+        let mut x = put(buf, r.x + 1, r.y, max, "filter files ", fg(p.muted));
+        x = put(buf, x, r.y, max, "❯ ", fg(p.accent).add_modifier(Modifier::BOLD));
+        x = put(buf, x, r.y, max, &app.input, fg(p.bright));
+        put(buf, x, r.y, max, "▏", fg(p.accent));
+        let info = format!("{}/{} files   ↑↓ move · enter keeps · esc cancels ", app.visible.len(), app.unfiltered);
+        put(buf, max.saturating_sub(info.width() as u16), r.y, max, &info, fg(p.muted));
+        return;
+    }
+
     if app.mode == Mode::Search {
         let mut x = put(buf, r.x + 1, r.y, max, "/", fg(p.accent).add_modifier(Modifier::BOLD));
         x = put(buf, x, r.y, max, &app.input, fg(p.bright));
@@ -186,6 +214,9 @@ fn status(app: &App, buf: &mut Buffer) {
     let mut segs: Vec<(String, Color)> = Vec::new();
     if let Some(c) = app.count {
         segs.push((c.to_string(), p.accent));
+    }
+    if app.filter_on() {
+        segs.push((format!("filter: {}", app.filter), p.accent));
     }
     if let Some(s) = &app.search {
         let cur = if s.matches.is_empty() { 0 } else { s.cur + 1 };
@@ -252,6 +283,12 @@ fn tree(app: &App, buf: &mut Buffer) {
     let focused = app.focus == Focus::Tree;
     let max = a.right().saturating_sub(1);
     let nw = app.tree_nw;
+    if app.tree_rows.is_empty() && app.filter_on() {
+        put(buf, a.x + 2, a.y + 1, max, "No files match.", fg(p.muted));
+        put(buf, a.x + 2, a.y + 2, max, "esc clears the filter", fg(p.dim));
+        return;
+    }
+    let hit = fg(p.yellow).add_modifier(Modifier::BOLD);
     for (i, row) in app.tree_rows.iter().enumerate().skip(app.tree_top).take(a.height as usize) {
         let y = a.y + (i - app.tree_top) as u16;
         // Relative numbers like `set number relativenumber`: the cursor row
@@ -267,7 +304,9 @@ fn tree(app: &App, buf: &mut Buffer) {
         match &row.kind {
             RowKind::Dir { name, open, .. } => {
                 x = put(buf, x, y, max, if *open { "▾ " } else { "▸ " }, fg(p.dim));
-                put(buf, x, y, max, &truncate(name, max.saturating_sub(x) as usize), fg(p.muted));
+                let shown = truncate(name, max.saturating_sub(x) as usize);
+                put(buf, x, y, max, &shown, fg(p.muted));
+                mark_hits(buf, x, y, max, &shown, &tree::hits(&app.filter, name), hit);
             }
             RowKind::File { idx, name } => {
                 let f = &app.files[*idx];
@@ -284,7 +323,9 @@ fn tree(app: &App, buf: &mut Buffer) {
                 } else {
                     fg(p.fg)
                 };
-                put(buf, x, y, max, &truncate(name, room), style);
+                let shown = truncate(name, room);
+                put(buf, x, y, max, &shown, style);
+                mark_hits(buf, x, y, max, &shown, &tree::hits(&app.filter, name), hit);
                 let mut sx = max.saturating_sub(sw as u16);
                 for (s, c) in st {
                     sx = put(buf, sx, y, max, &s, fg(if viewed { p.dim } else { c }));
@@ -303,7 +344,11 @@ fn diff(app: &App, buf: &mut Buffer) {
         return;
     }
     if app.visible.is_empty() {
-        let msg = if app.hidden_tests > 0 {
+        let msg = if app.filter_on() && app.hidden_tests > 0 {
+            format!("Only test files match \"{}\". T shows the {} hidden; esc clears the filter.", app.filter, app.hidden_tests)
+        } else if app.filter_on() {
+            format!("No files match \"{}\". Esc clears the filter.", app.filter)
+        } else if app.hidden_tests > 0 {
             format!("Only test files changed. T shows the {} hidden.", app.hidden_tests)
         } else {
             "No files in this diff.".to_string()
@@ -720,7 +765,13 @@ fn goto(app: &App, buf: &mut Buffer, area: Rect) {
         let f = &app.files[*fi];
         let (g, gc) = status_glyph(f.status, p);
         let mut x = put(buf, inner.x + 1, y, max, g, fg(gc).add_modifier(Modifier::BOLD)) + 1;
-        let tag = if f.is_test && !app.show_tests { "hidden test".to_string() } else { String::new() };
+        let tag = if !tree::matches(&app.filter, &f.path) {
+            "filtered out".to_string()
+        } else if f.is_test && !app.show_tests {
+            "hidden test".to_string()
+        } else {
+            String::new()
+        };
         let st = stats(f.adds, f.dels, p);
         let rw = if tag.is_empty() { st.iter().map(|(s, _)| s.width()).sum::<usize>() } else { tag.width() };
         let pmax = max.saturating_sub(rw as u16 + 2);
@@ -759,7 +810,8 @@ const HELP: [&[Section]; 2] = [
                 ("tab", "switch focus: tree ↔ diff"),
                 ("J K  ] [", "next / prev file"),
                 ("} {", "next / prev hunk"),
-                ("d u", "half page down / up (^d ^u too)"),
+                ("d u", "half page down / up"),
+                ("^d ^u", "tree: half page of rows · diff: as d u"),
                 ("f b  space", "page down / up"),
                 ("g G", "top / bottom"),
                 ("12G", "tree: row 12 · diff: line 12 of this file"),
@@ -786,7 +838,9 @@ const HELP: [&[Section]; 2] = [
                 ("z Z", "fold this file · fold / unfold all"),
                 ("T", "show / hide test files"),
                 ("t  ^p", "go to file"),
-                ("/  n N", "search the diff · next / prev hit"),
+                ("/", "tree: filter files · diff: search the text"),
+                ("n N", "next / prev search hit"),
+                ("esc", "clear the filter / search"),
             ],
         ),
         (
