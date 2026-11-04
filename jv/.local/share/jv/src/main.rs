@@ -30,6 +30,8 @@ jv — review a PR diff: file tree on the left, syntax-highlighted hunks on the 
 usage:
   jv [PR | URL | BRANCH] [gh pr diff flags]   a PR (current branch's when omitted)
   jv . | -l                                    local changes (git diff HEAD)
+  jv -g [git diff args]                        `git diff …`: everything after -g goes to git
+                                               (jv -g --staged, jv -g main..., jv -g HEAD~3 -- src)
   jv -c 'git diff main...'                     any command that prints a diff
   git diff | jv                                a diff on stdin
 
@@ -55,6 +57,7 @@ struct Cli {
     theme: String,
     cmd: Option<String>,
     local: bool,
+    git: Option<Vec<String>>,
     snapshot: Option<(u16, u16)>,
     keys: String,
     out: Option<String>,
@@ -69,6 +72,7 @@ fn parse_cli() -> Result<Cli, String> {
         theme: std::env::var("JV_THEME").unwrap_or_else(|_| highlight::DEFAULT_THEME.to_string()),
         cmd: None,
         local: false,
+        git: None,
         snapshot: None,
         keys: String::new(),
         out: None,
@@ -94,6 +98,9 @@ fn parse_cli() -> Result<Cli, String> {
             "--theme" => c.theme = args.next().ok_or("--theme needs a name")?,
             "-c" | "--cmd" => c.cmd = Some(args.next().ok_or("--cmd needs a command")?),
             "-l" | "--local" | "." => c.local = true,
+            // git diff's own flags clash with jv's (-s is --no-patch there), so
+            // -g ends jv's options: the rest goes to git untouched.
+            "-g" | "--git" => c.git = Some(args.by_ref().collect()),
             // Hidden: offscreen render for UI work.
             "--snapshot" => {
                 let v = args.next().ok_or("--snapshot needs WxH")?;
@@ -130,6 +137,8 @@ fn main() -> ExitCode {
 
     let mut source = if let Some(c) = &cli.cmd {
         Source::Cmd(c.clone())
+    } else if let Some(a) = &cli.git {
+        Source::Git(a.clone())
     } else if cli.local {
         Source::Local
     } else {
@@ -186,6 +195,12 @@ fn main() -> ExitCode {
     clear(chatty);
     if text.trim().is_empty() {
         eprintln!("jv: empty diff ({})", source.label());
+        // Bare `git diff` is unstaged only; say where staged work went.
+        if matches!(&source, Source::Git(a) if a.is_empty())
+            && Source::Git(vec!["--staged".into()]).fetch().is_ok_and(|t| !t.trim().is_empty())
+        {
+            eprintln!("jv: everything is staged; try `jg --staged` or `jg HEAD`");
+        }
         return ExitCode::SUCCESS;
     }
 

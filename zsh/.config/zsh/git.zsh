@@ -27,6 +27,10 @@ function jt() {
 # tests hidden by default (T toggles). Drop any jv function an older shell
 # still has loaded so the binary wins.
 (( $+functions[jv] )) && unfunction jv
+# jg [git diff args] — jv for `git diff` instead of `gh pr diff`: same tree,
+# highlighting and keys. Args go to git untouched (jg, jg --staged, jg HEAD,
+# jg main..., jg HEAD~3 -- src). For jv flags: jv -u -g --staged.
+function jg() { jv -g "$@"; }
 function jc() {
   gh pr checkout "$@"
 }

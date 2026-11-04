@@ -12,6 +12,8 @@ pub enum Source {
     Gh(Vec<String>),
     /// `git diff HEAD`: staged + unstaged changes.
     Local,
+    /// Arguments passed straight to `git diff` (revs, ranges, --staged, -- paths).
+    Git(Vec<String>),
     Cmd(String),
     Stdin,
 }
@@ -22,6 +24,8 @@ impl Source {
             Source::Gh(a) if a.is_empty() => "gh pr diff".into(),
             Source::Gh(a) => format!("gh pr diff {}", a.join(" ")),
             Source::Local => "local changes (git diff HEAD)".into(),
+            Source::Git(a) if a.is_empty() => "git diff".into(),
+            Source::Git(a) => format!("git diff {}", a.join(" ")),
             Source::Cmd(c) => c.clone(),
             Source::Stdin => "stdin".into(),
         }
@@ -34,7 +38,8 @@ impl Source {
     pub fn fetch(&self) -> Result<String, String> {
         match self {
             Source::Gh(args) => run(Command::new("gh").arg("pr").arg("diff").args(args).arg("--color=never")),
-            Source::Local => run(Command::new("git").args(["-c", "core.quotepath=off", "diff", "HEAD", "--no-color", "--no-ext-diff"])),
+            Source::Local => git_diff(&["HEAD".to_string()]),
+            Source::Git(args) => git_diff(args),
             Source::Cmd(c) => run(Command::new("sh").arg("-c").arg(c)),
             Source::Stdin => {
                 let mut s = String::new();
@@ -43,6 +48,12 @@ impl Source {
             }
         }
     }
+}
+
+/// `git diff ARGS` as plain text jv can parse, whatever the user's git config
+/// says about color, pagers, external diff tools or path quoting.
+fn git_diff(args: &[String]) -> Result<String, String> {
+    run(Command::new("git").args(["-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff"]).args(args))
 }
 
 fn run(cmd: &mut Command) -> Result<String, String> {
