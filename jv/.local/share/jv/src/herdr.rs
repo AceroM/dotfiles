@@ -84,9 +84,10 @@ pub fn tilde(path: &str) -> String {
     }
 }
 
-/// What pane `pane` shows right now, with its colors (ANSI).
+/// Pane `pane`'s latest lines with their colors (ANSI): its scrollback, which
+/// ends with what it shows now. A full-screen app (Claude Code) has only its screen.
 pub fn read(pane: &str) -> Result<String, String> {
-    let r = call("pane.read", json!({ "pane_id": pane, "source": "visible", "format": "ansi" }))?;
+    let r = call("pane.read", json!({ "pane_id": pane, "source": "recent", "lines": 2000, "format": "ansi" }))?;
     Ok(r["read"]["text"].as_str().unwrap_or("").to_string())
 }
 

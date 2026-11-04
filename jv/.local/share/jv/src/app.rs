@@ -227,14 +227,31 @@ pub struct TabsView {
     pub space: String,
     pub list: Vec<herdr::Tab>,
     pub cur: usize,
-    /// The selected tab's focused pane, as it looks right now.
+    /// The selected tab's focused pane: its latest lines, ending with its screen.
     pub preview: Vec<ansi::Line>,
+    /// Rows the preview is scrolled up from the bottom (`u` / `d`).
+    pub scroll: usize,
     fetched: Instant,
 }
 
 impl TabsView {
     pub fn selected(&self) -> Option<&herdr::Tab> {
         self.list.get(self.cur)
+    }
+
+    /// The preview lines shown in `h` rows: bottom-aligned, less the scroll.
+    /// Trailing blank lines don't count as content.
+    pub fn window(&self, h: usize) -> Range<usize> {
+        let blank = |l: &ansi::Line| l.iter().all(|(s, _)| s.trim().is_empty());
+        let end = self.preview.iter().rposition(|l| !blank(l)).map_or(0, |i| i + 1);
+        let e = end - self.scroll.min(end.saturating_sub(h));
+        e.saturating_sub(h)..e
+    }
+
+    /// How far up the preview can scroll in `h` rows.
+    fn max_scroll(&self, h: usize) -> usize {
+        let w = self.window(usize::MAX);
+        (w.end - w.start).saturating_sub(h)
     }
 }
 
@@ -1153,6 +1170,7 @@ impl App {
             list: Vec::new(),
             cur: 0,
             preview: Vec::new(),
+            scroll: 0,
             fetched: Instant::now(),
         });
         self.mode = Mode::Tabs;
@@ -1208,8 +1226,21 @@ impl App {
         let n = (v.cur as isize).saturating_add(d).clamp(0, v.list.len() as isize - 1) as usize;
         if n != v.cur {
             v.cur = n;
+            v.scroll = 0;
             self.load_preview();
         }
+    }
+
+    /// Rows inside the preview panel (the dialog spares the top bar and status line).
+    fn preview_rows(&self) -> usize {
+        (self.lay.status.y as usize).saturating_sub(3).max(1)
+    }
+
+    /// `u` / `d`: scroll the preview up (positive) or back down.
+    fn preview_scroll(&mut self, d: isize) {
+        let h = self.preview_rows();
+        let Some(v) = self.tabs.as_mut() else { return };
+        v.scroll = (v.scroll as isize).saturating_add(d).clamp(0, v.max_scroll(h) as isize) as usize;
     }
 
     /// `x`: close the selected tab now, no questions, like ctrl+alt+x.
@@ -1250,16 +1281,21 @@ impl App {
     fn key_tabs(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let h = (self.lay.diff.height as isize / 2).max(1);
+        let half = (self.preview_rows() as isize / 2).max(1);
         match k.code {
-            KeyCode::Esc | KeyCode::Char(';' | 'q') => self.close_tabs_view(),
+            KeyCode::Esc | KeyCode::Char('q') => self.close_tabs_view(),
             KeyCode::Char('c') if ctrl => self.close_tabs_view(),
             KeyCode::Char('d') if ctrl => self.tabs_move(h),
             KeyCode::Char('u') if ctrl => self.tabs_move(-h),
+            // d / u: the preview, half a panel at a time (as in the diff).
+            KeyCode::Char('d') => self.preview_scroll(-half),
+            KeyCode::Char('u') => self.preview_scroll(half),
             KeyCode::Char('j') | KeyCode::Down => self.tabs_move(1),
             KeyCode::Char('k') | KeyCode::Up => self.tabs_move(-1),
             KeyCode::Char('g') | KeyCode::Home => self.tabs_move(isize::MIN),
             KeyCode::Char('G') | KeyCode::End => self.tabs_move(isize::MAX),
-            KeyCode::Char('x') => self.close_selected_tab(),
+            // `;` again closes a tab too, so ;;; clears tabs from the home row.
+            KeyCode::Char('x' | ';') => self.close_selected_tab(),
             KeyCode::Enter => self.focus_selected_tab(),
             _ => {}
         }

@@ -921,14 +921,16 @@ fn tabs_view(app: &App, buf: &mut Buffer, area: Rect) {
         }
     }
 
-    let title = v.selected().map(|t| crate::herdr::tilde(&t.cwd)).unwrap_or_default();
+    let mut title = v.selected().map(|t| crate::herdr::tilde(&t.cwd)).unwrap_or_default();
+    // Scrolled up: say how far from the live bottom (d comes back down).
+    let up = v.scroll.min(v.window(usize::MAX).len().saturating_sub(right.height.saturating_sub(2) as usize));
+    if up > 0 {
+        title.push_str(&format!(" · ↑{up}"));
+    }
     let inner = panel(buf, right, &title, p.border, p);
     let max = inner.right().saturating_sub(1);
     // The pane's latest lines, bottom-aligned, like looking at it.
-    let blank = |l: &crate::ansi::Line| l.iter().all(|(s, _)| s.trim().is_empty());
-    let end = v.preview.iter().rposition(|l| !blank(l)).map_or(0, |i| i + 1);
-    let start = end.saturating_sub(inner.height as usize);
-    for (k, line) in v.preview[start..end].iter().enumerate() {
+    for (k, line) in v.preview[v.window(inner.height as usize)].iter().enumerate() {
         let y = inner.y + k as u16;
         let mut x = inner.x + 1;
         for (s, st) in line {
@@ -997,7 +999,8 @@ const HELP: [&[Section]; 2] = [
                 ("c", "ask an agent in a new Herdr tab"),
                 ("  ^i ^v ^j", "in it: file path · image · newline (⇧⏎ too)"),
                 (";", "this Herdr space's tabs, with a preview"),
-                ("  j k x ⏎", "in it: move · close a tab · go to it"),
+                ("  j k x ; ⏎", "in it: move · close a tab (x or ;) · go to it"),
+                ("  d u", "in it: scroll the preview"),
                 ("r", "reload the diff"),
                 ("q", "quit"),
             ],
