@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::agent;
 use crate::app::{App, Focus, Mode};
 use crate::diff::{Kind, Status};
 use crate::doc::{self, Note, Row};
@@ -30,6 +31,8 @@ pub fn draw(app: &App, frame: &mut Frame) {
     match app.mode {
         Mode::Help => help(app, buf, area),
         Mode::GoTo => goto(app, buf, area),
+        Mode::Ask => ask(app, buf, area),
+        Mode::Tabs => tabs_view(app, buf, area),
         _ => {}
     }
 }
@@ -358,8 +361,14 @@ fn diff(app: &App, buf: &mut Buffer) {
     }
     let cw = a.width - 1;
     for y in 0..a.height {
-        let Some(row) = app.doc.rows.get(app.scroll + y as usize) else { break };
+        let i = app.scroll + y as usize;
+        let Some(row) = app.doc.rows.get(i) else { break };
         draw_row(app, buf, Rect::new(a.x, a.y + y, cw, 1), *row);
+        if let Some(cols) = app.sel_cols(i) {
+            for x in cols.start..cols.end.min(cw) {
+                buf[(a.x + x, a.y + y)].set_bg(p.sel_text);
+            }
+        }
     }
     if let Some(f) = app.sticky() {
         let r = Rect::new(a.x, a.y, cw, 1);
@@ -797,6 +806,140 @@ fn goto(app: &App, buf: &mut Buffer, area: Rect) {
     }
 }
 
+/// Screen rows of a prompt: each of its lines wrapped to `w` columns, as
+/// byte ranges into `text`.
+fn prompt_rows(text: &str, w: usize) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        out.extend(doc::wrap_ranges(line, w).into_iter().map(|r| start + r.start..start + r.end));
+        start += line.len() + 1;
+    }
+    out
+}
+
+/// The `c` box, centered: just a bordered input, growing with its text.
+fn ask(app: &App, buf: &mut Buffer, area: Rect) {
+    const MAX_ROWS: usize = 10;
+    let p = &app.pal;
+    let w = area.width.saturating_sub(6).min(100);
+    if w < 20 || area.height < 3 {
+        return;
+    }
+    // Inside the border, a column of padding each side.
+    let tw = (w as usize).saturating_sub(4).max(8);
+    let field = &app.ask;
+    let rows = prompt_rows(&field.text, tw);
+    let shown = rows.len().clamp(1, MAX_ROWS).min(area.height as usize - 2);
+    let h = shown as u16 + 2;
+    let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+    Clear.render(r, buf);
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(fg(p.dim))
+        .style(Style::new().bg(p.panel))
+        .render(r, buf);
+    let (tx, y0, max) = (r.x + 2, r.y + 1, r.right().saturating_sub(2));
+
+    // Cursor: on the last row starting at or before it. At a wrap point that's
+    // the next row, so typing on carries on where the text will go.
+    let cr = rows.iter().rposition(|r| r.start <= field.cur).unwrap_or(0);
+    let top = cr.saturating_sub(shown - 1);
+    let tags = agent::image_tags(&field.text);
+    for (i, row) in rows.iter().enumerate().skip(top).take(shown) {
+        let (y, s) = (y0 + (i - top) as u16, &field.text[row.clone()]);
+        put(buf, tx, y, max, s, fg(p.bright));
+        // `[Image #N]` tags in the accent color; a tag can wrap across rows.
+        let hits: Vec<Range<usize>> = tags
+            .iter()
+            .filter(|(t, _)| t.start < row.end && t.end > row.start)
+            .map(|(t, _)| t.start.max(row.start) - row.start..t.end.min(row.end) - row.start)
+            .collect();
+        mark_hits(buf, tx, y, max, s, &hits, fg(p.accent));
+    }
+    let cx = tx + field.text[rows[cr].start..field.cur].width() as u16;
+    let cy = y0 + (cr - top) as u16;
+    if cx <= max {
+        let cell = &mut buf[(cx, cy)];
+        if cell.symbol().trim().is_empty() {
+            cell.set_symbol(" ");
+        }
+        cell.set_style(Style::new().fg(p.bg.c()).bg(p.accent));
+    }
+}
+
+fn panel(buf: &mut Buffer, r: Rect, title: &str, border: Color, p: &Palette) -> Rect {
+    Clear.render(r, buf);
+    let mut block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(border)).style(Style::new().bg(p.panel));
+    if !title.is_empty() {
+        block = block.title(Line::styled(format!(" {title} "), fg(p.muted)));
+    }
+    let inner = block.inner(r);
+    block.render(r, buf);
+    inner
+}
+
+/// `;`: this Herdr space's other tabs on the left, the selected one's pane
+/// (with its own colors) on the right.
+fn tabs_view(app: &App, buf: &mut Buffer, area: Rect) {
+    let Some(v) = &app.tabs else { return };
+    let p = &app.pal;
+    // Leave the top bar and the status line (close messages land there).
+    let r = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+    if r.width < 50 || r.height < 6 {
+        return;
+    }
+    let lw = (r.width * 3 / 10).clamp(28, 56);
+    let (left, right) = (Rect::new(r.x, r.y, lw, r.height), Rect::new(r.x + lw, r.y, r.width - lw, r.height));
+
+    let inner = panel(buf, left, &v.space, p.accent, p);
+    let max = inner.right().saturating_sub(1);
+    if v.list.is_empty() {
+        put(buf, inner.x + 1, inner.y, max, "no other tabs", fg(p.dim));
+    }
+    let h = inner.height as usize;
+    let top = (v.cur + 1).saturating_sub(h);
+    for (i, t) in v.list.iter().enumerate().skip(top).take(h) {
+        let y = inner.y + (i - top) as u16;
+        let on = i == v.cur;
+        if on {
+            fill(buf, Rect::new(inner.x, y, inner.width, 1), p.sel);
+        }
+        let dot = match t.status.as_str() {
+            "working" => p.yellow,
+            "blocked" => p.red,
+            "done" => p.green,
+            "idle" => p.green_dim,
+            _ => p.dim,
+        };
+        let mut x = put(buf, inner.x + 1, y, max, "●", fg(dot)) + 1;
+        let label = if t.label.is_empty() { t.id.as_str() } else { t.label.as_str() };
+        let lst = if on { fg(p.bright).add_modifier(Modifier::BOLD) } else { fg(p.fg) };
+        x = put(buf, x, y, max, &truncate(label, max.saturating_sub(x) as usize), lst) + 2;
+        if x < max {
+            put(buf, x, y, max, &truncate(&t.title, (max - x) as usize), fg(p.dim));
+        }
+    }
+
+    let title = v.selected().map(|t| crate::herdr::tilde(&t.cwd)).unwrap_or_default();
+    let inner = panel(buf, right, &title, p.border, p);
+    let max = inner.right().saturating_sub(1);
+    // The pane's latest lines, bottom-aligned, like looking at it.
+    let blank = |l: &crate::ansi::Line| l.iter().all(|(s, _)| s.trim().is_empty());
+    let end = v.preview.iter().rposition(|l| !blank(l)).map_or(0, |i| i + 1);
+    let start = end.saturating_sub(inner.height as usize);
+    for (k, line) in v.preview[start..end].iter().enumerate() {
+        let y = inner.y + k as u16;
+        let mut x = inner.x + 1;
+        for (s, st) in line {
+            x = put(buf, x, y, max, s, fg(p.fg).patch(*st));
+            if x >= max {
+                break;
+            }
+        }
+    }
+}
+
 type Section = (&'static str, &'static [(&'static str, &'static str)]);
 
 /// Two columns when the screen is wide enough, one otherwise.
@@ -849,6 +992,12 @@ const HELP: [&[Section]; 2] = [
                 ("o", "open at this line in Zed ($EDITOR otherwise)"),
                 ("O", "open this line in the PR on GitHub"),
                 ("y Y", "copy path · path:line"),
+                ("drag", "select code · copied on release"),
+                ("2x 3x click", "copy a word · a line"),
+                ("c", "ask an agent in a new Herdr tab"),
+                ("  ^i ^v ^j", "in it: file path · image · newline (⇧⏎ too)"),
+                (";", "this Herdr space's tabs, with a preview"),
+                ("  j k x ⏎", "in it: move · close a tab · go to it"),
                 ("r", "reload the diff"),
                 ("q", "quit"),
             ],

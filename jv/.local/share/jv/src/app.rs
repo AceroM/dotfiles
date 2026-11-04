@@ -11,8 +11,12 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use unicode_width::UnicodeWidthStr;
+use ratatui::style::Style;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::agent::{self, Field};
+use crate::ansi;
+use crate::herdr;
 use crate::diff::{self, FileDiff, Kind, Status};
 use crate::doc::{self, Doc, Geo, Note, Row};
 use crate::fuzzy;
@@ -27,6 +31,12 @@ use crate::viewed::Viewed;
 pub const LARGE: usize = 1500;
 /// Diff panes at least this wide start in split view.
 const SPLIT_MIN: u16 = 150;
+/// Clicks this close together on one cell count as a double / triple click.
+const MULTI_CLICK: Duration = Duration::from_millis(450);
+/// A drag held past the top or bottom of the diff scrolls a row this often.
+const AUTOSCROLL: Duration = Duration::from_millis(40);
+/// The `;` dialog re-reads the tabs and the preview this often.
+const TABS_REFRESH: Duration = Duration::from_millis(700);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -42,6 +52,10 @@ pub enum Mode {
     Filter,
     GoTo,
     Help,
+    /// The `c` box: a prompt for an agent in a new Herdr tab.
+    Ask,
+    /// The `;` dialog: this Herdr space's other tabs.
+    Tabs,
 }
 
 pub enum Act {
@@ -72,6 +86,44 @@ pub struct Search {
     pub matches: Vec<Match>,
     pub cur: usize,
     by_line: HashMap<(usize, usize, usize), Vec<usize>>,
+}
+
+/// A cell of the diff pane: a doc row, and a column from the pane's left edge.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Pos {
+    pub row: usize,
+    pub col: u16,
+}
+
+/// Text picked with the mouse. Only code is selectable: line numbers, signs
+/// and headers stay out of the copy, and split view copies only the side the
+/// drag started on.
+pub struct Sel {
+    anchor: Pos,
+    head: Pos,
+    right: bool,
+    /// Drawn and copied: the drag left its first cell, or a double/triple click.
+    shown: bool,
+}
+
+/// The left button is down in the diff pane (screen cells).
+struct Drag {
+    from: (u16, u16),
+    to: (u16, u16),
+}
+
+/// Where one code row's text sits in the diff pane.
+struct CodeCell {
+    f: usize,
+    h: usize,
+    l: usize,
+    /// Pane column the code starts at, and how many columns it gets.
+    x: u16,
+    w: usize,
+    /// Bytes of the line this row shows: one wrapped segment, or all of it.
+    range: Range<usize>,
+    /// Columns scrolled off the left (no-wrap).
+    skip: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -142,6 +194,48 @@ pub struct App {
     jumps: Vec<Anchor>,
     /// Line picked with `{n}G`, marked in the gutter until the next key.
     pub mark: Option<(usize, usize, usize)>,
+    pub sel: Option<Sel>,
+    drag: Option<Drag>,
+    scrolled_at: Instant,
+    /// Last click: when, where, and how many in a row (for 2× / 3× clicks).
+    clicks: Option<(Instant, u16, u16, u8)>,
+    /// Off for --snapshot, so a scripted run leaves the clipboard alone and
+    /// starts no agent tabs.
+    pub live: bool,
+    /// The last text copied, whether or not it reached the clipboard.
+    pub copied: Option<String>,
+    /// The `c` box's draft, kept across Esc until it's sent.
+    pub ask: Field,
+    /// Files behind the draft's `[Image #N]` tags (N - 1 indexes this).
+    ask_images: Vec<PathBuf>,
+    /// What ^i puts in the box: the file being looked at when it opened.
+    pub ask_path: Option<String>,
+    /// The agent kind `c` starts (`$JV_AGENT`'s first word).
+    pub ask_kind: String,
+    /// Where the agent runs: the repo root, else where jv started.
+    pub ask_cwd: PathBuf,
+    bg_tx: mpsc::Sender<String>,
+    bg_rx: mpsc::Receiver<String>,
+    /// The `;` dialog, while it's open.
+    pub tabs: Option<TabsView>,
+    /// Tabs `x` closed: hidden even if Herdr still lists them for a moment.
+    closed: HashSet<String>,
+}
+
+/// `;`: the other tabs in this Herdr space, and what the selected one shows.
+pub struct TabsView {
+    pub space: String,
+    pub list: Vec<herdr::Tab>,
+    pub cur: usize,
+    /// The selected tab's focused pane, as it looks right now.
+    pub preview: Vec<ansi::Line>,
+    fetched: Instant,
+}
+
+impl TabsView {
+    pub fn selected(&self) -> Option<&herdr::Tab> {
+        self.list.get(self.cur)
+    }
 }
 
 fn digits(n: u32) -> usize {
@@ -151,6 +245,9 @@ fn digits(n: u32) -> usize {
 impl App {
     pub fn new(source: Source, text: &str, hl: Hl, pal: Palette, opts: Opts, viewed: Viewed) -> App {
         let parsed = diff::parse(text);
+        let repo_root = source::repo_root();
+        let ask_cwd = repo_root.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ".".into());
+        let (bg_tx, bg_rx) = mpsc::channel();
         let mut app = App {
             source,
             files: parsed.files,
@@ -190,11 +287,26 @@ impl App {
             goto_cur: 0,
             msg: None,
             lay: Lay::default(),
-            repo_root: source::repo_root(),
+            repo_root,
             nw: 3,
             count: None,
             jumps: Vec::new(),
             mark: None,
+            sel: None,
+            drag: None,
+            scrolled_at: Instant::now(),
+            clicks: None,
+            live: true,
+            copied: None,
+            ask: Field::default(),
+            ask_images: Vec::new(),
+            ask_path: None,
+            ask_kind: agent::spec().0,
+            ask_cwd,
+            bg_tx,
+            bg_rx,
+            tabs: None,
+            closed: HashSet::new(),
         };
         app.rebuild_tree();
         app.rebuild_doc();
@@ -330,6 +442,8 @@ impl App {
         let geo = Geo { width, split: self.split_pref.unwrap_or(width >= SPLIT_MIN), wrap: self.wrap, nw: self.nw };
         let doc = doc::build(&self.files, &self.visible, |f| self.note_for(f), geo);
         self.doc = doc;
+        // Rows moved, so a selection would now point at other text.
+        self.sel = None;
         self.restore(anchor);
     }
 
@@ -432,6 +546,21 @@ impl App {
             }
         }
         false
+    }
+
+    /// Status lines from background jobs (`c` agents, `;` closes), and the
+    /// `;` dialog's live refresh. Returns true when a redraw is needed.
+    pub fn poll_bg(&mut self) -> bool {
+        let mut any = false;
+        while let Ok(m) = self.bg_rx.try_recv() {
+            self.flash(m);
+            any = true;
+        }
+        if self.mode == Mode::Tabs && self.tabs.as_ref().is_some_and(|t| t.fetched.elapsed() > TABS_REFRESH) {
+            self.refresh_tabs();
+            any = true;
+        }
+        any
     }
 
     /// Expire the status-bar message. Returns true when a redraw is needed.
@@ -884,12 +1013,256 @@ impl App {
         Act::Suspend(cmd)
     }
 
+    fn clip(&mut self, text: &str) -> bool {
+        self.copied = Some(text.to_string());
+        !self.live || source::copy(text)
+    }
+
     fn copy(&mut self, with_line: bool) {
         let Some((f, line)) = self.first_code_line() else { return };
         let path = &self.files[f].path;
         let text = if with_line { format!("{path}:{line}") } else { path.clone() };
-        let ok = source::copy(&text);
+        let ok = self.clip(&text);
         self.flash(if ok { format!("copied {text}") } else { "copy failed".to_string() });
+    }
+
+    /// `c`: open the agent box. ^i in it inserts the selection's file, else
+    /// the file at the top of the diff.
+    fn open_ask(&mut self, sel: Option<&Sel>) {
+        if !agent::in_herdr() {
+            self.flash(format!("c starts {} in a new Herdr tab · run jv inside Herdr", self.ask_kind));
+            return;
+        }
+        let sel_file = sel.filter(|s| s.shown).and_then(|s| self.doc.rows.get(s.anchor.min(s.head).row)?.file());
+        self.ask_path = sel_file.or_else(|| self.cur_file()).map(|f| self.files[f].path.clone());
+        self.ask.end();
+        self.mode = Mode::Ask;
+    }
+
+    fn send_ask(&mut self) {
+        self.mode = Mode::Normal;
+        let text = self.ask.text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let prompt = agent::with_images(text, &self.ask_images);
+        self.ask = Field::default();
+        self.ask_images.clear();
+        if self.live {
+            agent::spawn(prompt, self.ask_cwd.clone(), self.bg_tx.clone());
+        } else {
+            self.copied = Some(prompt);
+        }
+        self.flash(format!("starting {} in a new tab…", self.ask_kind));
+    }
+
+    fn insert_ask_path(&mut self) {
+        if let Some(p) = self.ask_path.clone() {
+            self.ask.insert_word(&p);
+        }
+    }
+
+    fn key_ask(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let f = &mut self.ask;
+        match k.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Char('c') if ctrl => self.mode = Mode::Normal,
+            // Newline: shift+Enter (the kitty keyboard protocol tells it from
+            // Enter; see main.rs), alt+Enter, or ^j anywhere.
+            KeyCode::Enter if alt || k.modifiers.contains(KeyModifiers::SHIFT) => f.insert("\n"),
+            KeyCode::Char('j') if ctrl => f.insert("\n"),
+            KeyCode::Enter => self.send_ask(),
+            // ^i: the file's path. Without the kitty protocol ^i is a Tab, so Tab does it too.
+            KeyCode::Char('i') if ctrl => self.insert_ask_path(),
+            KeyCode::Tab => self.insert_ask_path(),
+            KeyCode::Char('v') if ctrl => self.paste_image(),
+            // Word jumps: alt/ctrl+←→ arrive as modified arrows, or as ESC b /
+            // ESC f when the terminal sends option as meta.
+            KeyCode::Left if alt || ctrl => f.word_left(),
+            KeyCode::Right if alt || ctrl => f.word_right(),
+            KeyCode::Char('b') if alt => f.word_left(),
+            KeyCode::Char('f') if alt => f.word_right(),
+            KeyCode::Char('d') if alt => f.kill_word_right(),
+            KeyCode::Char('a') if ctrl => f.home(),
+            KeyCode::Char('e') if ctrl => f.end(),
+            KeyCode::Char('b') if ctrl => f.left(),
+            KeyCode::Char('f') if ctrl => f.right(),
+            KeyCode::Char('d') if ctrl => f.delete(),
+            KeyCode::Char('u') if ctrl => f.kill_start(),
+            KeyCode::Char('k') if ctrl => f.kill_end(),
+            KeyCode::Char('w') if ctrl => f.kill_word(),
+            KeyCode::Backspace if alt => f.kill_word(),
+            KeyCode::Home => f.home(),
+            KeyCode::End => f.end(),
+            KeyCode::Left => f.left(),
+            KeyCode::Right => f.right(),
+            KeyCode::Backspace => f.backspace(),
+            KeyCode::Delete => f.delete(),
+            KeyCode::Char(c) if !ctrl => f.insert(c.encode_utf8(&mut [0; 4])),
+            _ => {}
+        }
+    }
+
+    fn attach(&mut self, path: PathBuf) {
+        self.ask_images.push(path);
+        let tag = format!("[Image #{}]", self.ask_images.len());
+        self.ask.insert_word(&tag);
+    }
+
+    /// ^v in the agent box: the clipboard's image, as an `[Image #N]` tag.
+    fn paste_image(&mut self) {
+        match agent::clipboard_image() {
+            Some(p) => self.attach(p),
+            None => self.flash("no image on the clipboard"),
+        }
+    }
+
+    /// Bracketed paste: whole into the agent box, first line into the others
+    /// (as if typed, so search and the filter update). In the agent box, image
+    /// files dropped in become tags, and an empty paste (⌘V with only an image
+    /// on the clipboard) takes the clipboard's image.
+    fn paste(&mut self, s: &str) {
+        let s = s.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ");
+        match self.mode {
+            Mode::Ask if s.trim().is_empty() => self.paste_image(),
+            Mode::Ask => match agent::image_paths(&s) {
+                Some(files) => files.into_iter().for_each(|f| self.attach(f)),
+                None => self.ask.insert(&s),
+            },
+            Mode::Search | Mode::Filter | Mode::GoTo => {
+                for c in s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control()).take(500) {
+                    self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- `;` tabs dialog ---------------------------------------------------
+
+    fn open_tabs(&mut self) {
+        if !agent::in_herdr() {
+            self.flash("; lists this Herdr space's tabs · run jv inside Herdr");
+            return;
+        }
+        self.closed.clear();
+        self.tabs = Some(TabsView {
+            space: String::new(),
+            list: Vec::new(),
+            cur: 0,
+            preview: Vec::new(),
+            fetched: Instant::now(),
+        });
+        self.mode = Mode::Tabs;
+        self.refresh_tabs();
+    }
+
+    fn close_tabs_view(&mut self) {
+        self.mode = Mode::Normal;
+        self.tabs = None;
+    }
+
+    /// Re-read the tabs (the cursor stays on its tab) and the preview.
+    fn refresh_tabs(&mut self) {
+        let ws = std::env::var("HERDR_WORKSPACE_ID").unwrap_or_default();
+        let me = std::env::var("HERDR_TAB_ID").unwrap_or_default();
+        let res = herdr::tabs(&ws, &me);
+        let Some(v) = self.tabs.as_mut() else { return };
+        v.fetched = Instant::now();
+        match res {
+            Ok((space, mut list)) => {
+                list.retain(|t| !self.closed.contains(&t.id));
+                let keep = v.selected().map(|t| t.id.clone());
+                let at = keep.and_then(|id| list.iter().position(|t| t.id == id)).unwrap_or(v.cur);
+                v.cur = at.min(list.len().saturating_sub(1));
+                v.space = space;
+                v.list = list;
+            }
+            // A hiccup while open keeps what's on screen; failing to open at all closes.
+            Err(e) => {
+                if v.list.is_empty() {
+                    self.close_tabs_view();
+                }
+                self.flash(e);
+                return;
+            }
+        }
+        self.load_preview();
+    }
+
+    fn load_preview(&mut self) {
+        let Some(v) = self.tabs.as_mut() else { return };
+        v.preview = match v.selected().and_then(|t| t.pane.as_deref()) {
+            Some(p) => herdr::read(p).map_or_else(|e| vec![vec![(e, Style::new())]], |t| ansi::parse(&t)),
+            None => Vec::new(),
+        };
+    }
+
+    fn tabs_move(&mut self, d: isize) {
+        let Some(v) = self.tabs.as_mut() else { return };
+        if v.list.is_empty() {
+            return;
+        }
+        let n = (v.cur as isize).saturating_add(d).clamp(0, v.list.len() as isize - 1) as usize;
+        if n != v.cur {
+            v.cur = n;
+            self.load_preview();
+        }
+    }
+
+    /// `x`: close the selected tab now, no questions, like ctrl+alt+x.
+    fn close_selected_tab(&mut self) {
+        let Some(v) = self.tabs.as_mut() else { return };
+        if v.cur >= v.list.len() {
+            return;
+        }
+        let t = v.list.remove(v.cur);
+        v.cur = v.cur.min(v.list.len().saturating_sub(1));
+        self.closed.insert(t.id.clone());
+        let name = if t.label.is_empty() { t.id.clone() } else { t.label.clone() };
+        if self.live {
+            let tx = self.bg_tx.clone();
+            std::thread::spawn(move || {
+                let msg = match herdr::close_tab(&t.id) {
+                    Ok(()) => format!("closed {name}"),
+                    Err(e) => format!("couldn't close {name}: {e}"),
+                };
+                let _ = tx.send(msg);
+            });
+        }
+        self.load_preview();
+    }
+
+    /// Enter: switch Herdr to the selected tab.
+    fn focus_selected_tab(&mut self) {
+        let Some(id) = self.tabs.as_ref().and_then(|v| v.selected()).map(|t| t.id.clone()) else { return };
+        if self.live {
+            if let Err(e) = herdr::focus_tab(&id) {
+                self.flash(e);
+                return;
+            }
+        }
+        self.close_tabs_view();
+    }
+
+    fn key_tabs(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let h = (self.lay.diff.height as isize / 2).max(1);
+        match k.code {
+            KeyCode::Esc | KeyCode::Char(';' | 'q') => self.close_tabs_view(),
+            KeyCode::Char('c') if ctrl => self.close_tabs_view(),
+            KeyCode::Char('d') if ctrl => self.tabs_move(h),
+            KeyCode::Char('u') if ctrl => self.tabs_move(-h),
+            KeyCode::Char('j') | KeyCode::Down => self.tabs_move(1),
+            KeyCode::Char('k') | KeyCode::Up => self.tabs_move(-1),
+            KeyCode::Char('g') | KeyCode::Home => self.tabs_move(isize::MIN),
+            KeyCode::Char('G') | KeyCode::End => self.tabs_move(isize::MAX),
+            KeyCode::Char('x') => self.close_selected_tab(),
+            KeyCode::Enter => self.focus_selected_tab(),
+            _ => {}
+        }
     }
 
     fn reload(&mut self) {
@@ -1091,11 +1464,265 @@ impl App {
         self.goto_cur = self.goto_cur.min(self.goto.len().saturating_sub(1));
     }
 
+    // ---- mouse selection ---------------------------------------------------
+
+    /// The code on doc row `row` (its right side in split view when `right`).
+    fn code_cell(&self, row: usize, right: bool) -> Option<CodeCell> {
+        let g = &self.doc.geo;
+        let (f, h, l, seg, x, w) = match *self.doc.rows.get(row)? {
+            Row::Uni { f, h, l, seg } => {
+                let single = self.files[f as usize].one_sided();
+                let gw = if single { g.gutter1() } else { g.gutter2() };
+                (f, h, l as usize, seg, gw + Geo::SIGN, g.uni_code_w(single))
+            }
+            Row::Split { f, h, p, seg } => {
+                let (lo, ro) = self.files[f as usize].hunks[h as usize].pairs[p as usize];
+                let l = if right { ro } else { lo }?;
+                let x0 = if right { g.left_w() + 1 } else { 0 };
+                (f, h, l, seg, x0 + g.gutter1() + Geo::SIGN, g.side_code_w(right))
+            }
+            _ => return None,
+        };
+        let (f, h) = (f as usize, h as usize);
+        let text = &self.files[f].hunks[h].lines[l].text;
+        let (range, skip) = if self.wrap {
+            (doc::wrap_ranges(text, w).get(seg as usize)?.clone(), 0)
+        } else if seg == 0 {
+            (0..text.len(), self.hscroll)
+        } else {
+            return None;
+        };
+        Some(CodeCell { f, h, l, x: x as u16, w, range, skip })
+    }
+
+    fn cell_text(&self, c: &CodeCell) -> &str {
+        &self.files[c.f].hunks[c.h].lines[c.l].text
+    }
+
+    /// Byte of the row's line under pane column `col`, or just past that
+    /// character with `after` (a selection's inclusive end). Left of the code
+    /// is the row's start; right of it, the row's end.
+    fn byte_at(&self, c: &CodeCell, col: u16, after: bool) -> usize {
+        if col < c.x {
+            return c.range.start;
+        }
+        let want = (col - c.x) as usize;
+        if want >= c.w {
+            return c.range.end;
+        }
+        let want = want + c.skip;
+        let mut cx = 0;
+        for (i, ch) in self.cell_text(c)[c.range.clone()].char_indices() {
+            cx += ch.width().unwrap_or(0);
+            if want < cx {
+                let i = c.range.start + i;
+                return if after { i + ch.len_utf8() } else { i };
+            }
+        }
+        c.range.end
+    }
+
+    /// The selection's ends in order, and its side, once it's drawn.
+    fn sel_bounds(&self) -> Option<(Pos, Pos, bool)> {
+        let s = self.sel.as_ref().filter(|s| s.shown)?;
+        Some((s.anchor.min(s.head), s.anchor.max(s.head), s.right))
+    }
+
+    /// The selected bytes of doc row `row`'s line.
+    fn sel_on(&self, row: usize) -> Option<(CodeCell, Range<usize>)> {
+        let (a, b, right) = self.sel_bounds()?;
+        if row < a.row || row > b.row {
+            return None;
+        }
+        let c = self.code_cell(row, right)?;
+        let s = if row == a.row { self.byte_at(&c, a.col, false) } else { c.range.start };
+        let e = if row == b.row { self.byte_at(&c, b.col, true) } else { c.range.end };
+        Some((c, s..e.max(s)))
+    }
+
+    /// Pane columns to paint as selected on doc row `row`.
+    pub fn sel_cols(&self, row: usize) -> Option<Range<u16>> {
+        let (c, r) = self.sel_on(row)?;
+        let text = self.cell_text(&c);
+        let col = |b: usize| c.x + text[c.range.start..b].width().saturating_sub(c.skip).min(c.w) as u16;
+        let (x0, x1) = (col(r.start), col(r.end));
+        // A blank line inside the selection still shows that it's taken.
+        let blank = c.range.is_empty() && self.sel_bounds().is_some_and(|(_, b, _)| row < b.row);
+        Some(x0..if blank { x0 + 1 } else { x1 })
+    }
+
+    /// What the selection copies: each line's selected code, one per line.
+    pub fn sel_text(&self) -> String {
+        let Some((a, b, _)) = self.sel_bounds() else { return String::new() };
+        let mut out = String::new();
+        let mut last = None;
+        for row in a.row..=b.row {
+            let Some((c, r)) = self.sel_on(row) else { continue };
+            // A drag started past the end of a line doesn't open with a blank one.
+            if row == a.row && r.is_empty() {
+                continue;
+            }
+            let id = (c.f, c.h, c.l);
+            // Wrapped segments of one line join back up.
+            if last.is_some_and(|l| l != id) {
+                out.push('\n');
+            }
+            last = Some(id);
+            out.push_str(&self.cell_text(&c)[r]);
+        }
+        out
+    }
+
+    /// The cell under the mouse as a selection point. Above the code (the
+    /// sticky header) is the start of the top row, below it the end of the
+    /// bottom one.
+    fn pane_pos(&self, x: u16, y: u16) -> Pos {
+        let d = self.lay.diff;
+        let top = d.y + u16::from(self.sticky().is_some());
+        let last = d.bottom().saturating_sub(1).max(top);
+        let col = if y < top {
+            0
+        } else if y > last {
+            u16::MAX
+        } else {
+            x.saturating_sub(d.x)
+        };
+        Pos { row: self.scroll + (y.clamp(top, last) - d.y) as usize, col }
+    }
+
+    fn right_side(&self, x: u16) -> bool {
+        self.doc.geo.split && x.saturating_sub(self.lay.diff.x) as usize > self.doc.geo.left_w()
+    }
+
+    fn extend_sel(&mut self, x: u16, y: u16) {
+        let head = self.pane_pos(x, y);
+        if let Some(s) = self.sel.as_mut() {
+            s.shown |= head != s.anchor;
+            s.head = head;
+        }
+    }
+
+    fn copy_sel(&mut self) {
+        let text = self.sel_text();
+        if text.is_empty() {
+            self.sel = None;
+            return;
+        }
+        let ok = self.clip(&text);
+        let n = text.lines().count();
+        let msg = if !ok {
+            "copy failed".to_string()
+        } else if n > 1 {
+            format!("copied {n} lines")
+        } else {
+            let t = text.trim();
+            let cut: String = t.chars().take(48).collect();
+            format!("copied {cut}{}", if cut.len() < t.len() { "…" } else { "" })
+        };
+        self.flash(msg);
+    }
+
+    /// Double click: the word under the mouse.
+    fn select_word(&mut self, p: Pos, right: bool) {
+        let Some(c) = self.code_cell(p.row, right) else { return };
+        let seg = &self.cell_text(&c)[c.range.clone()];
+        let k = self.byte_at(&c, p.col, false) - c.range.start;
+        let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let s = seg[..k].char_indices().rev().take_while(|&(_, ch)| word(ch)).last().map_or(k, |(i, _)| i);
+        let e = seg[k..].char_indices().find(|&(_, ch)| !word(ch)).map_or(seg.len(), |(i, _)| k + i);
+        if s == e {
+            return;
+        }
+        let col = |b: usize| c.x + seg[..b].width().saturating_sub(c.skip) as u16;
+        let (anchor, head) = (Pos { row: p.row, col: col(s) }, Pos { row: p.row, col: col(e).saturating_sub(1) });
+        self.sel = Some(Sel { anchor, head, right, shown: true });
+        self.copy_sel();
+    }
+
+    /// Triple click: the whole line under the mouse, every wrapped row of it.
+    fn select_line(&mut self, p: Pos, right: bool) {
+        let Some(c) = self.code_cell(p.row, right) else { return };
+        let id = (c.f, c.h, c.l);
+        let same = |r: usize| self.code_cell(r, right).is_some_and(|x| (x.f, x.h, x.l) == id);
+        let (mut a, mut b) = (p.row, p.row);
+        while a > 0 && same(a - 1) {
+            a -= 1;
+        }
+        while same(b + 1) {
+            b += 1;
+        }
+        let (anchor, head) = (Pos { row: a, col: 0 }, Pos { row: b, col: u16::MAX });
+        self.sel = Some(Sel { anchor, head, right, shown: true });
+        self.copy_sel();
+    }
+
+    /// Left button released without dragging: fold a header, or count the
+    /// click toward a double / triple click.
+    fn click(&mut self, x: u16, y: u16) {
+        let ry = y.saturating_sub(self.lay.diff.y) as usize;
+        let header = if ry == 0 { self.sticky() } else { None }.or_else(|| match self.doc.rows.get(self.scroll + ry) {
+            Some(Row::File { f }) => Some(*f as usize),
+            _ => None,
+        });
+        if let Some(f) = header {
+            self.clicks = None;
+            self.toggle_fold(f);
+            return;
+        }
+        let n = match self.clicks {
+            Some((t, cx, cy, n)) if (cx, cy) == (x, y) && t.elapsed() < MULTI_CLICK => (n + 1).min(3),
+            _ => 1,
+        };
+        self.clicks = Some((Instant::now(), x, y, n));
+        let (p, right) = (self.pane_pos(x, y), self.right_side(x));
+        match n {
+            2 => self.select_word(p, right),
+            3 => self.select_line(p, right),
+            _ => {}
+        }
+    }
+
+    /// Mid-drag past the top or bottom of the diff: which way to scroll.
+    fn drag_edge(&self) -> Option<isize> {
+        let d = self.drag.as_ref().filter(|d| d.to != d.from)?;
+        let a = self.lay.diff;
+        let top = a.y + u16::from(self.sticky().is_some());
+        match d.to.1 {
+            y if y < top => Some(-1),
+            y if y >= a.bottom() => Some(1),
+            _ => None,
+        }
+    }
+
+    /// The event loop polls faster while this is true, to keep scrolling.
+    pub fn autoscrolling(&self) -> bool {
+        self.drag_edge().is_some()
+    }
+
+    /// Scroll a drag held past the edge on by a row. True when it moved.
+    pub fn autoscroll(&mut self) -> bool {
+        let Some(dir) = self.drag_edge() else { return false };
+        if self.scrolled_at.elapsed() < AUTOSCROLL {
+            return false;
+        }
+        self.scrolled_at = Instant::now();
+        let before = self.scroll;
+        self.scroll_by(dir);
+        if let Some((x, y)) = self.drag.as_ref().map(|d| d.to) {
+            self.extend_sel(x, y);
+        }
+        self.scroll != before
+    }
+
     // ---- input -----------------------------------------------------------
 
     pub fn handle(&mut self, ev: Event) -> Act {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
+            Event::Paste(s) => {
+                self.paste(&s);
+                Act::None
+            }
             Event::Mouse(m) => {
                 self.mouse(m);
                 Act::None
@@ -1105,9 +1732,22 @@ impl App {
     }
 
     fn key(&mut self, k: KeyEvent) -> Act {
+        // Any key drops a mouse selection; Esc does only that. (`c` reads it first.)
+        let sel = self.sel.take();
+        if sel.as_ref().is_some_and(|s| s.shown) && k.code == KeyCode::Esc && self.mode == Mode::Normal {
+            return Act::None;
+        }
         match self.mode {
             Mode::Help => {
                 self.mode = Mode::Normal;
+                return Act::None;
+            }
+            Mode::Ask => {
+                self.key_ask(k);
+                return Act::None;
+            }
+            Mode::Tabs => {
+                self.key_tabs(k);
                 return Act::None;
             }
             Mode::Search => {
@@ -1207,6 +1847,8 @@ impl App {
             (KeyCode::Char('y'), false) => self.copy(false),
             (KeyCode::Char('Y'), _) => self.copy(true),
             (KeyCode::Char('r'), false) => self.reload(),
+            (KeyCode::Char('c'), false) => self.open_ask(sel.as_ref()),
+            (KeyCode::Char(';'), false) => self.open_tabs(),
             // The focused pane's filter or search goes first, then the other's.
             (KeyCode::Esc, _) => {
                 let tree = self.tree_on();
@@ -1376,10 +2018,22 @@ impl App {
                 self.clamp_tree_top();
             }
             MouseEventKind::ScrollUp if inside(tree) => self.tree_top = self.tree_top.saturating_sub(3),
-            MouseEventKind::ScrollDown => self.scroll_by(3),
-            MouseEventKind::ScrollUp => self.scroll_by(-3),
-            MouseEventKind::ScrollRight if !self.wrap => self.hscroll += 4,
-            MouseEventKind::ScrollLeft if !self.wrap => self.hscroll = self.hscroll.saturating_sub(4),
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                self.scroll_by(if m.kind == MouseEventKind::ScrollDown { 3 } else { -3 });
+                // Wheeling mid-drag carries the selection along.
+                if self.drag.is_some() {
+                    self.extend_sel(x, y);
+                }
+            }
+            // Selections are kept in screen columns, so sideways scrolling drops them.
+            MouseEventKind::ScrollRight if !self.wrap => {
+                self.hscroll += 4;
+                self.sel = None;
+            }
+            MouseEventKind::ScrollLeft if !self.wrap => {
+                self.hscroll = self.hscroll.saturating_sub(4);
+                self.sel = None;
+            }
             MouseEventKind::Down(MouseButton::Left) if inside(tree) => {
                 self.focus = Focus::Tree;
                 let i = self.tree_top + (y - tree.y) as usize;
@@ -1389,15 +2043,27 @@ impl App {
                     self.focus = Focus::Tree;
                 }
             }
+            // Press starts a selection; it's drawn once the drag leaves the
+            // first cell and copied on release. A release in place is a click.
             MouseEventKind::Down(MouseButton::Left) if inside(diff) => {
                 self.focus = Focus::Diff;
-                let ry = (y - diff.y) as usize;
-                let f = if ry == 0 { self.sticky() } else { None }.or_else(|| match self.doc.rows.get(self.scroll + ry) {
-                    Some(Row::File { f }) => Some(*f as usize),
-                    _ => None,
-                });
-                if let Some(f) = f {
-                    self.toggle_fold(f);
+                let p = self.pane_pos(x, y);
+                self.sel = Some(Sel { anchor: p, head: p, right: self.right_side(x), shown: false });
+                self.drag = Some(Drag { from: (x, y), to: (x, y) });
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.drag.is_some() => {
+                if let Some(d) = self.drag.as_mut() {
+                    d.to = (x, y);
+                }
+                self.extend_sel(x, y);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(d) = self.drag.take() else { return };
+                if self.sel.as_ref().is_some_and(|s| s.shown) {
+                    self.copy_sel();
+                } else {
+                    self.sel = None;
+                    self.click(d.from.0, d.from.1);
                 }
             }
             _ => {}

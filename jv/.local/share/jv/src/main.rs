@@ -1,7 +1,10 @@
+mod agent;
+mod ansi;
 mod app;
 mod diff;
 mod doc;
 mod fuzzy;
+mod herdr;
 mod highlight;
 mod snapshot;
 mod source;
@@ -14,8 +17,12 @@ use std::io::{self, IsTerminal};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 
@@ -120,6 +127,10 @@ fn parse_cli() -> Result<Cli, String> {
 }
 
 fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some(agent::CHILD_FLAG) {
+        return agent::child(&argv[2..]);
+    }
     let cli = match parse_cli() {
         Ok(c) => c,
         Err(e) => {
@@ -238,18 +249,40 @@ fn main() -> ExitCode {
 
 fn run(mut app: App) -> io::Result<()> {
     let mut terminal = ratatui::init();
-    let _ = execute!(io::stdout(), EnableMouseCapture);
-    let res = event_loop(&mut terminal, &mut app);
-    let _ = execute!(io::stdout(), DisableMouseCapture);
+    let kitty = matches!(supports_keyboard_enhancement(), Ok(true));
+    modes(true, kitty);
+    let res = event_loop(&mut terminal, &mut app, kitty);
+    modes(false, kitty);
     ratatui::restore();
     res
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
+/// The terminal modes jv adds to ratatui's: mouse reports, bracketed paste (a
+/// pasted newline mustn't submit the `c` box), and where the terminal has it,
+/// the kitty keyboard protocol's first level, so shift+Enter and ^i arrive as
+/// themselves instead of as Enter and Tab.
+fn modes(on: bool, kitty: bool) {
+    let mut out = io::stdout();
+    if on {
+        let _ = execute!(out, EnableMouseCapture, EnableBracketedPaste);
+        if kitty {
+            let _ = execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        }
+    } else {
+        if kitty {
+            let _ = execute!(out, PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(out, DisableMouseCapture, DisableBracketedPaste);
+    }
+}
+
+fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, kitty: bool) -> io::Result<()> {
     let mut dirty = true;
     loop {
         dirty |= app.poll_meta();
+        dirty |= app.poll_bg();
         dirty |= app.tick();
+        dirty |= app.autoscroll();
         if dirty {
             let s = terminal.size()?;
             app.layout_for(Rect::new(0, 0, s.width, s.height));
@@ -257,14 +290,16 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             terminal.draw(|f| ui::draw(app, f))?;
             dirty = false;
         }
-        if !event::poll(Duration::from_millis(250))? {
+        // A drag held past the diff's edge sends no events, so wake up to scroll it.
+        let wait = if app.autoscrolling() { 20 } else { 250 };
+        if !event::poll(Duration::from_millis(wait))? {
             continue;
         }
         // Drain everything queued (fast wheel scrolling) before redrawing.
         loop {
             match app.handle(event::read()?) {
                 Act::Quit => return Ok(()),
-                Act::Suspend(cmd) => suspend(terminal, &cmd)?,
+                Act::Suspend(cmd) => suspend(terminal, &cmd, kitty)?,
                 Act::None => {}
             }
             dirty = true;
@@ -276,13 +311,13 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 /// Hand the terminal to a foreground program (a terminal $EDITOR), then resume.
-fn suspend(terminal: &mut DefaultTerminal, cmd: &[String]) -> io::Result<()> {
-    let _ = execute!(io::stdout(), DisableMouseCapture);
+fn suspend(terminal: &mut DefaultTerminal, cmd: &[String], kitty: bool) -> io::Result<()> {
+    modes(false, kitty);
     ratatui::restore();
     if let Some((prog, args)) = cmd.split_first() {
         let _ = Command::new(prog).args(args).status();
     }
     *terminal = ratatui::init();
-    let _ = execute!(io::stdout(), EnableMouseCapture);
+    modes(true, kitty);
     terminal.clear()
 }

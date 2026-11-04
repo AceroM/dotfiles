@@ -75,21 +75,50 @@ kill_agents() { # pane_id...
   killed="${groups:- none}${alive:+; still alive:$alive}"
 }
 
+# When the focused tab closes, Herdr hands focus to the tab on its LEFT.
+# Browser habit wants the one on the right, so focus the right-hand neighbor
+# *before* the close: the tab then goes away in the background and Herdr has no
+# focus to reassign. Nothing happens when the tab is not the focused one (an
+# explicit id closing something in the background), when it is the last tab in
+# its space (no right neighbor, so Herdr's fallback to the left stands), or,
+# for a pane close, when other panes keep the tab alive.
+moved=""
+focus_right_of() { # tab_id [pane]   "pane": only if that is the tab's last pane
+  local right
+  moved=""
+  right=$(call session.snapshot | jq -r --arg t "$1" --arg mode "${2:-}" '
+    .result.snapshot as $s
+    | ([$s.tabs[]? | select(.tab_id == $t)] | first) as $tab
+    | if $tab == null or $s.focused_tab_id != $t
+        or ($mode == "pane" and ($tab.pane_count // 1) > 1) then ""
+      else
+        [$s.tabs[] | select(.workspace_id == $tab.workspace_id) | .tab_id] as $ids
+        | ($ids | index($t)) as $i
+        | ($ids[$i + 1] // "")
+      end')
+  [ -n "$right" ] || return 0
+  call tab.focus "{\"tab_id\":\"$right\"}" | jq -e '.error == null' >/dev/null &&
+    moved=", focused $right"
+}
+
 close_pane() { # [pane_id]
-  local pane="${1:-}" agent
+  local pane="${1:-}" agent tab
   if [ -n "$pane" ]; then
-    read -r pane agent < <(call pane.get "{\"pane_id\":\"$pane\"}" |
-      jq -r '.result.pane | "\(.pane_id // "") \(.agent // "")"')
+    read -r pane agent tab < <(call pane.get "{\"pane_id\":\"$pane\"}" |
+      jq -r '.result.pane | "\(.pane_id // "") \(.agent // "-") \(.tab_id // "")"')
   else
-    read -r pane agent < <(call pane.current |
-      jq -r '.result.pane | "\(.pane_id // "") \(.agent // "")"')
+    read -r pane agent tab < <(call pane.current |
+      jq -r '.result.pane | "\(.pane_id // "") \(.agent // "-") \(.tab_id // "")"')
   fi
   [ -n "${pane:-}" ] || die "no pane to close${1:+ ($1)}"
+  # "-" holds the agent's place so read keeps tab_id in its own field.
+  [ "${agent:-}" = "-" ] && agent=""
   killed=" none"
   [ -z "${agent:-}" ] || kill_agents "$pane"
+  [ -z "${tab:-}" ] || focus_right_of "$tab" pane
   call pane.close "{\"pane_id\":\"$pane\"}" | jq -e '.error == null' >/dev/null ||
     die "pane close $pane failed"
-  log "closed pane $pane${agent:+ ($agent)} (killed groups:$killed)"
+  log "closed pane $pane${agent:+ ($agent)} (killed groups:$killed$moved)"
 }
 
 close_tab() { # [tab_id]
@@ -104,9 +133,10 @@ close_tab() { # [tab_id]
   [ -n "${tab:-}" ] || die "no focused tab"
   # shellcheck disable=SC2086 # pane ids carry no spaces; split them on purpose
   kill_agents $agents
+  focus_right_of "$tab"
   call tab.close "{\"tab_id\":\"$tab\"}" | jq -e '.error == null' >/dev/null ||
     die "tab close $tab failed"
-  log "closed tab $tab (killed groups:$killed)"
+  log "closed tab $tab (killed groups:$killed$moved)"
 }
 
 # Ids go into JSON by hand, so only let through what Herdr ids look like.

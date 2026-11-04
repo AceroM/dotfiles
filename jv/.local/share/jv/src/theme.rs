@@ -37,6 +37,8 @@ pub struct Palette {
     pub panel: Color,
     pub sel: Color,
     pub sel_dim: Color,
+    /// Mouse-selected text in the diff.
+    pub sel_text: Color,
     pub accent: Color,
     pub green: Color,
     pub red: Color,
@@ -83,6 +85,7 @@ impl Palette {
             panel: bg.mix(fg, 0.055).c(),
             sel: bg.mix(accent, 0.24).c(),
             sel_dim: bg.mix(fg, 0.13).c(),
+            sel_text: bg.mix(accent, 0.40).c(),
             accent: accent.c(),
             green: green.c(),
             red: red.c(),

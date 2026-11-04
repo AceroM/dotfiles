@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
@@ -23,6 +23,9 @@ pub fn run(mut app: App, w: u16, h: u16, keys: &str, out: Option<&str>) -> ExitC
             app.meta = Some(m);
         }
     }
+    // Copies land in app.copied (printed to stderr), not the clipboard, and
+    // the c box starts no agent.
+    app.live = false;
     let area = Rect::new(0, 0, w, h);
     app.layout_for(area);
     for ev in parse_keys(keys) {
@@ -30,6 +33,9 @@ pub fn run(mut app: App, w: u16, h: u16, keys: &str, out: Option<&str>) -> ExitC
             break;
         }
         app.layout_for(area);
+    }
+    if let Some(t) = &app.copied {
+        eprintln!("{t}");
     }
     app.msg = None;
     app.prepare();
@@ -57,7 +63,20 @@ pub fn run(mut app: App, w: u16, h: u16, keys: &str, out: Option<&str>) -> ExitC
     ExitCode::SUCCESS
 }
 
-/// `jjs<C-d><Tab><CR>` style key sequences.
+/// `<P40,5>` press, `<D60,8>` drag, `<U60,8>` release the left button at
+/// column 40, row 5 (0-based screen cells).
+fn mouse_tok(t: &str) -> Option<Event> {
+    let kind = match t.as_bytes().first()? {
+        b'P' => MouseEventKind::Down(MouseButton::Left),
+        b'D' => MouseEventKind::Drag(MouseButton::Left),
+        b'U' => MouseEventKind::Up(MouseButton::Left),
+        _ => return None,
+    };
+    let (x, y) = t[1..].split_once(',')?;
+    Some(Event::Mouse(MouseEvent { kind, column: x.parse().ok()?, row: y.parse().ok()?, modifiers: KeyModifiers::NONE }))
+}
+
+/// `jjs<C-d><Tab><CR>` style key sequences, plus mouse tokens (`mouse_tok`).
 fn parse_keys(s: &str) -> Vec<Event> {
     let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
     let mut out = Vec::new();
@@ -69,6 +88,10 @@ fn parse_keys(s: &str) -> Vec<Event> {
             continue;
         }
         let tok: String = chars.by_ref().take_while(|&d| d != '>').collect();
+        if let Some(ev) = mouse_tok(&tok) {
+            out.push(ev);
+            continue;
+        }
         let (code, mods) = match tok.as_str() {
             "CR" | "Enter" => (KeyCode::Enter, KeyModifiers::NONE),
             "Esc" => (KeyCode::Esc, KeyModifiers::NONE),
@@ -76,6 +99,12 @@ fn parse_keys(s: &str) -> Vec<Event> {
             "BS" => (KeyCode::Backspace, KeyModifiers::NONE),
             "Down" => (KeyCode::Down, KeyModifiers::NONE),
             "Up" => (KeyCode::Up, KeyModifiers::NONE),
+            "Left" => (KeyCode::Left, KeyModifiers::NONE),
+            "Right" => (KeyCode::Right, KeyModifiers::NONE),
+            "M-CR" => (KeyCode::Enter, KeyModifiers::ALT),
+            "M-Left" => (KeyCode::Left, KeyModifiers::ALT),
+            "M-Right" => (KeyCode::Right, KeyModifiers::ALT),
+            t if t.starts_with("M-") && t.len() == 3 => (KeyCode::Char(t.chars().nth(2).unwrap_or(' ')), KeyModifiers::ALT),
             "Space" => (KeyCode::Char(' '), KeyModifiers::NONE),
             "lt" => (KeyCode::Char('<'), KeyModifiers::NONE),
             t if t.starts_with("C-") && t.len() == 3 => {
