@@ -90,5 +90,6 @@ approval for the next. Never touch tabs unrelated to the task.
   Prefer it — it's auditable and doesn't depend on a browser being open. Reach for
   helium-cdp when the token is missing/expired or lacks the needed scope (the
   wrangler OAuth token, for instance, has only `zone:read` — no DNS-records read).
-- You need a clean, logged-out browser or parallel isolated sessions → use
-  `agent-browser` instead (it launches its own Chrome).
+- You need parallel sessions → use `browser-use` (one tab per agent in the shared
+  Agents group). agent-browser is uninstalled; if a flow truly needs a logged-out
+  profile, ask Miguel.
