@@ -36,8 +36,20 @@ impl Source {
     }
 
     pub fn fetch(&self) -> Result<String, String> {
+        self.fetch_noted().map(|(text, _)| text)
+    }
+
+    /// The diff, plus a note when it didn't come the usual way.
+    pub fn fetch_noted(&self) -> Result<(String, Option<String>), String> {
         match self {
-            Source::Gh(args) => run(Command::new("gh").arg("pr").arg("diff").args(args).arg("--color=never")),
+            Source::Gh(args) => gh_pr_diff(args),
+            other => other.fetch_plain().map(|t| (t, None)),
+        }
+    }
+
+    fn fetch_plain(&self) -> Result<String, String> {
+        match self {
+            Source::Gh(args) => gh_pr_diff(args).map(|(t, _)| t),
             Source::Local => git_diff(&["HEAD".to_string()]),
             Source::Git(args) => git_diff(args),
             Source::Cmd(c) => run(Command::new("sh").arg("-c").arg(c)),
@@ -48,6 +60,61 @@ impl Source {
             }
         }
     }
+}
+
+/// `gh pr diff`, or for a PR past GitHub's 20,000-line diff limit (HTTP 406
+/// too_large), the same three-dot diff built from local git.
+fn gh_pr_diff(args: &[String]) -> Result<(String, Option<String>), String> {
+    match run(Command::new("gh").arg("pr").arg("diff").args(args).arg("--color=never")) {
+        Ok(t) => Ok((t, None)),
+        Err(e) if e.contains("too_large") || e.contains("exceeded the maximum number of lines") => {
+            let t = pr_diff_via_git(args).map_err(|g| format!("{e}\nbuilding it locally failed too: {g}"))?;
+            Ok((t, Some("too big for GitHub's diff API · built locally (git diff base...head)".into())))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// GitHub's PR diff is `git diff base...head` on the PR's current base tip and
+/// pushed head; fetch either commit from origin when it isn't local.
+fn pr_diff_via_git(args: &[String]) -> Result<String, String> {
+    let out = run(Command::new("gh").args(["pr", "view"]).args(selector(args)).args([
+        "--json",
+        "number,baseRefName,baseRefOid,headRefOid",
+        "--jq",
+        "[.number, .baseRefName, .baseRefOid, .headRefOid] | @tsv",
+    ]))?;
+    let f: Vec<&str> = out.trim().split('\t').collect();
+    let [number, base_ref, base, head] = f[..] else {
+        return Err(format!("unexpected `gh pr view` output: {}", out.trim()));
+    };
+    let have = |oid: &str| {
+        Command::new("git")
+            .args(["cat-file", "-e", &format!("{oid}^{{commit}}")])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if !have(base) || !have(head) {
+        let pull = format!("refs/pull/{number}/head");
+        run(Command::new("git").args(["fetch", "--quiet", "--no-tags", "origin", base_ref, &pull]))?;
+    }
+    git_diff(&[format!("{base}...{head}")])
+}
+
+/// Only the selector and -R carry over from `gh pr diff` flags to `gh pr view`.
+fn selector(args: &[String]) -> Vec<String> {
+    let mut sel = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "-R" || a == "--repo" {
+            sel.push(a.clone());
+            sel.extend(it.next().cloned());
+        } else if a.starts_with("--repo=") || !a.starts_with('-') {
+            sel.push(a.clone());
+        }
+    }
+    sel
 }
 
 /// `git diff ARGS` as plain text jv can parse, whatever the user's git config
@@ -93,20 +160,9 @@ pub fn spawn_meta(args: Vec<String>) -> mpsc::Receiver<PrMeta> {
 }
 
 pub fn pr_meta(args: &[String]) -> Option<PrMeta> {
-    // Only the selector and -R carry over from `gh pr diff` flags.
-    let mut sel = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-R" || a == "--repo" {
-            sel.push(a.clone());
-            sel.extend(it.next().cloned());
-        } else if a.starts_with("--repo=") || !a.starts_with('-') {
-            sel.push(a.clone());
-        }
-    }
     let out = Command::new("gh")
         .args(["pr", "view"])
-        .args(&sel)
+        .args(selector(args))
         .args([
             "--json",
             "number,title,author,headRefName,baseRefName,isDraft,state,url",

@@ -165,17 +165,23 @@ fn main() -> ExitCode {
             eprint!("\r\x1b[2K");
         }
     };
-    let mut note = None;
+    let note: Option<String>;
     let fetched = match stdin_text {
-        Some(t) => Ok(t),
-        None => source.fetch(),
+        Some(t) => Ok((t, None)),
+        None => source.fetch_noted(),
     };
     let text = match fetched {
-        Ok(t) => t,
+        Ok((t, n)) => {
+            note = n;
+            t
+        }
         Err(e) => {
             // No PR for this branch: show local changes rather than nothing.
+            // Any other gh failure is an error, never a silent switch to local.
             let fallback = match &source {
-                Source::Gh(a) if a.is_empty() => Source::Local.fetch().ok().filter(|t| !t.trim().is_empty()),
+                Source::Gh(a) if a.is_empty() && e.contains("no pull requests found") => {
+                    Source::Local.fetch().ok().filter(|t| !t.trim().is_empty())
+                }
                 _ => None,
             };
             match fallback {
