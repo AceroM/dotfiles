@@ -223,6 +223,17 @@ pub struct App {
     closed: HashSet<String>,
 }
 
+/// The `;` dialog's two panels on a screen of `area`, the tab list and the
+/// preview, sparing the top bar and the status line (close messages land there).
+pub fn tabs_rects(area: Rect) -> Option<(Rect, Rect)> {
+    let r = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+    if r.width < 50 || r.height < 6 {
+        return None;
+    }
+    let lw = (r.width * 3 / 10).clamp(28, 56);
+    Some((Rect::new(r.x, r.y, lw, r.height), Rect::new(r.x + lw, r.y, r.width - lw, r.height)))
+}
+
 /// `;`: the other tabs in this Herdr space, and what the selected one shows.
 pub struct TabsView {
     pub space: String,
@@ -241,6 +252,13 @@ pub struct TabsView {
 impl TabsView {
     pub fn selected(&self) -> Option<&herdr::Tab> {
         self.list.get(self.cur)
+    }
+
+    /// Another tab is selected: back to its live screen, unscrolled.
+    fn reset_preview(&mut self) {
+        self.scroll = 0;
+        self.transcript = None;
+        self.in_transcript = false;
     }
 
     /// What the preview shows: the pane's lines, or the transcript's.
@@ -1207,10 +1225,13 @@ impl App {
             Ok((space, mut list)) => {
                 list.retain(|t| !self.closed.contains(&t.id));
                 let keep = v.selected().map(|t| t.id.clone());
-                let at = keep.and_then(|id| list.iter().position(|t| t.id == id)).unwrap_or(v.cur);
+                let at = keep.as_ref().and_then(|id| list.iter().position(|t| &t.id == id)).unwrap_or(v.cur);
                 v.cur = at.min(list.len().saturating_sub(1));
                 v.space = space;
                 v.list = list;
+                if v.selected().map(|t| &t.id) != keep.as_ref() {
+                    v.reset_preview();
+                }
             }
             // A hiccup while open keeps what's on screen; failing to open at all closes.
             Err(e) => {
@@ -1225,11 +1246,20 @@ impl App {
     }
 
     fn load_preview(&mut self) {
+        let w = self.preview_size().1;
         let Some(v) = self.tabs.as_mut() else { return };
         v.preview = match v.selected().and_then(|t| t.pane.as_deref()) {
             Some(p) => herdr::read(p).map_or_else(|e| vec![vec![(e, Style::new())]], |t| ansi::parse(&t)),
             None => Vec::new(),
         };
+        if let Some(t) = v.transcript.as_mut() {
+            t.set_width(w);
+            // New turns land at the bottom; a view scrolled up keeps its place.
+            let before = t.lines.len();
+            if t.grow() && v.in_transcript && v.scroll > 0 {
+                v.scroll += t.lines.len() - before;
+            }
+        }
     }
 
     fn tabs_move(&mut self, d: isize) {
@@ -1240,21 +1270,57 @@ impl App {
         let n = (v.cur as isize).saturating_add(d).clamp(0, v.list.len() as isize - 1) as usize;
         if n != v.cur {
             v.cur = n;
-            v.scroll = 0;
+            v.reset_preview();
             self.load_preview();
         }
     }
 
-    /// Rows inside the preview panel (the dialog spares the top bar and status line).
-    fn preview_rows(&self) -> usize {
-        (self.lay.status.y as usize).saturating_sub(3).max(1)
+    /// The preview panel's text area: (rows, columns).
+    fn preview_size(&self) -> (usize, usize) {
+        let s = self.lay.status;
+        tabs_rects(Rect::new(0, 0, s.width, s.y + 1))
+            .map_or((1, 10), |(_, r)| ((r.height as usize).saturating_sub(2).max(1), (r.width as usize).saturating_sub(4).max(10)))
     }
 
-    /// `u` / `d`: scroll the preview up (positive) or back down.
+    fn transcript_colors(&self) -> transcript::Colors {
+        let p = &self.pal;
+        transcript::Colors { fg: p.fg, bright: p.bright, dim: p.dim, accent: p.accent, green: p.green }
+    }
+
+    /// `u` / `d`: scroll the preview up (positive) or back down. A Claude
+    /// tab carries on up past its screen into its transcript, which reads
+    /// further back as you go; coming back down past the transcript's end
+    /// returns to the live screen.
     fn preview_scroll(&mut self, d: isize) {
-        let h = self.preview_rows();
+        let (h, w) = self.preview_size();
+        let colors = self.transcript_colors();
         let Some(v) = self.tabs.as_mut() else { return };
-        v.scroll = (v.scroll as isize).saturating_add(d).clamp(0, v.max_scroll(h) as isize) as usize;
+        let want = (v.scroll as isize).saturating_add(d).max(0) as usize;
+        if d > 0 && !v.in_transcript && v.scroll >= v.max_scroll(h) {
+            if v.transcript.is_none() {
+                let path = v.selected().and_then(|t| t.claude_session.as_deref()).and_then(transcript::find);
+                v.transcript = path.and_then(|p| Transcript::open(p, w, colors));
+            }
+            if let Some(t) = v.transcript.as_mut() {
+                // The newest chunk can be mostly tool output: read on until the panel fills.
+                while t.lines.len() < h && t.load_earlier() {}
+                v.in_transcript = true;
+                v.scroll = 0;
+                return;
+            }
+        }
+        if d < 0 && v.in_transcript && v.scroll == 0 {
+            // Below the transcript's end is the screen, from its top.
+            v.in_transcript = false;
+            v.scroll = v.max_scroll(h);
+            return;
+        }
+        if v.in_transcript {
+            if let Some(t) = v.transcript.as_mut() {
+                while want + h > t.lines.len() && t.load_earlier() {}
+            }
+        }
+        v.scroll = want.min(v.max_scroll(h));
     }
 
     /// `x`: close the selected tab now, no questions, like ctrl+alt+x.
@@ -1265,6 +1331,7 @@ impl App {
         }
         let t = v.list.remove(v.cur);
         v.cur = v.cur.min(v.list.len().saturating_sub(1));
+        v.reset_preview();
         self.closed.insert(t.id.clone());
         let name = if t.label.is_empty() { t.id.clone() } else { t.label.clone() };
         if self.live {
@@ -1295,7 +1362,7 @@ impl App {
     fn key_tabs(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let h = (self.lay.diff.height as isize / 2).max(1);
-        let half = (self.preview_rows() as isize / 2).max(1);
+        let half = (self.preview_size().0 as isize / 2).max(1);
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => self.close_tabs_view(),
             KeyCode::Char('c') if ctrl => self.close_tabs_view(),

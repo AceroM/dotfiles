@@ -9,6 +9,7 @@ mod highlight;
 mod snapshot;
 mod source;
 mod theme;
+mod transcript;
 mod tree;
 mod ui;
 mod viewed;

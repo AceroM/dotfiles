@@ -884,13 +884,7 @@ fn panel(buf: &mut Buffer, r: Rect, title: &str, border: Color, p: &Palette) -> 
 fn tabs_view(app: &App, buf: &mut Buffer, area: Rect) {
     let Some(v) = &app.tabs else { return };
     let p = &app.pal;
-    // Leave the top bar and the status line (close messages land there).
-    let r = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
-    if r.width < 50 || r.height < 6 {
-        return;
-    }
-    let lw = (r.width * 3 / 10).clamp(28, 56);
-    let (left, right) = (Rect::new(r.x, r.y, lw, r.height), Rect::new(r.x + lw, r.y, r.width - lw, r.height));
+    let Some((left, right)) = crate::app::tabs_rects(area) else { return };
 
     let inner = panel(buf, left, &v.space, p.accent, p);
     let max = inner.right().saturating_sub(1);
@@ -922,15 +916,18 @@ fn tabs_view(app: &App, buf: &mut Buffer, area: Rect) {
     }
 
     let mut title = v.selected().map(|t| crate::herdr::tilde(&t.cwd)).unwrap_or_default();
-    // Scrolled up: say how far from the live bottom (d comes back down).
+    if v.in_transcript {
+        title.push_str(" · transcript");
+    }
+    // Scrolled up: say how far from the bottom (d comes back down).
     let up = v.scroll.min(v.window(usize::MAX).len().saturating_sub(right.height.saturating_sub(2) as usize));
     if up > 0 {
         title.push_str(&format!(" · ↑{up}"));
     }
     let inner = panel(buf, right, &title, p.border, p);
     let max = inner.right().saturating_sub(1);
-    // The pane's latest lines, bottom-aligned, like looking at it.
-    for (k, line) in v.preview[v.window(inner.height as usize)].iter().enumerate() {
+    // The pane's latest lines (or the transcript's), bottom-aligned, like looking at it.
+    for (k, line) in v.lines()[v.window(inner.height as usize)].iter().enumerate() {
         let y = inner.y + k as u16;
         let mut x = inner.x + 1;
         for (s, st) in line {
@@ -1000,7 +997,7 @@ const HELP: [&[Section]; 2] = [
                 ("  ^i ^v ^j", "in it: file path · image · newline (⇧⏎ too)"),
                 (";", "this Herdr space's tabs, with a preview"),
                 ("  j k x ; ⏎", "in it: move · close a tab (x or ;) · go to it"),
-                ("  d u", "in it: scroll the preview"),
+                ("  d u", "in it: scroll the preview (a Claude tab's transcript above)"),
                 ("r", "reload the diff"),
                 ("q", "quit"),
             ],
