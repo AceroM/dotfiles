@@ -42,6 +42,8 @@ pub struct Tab {
     /// The agent's session title, else the pane's directory.
     pub title: String,
     pub cwd: String,
+    /// A Claude agent's session ID: its transcript has what its screen doesn't.
+    pub claude_session: Option<String>,
 }
 
 /// The tabs of workspace `ws` in sidebar order, leaving out tab `skip`
@@ -70,7 +72,11 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
             let agent = mine.iter().find_map(|p| agents.get(p["terminal_id"].as_str()?));
             let title = agent.map(|a| str_of(a, "terminal_title_stripped")).filter(|t| !t.is_empty());
             let title = title.unwrap_or_else(|| tilde(&cwd));
-            Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, id }
+            let claude_session = agent
+                .filter(|a| a["agent"] == "claude")
+                .and_then(|a| a["agent_session"]["value"].as_str())
+                .map(String::from);
+            Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, claude_session, id }
         })
         .collect();
     Ok((name, tabs))

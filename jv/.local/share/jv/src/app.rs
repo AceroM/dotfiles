@@ -17,6 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::agent::{self, Field};
 use crate::ansi;
 use crate::herdr;
+use crate::transcript::{self, Transcript};
 use crate::diff::{self, FileDiff, Kind, Status};
 use crate::doc::{self, Doc, Geo, Note, Row};
 use crate::fuzzy;
@@ -231,6 +232,9 @@ pub struct TabsView {
     pub preview: Vec<ansi::Line>,
     /// Rows the preview is scrolled up from the bottom (`u` / `d`).
     pub scroll: usize,
+    /// A Claude tab scrolled past the top of its screen shows its transcript.
+    pub transcript: Option<Transcript>,
+    pub in_transcript: bool,
     fetched: Instant,
 }
 
@@ -239,11 +243,19 @@ impl TabsView {
         self.list.get(self.cur)
     }
 
+    /// What the preview shows: the pane's lines, or the transcript's.
+    pub fn lines(&self) -> &[ansi::Line] {
+        match &self.transcript {
+            Some(t) if self.in_transcript => &t.lines,
+            _ => &self.preview,
+        }
+    }
+
     /// The preview lines shown in `h` rows: bottom-aligned, less the scroll.
     /// Trailing blank lines don't count as content.
     pub fn window(&self, h: usize) -> Range<usize> {
         let blank = |l: &ansi::Line| l.iter().all(|(s, _)| s.trim().is_empty());
-        let end = self.preview.iter().rposition(|l| !blank(l)).map_or(0, |i| i + 1);
+        let end = self.lines().iter().rposition(|l| !blank(l)).map_or(0, |i| i + 1);
         let e = end - self.scroll.min(end.saturating_sub(h));
         e.saturating_sub(h)..e
     }
@@ -1171,6 +1183,8 @@ impl App {
             cur: 0,
             preview: Vec::new(),
             scroll: 0,
+            transcript: None,
+            in_transcript: false,
             fetched: Instant::now(),
         });
         self.mode = Mode::Tabs;
