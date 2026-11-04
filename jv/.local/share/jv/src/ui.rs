@@ -49,6 +49,20 @@ fn put(buf: &mut Buffer, x: u16, y: u16, max_x: u16, s: &str, st: Style) -> u16 
     buf.set_stringn(x, y, s, (max_x - x) as usize, st).0
 }
 
+/// A one-line input from `x`: its text, then the cursor, a bar past the end
+/// or a block on the character it's on (where typing goes in).
+fn input_line(buf: &mut Buffer, x: u16, y: u16, max_x: u16, f: &agent::Field, p: &Palette) {
+    let end = put(buf, x, y, max_x, &f.text, fg(p.bright));
+    if f.cur >= f.text.len() {
+        put(buf, end, y, max_x, "▏", fg(p.accent));
+        return;
+    }
+    let cx = x + f.text[..f.cur].width() as u16;
+    if cx < max_x {
+        buf[(cx, y)].set_style(Style::new().fg(p.bg.c()).bg(p.accent));
+    }
+}
+
 fn fill(buf: &mut Buffer, r: Rect, bg: Color) {
     buf.set_style(r, Style::new().bg(bg));
 }
@@ -196,17 +210,15 @@ fn status(app: &App, buf: &mut Buffer) {
     if app.mode == Mode::Filter {
         let mut x = put(buf, r.x + 1, r.y, max, "filter files ", fg(p.muted));
         x = put(buf, x, r.y, max, "❯ ", fg(p.accent).add_modifier(Modifier::BOLD));
-        x = put(buf, x, r.y, max, &app.input, fg(p.bright));
-        put(buf, x, r.y, max, "▏", fg(p.accent));
+        input_line(buf, x, r.y, max, &app.input, p);
         let info = format!("{}/{} files   ↑↓ move · enter keeps · esc cancels ", app.visible.len(), app.unfiltered);
         put(buf, max.saturating_sub(info.width() as u16), r.y, max, &info, fg(p.muted));
         return;
     }
 
     if app.mode == Mode::Search {
-        let mut x = put(buf, r.x + 1, r.y, max, "/", fg(p.accent).add_modifier(Modifier::BOLD));
-        x = put(buf, x, r.y, max, &app.input, fg(p.bright));
-        put(buf, x, r.y, max, "▏", fg(p.accent));
+        let x = put(buf, r.x + 1, r.y, max, "/", fg(p.accent).add_modifier(Modifier::BOLD));
+        input_line(buf, x, r.y, max, &app.input, p);
         let info = match &app.search {
             Some(s) if !s.matches.is_empty() => format!("{}/{}", s.cur + 1, s.matches.len()),
             Some(_) => "no matches".into(),
@@ -761,9 +773,8 @@ fn goto(app: &App, buf: &mut Buffer, area: Rect) {
     }
     let inner = frame(buf, r, "Go to file", p);
     let max = inner.right().saturating_sub(1);
-    let mut x = put(buf, inner.x + 1, inner.y, max, "❯ ", fg(p.accent));
-    x = put(buf, x, inner.y, max, &app.input, fg(p.bright));
-    put(buf, x, inner.y, max, "▏", fg(p.accent));
+    let x = put(buf, inner.x + 1, inner.y, max, "❯ ", fg(p.accent));
+    input_line(buf, x, inner.y, max, &app.input, p);
     let count = format!("{}/{}", app.goto.len(), app.files.len());
     put(buf, max.saturating_sub(count.width() as u16), inner.y, max, &count, fg(p.dim));
 
@@ -811,7 +822,7 @@ fn goto(app: &App, buf: &mut Buffer, area: Rect) {
 
 /// Screen rows of a prompt: each of its lines wrapped to `w` columns, as
 /// byte ranges into `text`.
-fn prompt_rows(text: &str, w: usize) -> Vec<Range<usize>> {
+pub fn prompt_rows(text: &str, w: usize) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = 0;
     for line in text.split('\n') {
@@ -821,17 +832,27 @@ fn prompt_rows(text: &str, w: usize) -> Vec<Range<usize>> {
     out
 }
 
+/// The agent box's width on a screen `screen_w` wide.
+fn ask_box_width(screen_w: u16) -> u16 {
+    screen_w.saturating_sub(6).min(100)
+}
+
+/// The columns the agent box wraps its text to: inside the border, a column
+/// of padding each side. ↑↓ in the box move by these rows.
+pub fn ask_width(screen_w: u16) -> usize {
+    (ask_box_width(screen_w) as usize).saturating_sub(4).max(8)
+}
+
 /// The agent box (`c`, or `r` in the `;` dialog), centered: a bordered input,
 /// growing with its text. A reply names its tab in the border.
 fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     const MAX_ROWS: usize = 10;
     let p = &app.pal;
-    let w = area.width.saturating_sub(6).min(100);
+    let w = ask_box_width(area.width);
     if w < 20 || area.height < 3 {
         return;
     }
-    // Inside the border, a column of padding each side.
-    let tw = (w as usize).saturating_sub(4).max(8);
+    let tw = ask_width(area.width);
     let field = &app.ask;
     let rows = prompt_rows(&field.text, tw);
     let shown = rows.len().clamp(1, MAX_ROWS).min(area.height as usize - 2);
@@ -1002,6 +1023,7 @@ const HELP: [&[Section]; 2] = [
                 ("/", "tree: filter files · diff: search the text"),
                 ("n N", "next / prev search hit"),
                 ("esc", "clear the filter / search"),
+                ("^l", "in any input: clear what's typed"),
             ],
         ),
         (

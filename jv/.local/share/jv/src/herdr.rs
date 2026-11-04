@@ -50,7 +50,7 @@ pub struct Tab {
 }
 
 /// The tabs of workspace `ws` in sidebar order, leaving out tab `skip`
-/// (jv's own), and the workspace's name.
+/// (jv's own) and tabs that are only another jv or jg, and the workspace's name.
 pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
     let snap = call("session.snapshot", json!({}))?;
     let s = &snap["snapshot"];
@@ -64,7 +64,7 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
     let tabs = list("tabs")
         .iter()
         .filter(|t| t["workspace_id"] == ws && t["tab_id"] != skip)
-        .map(|t| {
+        .filter_map(|t| {
             let id = str_of(t, "tab_id");
             let mine: Vec<&Value> = panes.iter().filter(|p| p["tab_id"] == id.as_str()).collect();
             let pane = focused.get(&id).filter(|p| !p.is_empty()).cloned().or_else(|| mine.first().map(|p| str_of(p, "pane_id")));
@@ -77,6 +77,10 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
                 agents.get(p["terminal_id"].as_str()?).map(|a| (str_of(p, "pane_id"), a))
             };
             let agent = shown.and_then(|p| agent_of(p)).or_else(|| mine.iter().find_map(|p| agent_of(p)));
+            // Another jv or jg with no agent beside it: nothing to read or reply to.
+            if agent.is_none() && mine.iter().any(|p| runs_jv(&str_of(p, "pane_id"))) {
+                return None;
+            }
             let title = agent.as_ref().map(|(_, a)| str_of(a, "terminal_title_stripped")).filter(|t| !t.is_empty());
             let title = title.unwrap_or_else(|| tilde(&cwd));
             let claude_session = agent
@@ -85,10 +89,17 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
                 .and_then(|(_, a)| a["agent_session"]["value"].as_str())
                 .map(String::from);
             let agent_pane = agent.map(|(p, _)| p).filter(|p| !p.is_empty());
-            Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, claude_session, agent_pane, id }
+            Some(Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, claude_session, agent_pane, id })
         })
         .collect();
     Ok((name, tabs))
+}
+
+/// Whether pane `pane` is running jv in the foreground (`jg` is `jv -g`, so
+/// it's jv too). The snapshot doesn't carry processes; this is ~0.3ms a pane.
+fn runs_jv(pane: &str) -> bool {
+    let Ok(r) = call("pane.process_info", json!({ "pane_id": pane })) else { return false };
+    r["process_info"]["foreground_processes"].as_array().is_some_and(|ps| ps.iter().any(|p| p["name"] == "jv"))
 }
 
 /// `/Users/me/x` → `~/x`.

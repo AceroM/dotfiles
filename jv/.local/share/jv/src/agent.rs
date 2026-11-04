@@ -15,7 +15,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const DEFAULT_AGENT: &str = "claude --dangerously-skip-permissions";
 
@@ -293,7 +295,8 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// A text field with a cursor (a byte offset into `text`).
+/// A text field with a cursor (a byte offset into `text`): the agent box, and
+/// the search, filter and go-to inputs.
 #[derive(Default)]
 pub struct Field {
     pub text: String,
@@ -301,6 +304,82 @@ pub struct Field {
 }
 
 impl Field {
+    /// The editing keys every input shares, readline's mostly. Returns true
+    /// when the text changed (every edit adds or removes bytes); a move only
+    /// moves the cursor.
+    pub fn key(&mut self, k: &KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let before = self.text.len();
+        match k.code {
+            // Word jumps: alt/ctrl+←→ arrive as modified arrows, or as ESC b /
+            // ESC f when the terminal sends option as meta.
+            KeyCode::Left if alt || ctrl => self.word_left(),
+            KeyCode::Right if alt || ctrl => self.word_right(),
+            KeyCode::Char('b') if alt => self.word_left(),
+            KeyCode::Char('f') if alt => self.word_right(),
+            KeyCode::Char('d') if alt => self.kill_word_right(),
+            KeyCode::Char('a') if ctrl => self.home(),
+            KeyCode::Char('e') if ctrl => self.end(),
+            KeyCode::Char('b') if ctrl => self.left(),
+            KeyCode::Char('f') if ctrl => self.right(),
+            KeyCode::Char('d') if ctrl => self.delete(),
+            KeyCode::Char('u') if ctrl => self.kill_start(),
+            KeyCode::Char('k') if ctrl => self.kill_end(),
+            KeyCode::Char('w') if ctrl => self.kill_word(),
+            KeyCode::Char('l') if ctrl => self.clear(),
+            KeyCode::Backspace if alt => self.kill_word(),
+            KeyCode::Home => self.home(),
+            KeyCode::End => self.end(),
+            KeyCode::Left => self.left(),
+            KeyCode::Right => self.right(),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Char(c) if !ctrl => self.insert(c.encode_utf8(&mut [0; 4])),
+            _ => {}
+        }
+        self.text.len() != before
+    }
+
+    /// ^l
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cur = 0;
+    }
+
+    /// Replace the text, cursor at its end.
+    pub fn set(&mut self, s: &str) {
+        self.text = s.to_string();
+        self.cur = self.text.len();
+    }
+
+    /// ↑ / ↓ in the wrapped, multi-line agent box: the same column on the
+    /// screen row `dir` away (`rows` as the box draws them). Up from the
+    /// first row goes to the start, down from the last to the end.
+    pub fn vertical(&mut self, rows: &[Range<usize>], dir: isize) {
+        let Some(cr) = rows.iter().rposition(|r| r.start <= self.cur) else { return };
+        let col = self.text[rows[cr].start..self.cur].width();
+        let Some(to) = cr.checked_add_signed(dir).filter(|&i| i < rows.len()) else {
+            self.cur = if dir < 0 { 0 } else { self.text.len() };
+            return;
+        };
+        let row = rows[to].clone();
+        // A row wrapped mid-line ends where the next one starts, and a cursor
+        // there draws on the next row: stop a character short of it.
+        let wrapped = rows.get(to + 1).is_some_and(|n| n.start == row.end);
+        let (mut at, mut w) = (row.start, 0);
+        for (i, c) in self.text[row.clone()].char_indices() {
+            let end = row.start + i + c.len_utf8();
+            w += c.width().unwrap_or(0);
+            if w > col || (wrapped && end == row.end) {
+                break;
+            }
+            at = end;
+        }
+        // Never inside an `[Image #N]` tag.
+        self.cur = image_tags(&self.text).into_iter().find(|(r, _)| r.start < at && at < r.end).map_or(at, |(r, _)| r.start);
+    }
+
     pub fn insert(&mut self, s: &str) {
         self.text.insert_str(self.cur, s);
         self.cur += s.len();

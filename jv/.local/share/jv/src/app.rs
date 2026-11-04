@@ -26,6 +26,7 @@ use crate::highlight::{FileHl, Hl};
 use crate::source::{self, PrMeta, Source};
 use crate::theme::Palette;
 use crate::tree::{self, RowKind};
+use crate::ui;
 use crate::viewed::Viewed;
 
 /// Files with more changed lines than this start folded, like GitHub's
@@ -183,8 +184,8 @@ pub struct App {
     filter_origin: String,
     /// Files the tree would show without the filter.
     pub unfiltered: usize,
-    /// Text being typed in the search prompt or go-to-file picker.
-    pub input: String,
+    /// Text being typed in the search prompt, tree filter or go-to-file picker.
+    pub input: Field,
     pub goto: Vec<(usize, Vec<usize>)>,
     pub goto_cur: usize,
     pub msg: Option<(String, Instant)>,
@@ -344,7 +345,7 @@ impl App {
             filter: String::new(),
             filter_origin: String::new(),
             unfiltered: 0,
-            input: String::new(),
+            input: Field::default(),
             goto: Vec::new(),
             goto_cur: 0,
             msg: None,
@@ -1196,30 +1197,19 @@ impl App {
             KeyCode::Char('i') if ctrl => self.insert_ask_path(),
             KeyCode::Tab => self.insert_ask_path(),
             KeyCode::Char('v') if ctrl => self.paste_image(),
-            // Word jumps: alt/ctrl+←→ arrive as modified arrows, or as ESC b /
-            // ESC f when the terminal sends option as meta.
-            KeyCode::Left if alt || ctrl => f.word_left(),
-            KeyCode::Right if alt || ctrl => f.word_right(),
-            KeyCode::Char('b') if alt => f.word_left(),
-            KeyCode::Char('f') if alt => f.word_right(),
-            KeyCode::Char('d') if alt => f.kill_word_right(),
-            KeyCode::Char('a') if ctrl => f.home(),
-            KeyCode::Char('e') if ctrl => f.end(),
-            KeyCode::Char('b') if ctrl => f.left(),
-            KeyCode::Char('f') if ctrl => f.right(),
-            KeyCode::Char('d') if ctrl => f.delete(),
-            KeyCode::Char('u') if ctrl => f.kill_start(),
-            KeyCode::Char('k') if ctrl => f.kill_end(),
-            KeyCode::Char('w') if ctrl => f.kill_word(),
-            KeyCode::Backspace if alt => f.kill_word(),
-            KeyCode::Home => f.home(),
-            KeyCode::End => f.end(),
-            KeyCode::Left => f.left(),
-            KeyCode::Right => f.right(),
-            KeyCode::Backspace => f.backspace(),
-            KeyCode::Delete => f.delete(),
-            KeyCode::Char(c) if !ctrl => f.insert(c.encode_utf8(&mut [0; 4])),
-            _ => {}
+            // ^l: the whole draft, its images too.
+            KeyCode::Char('l') if ctrl => {
+                f.clear();
+                self.ask_images.clear();
+            }
+            // ↑↓: a row up or down, as the box wraps the text.
+            KeyCode::Up | KeyCode::Down => {
+                let rows = ui::prompt_rows(&f.text, ui::ask_width(self.lay.top.width));
+                f.vertical(&rows, if k.code == KeyCode::Up { -1 } else { 1 });
+            }
+            _ => {
+                f.key(&k);
+            }
         }
     }
 
@@ -1613,7 +1603,7 @@ impl App {
     }
 
     fn update_search(&mut self) {
-        self.search = self.run_search(&self.input.clone());
+        self.search = self.run_search(&self.input.text.clone());
         if self.search.is_some() {
             self.search_from_origin();
         } else {
@@ -1626,7 +1616,7 @@ impl App {
     fn open_filter(&mut self) {
         self.mode = Mode::Filter;
         self.filter_origin = self.filter.clone();
-        self.input = self.filter.clone();
+        self.input.set(&self.filter);
     }
 
     fn set_filter(&mut self, q: &str) {
@@ -1669,13 +1659,13 @@ impl App {
         let mut order = self.visible.clone();
         let shown: HashSet<usize> = order.iter().copied().collect();
         order.extend((0..self.files.len()).filter(|i| !shown.contains(i)));
-        if self.input.trim().is_empty() {
+        if self.input.text.trim().is_empty() {
             self.goto = order.into_iter().map(|i| (i, Vec::new())).collect();
         } else {
             let mut scored: Vec<(i64, usize, usize, Vec<usize>)> = order
                 .iter()
                 .enumerate()
-                .filter_map(|(rank, &i)| fuzzy::score(&self.input, &self.files[i].path).map(|(s, p)| (s, rank, i, p)))
+                .filter_map(|(rank, &i)| fuzzy::score(&self.input.text, &self.files[i].path).map(|(s, p)| (s, rank, i, p)))
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             self.goto = scored.into_iter().map(|(_, _, i, p)| (i, p)).collect();
@@ -2109,22 +2099,11 @@ impl App {
         }
     }
 
+    /// Typing in the search, filter or go-to input, with the agent box's
+    /// editing keys (←→, ^a ^e, ^w, ^l clears…). True when the text changed,
+    /// so the caller re-runs what it drives.
     fn edit_input(&mut self, k: &KeyEvent) -> bool {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Backspace => {
-                self.input.pop();
-            }
-            KeyCode::Char('u') if ctrl => self.input.clear(),
-            KeyCode::Char('w') if ctrl => {
-                let t = self.input.trim_end().len();
-                let cut = self.input[..t].rfind(|c: char| c.is_whitespace() || c == '/').map_or(0, |i| i + 1);
-                self.input.truncate(cut);
-            }
-            KeyCode::Char(c) if !ctrl => self.input.push(c),
-            _ => return false,
-        }
-        true
+        self.input.key(k)
     }
 
     fn key_search(&mut self, k: KeyEvent) {
@@ -2176,7 +2155,7 @@ impl App {
             KeyCode::Char('p' | 'k') if ctrl => self.tree_move(-1),
             _ => {
                 if self.edit_input(&k) {
-                    let q = self.input.clone();
+                    let q = self.input.text.clone();
                     self.set_filter(&q);
                 }
             }
