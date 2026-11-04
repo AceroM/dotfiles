@@ -1014,6 +1014,7 @@ const HELP: [&[Section]; 2] = [
                 ("2x 3x click", "copy a word · a line"),
                 ("c", "ask an agent in a new Herdr tab"),
                 ("  ^i ^v ^j", "in it: file path · image · newline (⇧⏎ too)"),
+                ("C", "commit & push all in a new Herdr tab"),
                 (";", "this Herdr space's tabs, with a preview"),
                 ("  j k x ; ⏎", "in it: move · close a tab (x or ;) · go to it"),
                 ("  5j 3k 12G", "in it: counts, by the relative numbers · tab 12"),

@@ -1,6 +1,7 @@
 mod agent;
 mod ansi;
 mod app;
+mod commit;
 mod diff;
 mod doc;
 mod fuzzy;
@@ -129,8 +130,10 @@ fn parse_cli() -> Result<Cli, String> {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(String::as_str) == Some(agent::CHILD_FLAG) {
-        return agent::child(&argv[2..]);
+    match argv.get(1).map(String::as_str) {
+        Some(agent::CHILD_FLAG) => return agent::child(&argv[2..]),
+        Some(commit::CHILD_FLAG) => return commit::child(&argv[2..]),
+        _ => {}
     }
     let cli = match parse_cli() {
         Ok(c) => c,

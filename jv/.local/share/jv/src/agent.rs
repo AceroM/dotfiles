@@ -5,6 +5,7 @@
 //! `$JV_AGENT` names another, e.g. `JV_AGENT="codex --yolo"`: the first word
 //! is Herdr's agent kind, the rest go to the agent.
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::ops::Range;
 use std::os::unix::process::CommandExt;
@@ -37,13 +38,17 @@ pub fn spec() -> (String, Vec<String>) {
 /// Start the agent in the background. The outcome comes back on `tx` as a
 /// status-bar line.
 pub fn spawn(prompt: String, cwd: PathBuf, tx: mpsc::Sender<String>) {
-    let kind = spec().0;
+    background(vec![CHILD_FLAG.into(), cwd.into(), prompt.into()], spec().0, tx);
+}
+
+/// Run `jv ARGS` (one of the internal child flags) in the background. Its one
+/// stdout line comes back on `tx` as a status-bar line; `what` names the job
+/// when it can't start.
+pub fn background(args: Vec<OsString>, what: String, tx: mpsc::Sender<String>) {
     thread::spawn(move || {
         let child = std::env::current_exe().and_then(|exe| {
             Command::new(exe)
-                .arg(CHILD_FLAG)
-                .arg(&cwd)
-                .arg(&prompt)
+                .args(&args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -53,16 +58,21 @@ pub fn spawn(prompt: String, cwd: PathBuf, tx: mpsc::Sender<String>) {
         });
         let msg = match child.and_then(|c| c.wait_with_output()) {
             Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-            Err(e) => format!("couldn't start {kind}: {e}"),
+            Err(e) => format!("couldn't start {what}: {e}"),
         };
-        let _ = tx.send(if msg.is_empty() { format!("{kind} didn't start") } else { msg });
+        let _ = tx.send(if msg.is_empty() { format!("{what} didn't start") } else { msg });
     });
 }
 
 /// The `--start-agent` process: one line on stdout says how it went.
 pub fn child(args: &[String]) -> ExitCode {
     let [cwd, prompt] = args else { return ExitCode::from(2) };
-    let res = start(prompt, Path::new(cwd));
+    report(start(prompt, Path::new(cwd)))
+}
+
+/// A child process's ending: its outcome as the one stdout line `background`
+/// hands back.
+pub fn report(res: Result<String, String>) -> ExitCode {
     let _ = writeln!(std::io::stdout(), "{}", res.as_ref().unwrap_or_else(|e| e));
     if res.is_ok() {
         ExitCode::SUCCESS
@@ -129,7 +139,7 @@ pub fn reply(pane: String, prompt: String, label: String, tx: mpsc::Sender<Strin
 }
 
 /// Run `herdr ARGS`: stdout on success, else the error's message.
-fn herdr(args: &[&str]) -> Result<String, String> {
+pub fn herdr(args: &[&str]) -> Result<String, String> {
     let out = Command::new("herdr")
         .args(args)
         .stdin(Stdio::null())

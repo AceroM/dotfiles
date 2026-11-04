@@ -15,6 +15,7 @@ use ratatui::style::Style;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent::{self, Field};
+use crate::commit;
 use crate::ansi;
 use crate::herdr;
 use crate::transcript::{self, Transcript};
@@ -1101,6 +1102,24 @@ impl App {
         self.show_box(None);
     }
 
+    /// `C`: commit and push everything in a new Herdr tab (commit.rs).
+    fn commit(&mut self) {
+        if !agent::in_herdr() {
+            self.flash("C commits & pushes in a new Herdr tab · run jv inside Herdr");
+            return;
+        }
+        let Some(root) = self.repo_root.clone() else {
+            self.flash("C needs a git repo");
+            return;
+        };
+        if self.live {
+            commit::spawn(&root, self.bg_tx.clone());
+        } else {
+            self.copied = Some(commit::SCRIPT.to_string());
+        }
+        self.flash("committing & pushing in a new tab…");
+    }
+
     /// `r` in the `;` dialog: the box again, aimed at the selected tab's agent.
     fn open_reply(&mut self) {
         let Some(t) = self.tabs.as_ref().and_then(|v| v.selected()) else { return };
@@ -2044,6 +2063,7 @@ impl App {
             (KeyCode::Char('Y'), _) => self.copy(true),
             (KeyCode::Char('r'), false) => self.reload(),
             (KeyCode::Char('c'), false) => self.open_ask(sel.as_ref()),
+            (KeyCode::Char('C'), false) => self.commit(),
             (KeyCode::Char(';'), false) => self.open_tabs(),
             // The focused pane's filter or search goes first, then the other's.
             (KeyCode::Esc, _) => {
