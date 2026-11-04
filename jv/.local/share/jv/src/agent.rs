@@ -9,7 +9,7 @@ use std::io::Write;
 use std::ops::Range;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -106,6 +106,28 @@ fn start(prompt: &str, cwd: &Path) -> Result<String, String> {
     Ok(format!("{kind} is on it in tab {label}"))
 }
 
+/// `r` in the `;` dialog: hand `prompt` to the agent running in `pane`. The
+/// outcome comes back on `tx`. herdr runs as its own process group, so
+/// quitting jv right after Enter still gets the reply there.
+pub fn reply(pane: String, prompt: String, label: String, tx: mpsc::Sender<String>) {
+    thread::spawn(move || {
+        // No `--`: herdr takes a prompt starting with - as the prompt, and `--` as an option.
+        let out = Command::new("herdr")
+            .args(["agent", "prompt", &pane, &prompt])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .output();
+        let msg = match out {
+            Ok(o) if o.status.success() => format!("sent to {label}"),
+            Ok(o) => format!("couldn't reply to {label}: {}", failure(&o)),
+            Err(e) => format!("couldn't reply to {label}: herdr: {e}"),
+        };
+        let _ = tx.send(msg);
+    });
+}
+
 /// Run `herdr ARGS`: stdout on success, else the error's message.
 fn herdr(args: &[&str]) -> Result<String, String> {
     let out = Command::new("herdr")
@@ -113,10 +135,15 @@ fn herdr(args: &[&str]) -> Result<String, String> {
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("herdr: {e}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if out.status.success() {
-        return Ok(stdout);
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
+    Err(failure(&out))
+}
+
+/// A failed herdr call's error message.
+fn failure(out: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&out.stdout);
     // Errors are JSON on stdout or stderr: {"error":{"code":…,"message":…}}.
     let all = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
     let err = all.lines().find_map(|l| serde_json::from_str::<Value>(l).ok()).map(|v| v["error"].clone());
@@ -124,7 +151,11 @@ fn herdr(args: &[&str]) -> Result<String, String> {
     let (code, msg) = (field("code"), field("message"));
     let msg = if msg.is_empty() { all.trim().lines().next().unwrap_or("").to_string() } else { msg };
     // Keep the code in the text: callers match on it (agent_pane_busy).
-    Err(if code.is_empty() || msg.contains(&code) { msg } else { format!("{msg} ({code})") })
+    if code.is_empty() || msg.contains(&code) {
+        msg
+    } else {
+        format!("{msg} ({code})")
+    }
 }
 
 // ---- images ---------------------------------------------------------------

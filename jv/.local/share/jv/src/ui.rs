@@ -6,7 +6,7 @@ use std::ops::Range;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -28,11 +28,14 @@ pub fn draw(app: &App, frame: &mut Frame) {
     }
     diff(app, buf);
     status(app, buf);
+    // The `;` dialog stays up under a `c` box opened from it.
+    if app.tabs.is_some() && matches!(app.mode, Mode::Tabs | Mode::Ask) {
+        tabs_view(app, buf, area);
+    }
     match app.mode {
         Mode::Help => help(app, buf, area),
         Mode::GoTo => goto(app, buf, area),
         Mode::Ask => ask(app, buf, area),
-        Mode::Tabs => tabs_view(app, buf, area),
         _ => {}
     }
 }
@@ -818,7 +821,8 @@ fn prompt_rows(text: &str, w: usize) -> Vec<Range<usize>> {
     out
 }
 
-/// The `c` box, centered: just a bordered input, growing with its text.
+/// The agent box (`c`, or `r` in the `;` dialog), centered: a bordered input,
+/// growing with its text. A reply names its tab in the border.
 fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     const MAX_ROWS: usize = 10;
     let p = &app.pal;
@@ -834,11 +838,17 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     let h = shown as u16 + 2;
     let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
     Clear.render(r, buf);
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(fg(p.dim))
-        .style(Style::new().bg(p.panel))
-        .render(r, buf);
+    let mut block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(p.dim)).style(Style::new().bg(p.panel));
+    // A reply says who it goes to.
+    if let Some(to) = &app.reply_to {
+        let name = truncate(&to.label, (w as usize).saturating_sub(16));
+        block = block.title(Line::from(vec![
+            Span::styled(" reply to ", fg(p.muted)),
+            Span::styled(name, fg(p.accent)),
+            Span::raw(" "),
+        ]));
+    }
+    block.render(r, buf);
     let (tx, y0, max) = (r.x + 2, r.y + 1, r.right().saturating_sub(2));
 
     // Cursor: on the last row starting at or before it. At a wrap point that's
@@ -893,12 +903,21 @@ fn tabs_view(app: &App, buf: &mut Buffer, area: Rect) {
     }
     let h = inner.height as usize;
     let top = (v.cur + 1).saturating_sub(h);
+    let nw = v.list.len().max(1).to_string().len();
     for (i, t) in v.list.iter().enumerate().skip(top).take(h) {
         let y = inner.y + (i - top) as u16;
         let on = i == v.cur;
         if on {
             fill(buf, Rect::new(inner.x, y, inner.width, 1), p.sel);
         }
+        // Relative numbers, as in the tree: the cursor row its own number,
+        // the rest their distance (5j gets there).
+        let (n, nst) = if on {
+            (i + 1, fg(p.yellow).add_modifier(Modifier::BOLD))
+        } else {
+            (i.abs_diff(v.cur), fg(p.dim))
+        };
+        let x = put(buf, inner.x + 1, y, max, &format!("{n:>nw$}"), nst) + 1;
         let dot = match t.status.as_str() {
             "working" => p.yellow,
             "blocked" => p.red,
@@ -906,7 +925,7 @@ fn tabs_view(app: &App, buf: &mut Buffer, area: Rect) {
             "idle" => p.green_dim,
             _ => p.dim,
         };
-        let mut x = put(buf, inner.x + 1, y, max, "●", fg(dot)) + 1;
+        let mut x = put(buf, x, y, max, "●", fg(dot)) + 1;
         let label = if t.label.is_empty() { t.id.as_str() } else { t.label.as_str() };
         let lst = if on { fg(p.bright).add_modifier(Modifier::BOLD) } else { fg(p.fg) };
         x = put(buf, x, y, max, &truncate(label, max.saturating_sub(x) as usize), lst) + 2;
@@ -997,6 +1016,8 @@ const HELP: [&[Section]; 2] = [
                 ("  ^i ^v ^j", "in it: file path · image · newline (⇧⏎ too)"),
                 (";", "this Herdr space's tabs, with a preview"),
                 ("  j k x ; ⏎", "in it: move · close a tab (x or ;) · go to it"),
+                ("  5j 3k 12G", "in it: counts, by the relative numbers · tab 12"),
+                ("  c r", "in it: new agent · reply to the selected tab's"),
                 ("  d u", "in it: scroll the preview (a Claude tab's transcript above)"),
                 ("r", "reload the diff"),
                 ("q", "quit"),

@@ -44,6 +44,9 @@ pub struct Tab {
     pub cwd: String,
     /// A Claude agent's session ID: its transcript has what its screen doesn't.
     pub claude_session: Option<String>,
+    /// The pane the tab's agent runs in (`r` replies to it): the shown pane's
+    /// agent, else the first one in the tab.
+    pub agent_pane: Option<String>,
 }
 
 /// The tabs of workspace `ws` in sidebar order, leaving out tab `skip`
@@ -68,15 +71,21 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
             let shown = mine.iter().find(|p| Some(str_of(p, "pane_id")) == pane).or(mine.first());
             let cwd = shown.map(|p| str_of(p, "foreground_cwd")).filter(|c| !c.is_empty());
             let cwd = cwd.or_else(|| shown.map(|p| str_of(p, "cwd"))).unwrap_or_default();
-            // The agent in this tab, if any: its title says what the tab is doing.
-            let agent = mine.iter().find_map(|p| agents.get(p["terminal_id"].as_str()?));
-            let title = agent.map(|a| str_of(a, "terminal_title_stripped")).filter(|t| !t.is_empty());
+            // The agent in this tab, if any (the shown pane's first): its title
+            // says what the tab is doing.
+            let agent_of = |p: &Value| -> Option<(String, &Value)> {
+                agents.get(p["terminal_id"].as_str()?).map(|a| (str_of(p, "pane_id"), a))
+            };
+            let agent = shown.and_then(|p| agent_of(p)).or_else(|| mine.iter().find_map(|p| agent_of(p)));
+            let title = agent.as_ref().map(|(_, a)| str_of(a, "terminal_title_stripped")).filter(|t| !t.is_empty());
             let title = title.unwrap_or_else(|| tilde(&cwd));
             let claude_session = agent
-                .filter(|a| a["agent"] == "claude")
-                .and_then(|a| a["agent_session"]["value"].as_str())
+                .as_ref()
+                .filter(|(_, a)| a["agent"] == "claude")
+                .and_then(|(_, a)| a["agent_session"]["value"].as_str())
                 .map(String::from);
-            Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, claude_session, id }
+            let agent_pane = agent.map(|(p, _)| p).filter(|p| !p.is_empty());
+            Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, claude_session, agent_pane, id }
         })
         .collect();
     Ok((name, tabs))

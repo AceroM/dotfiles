@@ -53,7 +53,8 @@ pub enum Mode {
     Filter,
     GoTo,
     Help,
-    /// The `c` box: a prompt for an agent in a new Herdr tab.
+    /// The `c` box: a prompt for an agent in a new Herdr tab. Opened from
+    /// the `;` dialog it sits on top of it, and closing it goes back there.
     Ask,
     /// The `;` dialog: this Herdr space's other tabs.
     Tabs,
@@ -205,10 +206,16 @@ pub struct App {
     pub live: bool,
     /// The last text copied, whether or not it reached the clipboard.
     pub copied: Option<String>,
-    /// The `c` box's draft, kept across Esc until it's sent.
+    /// The agent box's draft, kept across Esc until it's sent.
     pub ask: Field,
     /// Files behind the draft's `[Image #N]` tags (N - 1 indexes this).
     ask_images: Vec<PathBuf>,
+    /// Who the box sends to: None starts an agent in a new tab (`c`), Some
+    /// replies to one already running (`r` in the `;` dialog).
+    pub reply_to: Option<ReplyTo>,
+    /// The other box's draft (a reply's while `c` is up, and the other way
+    /// round), swapped back in when it opens again.
+    parked: (Field, Vec<PathBuf>),
     /// What ^i puts in the box: the file being looked at when it opened.
     pub ask_path: Option<String>,
     /// The agent kind `c` starts (`$JV_AGENT`'s first word).
@@ -232,6 +239,13 @@ pub fn tabs_rects(area: Rect) -> Option<(Rect, Rect)> {
     }
     let lw = (r.width * 3 / 10).clamp(28, 56);
     Some((Rect::new(r.x, r.y, lw, r.height), Rect::new(r.x + lw, r.y, r.width - lw, r.height)))
+}
+
+/// An `r` reply's destination: the agent's pane, and its tab's name.
+#[derive(Clone)]
+pub struct ReplyTo {
+    pub pane: String,
+    pub label: String,
 }
 
 /// `;`: the other tabs in this Herdr space, and what the selected one shows.
@@ -347,6 +361,8 @@ impl App {
             copied: None,
             ask: Field::default(),
             ask_images: Vec::new(),
+            reply_to: None,
+            parked: (Field::default(), Vec::new()),
             ask_path: None,
             ask_kind: agent::spec().0,
             ask_cwd,
@@ -1082,12 +1098,39 @@ impl App {
         }
         let sel_file = sel.filter(|s| s.shown).and_then(|s| self.doc.rows.get(s.anchor.min(s.head).row)?.file());
         self.ask_path = sel_file.or_else(|| self.cur_file()).map(|f| self.files[f].path.clone());
+        self.show_box(None);
+    }
+
+    /// `r` in the `;` dialog: the box again, aimed at the selected tab's agent.
+    fn open_reply(&mut self) {
+        let Some(t) = self.tabs.as_ref().and_then(|v| v.selected()) else { return };
+        let label = if t.label.is_empty() { t.id.clone() } else { t.label.clone() };
+        let Some(pane) = t.agent_pane.clone() else {
+            self.flash(format!("no agent in {label} to reply to"));
+            return;
+        };
+        self.ask_path = self.cur_file().map(|f| self.files[f].path.clone());
+        self.show_box(Some(ReplyTo { pane, label }));
+    }
+
+    /// Open the agent box for `to`, with that kind of box's draft.
+    fn show_box(&mut self, to: Option<ReplyTo>) {
+        if self.reply_to.is_some() != to.is_some() {
+            std::mem::swap(&mut self.ask, &mut self.parked.0);
+            std::mem::swap(&mut self.ask_images, &mut self.parked.1);
+        }
+        self.reply_to = to;
         self.ask.end();
         self.mode = Mode::Ask;
     }
 
+    /// Leave the agent box: back to the `;` dialog if it's open under it.
+    fn close_ask(&mut self) {
+        self.mode = if self.tabs.is_some() { Mode::Tabs } else { Mode::Normal };
+    }
+
     fn send_ask(&mut self) {
-        self.mode = Mode::Normal;
+        self.close_ask();
         let text = self.ask.text.trim();
         if text.is_empty() {
             return;
@@ -1095,6 +1138,15 @@ impl App {
         let prompt = agent::with_images(text, &self.ask_images);
         self.ask = Field::default();
         self.ask_images.clear();
+        if let Some(to) = self.reply_to.clone() {
+            self.flash(format!("replying to {}…", to.label));
+            if self.live {
+                agent::reply(to.pane, prompt, to.label, self.bg_tx.clone());
+            } else {
+                self.copied = Some(prompt);
+            }
+            return;
+        }
         if self.live {
             agent::spawn(prompt, self.ask_cwd.clone(), self.bg_tx.clone());
         } else {
@@ -1114,8 +1166,8 @@ impl App {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let f = &mut self.ask;
         match k.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Char('c') if ctrl => self.mode = Mode::Normal,
+            KeyCode::Esc => self.close_ask(),
+            KeyCode::Char('c') if ctrl => self.close_ask(),
             // Newline: shift+Enter (the kitty keyboard protocol tells it from
             // Enter; see main.rs), alt+Enter, or ^j anywhere.
             KeyCode::Enter if alt || k.modifiers.contains(KeyModifiers::SHIFT) => f.insert("\n"),
@@ -1359,11 +1411,37 @@ impl App {
         self.close_tabs_view();
     }
 
+    /// A digit of a vim count (5j, 12G): true when `k` was one. A leading 0
+    /// is its own key.
+    fn count_digit(&mut self, k: &KeyEvent) -> bool {
+        let KeyCode::Char(c @ '0'..='9') = k.code else { return false };
+        if k.modifiers.contains(KeyModifiers::CONTROL) || (c == '0' && self.count.is_none()) {
+            return false;
+        }
+        let d = c as usize - '0' as usize;
+        self.count = Some((self.count.unwrap_or(0) * 10 + d).min(99_999));
+        true
+    }
+
+    /// Tab `n` (1-based) in the `;` list, as `12G` goes to row 12 in the tree.
+    fn tabs_go(&mut self, n: usize) {
+        let cur = self.tabs.as_ref().map_or(0, |v| v.cur) as isize;
+        self.tabs_move(n.saturating_sub(1) as isize - cur);
+    }
+
     fn key_tabs(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let h = (self.lay.diff.height as isize / 2).max(1);
         let half = (self.preview_size().0 as isize / 2).max(1);
+        // Counts as in the tree: 5j / 3k by the relative numbers, 12G to tab 12.
+        if self.count_digit(&k) {
+            return;
+        }
+        let count = self.count.take();
+        let n = count.unwrap_or(1).max(1) as isize;
         match k.code {
+            // Esc drops a half-typed count before it closes the dialog.
+            KeyCode::Esc if count.is_some() => {}
             KeyCode::Esc | KeyCode::Char('q') => self.close_tabs_view(),
             KeyCode::Char('c') if ctrl => self.close_tabs_view(),
             KeyCode::Char('d') if ctrl => self.tabs_move(h),
@@ -1371,12 +1449,17 @@ impl App {
             // d / u: the preview, half a panel at a time (as in the diff).
             KeyCode::Char('d') => self.preview_scroll(-half),
             KeyCode::Char('u') => self.preview_scroll(half),
-            KeyCode::Char('j') | KeyCode::Down => self.tabs_move(1),
-            KeyCode::Char('k') | KeyCode::Up => self.tabs_move(-1),
+            KeyCode::Char('j') | KeyCode::Down => self.tabs_move(n),
+            KeyCode::Char('k') | KeyCode::Up => self.tabs_move(-n),
+            KeyCode::Char('g' | 'G') | KeyCode::Home | KeyCode::End if count.is_some() => self.tabs_go(n as usize),
             KeyCode::Char('g') | KeyCode::Home => self.tabs_move(isize::MIN),
             KeyCode::Char('G') | KeyCode::End => self.tabs_move(isize::MAX),
             // `;` again closes a tab too, so ;;; clears tabs from the home row.
             KeyCode::Char('x' | ';') => self.close_selected_tab(),
+            // The agent box, over this dialog: c for a new agent (its tab shows
+            // up in the list), r to reply to the selected tab's.
+            KeyCode::Char('c') => self.open_ask(None),
+            KeyCode::Char('r') => self.open_reply(),
             KeyCode::Enter => self.focus_selected_tab(),
             _ => {}
         }
@@ -1882,13 +1965,9 @@ impl App {
             Mode::Normal => {}
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        // Vim counts: 5j, 3J, 2}, 12G. A leading 0 is its own key.
-        if let (KeyCode::Char(c @ '0'..='9'), false) = (k.code, ctrl) {
-            if c != '0' || self.count.is_some() {
-                let d = c as usize - '0' as usize;
-                self.count = Some((self.count.unwrap_or(0) * 10 + d).min(99_999));
-                return Act::None;
-            }
+        // Vim counts: 5j, 3J, 2}, 12G.
+        if self.count_digit(&k) {
+            return Act::None;
         }
         let count = self.count.take();
         let n = count.unwrap_or(1).max(1) as isize;
