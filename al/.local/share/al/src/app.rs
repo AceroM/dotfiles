@@ -1,12 +1,13 @@
 //! State and keys: jv's `;` dialog on its own. j/k with counts and relative
 //! numbers, J/K through the preview (a Claude tab's transcript above its
-//! screen), x or ; to close, c / r for the agent box, ⏎ to go (al stays
-//! open), y / Y to copy the tab's pane and session IDs. `d` drafts a prompt:
+//! screen), x or ; to close, c / r for the agent box, n to run a shell
+//! command in a new tab, ⏎ to go (al stays open), y / Y to copy the tab's pane and session IDs. `d` drafts a prompt:
 //! it waits on top of the tabs (drafts.rs) until ⏎ starts its agent. A draft
 //! reads as a page in the preview, a centered column with its images
-//! (gfx.rs), and `d` / `e` write it right there. In the preview, the mouse
-//! marks text to copy as in Codex (select.rs), and ctrl-click opens a link
-//! (links.rs).
+//! (gfx.rs), and `d` / `e` write it right there; the page takes the mouse as
+//! a text area does (a click writes there, a drag selects). Elsewhere in the
+//! preview, the mouse marks text to copy as in Codex (select.rs), and
+//! ctrl-click opens a link (links.rs).
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -52,7 +53,7 @@ pub enum Mode {
     /// Typing the `/` filter.
     Filter,
     /// The agent box: `c` for a new agent, `r` to reply to the selected
-    /// tab's agent, both in a box over the middle; `d` for a draft and `e`
+    /// tab's agent, `n` for a shell command, all in a box over the middle; `d` for a draft and `e`
     /// to change one, written on the draft's page in the preview.
     Ask,
     Help,
@@ -81,15 +82,18 @@ pub enum Target {
     Edit(String),
     /// `r`: an agent already running.
     Reply(ReplyTo),
+    /// `n`: a shell command, typed into a new tab's shell.
+    Command,
 }
 
 impl Target {
-    /// Which kept text the box shows: `c` its own, a reply its own. A draft
-    /// is its own text, kept in the draft.
+    /// Which kept text the box shows: `c` its own, a reply its own, `n` its
+    /// own. A draft is its own text, kept in the draft.
     fn slot(&self) -> Option<usize> {
         match self {
             Target::Agent => Some(0),
             Target::Reply(_) => Some(1),
+            Target::Command => Some(2),
             Target::Edit(_) => None,
         }
     }
@@ -112,7 +116,7 @@ pub struct ReplyTo {
 }
 
 pub struct Opts {
-    /// Where `c` starts its agent.
+    /// Where `c` starts its agent, and `n` its command.
     pub cwd: PathBuf,
     /// What ^i / Tab puts in the agent box (jv passes the file it's on).
     pub path: Option<String>,
@@ -223,7 +227,7 @@ pub struct App {
     /// Where the box's text goes.
     pub target: Target,
     /// The texts of the boxes not open (Target::slot), swapped in when they open again.
-    parked: [(Field, Vec<PathBuf>); 2],
+    parked: [(Field, Vec<PathBuf>); 3],
     /// What ^c last cleared from the open box: ^z brings it back.
     cleared: Option<(Field, Vec<PathBuf>)>,
     pub ask_path: Option<String>,
@@ -241,6 +245,14 @@ pub struct App {
     press: Option<Spot>,
     /// The preview's last press: when, where, and how many in a row.
     last_press: Option<(Instant, u16, u16, u8)>,
+    /// The button down on the page being written: what the press took (a
+    /// place, a word, a line) and how many presses, so a drag selects on by
+    /// the same steps.
+    page_press: Option<(Range<usize>, u8)>,
+    /// The cursor the page last scrolled to keep in view (place, text
+    /// length, selection, width): it follows the cursor, and in between the
+    /// wheel scrolls it freely.
+    followed: Option<(usize, usize, Option<usize>, usize)>,
     /// The links on the preview's visible lines.
     pub links: Vec<Link>,
     finder: Finder,
@@ -315,6 +327,8 @@ impl App {
             sel: None,
             press: None,
             last_press: None,
+            page_press: None,
+            followed: None,
             links: Vec::new(),
             finder: Finder::default(),
             gfx: None,
@@ -833,11 +847,88 @@ impl App {
         let rows = ui::word_rows(&text, w);
         let cr = rows.iter().rposition(|r| r.start <= self.ask.cur).unwrap_or(0);
         self.caret = Some((cr, text[rows[cr].start..self.ask.cur].width()));
+        // Only when the cursor moved: the wheel can leave it out of view.
+        let now = (self.ask.cur, text.len(), self.ask.anchor, w);
+        if self.followed == Some(now) {
+            return;
+        }
+        self.followed = Some(now);
         if cr < self.scroll {
             self.scroll = cr;
         } else if cr >= self.scroll + h {
             self.scroll = cr + 1 - h;
         }
+    }
+
+    /// The place in the page's text under screen cell (x, y): on its rows
+    /// as drawn, the nearest row above or below the text column (`drag`:
+    /// the row past it, so the page scrolls along), its start to the left,
+    /// its end to the right, the text's end under the last row.
+    fn page_pos(&self, x: u16, y: u16, drag: bool) -> Option<usize> {
+        let t = self.preview_text()?;
+        let rows = ui::word_rows(&self.ask.text, t.width as usize);
+        let w = self.window(t.height as usize);
+        let line = if y < t.y {
+            if drag { w.start.saturating_sub(1) } else { w.start }
+        } else if y >= t.bottom() {
+            if drag { w.end } else { w.end.saturating_sub(1) }
+        } else {
+            w.start + (y - t.y) as usize
+        };
+        Some(self.ask.pos_at(&rows, line, x.saturating_sub(t.x) as usize))
+    }
+
+    /// What a press (or a drag on from one) at `at` takes: the place, its
+    /// word, or its line, by the presses in a row.
+    fn page_span(&self, at: usize, n: u8) -> Range<usize> {
+        match n {
+            1 => at..at,
+            2 => self.ask.word_at(at),
+            _ => self.ask.line_at(at),
+        }
+    }
+
+    /// A press on the page being written, as in a text area: the cursor
+    /// there, a second on the cell its word, a third its line. With shift,
+    /// the selection runs there from the cursor.
+    fn press_page(&mut self, x: u16, y: u16, shift: bool) {
+        let n = self.count_press(x, y);
+        let Some(at) = self.page_pos(x, y, false) else { return };
+        if shift && n == 1 {
+            let from = self.ask.anchor.unwrap_or(self.ask.cur);
+            self.ask.select_from(from, at);
+            self.page_press = Some((from..from, 1));
+            return;
+        }
+        let span = self.page_span(at, n);
+        self.ask.select(span.clone());
+        self.page_press = Some((span, n));
+    }
+
+    /// Dragging on the page: the selection from the press to here, by its
+    /// steps (words after a double-click), back from its end when it's
+    /// above the press.
+    fn drag_page(&mut self, x: u16, y: u16) {
+        let Some((press, n)) = self.page_press.clone() else { return };
+        let Some(at) = self.page_pos(x, y, true) else { return };
+        let span = self.page_span(at, n);
+        if at < press.start {
+            self.ask.select_from(press.end, span.start);
+        } else {
+            self.ask.select_from(press.start, span.end.max(press.end));
+        }
+    }
+
+    /// A click on a draft's page while reading it: write it, the cursor
+    /// where the click was, the page left where it was scrolled.
+    fn click_draft(&mut self, x: u16, y: u16) {
+        let scroll = self.scroll;
+        self.edit_draft();
+        if !self.page_editing() {
+            return;
+        }
+        self.scroll = scroll;
+        self.press_page(x, y, false);
     }
 
     /// A draft's page: its prompt, wrapped at its words, then under it each
@@ -1043,11 +1134,7 @@ impl App {
     /// A press in the preview: the start of a drag, or the second or third
     /// on one cell, a word or a line.
     fn press_at(&mut self, x: u16, y: u16) {
-        let n = match self.last_press {
-            Some((at, px, py, n)) if at.elapsed() < PRESS_REPEAT && (px, py) == (x, y) => n % 3 + 1,
-            _ => 1,
-        };
-        self.last_press = Some((Instant::now(), x, y, n));
+        let n = self.count_press(x, y);
         self.clear_sel();
         let Some(s) = self.spot_at(x, y) else { return };
         match n {
@@ -1055,6 +1142,16 @@ impl App {
             2 => self.sel = select::word(&self.lines()[s.line], s.line, s.col),
             _ => self.sel = Some(Sel::line(s.line)),
         }
+    }
+
+    /// The presses on cell (x, y) in a row, this one counted: 1, 2, 3, 1 …
+    fn count_press(&mut self, x: u16, y: u16) -> u8 {
+        let n = match self.last_press {
+            Some((at, px, py, n)) if at.elapsed() < PRESS_REPEAT && (px, py) == (x, y) => n % 3 + 1,
+            _ => 1,
+        };
+        self.last_press = Some((Instant::now(), x, y, n));
+        n
     }
 
     /// Dragging: the mark runs from the press to here. Past the preview's
@@ -1266,8 +1363,10 @@ impl App {
             KeyCode::Char('u') => self.undo(),
             // The agent box: c for a new agent (its tab shows up in the
             // list), d for a draft (it shows up on top), e to change a
-            // draft, r to reply to the selected tab's agent.
+            // draft, r to reply to the selected tab's agent. n: the same box
+            // for a shell command, run in a new tab.
             KeyCode::Char('c') => self.show_box(Target::Agent),
+            KeyCode::Char('n') => self.show_box(Target::Command),
             KeyCode::Char('d') => self.new_draft(),
             KeyCode::Char('e') => self.edit_draft(),
             // l, vim's right: from the list into the selected draft's page.
@@ -1447,6 +1546,8 @@ impl App {
         }
         self.target = to;
         self.ask.end();
+        self.followed = None;
+        self.page_press = None;
         self.cleared = None;
         self.mode = Mode::Ask;
         // The box is what's happening now: an old toast would sit on it.
@@ -1485,6 +1586,16 @@ impl App {
         let text = self.ask.text.trim().to_string();
         if text.is_empty() {
             return;
+        }
+        if matches!(self.target, Target::Command) {
+            self.ask = Field::default();
+            self.ask_images.clear();
+            if self.live {
+                agent::run(text, self.ask_cwd.clone(), self.bg_tx.clone());
+            } else {
+                self.sent = Some(text);
+            }
+            return self.flash("running it in a new tab…");
         }
         let prompt = agent::with_images(&text, &self.ask_images);
         self.ask = Field::default();
@@ -1545,8 +1656,9 @@ impl App {
                 self.ask_images.clear();
             }
             // ↑↓: a row up or down, as the page or the box wraps the text;
-            // ⇧↑ ⇧↓ select along. (⌥↑ ⌥↓ go by line: Field::key.)
-            KeyCode::Up | KeyCode::Down if !alt => {
+            // ⇧↑ ⇧↓ select along. (⌥↑ ⌥↓ go by line, ⌘↑ ⌘↓ to the text's
+            // ends: Field::key.)
+            KeyCode::Up | KeyCode::Down if !alt && !k.modifiers.contains(KeyModifiers::SUPER) => {
                 let rows = if page { ui::word_rows(&f.text, wrap) } else { ui::prompt_rows(&f.text, wrap) };
                 f.vertical_by(&rows, if k.code == KeyCode::Up { -1 } else { 1 }, shift);
             }
@@ -1595,7 +1707,11 @@ impl App {
     }
 
     /// ^v in the agent box: the clipboard's image, as an `[Image #N]` tag.
+    /// A command has no use for one.
     fn paste_image(&mut self) {
+        if matches!(self.target, Target::Command) {
+            return self.flash("a command takes no images");
+        }
         match agent::clipboard_image() {
             Some(p) => self.attach(p),
             None => self.flash("no image on the clipboard"),
@@ -1605,10 +1721,12 @@ impl App {
     /// Bracketed paste: whole into the agent box, the first line into the
     /// filter. In the agent box, image files dropped in become tags, and an
     /// empty paste (⌘V with only an image on the clipboard) takes the
-    /// clipboard's image.
+    /// clipboard's image. A command takes the paste as it is: a dropped
+    /// file is its path.
     fn paste(&mut self, s: &str) {
         let s = s.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ");
         match self.mode {
+            Mode::Ask if matches!(self.target, Target::Command) => self.ask.insert(&s),
             Mode::Ask if s.trim().is_empty() => self.paste_image(),
             Mode::Ask => match agent::image_paths(&s) {
                 Some(files) => files.into_iter().for_each(|f| self.attach(f)),
@@ -1626,6 +1744,9 @@ impl App {
     // ---- mouse -------------------------------------------------------------
 
     fn mouse(&mut self, m: MouseEvent) -> Act {
+        if self.page_editing() && self.mouse_page(m) {
+            return Act::None;
+        }
         if self.mode != Mode::Normal {
             return Act::None;
         }
@@ -1645,6 +1766,8 @@ impl App {
             MouseEventKind::ScrollDown if in_preview => self.preview_scroll(-3),
             MouseEventKind::ScrollUp if in_preview => self.preview_scroll(3),
             MouseEventKind::Down(MouseButton::Left) if in_text && modded => self.open_link(m.column, m.row),
+            // A draft's page is a text area: a click writes there.
+            MouseEventKind::Down(MouseButton::Left) if in_preview && self.selected_draft().is_some() => self.click_draft(m.column, m.row),
             MouseEventKind::Down(MouseButton::Left) if in_text => self.press_at(m.column, m.row),
             MouseEventKind::Drag(MouseButton::Left) if self.press.is_some() => self.drag_to(m.column, m.row),
             // The button came up, maybe outside the pane: motion with none down says so too.
@@ -1667,6 +1790,36 @@ impl App {
             _ => {}
         }
         Act::None
+    }
+
+    /// The mouse while a draft's page is being written, as in a text area:
+    /// a click puts the cursor there (2× a word, 3× a line, ⇧ extends), a
+    /// drag selects, the wheel scrolls, ctrl-click opens a link, a
+    /// right-click copies the selection. A click off the preview leaves the
+    /// page as esc does (the draft is kept); false hands it on to the list.
+    fn mouse_page(&mut self, m: MouseEvent) -> bool {
+        let p = self.lay.preview;
+        let in_preview = p.is_some_and(|r| m.column >= r.x && m.column < r.right() && m.row >= r.y && m.row < r.bottom());
+        let modded = m.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+        match m.kind {
+            MouseEventKind::ScrollDown if in_preview => self.preview_scroll(-3),
+            MouseEventKind::ScrollUp if in_preview => self.preview_scroll(3),
+            MouseEventKind::Down(MouseButton::Left) if in_preview && modded => self.open_link(m.column, m.row),
+            MouseEventKind::Down(MouseButton::Left) if in_preview => self.press_page(m.column, m.row, m.modifiers.contains(KeyModifiers::SHIFT)),
+            MouseEventKind::Drag(MouseButton::Left) if self.page_press.is_some() => self.drag_page(m.column, m.row),
+            MouseEventKind::Up(_) | MouseEventKind::Moved => self.page_press = None,
+            MouseEventKind::Down(MouseButton::Right) if in_preview => {
+                if self.ask.selection().is_some() {
+                    self.ctrl_c();
+                }
+            }
+            MouseEventKind::Down(_) => {
+                self.close_box();
+                return false;
+            }
+            _ => {}
+        }
+        true
     }
 }
 

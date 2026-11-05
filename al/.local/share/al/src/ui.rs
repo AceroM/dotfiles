@@ -321,6 +321,8 @@ fn status(app: &App, buf: &mut Buffer) {
         Mode::Filter => &[("⏎", "go"), ("↑↓", "move"), ("esc", "keep filter"), ("^u", "clear")],
         Mode::Ask if app.ask.selection().is_some() => &[("^c", "copy"), ("^x", "cut"), ("⌫", "delete"), ("esc", "unselect")],
         Mode::Ask if drafting => &[("⏎", "send"), ("esc", "keep for later"), ("^c", "clear"), ("⇧⏎ ^j", "newline"), ("^v", "image")],
+        Mode::Ask if matches!(app.target, Target::Command) && app.ask_path.is_some() => &[("⏎", "run"), ("⇧⏎ ^j", "newline"), ("tab", "path"), ("^c", "clear"), ("esc", "back")],
+        Mode::Ask if matches!(app.target, Target::Command) => &[("⏎", "run"), ("⇧⏎ ^j", "newline"), ("^c", "clear"), ("esc", "back")],
         Mode::Ask if app.ask_path.is_some() => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("tab", "path"), ("^c", "clear"), ("esc", "back")],
         Mode::Ask => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("^c", "clear"), ("esc", "back")],
         // Codex's footer while its transcript has a mark.
@@ -340,6 +342,7 @@ fn status(app: &App, buf: &mut Buffer) {
             ("⏎", "go"),
             ("x", "close"),
             ("c", "new agent"),
+            ("n", "run"),
             ("d", "draft"),
             ("r", "reply"),
             ("y Y", "pane · session"),
@@ -470,9 +473,9 @@ pub fn ask_width(screen_w: u16) -> usize {
     (ask_box_width(screen_w) as usize).saturating_sub(4).max(8)
 }
 
-/// The agent box (`c` or `r`; `d` and `e` without a preview), centered: a bordered input growing with its
-/// text. The border says where it goes: a new agent's kind and folder, or
-/// the tab a reply is for.
+/// The agent box (`c`, `r` or `n`; `d` and `e` without a preview), centered: a bordered input growing with its
+/// text. The border says where it goes: a new agent's kind and folder, a
+/// command's folder, or the tab a reply is for.
 fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     const MAX_ROWS: usize = 10;
     let p = &app.pal;
@@ -490,6 +493,16 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     let room = (w as usize).saturating_sub(16);
     let title = match &app.target {
         Target::Reply(to) => vec![Span::styled(" reply to ", fg(p.muted)), Span::styled(truncate(&to.label, room), fg(p.accent)), Span::raw(" ")],
+        Target::Command => {
+            let cwd = herdr::tilde(&app.box_cwd().to_string_lossy());
+            vec![
+                Span::styled(" run ", fg(p.muted)),
+                Span::styled("$", fg(p.accent)),
+                Span::styled(" in ", fg(p.muted)),
+                Span::styled(truncate(&cwd, room.saturating_sub(8)), fg(p.fg)),
+                Span::raw(" "),
+            ]
+        }
         t => {
             // A draft says so (written here when there's no preview to hold its page).
             let what = if matches!(t, Target::Edit(_)) { " draft · " } else { " new " };
@@ -552,12 +565,15 @@ const KEYS: &[(&str, &str)] = &[
     ("⏎ o", "go to the tab (al stays open) · send a draft"),
     ("x ;", "close the tab (;;; closes a run) · delete a draft"),
     ("c", "ask a new agent, in a new tab"),
+    ("n", "run a shell command, in a new tab"),
     ("d", "a new draft, on top now: write it, ⏎ sends, esc keeps"),
     ("e l", "write in the selected draft"),
     ("u", "bring back the draft x deleted"),
     ("r", "reply to the selected tab's agent"),
     ("  ^v ^j tab", "in the box: image · newline (⇧⏎ too) · --path"),
     ("  ^a ^e ^u ^k", "in the box: the line's start / end · delete to them"),
+    ("  ⌘↑ ⌘↓", "in the box: the text's start / end (⇧ selects)"),
+    ("  click drag", "on a draft's page: write there · select (2× a word, 3× a line)"),
     ("  ⇧ ⌥⇧ arrows", "in the box: select (⌥ a word, ⌥↑↓ to the line's end)"),
     ("  ^c ^x ^z", "in the box: copy (else clear) · cut · undo the clear"),
     ("y Y", "copy the tab's pane ID · its agent's session ID"),

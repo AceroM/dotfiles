@@ -102,6 +102,9 @@ fn main() -> ExitCode {
     if argv.get(1).map(String::as_str) == Some(agent::CHILD_FLAG) {
         return agent::child(&argv[2..]);
     }
+    if argv.get(1).map(String::as_str) == Some(agent::RUN_FLAG) {
+        return agent::run_child(&argv[2..]);
+    }
     let cli = match parse_cli() {
         Ok(c) => c,
         Err(e) => {

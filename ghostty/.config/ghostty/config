@@ -77,6 +77,15 @@ keybind = super+i=goto_split:next
 keybind = super+alt+shift+w=unbind
 keybind = super+alt+shift+j=unbind
 
+# Hand cmd+up/down (and with shift) to the running program instead of Ghostty's
+# jump_to_prompt, which has no prompts to jump to under herdr's full-screen UI.
+# herdr forwards them as CSI 1;9A / 1;9B (1;10A with shift), so text boxes like
+# al's can go to the start / end of their text the macOS way. zsh ignores them.
+keybind = super+arrow_up=unbind
+keybind = super+arrow_down=unbind
+keybind = super+shift+arrow_up=unbind
+keybind = super+shift+arrow_down=unbind
+
 # Don't dim the unfocused split. Ghostty defaults to 0.7, which fades the
 # terminal split whenever tmux-nav (the other split) is focused. Keep both
 # splits at full opacity so the terminal stays fully readable while navigating.

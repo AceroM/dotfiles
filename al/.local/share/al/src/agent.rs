@@ -1,5 +1,6 @@
 //! The prompt box: `c` starts a coding agent in a new Herdr tab and hands it
-//! the prompt, `r` sends it to the selected tab's agent. al stays where it is.
+//! the prompt, `r` sends it to the selected tab's agent, `n` runs it as a
+//! shell command in a new tab. al stays where it is.
 //!
 //! The agent is `claude --dangerously-skip-permissions` (the `c` alias) unless
 //! `$AL_AGENT` (else jv's `$JV_AGENT`) names another, e.g.
@@ -18,6 +19,7 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const DEFAULT_AGENT: &str = "claude --dangerously-skip-permissions";
@@ -25,6 +27,8 @@ const DEFAULT_AGENT: &str = "claude --dangerously-skip-permissions";
 /// Internal: `al --start-agent CWD PROMPT` does the Herdr calls. A separate
 /// process, so quitting al right after Enter still gets the agent its prompt.
 pub const CHILD_FLAG: &str = "--start-agent";
+/// Internal: `al --run-command CWD COMMAND`, the same for `n`.
+pub const RUN_FLAG: &str = "--run-command";
 
 pub fn in_herdr() -> bool {
     std::env::var("HERDR_ENV").as_deref() == Ok("1")
@@ -42,6 +46,11 @@ pub fn spec() -> (String, Vec<String>) {
 /// status-bar line.
 pub fn spawn(prompt: String, cwd: PathBuf, tx: mpsc::Sender<String>) {
     background(vec![CHILD_FLAG.into(), cwd.into(), prompt.into()], spec().0, tx);
+}
+
+/// `n`: run `command` in a new tab's shell, in the background, as `spawn`.
+pub fn run(command: String, cwd: PathBuf, tx: mpsc::Sender<String>) {
+    background(vec![RUN_FLAG.into(), cwd.into(), command.into()], "the command".into(), tx);
 }
 
 /// Run `al ARGS` (the internal child flag) in the background. Its one
@@ -73,6 +82,12 @@ pub fn child(args: &[String]) -> ExitCode {
     report(start(prompt, Path::new(cwd)))
 }
 
+/// The `--run-command` process, as `child`.
+pub fn run_child(args: &[String]) -> ExitCode {
+    let [cwd, command] = args else { return ExitCode::from(2) };
+    report(run_in_tab(command, Path::new(cwd)))
+}
+
 /// A child process's ending: its outcome as the one stdout line `background`
 /// hands back.
 pub fn report(res: Result<String, String>) -> ExitCode {
@@ -84,8 +99,9 @@ pub fn report(res: Result<String, String>) -> ExitCode {
     }
 }
 
-fn start(prompt: &str, cwd: &Path) -> Result<String, String> {
-    let (kind, args) = spec();
+/// A new tab in this workspace, in `cwd`, left in the background: its pane
+/// and its label.
+fn new_tab(cwd: &Path) -> Result<(String, String), String> {
     let ws = std::env::var("HERDR_WORKSPACE_ID").map_err(|_| "not in a Herdr pane (no HERDR_WORKSPACE_ID)".to_string())?;
     let cwd = cwd.to_string_lossy();
     let tab = herdr(&["tab", "create", "--workspace", &ws, "--cwd", &cwd, "--no-focus"])
@@ -93,6 +109,20 @@ fn start(prompt: &str, cwd: &Path) -> Result<String, String> {
     let tab: Value = serde_json::from_str(&tab).map_err(|e| format!("tab create: {e}"))?;
     let pane = tab["result"]["root_pane"]["pane_id"].as_str().ok_or("tab create returned no pane")?.to_string();
     let label = tab["result"]["tab"]["label"].as_str().unwrap_or("").to_string();
+    Ok((pane, label))
+}
+
+/// `n`: type `command` into a new tab's shell and press enter. The shell
+/// holds it until its prompt is up, so there's nothing to wait for.
+fn run_in_tab(command: &str, cwd: &Path) -> Result<String, String> {
+    let (pane, label) = new_tab(cwd)?;
+    herdr(&["pane", "run", &pane, command]).map_err(|e| format!("tab {label} is open, but the command didn't go: {e}"))?;
+    Ok(format!("running in tab {label}"))
+}
+
+fn start(prompt: &str, cwd: &Path) -> Result<String, String> {
+    let (kind, args) = spec();
+    let (pane, label) = new_tab(cwd)?;
     // Agent names are [a-z][a-z0-9_-]{0,31}; pane IDs are unique, and their
     // only uppercase is base-36 digits, so lowercasing keeps them unique.
     let name = format!("{kind}-{}", pane.to_ascii_lowercase().replace(':', "-"));
@@ -298,9 +328,9 @@ fn is_word(c: char) -> bool {
 
 /// A text field with a cursor (a byte offset into `text`): the agent box.
 /// It edits as a multi-line text box does: ^a ^e (⌘← ⌘→ in Ghostty) and
-/// Home End go to the ends of the cursor's line, ^u ^k delete to them, and
-/// shift with a move (⌥⇧ for a word, ⌥⇧↑↓ for the line) marks a selection
-/// that typing, a paste or ⌫ replaces.
+/// Home End go to the ends of the cursor's line, ^u ^k delete to them, ⌘↑ ⌘↓
+/// go to the ends of the whole text, and shift with a move (⌥⇧ for a word,
+/// ⌥⇧↑↓ for the line) marks a selection that typing, a paste or ⌫ replaces.
 #[derive(Default)]
 pub struct Field {
     pub text: String,
@@ -332,6 +362,10 @@ impl Field {
             KeyCode::End if ctrl || sup => self.go(self.text.len(), shift),
             KeyCode::Home => self.go(self.line_start(self.cur), shift),
             KeyCode::End => self.go(self.line_end(self.cur), shift),
+            // ⌘↑ ⌘↓, as on macOS: the very start (end) of the text; ⇧⌘ selects to it.
+            // Ghostty binds them to jump_to_prompt unless unbound (ghostty/config).
+            KeyCode::Up if sup => self.go(0, shift),
+            KeyCode::Down if sup => self.go(self.text.len(), shift),
             // ⌥↑ ⌥↓, as on macOS: to the start (end) of the line, then the one before (after).
             KeyCode::Up if alt => self.go(self.paragraph(-1), shift),
             KeyCode::Down if alt => self.go(self.paragraph(1), shift),
@@ -439,24 +473,61 @@ impl Field {
     fn row_target(&self, rows: &[Range<usize>], dir: isize) -> usize {
         let Some(cr) = rows.iter().rposition(|r| r.start <= self.cur) else { return self.cur };
         let col = self.text[rows[cr].start..self.cur].width();
-        let Some(to) = cr.checked_add_signed(dir).filter(|&i| i < rows.len()) else {
-            return if dir < 0 { 0 } else { self.text.len() };
-        };
-        let row = rows[to].clone();
+        match cr.checked_add_signed(dir).filter(|&i| i < rows.len()) {
+            Some(to) => self.pos_at(rows, to, col),
+            None if dir < 0 => 0,
+            None => self.text.len(),
+        }
+    }
+
+    /// The place at screen column `col` of row `row` (`rows` as drawn): on
+    /// the character in that cell, the row's end past its text, the text's
+    /// end below its last row. A click, and ↑↓ keeping their column.
+    pub fn pos_at(&self, rows: &[Range<usize>], row: usize, col: usize) -> usize {
+        let Some(r) = rows.get(row).cloned() else { return self.text.len() };
         // A row wrapped mid-line ends where the next one starts, and a cursor
         // there draws on the next row: stop a character short of it.
-        let wrapped = rows.get(to + 1).is_some_and(|n| n.start == row.end);
-        let (mut at, mut w) = (row.start, 0);
-        for (i, c) in self.text[row.clone()].char_indices() {
-            let end = row.start + i + c.len_utf8();
+        let wrapped = rows.get(row + 1).is_some_and(|n| n.start == r.end);
+        let (mut at, mut w) = (r.start, 0);
+        for (i, c) in self.text[r.clone()].char_indices() {
+            let end = r.start + i + c.len_utf8();
             w += c.width().unwrap_or(0);
-            if w > col || (wrapped && end == row.end) {
+            if w > col || (wrapped && end == r.end) {
                 break;
             }
             at = end;
         }
         // Never inside an `[Image #N]` tag.
-        image_tags(&self.text).into_iter().find(|(r, _)| r.start < at && at < r.end).map_or(at, |(r, _)| r.start)
+        image_tags(&self.text).into_iter().find(|(t, _)| t.start < at && at < t.end).map_or(at, |(t, _)| t.start)
+    }
+
+    /// What a double-click at `at` takes: the word there by Unicode's word
+    /// bounds (a run of spaces or of punctuation is one too), the one ending
+    /// there at a line's end; an `[Image #N]` tag whole.
+    pub fn word_at(&self, at: usize) -> Range<usize> {
+        if let Some((t, _)) = image_tags(&self.text).into_iter().find(|(t, _)| t.start <= at && at < t.end) {
+            return t;
+        }
+        let (s, e) = (self.line_start(at), self.line_end(at));
+        let words = || self.text[s..e].split_word_bound_indices().map(|(b, w)| s + b..s + b + w.len());
+        words().find(|r| r.contains(&at)).or_else(|| words().last().filter(|r| r.end == at)).unwrap_or(at..at)
+    }
+
+    /// What a triple-click at `at` takes: its line, without the line break.
+    pub fn line_at(&self, at: usize) -> Range<usize> {
+        self.line_start(at)..self.line_end(at)
+    }
+
+    /// Select `r`, the cursor at its end; an empty one is just the cursor.
+    pub fn select(&mut self, r: Range<usize>) {
+        self.anchor = (r.start != r.end).then_some(r.start);
+        self.cur = r.end;
+    }
+
+    /// A selection from `anchor` to `cur`, the cursor at `cur`.
+    pub fn select_from(&mut self, anchor: usize, cur: usize) {
+        self.anchor = Some(anchor);
+        self.cur = cur;
     }
 
     /// Type `s`, over the selection if there is one.
@@ -670,6 +741,20 @@ mod tests {
     }
 
     #[test]
+    fn cmd_up_down_go_to_the_text_ends() {
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::Up, KeyModifiers::SUPER);
+        assert_eq!((f.cur, f.selection()), (0, None));
+        press(&mut f, KeyCode::Down, KeyModifiers::SUPER);
+        assert_eq!((f.cur, f.selection()), (18, None));
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::Down, KeyModifiers::SUPER.union(SHIFT));
+        assert_eq!(f.selected(), Some("three\nfour"));
+        press(&mut f, KeyCode::Up, KeyModifiers::SUPER.union(SHIFT));
+        assert_eq!(f.selected(), Some("one\ntwo "));
+    }
+
+    #[test]
     fn a_selection_goes_on_backspace_and_arrows_collapse_it() {
         let mut f = field("abc def", 7);
         press(&mut f, KeyCode::Char('a'), CTRL.union(SHIFT));
@@ -680,6 +765,32 @@ mod tests {
         press(&mut f, KeyCode::Right, SHIFT);
         press(&mut f, KeyCode::Backspace, KeyModifiers::NONE);
         assert_eq!((f.text.as_str(), f.cur), ("c def", 0));
+    }
+
+    #[test]
+    fn a_click_lands_on_its_cell() {
+        // "hello brave " wraps after its space; the cursor never sits past it.
+        let f = field("hello brave world\nnext", 0);
+        let rows = [0..12, 12..17, 18..22];
+        assert_eq!(f.pos_at(&rows, 0, 1), 1);
+        assert_eq!(f.pos_at(&rows, 0, 40), 11);
+        assert_eq!(f.pos_at(&rows, 1, 40), 17);
+        assert_eq!(f.pos_at(&rows, 2, 2), 20);
+        assert_eq!(f.pos_at(&rows, 9, 0), 22);
+        // Not inside an image tag.
+        let f = field("see [Image #1] here", 0);
+        assert_eq!(f.pos_at(&[0..19], 0, 8), 4);
+    }
+
+    #[test]
+    fn double_and_triple_click_take_a_word_and_a_line() {
+        let f = field("one two-three\n[Image #2] four", 0);
+        assert_eq!(&f.text[f.word_at(5)], "two");
+        assert_eq!(&f.text[f.word_at(3)], " ");
+        assert_eq!(&f.text[f.word_at(13)], "three");
+        assert_eq!(&f.text[f.word_at(17)], "[Image #2]");
+        assert_eq!(&f.text[f.line_at(5)], "one two-three");
+        assert_eq!(&f.text[f.line_at(26)], "[Image #2] four");
     }
 
     #[test]
