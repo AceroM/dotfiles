@@ -108,6 +108,19 @@ def choose_editor(path, source_cwd, editors):
     raise ValueError(f"File was not found in the agent or sibling editor checkout: {path}")
 
 
+def open_float(path, line, column, source_cwd):
+    """Neovim in this plugin's `float` popup, centered over the clicked pane.
+    al's links carry absolute paths; a relative one resolves as the source pane's."""
+    target = path.resolve() if path.is_absolute() else existing_path(path, source_cwd)
+    if target is None or not target.is_file():
+        raise ValueError(f"File was not found: {path}")
+    run([os.environ.get("HERDR_BIN_PATH", "herdr"), "plugin", "pane", "open",
+         "--plugin", os.environ.get("HERDR_PLUGIN_ID", "miguel.nvim-links"), "--entrypoint", "float",
+         "--env", f"NVIM_LINKS_FILE={target}", "--env", f"NVIM_LINKS_LINE={line}",
+         "--env", f"NVIM_LINKS_COL={column}", "--focus"])
+    print(f"Opened {target}:{line} in a popup")
+
+
 def main():
     context = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON", "{}"))
     clicked = context.get("clicked_url") or os.environ.get("HERDR_PLUGIN_CLICKED_URL", "")
@@ -137,10 +150,12 @@ def main():
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             failures.append(f"{pane['pane_id']}: {error}")
             continue
+    source_cwd = source.get("foreground_cwd") or source.get("cwd")
     if not editors:
-        detail = "; ".join(failures) or "no sibling panes"
-        raise ValueError(f"No registered Neovim sibling in this tab ({detail}); restart the sibling Neovim")
-    editor, target = choose_editor(path, source.get("foreground_cwd") or source.get("cwd"), editors)
+        # No Neovim beside it (al's preview, a lone agent): one in a centered popup.
+        open_float(path, line, column, source_cwd)
+        return
+    editor, target = choose_editor(path, source_cwd, editors)
     result = rpc(editor["server"], 'require("config.herdr_links").open(_A)', {
         "path": str(target), "line": line, "column": column,
     })

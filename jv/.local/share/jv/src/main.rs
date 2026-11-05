@@ -1,16 +1,13 @@
 mod agent;
-mod ansi;
 mod app;
 mod commit;
 mod diff;
 mod doc;
 mod fuzzy;
-mod herdr;
 mod highlight;
 mod snapshot;
 mod source;
 mod theme;
-mod transcript;
 mod tree;
 mod ui;
 mod viewed;

@@ -11,14 +11,10 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent::{self, Field};
 use crate::commit;
-use crate::ansi;
-use crate::herdr;
-use crate::transcript::{self, Transcript};
 use crate::diff::{self, FileDiff, Kind, Status};
 use crate::doc::{self, Doc, Geo, Note, Row};
 use crate::fuzzy;
@@ -38,8 +34,6 @@ const SPLIT_MIN: u16 = 150;
 const MULTI_CLICK: Duration = Duration::from_millis(450);
 /// A drag held past the top or bottom of the diff scrolls a row this often.
 const AUTOSCROLL: Duration = Duration::from_millis(40);
-/// The `;` dialog re-reads the tabs and the preview this often.
-const TABS_REFRESH: Duration = Duration::from_millis(700);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -55,11 +49,8 @@ pub enum Mode {
     Filter,
     GoTo,
     Help,
-    /// The `c` box: a prompt for an agent in a new Herdr tab. Opened from
-    /// the `;` dialog it sits on top of it, and closing it goes back there.
+    /// The `c` box: a prompt for an agent in a new Herdr tab.
     Ask,
-    /// The `;` dialog: this Herdr space's other tabs.
-    Tabs,
 }
 
 pub enum Act {
@@ -212,12 +203,6 @@ pub struct App {
     pub ask: Field,
     /// Files behind the draft's `[Image #N]` tags (N - 1 indexes this).
     ask_images: Vec<PathBuf>,
-    /// Who the box sends to: None starts an agent in a new tab (`c`), Some
-    /// replies to one already running (`r` in the `;` dialog).
-    pub reply_to: Option<ReplyTo>,
-    /// The other box's draft (a reply's while `c` is up, and the other way
-    /// round), swapped back in when it opens again.
-    parked: (Field, Vec<PathBuf>),
     /// What ^i puts in the box: the file being looked at when it opened.
     pub ask_path: Option<String>,
     /// The agent kind `c` starts (`$JV_AGENT`'s first word).
@@ -226,79 +211,6 @@ pub struct App {
     pub ask_cwd: PathBuf,
     bg_tx: mpsc::Sender<String>,
     bg_rx: mpsc::Receiver<String>,
-    /// The `;` dialog, while it's open.
-    pub tabs: Option<TabsView>,
-    /// Tabs `x` closed: hidden even if Herdr still lists them for a moment.
-    closed: HashSet<String>,
-}
-
-/// The `;` dialog's two panels on a screen of `area`, the tab list and the
-/// preview, sparing the top bar and the status line (close messages land there).
-pub fn tabs_rects(area: Rect) -> Option<(Rect, Rect)> {
-    let r = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
-    if r.width < 50 || r.height < 6 {
-        return None;
-    }
-    let lw = (r.width * 3 / 10).clamp(28, 56);
-    Some((Rect::new(r.x, r.y, lw, r.height), Rect::new(r.x + lw, r.y, r.width - lw, r.height)))
-}
-
-/// An `r` reply's destination: the agent's pane, and its tab's name.
-#[derive(Clone)]
-pub struct ReplyTo {
-    pub pane: String,
-    pub label: String,
-}
-
-/// `;`: the other tabs in this Herdr space, and what the selected one shows.
-pub struct TabsView {
-    pub space: String,
-    pub list: Vec<herdr::Tab>,
-    pub cur: usize,
-    /// The selected tab's focused pane: its latest lines, ending with its screen.
-    pub preview: Vec<ansi::Line>,
-    /// Rows the preview is scrolled up from the bottom (`u` / `d`).
-    pub scroll: usize,
-    /// A Claude tab scrolled past the top of its screen shows its transcript.
-    pub transcript: Option<Transcript>,
-    pub in_transcript: bool,
-    fetched: Instant,
-}
-
-impl TabsView {
-    pub fn selected(&self) -> Option<&herdr::Tab> {
-        self.list.get(self.cur)
-    }
-
-    /// Another tab is selected: back to its live screen, unscrolled.
-    fn reset_preview(&mut self) {
-        self.scroll = 0;
-        self.transcript = None;
-        self.in_transcript = false;
-    }
-
-    /// What the preview shows: the pane's lines, or the transcript's.
-    pub fn lines(&self) -> &[ansi::Line] {
-        match &self.transcript {
-            Some(t) if self.in_transcript => &t.lines,
-            _ => &self.preview,
-        }
-    }
-
-    /// The preview lines shown in `h` rows: bottom-aligned, less the scroll.
-    /// Trailing blank lines don't count as content.
-    pub fn window(&self, h: usize) -> Range<usize> {
-        let blank = |l: &ansi::Line| l.iter().all(|(s, _)| s.trim().is_empty());
-        let end = self.lines().iter().rposition(|l| !blank(l)).map_or(0, |i| i + 1);
-        let e = end - self.scroll.min(end.saturating_sub(h));
-        e.saturating_sub(h)..e
-    }
-
-    /// How far up the preview can scroll in `h` rows.
-    fn max_scroll(&self, h: usize) -> usize {
-        let w = self.window(usize::MAX);
-        (w.end - w.start).saturating_sub(h)
-    }
 }
 
 fn digits(n: u32) -> usize {
@@ -363,15 +275,11 @@ impl App {
             copied: None,
             ask: Field::default(),
             ask_images: Vec::new(),
-            reply_to: None,
-            parked: (Field::default(), Vec::new()),
             ask_path: None,
             ask_kind: agent::spec().0,
             ask_cwd,
             bg_tx,
             bg_rx,
-            tabs: None,
-            closed: HashSet::new(),
         };
         app.rebuild_tree();
         app.rebuild_doc();
@@ -613,16 +521,12 @@ impl App {
         false
     }
 
-    /// Status lines from background jobs (`c` agents, `;` closes), and the
-    /// `;` dialog's live refresh. Returns true when a redraw is needed.
+    /// Status lines from background jobs (`c` agents, `C` commits). Returns
+    /// true when a redraw is needed.
     pub fn poll_bg(&mut self) -> bool {
         let mut any = false;
         while let Ok(m) = self.bg_rx.try_recv() {
             self.flash(m);
-            any = true;
-        }
-        if self.mode == Mode::Tabs && self.tabs.as_ref().is_some_and(|t| t.fetched.elapsed() > TABS_REFRESH) {
-            self.refresh_tabs();
             any = true;
         }
         any
@@ -1100,7 +1004,8 @@ impl App {
         }
         let sel_file = sel.filter(|s| s.shown).and_then(|s| self.doc.rows.get(s.anchor.min(s.head).row)?.file());
         self.ask_path = sel_file.or_else(|| self.cur_file()).map(|f| self.files[f].path.clone());
-        self.show_box(None);
+        self.ask.end();
+        self.mode = Mode::Ask;
     }
 
     /// `C`: commit and push everything in a new Herdr tab (commit.rs).
@@ -1121,32 +1026,9 @@ impl App {
         self.flash("committing & pushing in a new tab…");
     }
 
-    /// `r` in the `;` dialog: the box again, aimed at the selected tab's agent.
-    fn open_reply(&mut self) {
-        let Some(t) = self.tabs.as_ref().and_then(|v| v.selected()) else { return };
-        let label = if t.label.is_empty() { t.id.clone() } else { t.label.clone() };
-        let Some(pane) = t.agent_pane.clone() else {
-            self.flash(format!("no agent in {label} to reply to"));
-            return;
-        };
-        self.ask_path = self.cur_file().map(|f| self.files[f].path.clone());
-        self.show_box(Some(ReplyTo { pane, label }));
-    }
-
-    /// Open the agent box for `to`, with that kind of box's draft.
-    fn show_box(&mut self, to: Option<ReplyTo>) {
-        if self.reply_to.is_some() != to.is_some() {
-            std::mem::swap(&mut self.ask, &mut self.parked.0);
-            std::mem::swap(&mut self.ask_images, &mut self.parked.1);
-        }
-        self.reply_to = to;
-        self.ask.end();
-        self.mode = Mode::Ask;
-    }
-
-    /// Leave the agent box: back to the `;` dialog if it's open under it.
+    /// Leave the agent box.
     fn close_ask(&mut self) {
-        self.mode = if self.tabs.is_some() { Mode::Tabs } else { Mode::Normal };
+        self.mode = Mode::Normal;
     }
 
     fn send_ask(&mut self) {
@@ -1158,15 +1040,6 @@ impl App {
         let prompt = agent::with_images(text, &self.ask_images);
         self.ask = Field::default();
         self.ask_images.clear();
-        if let Some(to) = self.reply_to.clone() {
-            self.flash(format!("replying to {}…", to.label));
-            if self.live {
-                agent::reply(to.pane, prompt, to.label, self.bg_tx.clone());
-            } else {
-                self.copied = Some(prompt);
-            }
-            return;
-        }
         if self.live {
             agent::spawn(prompt, self.ask_cwd.clone(), self.bg_tx.clone());
         } else {
@@ -1248,176 +1121,26 @@ impl App {
         }
     }
 
-    // ---- `;` tabs dialog ---------------------------------------------------
+    // ---- `;` ---------------------------------------------------------------
 
-    fn open_tabs(&mut self) {
+    /// `;`: this Herdr space's tabs, in `al` (the dialog is its own CLI).
+    /// jv steps aside while it runs, as for a terminal editor. ^i in al's
+    /// agent box puts in the file at the top of the diff, and its agents
+    /// start where jv's `c` would.
+    fn open_tabs(&mut self) -> Act {
         if !agent::in_herdr() {
             self.flash("; lists this Herdr space's tabs · run jv inside Herdr");
-            return;
+            return Act::None;
         }
-        self.closed.clear();
-        self.tabs = Some(TabsView {
-            space: String::new(),
-            list: Vec::new(),
-            cur: 0,
-            preview: Vec::new(),
-            scroll: 0,
-            transcript: None,
-            in_transcript: false,
-            fetched: Instant::now(),
-        });
-        self.mode = Mode::Tabs;
-        self.refresh_tabs();
-    }
-
-    fn close_tabs_view(&mut self) {
-        self.mode = Mode::Normal;
-        self.tabs = None;
-    }
-
-    /// Re-read the tabs (the cursor stays on its tab) and the preview.
-    fn refresh_tabs(&mut self) {
-        let ws = std::env::var("HERDR_WORKSPACE_ID").unwrap_or_default();
-        let me = std::env::var("HERDR_TAB_ID").unwrap_or_default();
-        let res = herdr::tabs(&ws, &me);
-        let Some(v) = self.tabs.as_mut() else { return };
-        v.fetched = Instant::now();
-        match res {
-            Ok((space, mut list)) => {
-                list.retain(|t| !self.closed.contains(&t.id));
-                let keep = v.selected().map(|t| t.id.clone());
-                let at = keep.as_ref().and_then(|id| list.iter().position(|t| &t.id == id)).unwrap_or(v.cur);
-                v.cur = at.min(list.len().saturating_sub(1));
-                v.space = space;
-                v.list = list;
-                if v.selected().map(|t| &t.id) != keep.as_ref() {
-                    v.reset_preview();
-                }
-            }
-            // A hiccup while open keeps what's on screen; failing to open at all closes.
-            Err(e) => {
-                if v.list.is_empty() {
-                    self.close_tabs_view();
-                }
-                self.flash(e);
-                return;
-            }
+        if !source::which("al") {
+            self.flash("; runs al, which isn't on PATH · stow al from ~/.dotfiles");
+            return Act::None;
         }
-        self.load_preview();
-    }
-
-    fn load_preview(&mut self) {
-        let w = self.preview_size().1;
-        let Some(v) = self.tabs.as_mut() else { return };
-        v.preview = match v.selected().and_then(|t| t.pane.as_deref()) {
-            Some(p) => herdr::read(p).map_or_else(|e| vec![vec![(e, Style::new())]], |t| ansi::parse(&t)),
-            None => Vec::new(),
-        };
-        if let Some(t) = v.transcript.as_mut() {
-            t.set_width(w);
-            // New turns land at the bottom; a view scrolled up keeps its place.
-            let before = t.lines.len();
-            if t.grow() && v.in_transcript && v.scroll > 0 {
-                v.scroll += t.lines.len() - before;
-            }
+        let mut cmd = vec!["al".to_string(), "--cwd".to_string(), self.ask_cwd.display().to_string()];
+        if let Some(f) = self.cur_file() {
+            cmd.extend(["--path".to_string(), self.files[f].path.clone()]);
         }
-    }
-
-    fn tabs_move(&mut self, d: isize) {
-        let Some(v) = self.tabs.as_mut() else { return };
-        if v.list.is_empty() {
-            return;
-        }
-        let n = (v.cur as isize).saturating_add(d).clamp(0, v.list.len() as isize - 1) as usize;
-        if n != v.cur {
-            v.cur = n;
-            v.reset_preview();
-            self.load_preview();
-        }
-    }
-
-    /// The preview panel's text area: (rows, columns).
-    fn preview_size(&self) -> (usize, usize) {
-        let s = self.lay.status;
-        tabs_rects(Rect::new(0, 0, s.width, s.y + 1))
-            .map_or((1, 10), |(_, r)| ((r.height as usize).saturating_sub(2).max(1), (r.width as usize).saturating_sub(4).max(10)))
-    }
-
-    fn transcript_colors(&self) -> transcript::Colors {
-        let p = &self.pal;
-        transcript::Colors { fg: p.fg, bright: p.bright, dim: p.dim, accent: p.accent, green: p.green }
-    }
-
-    /// `u` / `d`: scroll the preview up (positive) or back down. A Claude
-    /// tab carries on up past its screen into its transcript, which reads
-    /// further back as you go; coming back down past the transcript's end
-    /// returns to the live screen.
-    fn preview_scroll(&mut self, d: isize) {
-        let (h, w) = self.preview_size();
-        let colors = self.transcript_colors();
-        let Some(v) = self.tabs.as_mut() else { return };
-        let want = (v.scroll as isize).saturating_add(d).max(0) as usize;
-        if d > 0 && !v.in_transcript && v.scroll >= v.max_scroll(h) {
-            if v.transcript.is_none() {
-                let path = v.selected().and_then(|t| t.claude_session.as_deref()).and_then(transcript::find);
-                v.transcript = path.and_then(|p| Transcript::open(p, w, colors));
-            }
-            if let Some(t) = v.transcript.as_mut() {
-                // The newest chunk can be mostly tool output: read on until the panel fills.
-                while t.lines.len() < h && t.load_earlier() {}
-                v.in_transcript = true;
-                v.scroll = 0;
-                return;
-            }
-        }
-        if d < 0 && v.in_transcript && v.scroll == 0 {
-            // Below the transcript's end is the screen, from its top.
-            v.in_transcript = false;
-            v.scroll = v.max_scroll(h);
-            return;
-        }
-        if v.in_transcript {
-            if let Some(t) = v.transcript.as_mut() {
-                while want + h > t.lines.len() && t.load_earlier() {}
-            }
-        }
-        v.scroll = want.min(v.max_scroll(h));
-    }
-
-    /// `x`: close the selected tab now, no questions, like ctrl+alt+x.
-    fn close_selected_tab(&mut self) {
-        let Some(v) = self.tabs.as_mut() else { return };
-        if v.cur >= v.list.len() {
-            return;
-        }
-        let t = v.list.remove(v.cur);
-        v.cur = v.cur.min(v.list.len().saturating_sub(1));
-        v.reset_preview();
-        self.closed.insert(t.id.clone());
-        let name = if t.label.is_empty() { t.id.clone() } else { t.label.clone() };
-        if self.live {
-            let tx = self.bg_tx.clone();
-            std::thread::spawn(move || {
-                let msg = match herdr::close_tab(&t.id) {
-                    Ok(()) => format!("closed {name}"),
-                    Err(e) => format!("couldn't close {name}: {e}"),
-                };
-                let _ = tx.send(msg);
-            });
-        }
-        self.load_preview();
-    }
-
-    /// Enter: switch Herdr to the selected tab.
-    fn focus_selected_tab(&mut self) {
-        let Some(id) = self.tabs.as_ref().and_then(|v| v.selected()).map(|t| t.id.clone()) else { return };
-        if self.live {
-            if let Err(e) = herdr::focus_tab(&id) {
-                self.flash(e);
-                return;
-            }
-        }
-        self.close_tabs_view();
+        Act::Suspend(cmd)
     }
 
     /// A digit of a vim count (5j, 12G): true when `k` was one. A leading 0
@@ -1430,48 +1153,6 @@ impl App {
         let d = c as usize - '0' as usize;
         self.count = Some((self.count.unwrap_or(0) * 10 + d).min(99_999));
         true
-    }
-
-    /// Tab `n` (1-based) in the `;` list, as `12G` goes to row 12 in the tree.
-    fn tabs_go(&mut self, n: usize) {
-        let cur = self.tabs.as_ref().map_or(0, |v| v.cur) as isize;
-        self.tabs_move(n.saturating_sub(1) as isize - cur);
-    }
-
-    fn key_tabs(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let h = (self.lay.diff.height as isize / 2).max(1);
-        let half = (self.preview_size().0 as isize / 2).max(1);
-        // Counts as in the tree: 5j / 3k by the relative numbers, 12G to tab 12.
-        if self.count_digit(&k) {
-            return;
-        }
-        let count = self.count.take();
-        let n = count.unwrap_or(1).max(1) as isize;
-        match k.code {
-            // Esc drops a half-typed count before it closes the dialog.
-            KeyCode::Esc if count.is_some() => {}
-            KeyCode::Esc | KeyCode::Char('q') => self.close_tabs_view(),
-            KeyCode::Char('c') if ctrl => self.close_tabs_view(),
-            KeyCode::Char('d') if ctrl => self.tabs_move(h),
-            KeyCode::Char('u') if ctrl => self.tabs_move(-h),
-            // d / u: the preview, half a panel at a time (as in the diff).
-            KeyCode::Char('d') => self.preview_scroll(-half),
-            KeyCode::Char('u') => self.preview_scroll(half),
-            KeyCode::Char('j') | KeyCode::Down => self.tabs_move(n),
-            KeyCode::Char('k') | KeyCode::Up => self.tabs_move(-n),
-            KeyCode::Char('g' | 'G') | KeyCode::Home | KeyCode::End if count.is_some() => self.tabs_go(n as usize),
-            KeyCode::Char('g') | KeyCode::Home => self.tabs_move(isize::MIN),
-            KeyCode::Char('G') | KeyCode::End => self.tabs_move(isize::MAX),
-            // `;` again closes a tab too, so ;;; clears tabs from the home row.
-            KeyCode::Char('x' | ';') => self.close_selected_tab(),
-            // The agent box, over this dialog: c for a new agent (its tab shows
-            // up in the list), r to reply to the selected tab's.
-            KeyCode::Char('c') => self.open_ask(None),
-            KeyCode::Char('r') => self.open_reply(),
-            KeyCode::Enter => self.focus_selected_tab(),
-            _ => {}
-        }
     }
 
     fn reload(&mut self) {
@@ -1955,10 +1636,6 @@ impl App {
                 self.key_ask(k);
                 return Act::None;
             }
-            Mode::Tabs => {
-                self.key_tabs(k);
-                return Act::None;
-            }
             Mode::Search => {
                 self.key_search(k);
                 return Act::None;
@@ -2054,7 +1731,7 @@ impl App {
             (KeyCode::Char('r'), false) => self.reload(),
             (KeyCode::Char('c'), false) => self.open_ask(sel.as_ref()),
             (KeyCode::Char('C'), false) => self.commit(),
-            (KeyCode::Char(';'), false) => self.open_tabs(),
+            (KeyCode::Char(';'), false) => return self.open_tabs(),
             // The focused pane's filter or search goes first, then the other's.
             (KeyCode::Esc, _) => {
                 let tree = self.tree_on();

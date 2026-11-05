@@ -105,4 +105,6 @@ guidance. Only Agents-group tabs are drivable; never `adopt` a tab the user didn
 
 Source: `~/.dotfiles/browser-use/.local/share/browser-use/` (stowed to `~/.local/share/browser-use`).
 `extension/background.js` = the commands; `host.ts` = native relay; `cli.ts` = this CLI.
+`extension/switcher.js` = the `switcher.*` commands behind `ctab` (the human's tab switcher, any
+tab, no debugger); agents don't call them. ctab's source: `~/.dotfiles/ctab/.local/share/ctab/`.
 After editing the extension, `browser-use reload`. Host log: `~/.local/state/browser-use/host.log`.

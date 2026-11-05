@@ -118,28 +118,6 @@ fn start(prompt: &str, cwd: &Path) -> Result<String, String> {
     Ok(format!("{kind} is on it in tab {label}"))
 }
 
-/// `r` in the `;` dialog: hand `prompt` to the agent running in `pane`. The
-/// outcome comes back on `tx`. herdr runs as its own process group, so
-/// quitting jv right after Enter still gets the reply there.
-pub fn reply(pane: String, prompt: String, label: String, tx: mpsc::Sender<String>) {
-    thread::spawn(move || {
-        // No `--`: herdr takes a prompt starting with - as the prompt, and `--` as an option.
-        let out = Command::new("herdr")
-            .args(["agent", "prompt", &pane, &prompt])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .output();
-        let msg = match out {
-            Ok(o) if o.status.success() => format!("sent to {label}"),
-            Ok(o) => format!("couldn't reply to {label}: {}", failure(&o)),
-            Err(e) => format!("couldn't reply to {label}: herdr: {e}"),
-        };
-        let _ = tx.send(msg);
-    });
-}
-
 /// Run `herdr ARGS`: stdout on success, else the error's message.
 pub fn herdr(args: &[&str]) -> Result<String, String> {
     let out = Command::new("herdr")

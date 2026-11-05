@@ -1,6 +1,6 @@
 //! Herdr, straight over its socket: one JSON request per connection (the
 //! server hangs up after answering), about a millisecond where the herdr CLI
-//! costs ~25ms a call. Drives the `;` tabs dialog.
+//! costs ~25ms a call.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -22,7 +22,7 @@ fn socket() -> PathBuf {
 pub fn call(method: &str, params: Value) -> Result<Value, String> {
     let mut s = UnixStream::connect(socket()).map_err(|e| format!("herdr socket: {e}"))?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-    writeln!(s, "{}", json!({ "id": "jv", "method": method, "params": params })).map_err(|e| format!("herdr: {e}"))?;
+    writeln!(s, "{}", json!({ "id": "al", "method": method, "params": params })).map_err(|e| format!("herdr: {e}"))?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).map_err(|e| format!("herdr: {e}"))?;
     let mut v: Value = serde_json::from_str(&line).map_err(|e| format!("herdr: {e}"))?;
@@ -49,8 +49,19 @@ pub struct Tab {
     pub agent_pane: Option<String>,
 }
 
+impl Tab {
+    /// What the sidebar calls it: its label, else its ID.
+    pub fn name(&self) -> &str {
+        if self.label.is_empty() {
+            &self.id
+        } else {
+            &self.label
+        }
+    }
+}
+
 /// The tabs of workspace `ws` in sidebar order, leaving out tab `skip`
-/// (jv's own) and tabs that are only another jv or jg, and the workspace's name.
+/// (al's own) and tabs that are only another al, jv, jg or ctab, and the workspace's name.
 pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
     let snap = call("session.snapshot", json!({}))?;
     let s = &snap["snapshot"];
@@ -77,8 +88,8 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
                 agents.get(p["terminal_id"].as_str()?).map(|a| (str_of(p, "pane_id"), a))
             };
             let agent = shown.and_then(|p| agent_of(p)).or_else(|| mine.iter().find_map(|p| agent_of(p)));
-            // Another jv or jg with no agent beside it: nothing to read or reply to.
-            if agent.is_none() && mine.iter().any(|p| runs_jv(&str_of(p, "pane_id"))) {
+            // Another al, jv, jg or ctab with no agent beside it: nothing to read or reply to.
+            if agent.is_none() && mine.iter().any(|p| runs_switcher(&str_of(p, "pane_id"))) {
                 return None;
             }
             let title = agent.as_ref().map(|(_, a)| str_of(a, "terminal_title_stripped")).filter(|t| !t.is_empty());
@@ -95,11 +106,19 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
     Ok((name, tabs))
 }
 
-/// Whether pane `pane` is running jv in the foreground (`jg` is `jv -g`, so
-/// it's jv too). The snapshot doesn't carry processes; this is ~0.3ms a pane.
-fn runs_jv(pane: &str) -> bool {
+/// Whether pane `pane` is running al, jv or ctab in the foreground (`jg`
+/// is `jv -g`, so it's jv too). The snapshot doesn't carry processes; this is
+/// ~0.3ms a pane.
+fn runs_switcher(pane: &str) -> bool {
     let Ok(r) = call("pane.process_info", json!({ "pane_id": pane })) else { return false };
-    r["process_info"]["foreground_processes"].as_array().is_some_and(|ps| ps.iter().any(|p| p["name"] == "jv"))
+    r["process_info"]["foreground_processes"].as_array().is_some_and(|ps| ps.iter().any(|p| matches!(p["name"].as_str(), Some("al" | "jv" | "ctab"))))
+}
+
+/// Whether `bin` is on $PATH.
+pub fn which(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+        .unwrap_or(false)
 }
 
 /// `/Users/me/x` → `~/x`.
@@ -124,7 +143,7 @@ pub fn focus_tab(tab: &str) -> Result<(), String> {
 /// Close a tab at once. `herdr-close` SIGKILLs its agents first, since
 /// Herdr's own close waits out each agent's shutdown with the UI frozen.
 pub fn close_tab(tab: &str) -> Result<(), String> {
-    if !crate::source::which("herdr-close") {
+    if !which("herdr-close") {
         return call("tab.close", json!({ "tab_id": tab })).map(drop);
     }
     let out = Command::new("herdr-close")

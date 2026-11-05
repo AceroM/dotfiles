@@ -5,6 +5,8 @@
 // Agents work inside one shared tab group titled "Agents", so every Claude/Codex session (and the
 // human) sees the same tabs.
 
+import { SWITCHER } from "./switcher.js";
+
 const HOST = "dev.dotfiles.browser_use";
 const GROUP_TITLE = "Agents";
 const GROUP_COLOR = "purple";
@@ -873,6 +875,9 @@ const COMMANDS = {
     return { width: args.width, height: args.height };
   },
 };
+
+// ctab's commands: any tab, no debugger (see switcher.js).
+Object.assign(COMMANDS, SWITCHER);
 
 // Resolve when the tab finishes loading. `fresh` ignores the current state and waits for the next
 // loading → complete cycle (a navigation that was just issued).

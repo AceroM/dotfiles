@@ -15,6 +15,7 @@ use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ansi::Line;
+use crate::select::Wrap;
 
 const CHUNK: u64 = 256 * 1024;
 
@@ -45,6 +46,9 @@ pub struct Transcript {
     width: usize,
     colors: Colors,
     pub lines: Vec<Line>,
+    /// Per line, how it carries on a paragraph wrapped from the line above
+    /// (None where a paragraph starts): copying joins them back up.
+    pub wraps: Vec<Option<Wrap>>,
 }
 
 /// The transcript file for Claude session `id`, in whichever project it's under.
@@ -65,7 +69,7 @@ fn read_range(path: &PathBuf, from: u64, to: u64) -> Option<Vec<u8>> {
 impl Transcript {
     pub fn open(path: PathBuf, width: usize, colors: Colors) -> Option<Transcript> {
         let len = std::fs::metadata(&path).ok()?.len();
-        let mut t = Transcript { path, start: len, end: len, entries: Vec::new(), width, colors, lines: Vec::new() };
+        let mut t = Transcript { path, start: len, end: len, entries: Vec::new(), width, colors, lines: Vec::new(), wraps: Vec::new() };
         // The newest chunk. Its last line may still be being written: keep to whole lines.
         let from = len.saturating_sub(CHUNK);
         let buf = read_range(&t.path, from, len)?;
@@ -129,13 +133,16 @@ impl Transcript {
         let c = self.colors;
         let w = self.width.max(10);
         let mut out: Vec<Line> = Vec::new();
+        let mut wraps: Vec<Option<Wrap>> = Vec::new();
         for e in &self.entries {
             out.push(Vec::new());
+            wraps.push(None);
             match e {
-                Entry::Prompt(text) => block(&mut out, "❯ ", Style::new().fg(c.accent), text, Style::new().fg(c.bright), w),
-                Entry::Reply(text) => block(&mut out, "⏺ ", Style::new().fg(c.bright), text, Style::new().fg(c.fg), w),
+                Entry::Prompt(text) => block(&mut out, &mut wraps, "❯ ", Style::new().fg(c.accent), text, Style::new().fg(c.bright), w),
+                Entry::Reply(text) => block(&mut out, &mut wraps, "⏺ ", Style::new().fg(c.bright), text, Style::new().fg(c.fg), w),
                 Entry::Tool(name, gist) => {
                     let room = w.saturating_sub(name.width() + 4);
+                    wraps.push(None);
                     out.push(vec![
                         ("⏺ ".into(), Style::new().fg(c.green)),
                         (name.clone(), Style::new().fg(c.bright).add_modifier(Modifier::BOLD)),
@@ -145,31 +152,34 @@ impl Transcript {
             }
         }
         self.lines = out;
+        self.wraps = wraps;
     }
 }
 
 /// `text` word-wrapped to `w`, the first row behind `mark`, the rest indented to match.
-fn block(out: &mut Vec<Line>, mark: &str, mark_st: Style, text: &str, st: Style, w: usize) {
+fn block(out: &mut Vec<Line>, wraps: &mut Vec<Option<Wrap>>, mark: &str, mark_st: Style, text: &str, st: Style, w: usize) {
     let indent = " ".repeat(mark.width());
     let mut first = true;
     for para in text.trim_end().split('\n') {
-        for row in wrap(para, w.saturating_sub(indent.len()).max(4)) {
+        for (k, (row, space)) in wrap(para, w.saturating_sub(indent.len()).max(4)).into_iter().enumerate() {
             let lead = if first { (mark.to_string(), mark_st) } else { (indent.clone(), st) };
             first = false;
             out.push(vec![lead, (row, st)]);
+            wraps.push((k > 0).then_some(Wrap { indent: indent.len(), space }));
         }
     }
 }
 
-/// Word wrap by display width; a word longer than `w` is broken.
-fn wrap(s: &str, w: usize) -> Vec<String> {
+/// Word wrap by display width; a word longer than `w` is broken. Each row
+/// says whether the break before it took a space (else it split a word).
+fn wrap(s: &str, w: usize) -> Vec<(String, bool)> {
     let mut rows = Vec::new();
-    let (mut row, mut rw) = (String::new(), 0);
+    let (mut row, mut rw, mut space) = (String::new(), 0, false);
     for word in s.split(' ') {
         let ww = word.width();
         if rw > 0 && rw + 1 + ww > w {
-            rows.push(std::mem::take(&mut row));
-            rw = 0;
+            rows.push((std::mem::take(&mut row), space));
+            (rw, space) = (0, true);
         }
         if rw > 0 {
             row.push(' ');
@@ -178,14 +188,14 @@ fn wrap(s: &str, w: usize) -> Vec<String> {
         for ch in word.chars() {
             let cw = ch.width().unwrap_or(0);
             if rw + cw > w && rw > 0 {
-                rows.push(std::mem::take(&mut row));
-                rw = 0;
+                rows.push((std::mem::take(&mut row), space));
+                (rw, space) = (0, false);
             }
             row.push(ch);
             rw += cw;
         }
     }
-    rows.push(row);
+    rows.push((row, space));
     rows
 }
 
