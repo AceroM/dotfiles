@@ -70,8 +70,8 @@ fn mouse_tok(t: &str) -> Option<Event> {
     Some(Event::Mouse(MouseEvent { kind, column: x.parse().ok()?, row: y.parse().ok()?, modifiers }))
 }
 
-/// `jjx<C-d><Tab><CR>` style key sequences, plus mouse tokens (`mouse_tok`)
-/// and `<paste:text>`.
+/// `jjx<C-d><Tab><CR>` style key sequences (modifiers stack: `<M-S-Left>`,
+/// `<C-S-a>`), plus mouse tokens (`mouse_tok`) and `<paste:text>`.
 fn parse_keys(s: &str) -> Vec<Event> {
     let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
     let mut out = Vec::new();
@@ -91,17 +91,33 @@ fn parse_keys(s: &str) -> Vec<Event> {
             out.push(Event::Paste(text.to_string()));
             continue;
         }
-        let (code, mods) = match tok.as_str() {
-            "CR" | "Enter" => (KeyCode::Enter, KeyModifiers::NONE),
-            "S-CR" => (KeyCode::Enter, KeyModifiers::SHIFT),
-            "Esc" => (KeyCode::Esc, KeyModifiers::NONE),
-            "Tab" => (KeyCode::Tab, KeyModifiers::NONE),
-            "BS" => (KeyCode::Backspace, KeyModifiers::NONE),
-            "Down" => (KeyCode::Down, KeyModifiers::NONE),
-            "Up" => (KeyCode::Up, KeyModifiers::NONE),
-            "Space" => (KeyCode::Char(' '), KeyModifiers::NONE),
-            "lt" => (KeyCode::Char('<'), KeyModifiers::NONE),
-            t if t.starts_with("C-") && t.len() == 3 => (KeyCode::Char(t.chars().nth(2).unwrap_or(' ')), KeyModifiers::CONTROL),
+        // Modifiers first, vim's way: C- ctrl, M- alt, S- shift, D- super (⌘).
+        let (mut name, mut mods) = (tok.as_str(), KeyModifiers::NONE);
+        while name.len() > 2 && name.as_bytes()[1] == b'-' {
+            mods |= match name.as_bytes()[0] {
+                b'C' => KeyModifiers::CONTROL,
+                b'M' => KeyModifiers::ALT,
+                b'S' => KeyModifiers::SHIFT,
+                b'D' => KeyModifiers::SUPER,
+                _ => break,
+            };
+            name = &name[2..];
+        }
+        let code = match name {
+            "CR" | "Enter" => KeyCode::Enter,
+            "Esc" => KeyCode::Esc,
+            "Tab" => KeyCode::Tab,
+            "BS" => KeyCode::Backspace,
+            "Del" => KeyCode::Delete,
+            "Down" => KeyCode::Down,
+            "Up" => KeyCode::Up,
+            "Left" => KeyCode::Left,
+            "Right" => KeyCode::Right,
+            "Home" => KeyCode::Home,
+            "End" => KeyCode::End,
+            "Space" => KeyCode::Char(' '),
+            "lt" => KeyCode::Char('<'),
+            n if n.chars().count() == 1 && mods != KeyModifiers::NONE => KeyCode::Char(n.chars().next().unwrap_or(' ')),
             _ => continue,
         };
         out.push(key(code, mods));

@@ -297,65 +297,150 @@ fn is_word(c: char) -> bool {
 }
 
 /// A text field with a cursor (a byte offset into `text`): the agent box.
+/// It edits as a multi-line text box does: ^a ^e (⌘← ⌘→ in Ghostty) and
+/// Home End go to the ends of the cursor's line, ^u ^k delete to them, and
+/// shift with a move (⌥⇧ for a word, ⌥⇧↑↓ for the line) marks a selection
+/// that typing, a paste or ⌫ replaces.
 #[derive(Default)]
 pub struct Field {
     pub text: String,
     pub cur: usize,
+    /// Where a selection started: it runs from here to `cur`.
+    pub anchor: Option<usize>,
 }
 
 impl Field {
-    /// The editing keys every input shares, readline's mostly. Returns true
-    /// when the text changed (every edit adds or removes bytes); a move only
-    /// moves the cursor.
+    /// The editing keys every input shares, readline's and macOS's. Returns
+    /// true when the text changed; a move only moves the cursor.
     pub fn key(&mut self, k: &KeyEvent) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
-        let before = self.text.len();
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let sup = k.modifiers.contains(KeyModifiers::SUPER);
+        let before = self.text.clone();
         match k.code {
             // Word jumps: alt/ctrl+←→ arrive as modified arrows, or as ESC b /
-            // ESC f when the terminal sends option as meta.
-            KeyCode::Left if alt || ctrl => self.word_left(),
-            KeyCode::Right if alt || ctrl => self.word_right(),
-            KeyCode::Char('b') if alt => self.word_left(),
-            KeyCode::Char('f') if alt => self.word_right(),
-            KeyCode::Char('d') if alt => self.kill_word_right(),
-            KeyCode::Char('a') if ctrl => self.home(),
-            KeyCode::Char('e') if ctrl => self.end(),
-            KeyCode::Char('b') if ctrl => self.left(),
-            KeyCode::Char('f') if ctrl => self.right(),
+            // ESC f (Ghostty's ⌥← ⌥→). With shift they select.
+            KeyCode::Left if alt || ctrl => self.go(self.word_left_pos(), shift),
+            KeyCode::Right if alt || ctrl => self.go(self.word_end(), shift),
+            KeyCode::Char('b' | 'B') if alt => self.go(self.word_left_pos(), shift),
+            KeyCode::Char('f' | 'F') if alt => self.go(self.word_end(), shift),
+            // ⌘←→ (when the terminal sends them as such) and Home / End: the line's ends.
+            KeyCode::Left if sup => self.go(self.line_start(self.cur), shift),
+            KeyCode::Right if sup => self.go(self.line_end(self.cur), shift),
+            KeyCode::Home if ctrl || sup => self.go(0, shift),
+            KeyCode::End if ctrl || sup => self.go(self.text.len(), shift),
+            KeyCode::Home => self.go(self.line_start(self.cur), shift),
+            KeyCode::End => self.go(self.line_end(self.cur), shift),
+            // ⌥↑ ⌥↓, as on macOS: to the start (end) of the line, then the one before (after).
+            KeyCode::Up if alt => self.go(self.paragraph(-1), shift),
+            KeyCode::Down if alt => self.go(self.paragraph(1), shift),
+            KeyCode::Char('d' | 'D') if alt => self.kill_word_right(),
+            KeyCode::Char('a' | 'A') if ctrl => self.go(self.line_start(self.cur), shift),
+            KeyCode::Char('e' | 'E') if ctrl => self.go(self.line_end(self.cur), shift),
+            KeyCode::Char('b') if ctrl => self.go(self.prev(), false),
+            KeyCode::Char('f') if ctrl => self.go(self.next(), false),
             KeyCode::Char('d') if ctrl => self.delete(),
             KeyCode::Char('u') if ctrl => self.kill_start(),
             KeyCode::Char('k') if ctrl => self.kill_end(),
             KeyCode::Char('w') if ctrl => self.kill_word(),
             KeyCode::Char('l') if ctrl => self.clear(),
             KeyCode::Backspace if alt => self.kill_word(),
-            KeyCode::Home => self.home(),
-            KeyCode::End => self.end(),
-            KeyCode::Left => self.left(),
-            KeyCode::Right => self.right(),
+            // ← → with a selection and no shift: to its edge, as a text box does.
+            KeyCode::Left if !shift && self.selection().is_some() => self.go(self.selection().map_or(self.cur, |r| r.start), false),
+            KeyCode::Right if !shift && self.selection().is_some() => self.go(self.selection().map_or(self.cur, |r| r.end), false),
+            KeyCode::Left => self.go(self.prev(), shift),
+            KeyCode::Right => self.go(self.next(), shift),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete(),
             KeyCode::Char(c) if !ctrl => self.insert(c.encode_utf8(&mut [0; 4])),
             _ => {}
         }
-        self.text.len() != before
+        self.text != before
     }
 
-    /// ^l
+    /// The selected bytes, when there are any.
+    pub fn selection(&self) -> Option<Range<usize>> {
+        let a = self.anchor?.min(self.text.len());
+        (a != self.cur).then(|| a.min(self.cur)..a.max(self.cur))
+    }
+
+    pub fn selected(&self) -> Option<&str> {
+        self.selection().map(|r| &self.text[r])
+    }
+
+    /// Take the selection out of the text. False when there was none.
+    pub fn delete_selection(&mut self) -> bool {
+        let sel = self.selection();
+        self.anchor = None;
+        let Some(r) = sel else { return false };
+        self.text.replace_range(r.clone(), "");
+        self.cur = r.start;
+        true
+    }
+
+    /// The cursor to `to`; `extend` (shift) carries the selection along,
+    /// starting one where the cursor was, and without it the selection goes.
+    fn go(&mut self, to: usize, extend: bool) {
+        if extend {
+            self.anchor.get_or_insert(self.cur);
+        } else {
+            self.anchor = None;
+        }
+        self.cur = to;
+    }
+
+    /// Where the line holding byte `i` starts.
+    fn line_start(&self, i: usize) -> usize {
+        self.text[..i].rfind('\n').map_or(0, |p| p + 1)
+    }
+
+    /// Where the line holding byte `i` ends (its `\n`, or the text's end).
+    fn line_end(&self, i: usize) -> usize {
+        self.text[i..].find('\n').map_or(self.text.len(), |p| i + p)
+    }
+
+    /// ⌥↑ / ⌥↓: the line's start (end), or the previous line's start (the
+    /// next one's end) when the cursor is already there.
+    fn paragraph(&self, dir: isize) -> usize {
+        if dir < 0 {
+            let s = self.line_start(self.cur);
+            if s < self.cur || s == 0 {
+                s
+            } else {
+                self.line_start(s - 1)
+            }
+        } else {
+            let e = self.line_end(self.cur);
+            if e > self.cur || e == self.text.len() {
+                e
+            } else {
+                self.line_end(e + 1)
+            }
+        }
+    }
+
+    /// ^l, and ^c in the box: everything.
     pub fn clear(&mut self) {
         self.text.clear();
         self.cur = 0;
+        self.anchor = None;
     }
 
     /// ↑ / ↓ in the wrapped, multi-line agent box: the same column on the
-    /// screen row `dir` away (`rows` as the box draws them). Up from the
-    /// first row goes to the start, down from the last to the end.
-    pub fn vertical(&mut self, rows: &[Range<usize>], dir: isize) {
-        let Some(cr) = rows.iter().rposition(|r| r.start <= self.cur) else { return };
+    /// screen row `dir` away (`rows` as the box draws them); up from the
+    /// first row goes to the start, down from the last to the end. With
+    /// `extend` (⇧↑ ⇧↓) the selection comes along.
+    pub fn vertical_by(&mut self, rows: &[Range<usize>], dir: isize, extend: bool) {
+        let to = self.row_target(rows, dir);
+        self.go(to, extend);
+    }
+
+    fn row_target(&self, rows: &[Range<usize>], dir: isize) -> usize {
+        let Some(cr) = rows.iter().rposition(|r| r.start <= self.cur) else { return self.cur };
         let col = self.text[rows[cr].start..self.cur].width();
         let Some(to) = cr.checked_add_signed(dir).filter(|&i| i < rows.len()) else {
-            self.cur = if dir < 0 { 0 } else { self.text.len() };
-            return;
+            return if dir < 0 { 0 } else { self.text.len() };
         };
         let row = rows[to].clone();
         // A row wrapped mid-line ends where the next one starts, and a cursor
@@ -371,17 +456,20 @@ impl Field {
             at = end;
         }
         // Never inside an `[Image #N]` tag.
-        self.cur = image_tags(&self.text).into_iter().find(|(r, _)| r.start < at && at < r.end).map_or(at, |(r, _)| r.start);
+        image_tags(&self.text).into_iter().find(|(r, _)| r.start < at && at < r.end).map_or(at, |(r, _)| r.start)
     }
 
+    /// Type `s`, over the selection if there is one.
     pub fn insert(&mut self, s: &str) {
+        self.delete_selection();
         self.text.insert_str(self.cur, s);
         self.cur += s.len();
     }
 
     /// `word` as a word of its own: a space before it when the cursor sits
-    /// right after text, and one after it.
+    /// right after text, and one after it. Over the selection, as `insert`.
     pub fn insert_word(&mut self, word: &str) {
+        self.delete_selection();
         let before = self.text[..self.cur].chars().next_back().is_some_and(|c| !c.is_whitespace());
         let after = self.text[self.cur..].starts_with(' ');
         self.insert(&format!("{}{word}{}", if before { " " } else { "" }, if after { "" } else { " " }));
@@ -395,24 +483,17 @@ impl Field {
         self.text[self.cur..].chars().next().map_or(self.cur, |c| self.cur + c.len_utf8())
     }
 
-    pub fn left(&mut self) {
-        self.cur = self.prev();
-    }
-
-    pub fn right(&mut self) {
-        self.cur = self.next();
-    }
-
-    pub fn home(&mut self) {
-        self.cur = 0;
-    }
-
+    /// The very end of the text.
     pub fn end(&mut self) {
-        self.cur = self.text.len();
+        self.go(self.text.len(), false);
     }
 
-    /// An `[Image #N]` tag goes in one keystroke, like a single character.
+    /// The selection, or the character before the cursor; an `[Image #N]`
+    /// tag goes in one keystroke, like a single character.
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let tag = image_tags(&self.text).into_iter().find(|(r, _)| r.end == self.cur);
         let p = tag.map_or_else(|| self.prev(), |(r, _)| r.start);
         self.text.replace_range(p..self.cur, "");
@@ -420,13 +501,16 @@ impl Field {
     }
 
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let tag = image_tags(&self.text).into_iter().find(|(r, _)| r.start == self.cur);
         let n = tag.map_or_else(|| self.next(), |(r, _)| r.end);
         self.text.replace_range(self.cur..n, "");
     }
 
     /// alt-←: back to the start of this word (or the previous one).
-    pub fn word_left(&mut self) {
+    fn word_left_pos(&self) -> usize {
         let mut it = self.text[..self.cur].char_indices().rev().peekable();
         let mut pos = self.cur;
         for word in [false, true] {
@@ -439,14 +523,10 @@ impl Field {
             }
         }
         // An `[Image #N]` tag is one word.
-        self.cur = image_tags(&self.text).into_iter().find(|(r, _)| r.start < pos && pos < r.end).map_or(pos, |(r, _)| r.start);
+        image_tags(&self.text).into_iter().find(|(r, _)| r.start < pos && pos < r.end).map_or(pos, |(r, _)| r.start)
     }
 
     /// alt-→: on to the end of this word (or the next one).
-    pub fn word_right(&mut self) {
-        self.cur = self.word_end();
-    }
-
     fn word_end(&self) -> usize {
         let end = self.word_end_raw();
         image_tags(&self.text).into_iter().find(|(r, _)| r.start < end && end < r.end).map_or(end, |(r, _)| r.end)
@@ -467,14 +547,20 @@ impl Field {
         self.cur + end
     }
 
-    /// alt-d: from the cursor to the end of the word.
+    /// alt-d: from the cursor to the end of the word (or the selection).
     pub fn kill_word_right(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let e = self.word_end();
         self.text.replace_range(self.cur..e, "");
     }
 
-    /// ^w: the word before the cursor, with the spaces after it.
+    /// ^w: the word before the cursor, with the spaces after it (or the selection).
     pub fn kill_word(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let before = &self.text[..self.cur];
         let t = before.trim_end().len();
         let cut = before[..t]
@@ -486,14 +572,123 @@ impl Field {
         self.cur = cut;
     }
 
-    /// ^u
+    /// ^u (⌘⌫ in Ghostty): back to the start of the cursor's line; at its
+    /// start, the line break before it, joining the line above.
     pub fn kill_start(&mut self) {
-        self.text.replace_range(..self.cur, "");
-        self.cur = 0;
+        if self.delete_selection() {
+            return;
+        }
+        let s = self.line_start(self.cur);
+        let s = if s == self.cur { s.saturating_sub(1) } else { s };
+        self.text.replace_range(s..self.cur, "");
+        self.cur = s;
     }
 
-    /// ^k
+    /// ^k: on to the end of the cursor's line; at its end, the line break,
+    /// joining the line below (emacs's ^k).
     pub fn kill_end(&mut self) {
-        self.text.truncate(self.cur);
+        if self.delete_selection() {
+            return;
+        }
+        let e = self.line_end(self.cur);
+        let e = if e == self.cur && e < self.text.len() { e + 1 } else { e };
+        self.text.replace_range(self.cur..e, "");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(text: &str, cur: usize) -> Field {
+        Field { text: text.into(), cur, ..Default::default() }
+    }
+
+    fn press(f: &mut Field, code: KeyCode, mods: KeyModifiers) {
+        f.key(&KeyEvent::new(code, mods));
+    }
+
+    const CTRL: KeyModifiers = KeyModifiers::CONTROL;
+    const SHIFT: KeyModifiers = KeyModifiers::SHIFT;
+    const ALT_SHIFT: KeyModifiers = KeyModifiers::ALT.union(KeyModifiers::SHIFT);
+
+    #[test]
+    fn ctrl_a_and_e_stay_on_the_line() {
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::Char('a'), CTRL);
+        assert_eq!(f.cur, 4);
+        press(&mut f, KeyCode::Char('e'), CTRL);
+        assert_eq!(f.cur, 13);
+        press(&mut f, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(f.cur, 4);
+        press(&mut f, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(f.cur, 13);
+    }
+
+    #[test]
+    fn ctrl_u_and_k_stay_on_the_line_then_join() {
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::Char('u'), CTRL);
+        assert_eq!((f.text.as_str(), f.cur), ("one\nthree\nfour", 4));
+        press(&mut f, KeyCode::Char('u'), CTRL);
+        assert_eq!((f.text.as_str(), f.cur), ("onethree\nfour", 3));
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::Char('k'), CTRL);
+        assert_eq!(f.text, "one\ntwo \nfour");
+        press(&mut f, KeyCode::Char('k'), CTRL);
+        assert_eq!(f.text, "one\ntwo four");
+    }
+
+    #[test]
+    fn shift_and_alt_shift_arrows_select() {
+        let mut f = field("hello brave world", 6);
+        press(&mut f, KeyCode::Right, ALT_SHIFT);
+        assert_eq!(f.selected(), Some("brave"));
+        press(&mut f, KeyCode::Right, SHIFT);
+        assert_eq!(f.selected(), Some("brave "));
+        press(&mut f, KeyCode::Left, ALT_SHIFT);
+        assert_eq!(f.selected(), None);
+        press(&mut f, KeyCode::Left, ALT_SHIFT);
+        assert_eq!(f.selected(), Some("hello "));
+        // Typing replaces it; ← without shift would have gone to its start.
+        press(&mut f, KeyCode::Char('X'), SHIFT);
+        assert_eq!((f.text.as_str(), f.cur, f.selection()), ("Xbrave world", 1, None));
+    }
+
+    #[test]
+    fn alt_shift_up_down_select_to_the_line_ends() {
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::Down, ALT_SHIFT);
+        assert_eq!(f.selected(), Some("three"));
+        press(&mut f, KeyCode::Down, ALT_SHIFT);
+        assert_eq!(f.selected(), Some("three\nfour"));
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::Up, ALT_SHIFT);
+        assert_eq!(f.selected(), Some("two "));
+        press(&mut f, KeyCode::Up, ALT_SHIFT);
+        assert_eq!(f.selected(), Some("one\ntwo "));
+    }
+
+    #[test]
+    fn a_selection_goes_on_backspace_and_arrows_collapse_it() {
+        let mut f = field("abc def", 7);
+        press(&mut f, KeyCode::Char('a'), CTRL.union(SHIFT));
+        assert_eq!(f.selected(), Some("abc def"));
+        press(&mut f, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!((f.cur, f.selection()), (0, None));
+        press(&mut f, KeyCode::Right, SHIFT);
+        press(&mut f, KeyCode::Right, SHIFT);
+        press(&mut f, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!((f.text.as_str(), f.cur), ("c def", 0));
+    }
+
+    #[test]
+    fn shift_down_selects_by_row() {
+        let mut f = field("abcd\nefgh", 1);
+        let rows = [0..4, 5..9];
+        f.vertical_by(&rows, 1, true);
+        assert_eq!(f.selected(), Some("bcd\ne"));
+        f.vertical_by(&rows, -1, false);
+        assert_eq!((f.cur, f.selection()), (1, None));
     }
 }

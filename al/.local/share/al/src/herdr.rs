@@ -42,6 +42,8 @@ pub struct Tab {
     /// The agent's session title, else the pane's directory.
     pub title: String,
     pub cwd: String,
+    /// The agent's session ID (`Y` copies it), whatever the agent.
+    pub session: Option<String>,
     /// A Claude agent's session ID: its transcript has what its screen doesn't.
     pub claude_session: Option<String>,
     /// The pane the tab's agent runs in (`r` replies to it): the shown pane's
@@ -94,13 +96,10 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
             }
             let title = agent.as_ref().map(|(_, a)| str_of(a, "terminal_title_stripped")).filter(|t| !t.is_empty());
             let title = title.unwrap_or_else(|| tilde(&cwd));
-            let claude_session = agent
-                .as_ref()
-                .filter(|(_, a)| a["agent"] == "claude")
-                .and_then(|(_, a)| a["agent_session"]["value"].as_str())
-                .map(String::from);
+            let session = agent.as_ref().and_then(|(_, a)| a["agent_session"]["value"].as_str()).filter(|s| !s.is_empty()).map(String::from);
+            let claude_session = session.clone().filter(|_| agent.as_ref().is_some_and(|(_, a)| a["agent"] == "claude"));
             let agent_pane = agent.map(|(p, _)| p).filter(|p| !p.is_empty());
-            Some(Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, claude_session, agent_pane, id })
+            Some(Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, session, claude_session, agent_pane, id })
         })
         .collect();
     Ok((name, tabs))

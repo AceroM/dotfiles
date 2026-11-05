@@ -64,7 +64,7 @@ fn truncate(s: &str, w: usize) -> String {
     out
 }
 
-/// Keep the end: `…numeral-4289.chatgpt.site`.
+/// Keep the end: `…acme-4289.chatgpt.site`.
 fn truncate_left(s: &str, w: usize) -> String {
     if s.width() <= w {
         return s.to_string();

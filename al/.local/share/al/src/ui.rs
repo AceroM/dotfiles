@@ -1,6 +1,8 @@
 //! Drawing, straight into the frame buffer, in the look of jv's `;` dialog:
-//! the tabs on the left with relative numbers, the selected one's pane (with
-//! its own colors) on the right.
+//! the tabs on the left with relative numbers (drafts on top), the selected
+//! one's pane (with its own colors) on the right, or a draft's page: its
+//! prompt in a centered column with its images under it, which `d` and `e`
+//! write in place.
 
 use std::ops::Range;
 
@@ -12,8 +14,10 @@ use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::agent;
-use crate::app::{App, Mode};
+use crate::agent::{self, Field};
+use crate::app::{App, Mode, Row, Target};
+use crate::drafts;
+use crate::gfx;
 use crate::herdr;
 use crate::select;
 use crate::theme::Palette;
@@ -28,9 +32,11 @@ pub fn draw(app: &App, frame: &mut Frame) {
     status(app, buf);
     match app.mode {
         Mode::Help => help(app, buf, area),
-        Mode::Ask => ask(app, buf, area),
+        // A draft is written on its page in the preview; the rest in the box.
+        Mode::Ask if !app.page_editing() => ask(app, buf, area),
         _ => {}
     }
+    toast(app, buf, area);
 }
 
 // ---- helpers -------------------------------------------------------------
@@ -126,19 +132,21 @@ fn list(app: &App, buf: &mut Buffer) {
     let title = if app.filter.is_empty() {
         app.space.clone()
     } else {
-        format!("/{} · {} of {}", app.filter, app.view.len(), app.tabs.len())
+        format!("/{} · {} of {}", app.filter, app.view.len(), app.tabs.len() + app.drafts.len())
     };
-    let inner = panel(buf, app.lay.list, &title, p.accent, p);
+    // Writing a draft's page: the preview has the focus, its border lit.
+    let editing = app.page_editing();
+    let inner = panel(buf, app.lay.list, &title, if editing { p.border } else { p.accent }, p);
     let max = inner.right().saturating_sub(1);
+    let nw = app.view.len().max(1).to_string().len();
+    let rows = inner;
     if app.view.is_empty() {
-        let why = if app.filter.is_empty() { "no other tabs" } else { "no tab matches" };
-        put(buf, inner.x + 1, inner.y, max, why, fg(p.dim));
+        let why = if app.filter.is_empty() { "no other tabs · d drafts a prompt" } else { "nothing matches" };
+        put(buf, rows.x + 1, rows.y, max, why, fg(p.dim));
         return;
     }
-    let nw = app.view.len().to_string().len();
-    for (k, &i) in app.view.iter().enumerate().skip(app.list_top).take(inner.height as usize) {
-        let t = &app.tabs[i];
-        let y = inner.y + (k - app.list_top) as u16;
+    for (k, &row) in app.view.iter().enumerate().skip(app.list_top).take(rows.height as usize) {
+        let y = rows.y + (k - app.list_top) as u16;
         let on = k == app.cur;
         if on {
             fill(buf, Rect::new(inner.x, y, inner.width, 1), p.sel);
@@ -147,6 +155,30 @@ fn list(app: &App, buf: &mut Buffer) {
         // the rest their distance (5j gets there).
         let (n, nst) = if on { (k + 1, fg(p.yellow).add_modifier(Modifier::BOLD)) } else { (k.abs_diff(app.cur), fg(p.dim)) };
         let x = put(buf, inner.x + 1, y, max, &format!("{n:>nw$}"), nst) + 1;
+        let (name_hits, title_hits) = &app.hits[k];
+        let lst = if on { fg(p.bright).add_modifier(Modifier::BOLD) } else { fg(p.fg) };
+        let t = match row {
+            Row::Tab(i) => &app.tabs[i],
+            // A draft: a hollow mark, then its prompt on one line.
+            Row::Draft(i) => {
+                let x = put(buf, x, y, max, "◇", fg(p.accent)) + 1;
+                let st = if on { lst } else { fg(p.fg).add_modifier(Modifier::ITALIC) };
+                // The draft being changed shows its prompt as it's typed.
+                let w = max.saturating_sub(x) as usize;
+                match &app.target {
+                    Target::Edit(id) if editing && *id == app.drafts[i].id => {
+                        // Nothing typed yet: a placeholder, as on its page.
+                        let text = drafts::flat(&app.ask.text);
+                        let (text, st) = if text.is_empty() { ("new draft".to_string(), fg(p.dim).add_modifier(Modifier::ITALIC)) } else { (text, st) };
+                        put(buf, x, y, max, &truncate(&text, w), st);
+                    }
+                    _ => {
+                        text_with_hits(buf, x, y, max, &app.drafts[i].flat(), w, name_hits, st, p);
+                    }
+                }
+                continue;
+            }
+        };
         let dot = match t.status.as_str() {
             "working" => p.yellow,
             "blocked" => p.red,
@@ -155,8 +187,6 @@ fn list(app: &App, buf: &mut Buffer) {
             _ => p.dim,
         };
         let x = put(buf, x, y, max, "●", fg(dot)) + 1;
-        let (name_hits, title_hits) = &app.hits[k];
-        let lst = if on { fg(p.bright).add_modifier(Modifier::BOLD) } else { fg(p.fg) };
         let x = text_with_hits(buf, x, y, max, t.name(), max.saturating_sub(x) as usize, name_hits, lst, p) + 2;
         if x < max {
             text_with_hits(buf, x, y, max, &t.title, (max - x) as usize, title_hits, fg(p.dim), p);
@@ -168,24 +198,40 @@ fn list(app: &App, buf: &mut Buffer) {
 
 fn preview(app: &App, buf: &mut Buffer, r: Rect) {
     let p = &app.pal;
-    let mut title = app.selected().map(|t| herdr::tilde(&t.cwd)).unwrap_or_default();
+    let editing = app.page_editing();
+    let mut title = match (&app.target, app.selected_draft()) {
+        _ if editing => format!("draft · {} in {} · ⏎ sends", app.ask_kind, herdr::tilde(&app.box_cwd().to_string_lossy())),
+        (_, Some(d)) => format!("draft · {} in {}", app.ask_kind, herdr::tilde(&d.cwd.to_string_lossy())),
+        _ => app.selected().map(|t| herdr::tilde(&t.cwd)).unwrap_or_default(),
+    };
     if app.in_transcript {
         title.push_str(" · transcript");
     }
-    // Scrolled up: say how far from the bottom (d comes back down).
-    let up = app.scroll.min(app.window(usize::MAX).len().saturating_sub(r.height.saturating_sub(2) as usize));
-    if up > 0 {
-        title.push_str(&format!(" · ↑{up}"));
+    let h = r.height.saturating_sub(2) as usize;
+    if app.top_aligned {
+        // A draft longer than the panel: say how much is below (J goes down).
+        let below = app.lines().len().saturating_sub(app.window(h).end);
+        if below > 0 {
+            title.push_str(&format!(" · ↓{below}"));
+        }
+    } else {
+        // Scrolled up: say how far from the bottom (J comes back down).
+        let up = app.scroll.min(app.window(usize::MAX).len().saturating_sub(h));
+        if up > 0 {
+            title.push_str(&format!(" · ↑{up}"));
+        }
     }
-    let inner = panel(buf, r, &title, p.border, p);
-    let max = inner.right().saturating_sub(1);
-    let x0 = inner.x + 1;
+    panel(buf, r, &title, if editing { p.accent } else { p.border }, p);
+    // The text's cells: the panel less its padding, or a draft's centered column.
+    let Some(t) = app.preview_text() else { return };
+    let (x0, max) = (t.x, t.right());
     // Cells a..b of a line, as screen columns cut to the panel.
     let cells = |a: usize, b: usize| (x0 as usize).saturating_add(a).min(max as usize) as u16..(x0 as usize).saturating_add(b).min(max as usize) as u16;
-    // The pane's latest lines (or the transcript's), bottom-aligned, like looking at it.
-    let w = app.window(inner.height as usize);
+    // The pane's latest lines (or the transcript's), bottom-aligned, like
+    // looking at it; a draft's page from its top.
+    let w = app.window(t.height as usize);
     for (k, line) in app.lines()[w.clone()].iter().enumerate() {
-        let (i, y) = (w.start + k, inner.y + k as u16);
+        let (i, y) = (w.start + k, t.y + k as u16);
         let mut x = x0;
         for (s, st) in line {
             x = put(buf, x, y, max, s, fg(p.fg).patch(*st));
@@ -208,6 +254,43 @@ fn preview(app: &App, buf: &mut Buffer, r: Rect) {
                 buf[(x, y)].modifier.toggle(Modifier::REVERSED);
             }
         }
+        // A draft's image: each cell names its own row and column of the
+        // picture, so one scrolled half out of view draws its other half.
+        for img in app.pimgs.iter().filter(|m| (m.line..m.line + m.rows as usize).contains(&i)) {
+            let row = (i - img.line) as u16;
+            for c in 0..img.cols.min(max.saturating_sub(x0)) {
+                if let Some(cell) = buf.cell_mut((x0 + c, y)) {
+                    gfx::placeholder(cell, img.id, row, c);
+                }
+            }
+        }
+    }
+    if editing {
+        caret(app, buf, t, w);
+    }
+}
+
+/// The page being written: a hint while it's empty, and the cursor (a
+/// column past a full row is the padding's).
+fn caret(app: &App, buf: &mut Buffer, t: Rect, w: Range<usize>) {
+    let p = &app.pal;
+    if app.ask.text.is_empty() {
+        put(buf, t.x, t.y, t.right(), &format!("What should {} do?", app.ask_kind), fg(p.dim).add_modifier(Modifier::ITALIC));
+    }
+    // The page's first lines are the text's rows, from the column's left edge.
+    let rows = word_rows(&app.ask.text, t.width as usize);
+    let shown = w.start.min(rows.len())..w.end.min(rows.len());
+    mark_selection(buf, &app.ask, &rows, shown, t.x, t.y, t.right(), Style::new().bg(p.sel));
+    let Some((line, col)) = app.caret.filter(|(l, _)| w.contains(l)) else { return };
+    let (x, y) = (t.x as usize + col, t.y + (line - w.start) as u16);
+    if x > t.right() as usize {
+        return;
+    }
+    if let Some(cell) = buf.cell_mut((x as u16, y)) {
+        if cell.symbol().trim().is_empty() {
+            cell.set_symbol(" ");
+        }
+        cell.set_style(Style::new().fg(p.bg.c()).bg(p.accent));
     }
 }
 
@@ -232,18 +315,34 @@ fn status(app: &App, buf: &mut Buffer) {
     } else if !app.filter.is_empty() {
         x = put(buf, x, r.y, max, &format!("/{} · esc clears", app.filter), fg(p.dim));
     }
+    let drafting = matches!(app.target, Target::Edit(_));
     let hints: &[(&str, &str)] = match app.mode {
         Mode::Filter => &[("⏎", "go"), ("↑↓", "move"), ("esc", "keep filter"), ("^u", "clear")],
-        Mode::Ask if app.ask_path.is_some() => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("tab", "path"), ("esc", "back")],
-        Mode::Ask => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("esc", "back")],
+        Mode::Ask if app.ask.selection().is_some() => &[("^c", "copy"), ("^x", "cut"), ("⌫", "delete"), ("esc", "unselect")],
+        Mode::Ask if drafting => &[("⏎", "send"), ("esc", "keep for later"), ("^c", "clear"), ("⇧⏎ ^j", "newline"), ("^v", "image")],
+        Mode::Ask if app.ask_path.is_some() => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("tab", "path"), ("^c", "clear"), ("esc", "back")],
+        Mode::Ask => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("^c", "clear"), ("esc", "back")],
         // Codex's footer while its transcript has a mark.
         _ if app.sel.is_some() => &[("^c", "copy"), ("⏎", "copy & follow"), ("esc", "clear")],
+        _ if app.selected_draft().is_some() => &[
+            ("⏎", "send"),
+            ("e", "edit"),
+            ("x", "delete"),
+            ("y", "copy"),
+            ("d", "draft"),
+            ("J K", "scroll"),
+            ("/", "find"),
+            ("?", "keys"),
+            ("q", "quit"),
+        ],
         _ => &[
             ("⏎", "go"),
             ("x", "close"),
             ("c", "new agent"),
+            ("d", "draft"),
             ("r", "reply"),
-            ("d u", "scroll"),
+            ("y Y", "pane · session"),
+            ("J K", "scroll"),
             ("/", "find"),
             ("?", "keys"),
             ("q", "quit"),
@@ -294,6 +393,71 @@ fn wrap_ranges(text: &str, w: usize) -> Vec<Range<usize>> {
     out
 }
 
+/// Rows of `text` for reading (a draft's preview): each line wrapped at its
+/// spaces to `w` columns, a word longer than a row cut, as byte ranges.
+pub fn word_rows(text: &str, w: usize) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        out.extend(word_wrap(line, w).into_iter().map(|r| start + r.start..start + r.end));
+        start += line.len() + 1;
+    }
+    out
+}
+
+fn word_wrap(text: &str, w: usize) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let (mut start, mut col) = (0, 0);
+    // Where this row may break: just past its last space.
+    let mut brk = None;
+    for (i, c) in text.char_indices() {
+        let cw = c.width().unwrap_or(0);
+        if col + cw > w && col > 0 {
+            match brk.take().filter(|&b| b > start) {
+                Some(b) => {
+                    out.push(start..b);
+                    start = b;
+                    col = text[b..i].width();
+                }
+                None => {
+                    out.push(start..i);
+                    start = i;
+                    col = 0;
+                }
+            }
+        }
+        col += cw;
+        if c == ' ' {
+            brk = Some(i + 1);
+        }
+    }
+    out.push(start..text.len());
+    out
+}
+
+/// Light up `f`'s selection where its text is drawn: row `i` of `rows` on
+/// screen line `y0 + (i - shown.start)`, from column `x`, cut at `max`. A
+/// selected line break shows as one cell past its row's text.
+#[allow(clippy::too_many_arguments)]
+pub fn mark_selection(buf: &mut Buffer, f: &Field, rows: &[Range<usize>], shown: Range<usize>, x: u16, y0: u16, max: u16, st: Style) {
+    let Some(sel) = f.selection() else { return };
+    for i in shown.clone() {
+        let Some(row) = rows.get(i) else { break };
+        let y = y0 + (i - shown.start) as u16;
+        let col = |b: usize| x as usize + f.text[row.start..b].width();
+        let (a, b) = (sel.start.clamp(row.start, row.end), sel.end.clamp(row.start, row.end));
+        let mut cells = col(a)..col(b);
+        if f.text[row.end..].starts_with('\n') && sel.start <= row.end && row.end < sel.end {
+            cells.end = col(row.end) + 1;
+        }
+        for cx in cells.start..cells.end.min(max as usize) {
+            if let Some(cell) = buf.cell_mut((cx as u16, y)) {
+                cell.set_style(st);
+            }
+        }
+    }
+}
+
 /// The agent box's width on a screen `screen_w` wide.
 fn ask_box_width(screen_w: u16) -> u16 {
     screen_w.saturating_sub(6).min(100)
@@ -305,7 +469,7 @@ pub fn ask_width(screen_w: u16) -> usize {
     (ask_box_width(screen_w) as usize).saturating_sub(4).max(8)
 }
 
-/// The agent box (`c`, or `r`), centered: a bordered input growing with its
+/// The agent box (`c` or `r`; `d` and `e` without a preview), centered: a bordered input growing with its
 /// text. The border says where it goes: a new agent's kind and folder, or
 /// the tab a reply is for.
 fn ask(app: &App, buf: &mut Buffer, area: Rect) {
@@ -323,13 +487,16 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
     Clear.render(r, buf);
     let room = (w as usize).saturating_sub(16);
-    let title = match &app.reply_to {
-        Some(to) => vec![Span::styled(" reply to ", fg(p.muted)), Span::styled(truncate(&to.label, room), fg(p.accent)), Span::raw(" ")],
-        None => {
+    let title = match &app.target {
+        Target::Reply(to) => vec![Span::styled(" reply to ", fg(p.muted)), Span::styled(truncate(&to.label, room), fg(p.accent)), Span::raw(" ")],
+        t => {
+            // A draft says so (written here when there's no preview to hold its page).
+            let what = if matches!(t, Target::Edit(_)) { " draft · " } else { " new " };
             let kind = &app.ask_kind;
-            let cwd = truncate(&herdr::tilde(&app.ask_cwd.to_string_lossy()), room.saturating_sub(kind.width() + 8));
+            let cwd = herdr::tilde(&app.box_cwd().to_string_lossy());
+            let cwd = truncate(&cwd, room.saturating_sub(kind.width() + what.width() + 4));
             vec![
-                Span::styled(" new ", fg(p.muted)),
+                Span::styled(what, fg(p.muted)),
                 Span::styled(kind.clone(), fg(p.accent)),
                 Span::styled(" in ", fg(p.muted)),
                 Span::styled(cwd, fg(p.fg)),
@@ -361,6 +528,7 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
             .collect();
         mark_hits(buf, tx, y, max, s, &hits, fg(p.accent));
     }
+    mark_selection(buf, field, &rows, top..(top + shown).min(rows.len()), tx, y0, max, Style::new().bg(p.sel));
     let cx = tx + field.text[rows[cr].start..field.cur].width() as u16;
     let cy = y0 + (cr - top) as u16;
     if cx <= max {
@@ -379,13 +547,19 @@ const KEYS: &[(&str, &str)] = &[
     ("5j 3k 12G", "counts, by the relative numbers · tab 12"),
     ("^d ^u", "half a list down / up"),
     ("g G", "first / last tab"),
-    ("d u", "scroll the preview (a Claude tab's transcript above)"),
-    ("⏎", "go to the tab and quit"),
-    ("o", "go to the tab, stay open"),
-    ("x ;", "close the tab (;;; closes a run)"),
+    ("J K", "scroll the preview (a Claude tab's transcript above)"),
+    ("⏎ o", "go to the tab (al stays open) · send a draft"),
+    ("x ;", "close the tab (;;; closes a run) · delete a draft"),
     ("c", "ask a new agent, in a new tab"),
+    ("d", "a new draft, on top now: write it, ⏎ sends, esc keeps"),
+    ("e", "write in the selected draft"),
+    ("u", "bring back the draft x deleted"),
     ("r", "reply to the selected tab's agent"),
     ("  ^v ^j tab", "in the box: image · newline (⇧⏎ too) · --path"),
+    ("  ^a ^e ^u ^k", "in the box: the line's start / end · delete to them"),
+    ("  ⇧ ⌥⇧ arrows", "in the box: select (⌥ a word, ⌥↑↓ to the line's end)"),
+    ("  ^c ^x ^z", "in the box: copy (else clear) · cut · undo the clear"),
+    ("y Y", "copy the tab's pane ID · its agent's session ID"),
     ("/", "find by name, title or folder (⏎ goes)"),
     ("esc", "stop typing · clear the filter · quit"),
     ("click", "select · click again to go"),
@@ -408,5 +582,62 @@ fn help(app: &App, buf: &mut Buffer, area: Rect) {
         let y = inner.y + i as u16;
         put(buf, inner.x + 1, y, max, k, fg(p.yellow));
         put(buf, inner.x + 3 + kw as u16, y, max, l, fg(p.fg));
+    }
+}
+
+// ---- the toast -------------------------------------------------------------
+
+/// What an action just did, in a box over the preview's bottom right corner
+/// for a moment: green when it worked, red when it didn't.
+fn toast(app: &App, buf: &mut Buffer, area: Rect) {
+    let Some((m, ok, _)) = &app.toast else { return };
+    let p = &app.pal;
+    let room = area.width.saturating_sub(4) as usize;
+    if room < 8 || area.height < 5 {
+        return;
+    }
+    let text = truncate(&format!("{} {m}", if *ok { "✓" } else { "✗" }), room - 4);
+    let w = text.width() as u16 + 4;
+    let r = Rect::new(area.right().saturating_sub(w + 2), area.bottom().saturating_sub(5), w, 3);
+    Clear.render(r, buf);
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(fg(if *ok { p.green } else { p.red }))
+        .style(Style::new().bg(p.panel))
+        .render(r, buf);
+    put(buf, r.x + 2, r.y + 1, r.right() - 2, &text, fg(p.bright));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(text: &str, w: usize) -> Vec<&str> {
+        word_rows(text, w).into_iter().map(|r| &text[r]).collect()
+    }
+
+    #[test]
+    fn lights_the_selection_and_its_line_break() {
+        use ratatui::style::Color;
+        // "ab\ncd", selected from 'b' to 'c' (the line break between them too).
+        let f = Field { text: "ab\ncd".into(), cur: 4, anchor: Some(1) };
+        let rows = prompt_rows(&f.text, 10);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
+        let st = Style::new().bg(Color::Red);
+        mark_selection(&mut buf, &f, &rows, 0..2, 1, 0, 10, st);
+        let lit = |y: u16| -> Vec<u16> { (0..10).filter(|&x| buf[(x, y)].bg == Color::Red).collect() };
+        // Row one: 'b' at column 2, and its line break one past it.
+        assert_eq!(lit(0), [2, 3]);
+        // Row two: 'c' at column 1.
+        assert_eq!(lit(1), [1]);
+    }
+
+    #[test]
+    fn wraps_at_words() {
+        assert_eq!(rows("and the JPEG [Image #2] too", 14), ["and the JPEG ", "[Image #2] too"]);
+        assert_eq!(rows("one\ntwo three", 5), ["one", "two ", "three"]);
+        // A word longer than a row is cut.
+        assert_eq!(rows("ab abcdefgh", 4), ["ab ", "abcd", "efgh"]);
+        assert_eq!(rows("", 4), [""]);
     }
 }

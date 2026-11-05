@@ -1,7 +1,9 @@
 mod agent;
 mod ansi;
 mod app;
+mod drafts;
 mod fuzzy;
+mod gfx;
 mod herdr;
 mod links;
 mod select;
@@ -37,7 +39,7 @@ const HELP: &str = "\
 al — this Herdr space's tabs: the list on the left, the selected tab's pane on the right
 
 usage:
-  al                   switch to, read, reply to and close tabs (? inside for keys)
+  al                   switch to, read, reply to and close tabs, and keep drafts (? inside for keys)
   al -l, --list        print the tabs (id, status, name, title, folder), tab-separated
 
 options:
@@ -45,8 +47,16 @@ options:
   --path PATH          what ^i / tab puts in the agent box (jv passes the file it's on)
   -h, --help
 
-Runs inside a Herdr pane. Keys are jv's `;` dialog's: j/k (with counts), d/u scroll the
-preview, x or ; closes, c asks a new agent, r replies to the tab's agent, ⏎ goes, / finds.
+Runs inside a Herdr pane. Keys are jv's `;` dialog's: j/k (with counts), J/K scroll the
+preview, x or ; closes, c asks a new agent, r replies to the tab's agent, ⏎ goes, / finds,
+y / Y copy the tab's pane / session ID.
+d starts a draft: it's on top of the tabs at once, its page open on the right, saved as you
+type (in ~/.local/state/al, images and all). ⏎ sends it to a new agent; esc keeps it for
+later, when ⏎ on it sends it. e writes in it again, x deletes it, u undoes.
+Its page draws its images (Kitty graphics: Ghostty, through Herdr). AL_IMAGES=0: off.
+In a box, as in a text editor: ^a ^e the line's start / end, ^u ^k delete to them, shift
+(⌥⇧ a word) with the arrows selects, ^c copies the selection or else clears the input
+(^z brings it back; ^c on an empty box leaves), ^x cuts.
 In the preview, as in Codex: drag (or double/triple-click) marks text and ^c copies it;
 ctrl-click opens a link, a code location in Neovim in a Herdr popup.
 The agent is `claude --dangerously-skip-permissions` unless $AL_AGENT (else $JV_AGENT)
@@ -157,9 +167,17 @@ fn print_list() -> ExitCode {
 
 fn run(app: &mut App) -> io::Result<()> {
     let mut terminal = ratatui::init();
+    // Before anything else reads input: the answer comes back on stdin.
+    app.gfx = gfx::detect();
     let kitty = matches!(supports_keyboard_enhancement(), Ok(true));
     modes(true, kitty);
+    std::thread::spawn(drafts::sweep);
     let res = event_loop(&mut terminal, app);
+    let bye = app.clear_images();
+    if !bye.is_empty() {
+        let _ = terminal.backend_mut().write_all(&bye);
+        let _ = terminal.backend_mut().flush();
+    }
     modes(false, kitty);
     ratatui::restore();
     res
@@ -193,6 +211,12 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         dirty |= app.tick();
         if dirty {
             app.prepare();
+            // Images go out before the cells that show them.
+            let g = app.take_gfx();
+            if !g.is_empty() {
+                terminal.backend_mut().write_all(&g)?;
+                terminal.backend_mut().flush()?;
+            }
             let frame = terminal.draw(|f| ui::draw(app, f))?;
             // A resize redraws everything, their links gone with it.
             if s != size {
