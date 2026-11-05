@@ -1270,6 +1270,8 @@ impl App {
             KeyCode::Char('c') => self.show_box(Target::Agent),
             KeyCode::Char('d') => self.new_draft(),
             KeyCode::Char('e') => self.edit_draft(),
+            // l, vim's right: from the list into the selected draft's page.
+            KeyCode::Char('l') if self.selected_draft().is_some() => self.edit_draft(),
             KeyCode::Char('r') if self.selected_draft().is_some() => self.edit_draft(),
             KeyCode::Char('r') => self.open_reply(),
             KeyCode::Char('y') if !ctrl => self.copy_pane(),

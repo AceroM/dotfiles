@@ -159,7 +159,7 @@ fn list(app: &App, buf: &mut Buffer) {
         let lst = if on { fg(p.bright).add_modifier(Modifier::BOLD) } else { fg(p.fg) };
         let t = match row {
             Row::Tab(i) => &app.tabs[i],
-            // A draft: a hollow mark, then its prompt on one line.
+            // A draft: a hollow mark, then its prompt's first line.
             Row::Draft(i) => {
                 let x = put(buf, x, y, max, "◇", fg(p.accent)) + 1;
                 let st = if on { lst } else { fg(p.fg).add_modifier(Modifier::ITALIC) };
@@ -168,12 +168,13 @@ fn list(app: &App, buf: &mut Buffer) {
                 match &app.target {
                     Target::Edit(id) if editing && *id == app.drafts[i].id => {
                         // Nothing typed yet: a placeholder, as on its page.
-                        let text = drafts::flat(&app.ask.text);
+                        let text = drafts::first_line(&app.ask.text);
                         let (text, st) = if text.is_empty() { ("new draft".to_string(), fg(p.dim).add_modifier(Modifier::ITALIC)) } else { (text, st) };
                         put(buf, x, y, max, &truncate(&text, w), st);
                     }
                     _ => {
-                        text_with_hits(buf, x, y, max, &app.drafts[i].flat(), w, name_hits, st, p);
+                        // Its first line only; the filter still searches all of it.
+                        text_with_hits(buf, x, y, max, &drafts::first_line(&app.drafts[i].text), w, name_hits, st, p);
                     }
                 }
                 continue;
@@ -326,7 +327,7 @@ fn status(app: &App, buf: &mut Buffer) {
         _ if app.sel.is_some() => &[("^c", "copy"), ("⏎", "copy & follow"), ("esc", "clear")],
         _ if app.selected_draft().is_some() => &[
             ("⏎", "send"),
-            ("e", "edit"),
+            ("e l", "edit"),
             ("x", "delete"),
             ("y", "copy"),
             ("d", "draft"),
@@ -552,7 +553,7 @@ const KEYS: &[(&str, &str)] = &[
     ("x ;", "close the tab (;;; closes a run) · delete a draft"),
     ("c", "ask a new agent, in a new tab"),
     ("d", "a new draft, on top now: write it, ⏎ sends, esc keeps"),
-    ("e", "write in the selected draft"),
+    ("e l", "write in the selected draft"),
     ("u", "bring back the draft x deleted"),
     ("r", "reply to the selected tab's agent"),
     ("  ^v ^j tab", "in the box: image · newline (⇧⏎ too) · --path"),

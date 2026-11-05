@@ -36,9 +36,15 @@ pub struct Draft {
     pub created: u64,
 }
 
-/// A prompt on one line, for the list.
+/// A prompt on one line: what the `/` filter searches.
 pub fn flat(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A prompt's first line with words in it, spaced as `flat` spaces it (so
+/// it starts `flat`, and the filter's hits line up): what the list shows.
+pub fn first_line(text: &str) -> String {
+    text.lines().map(flat).find(|l| !l.is_empty()).unwrap_or_default()
 }
 
 /// The images `text`'s tags still point at, in tag order: (N, file).
@@ -294,6 +300,10 @@ mod tests {
     fn flattens_and_scopes() {
         let d = draft("one\n\ntwo   three", &[]);
         assert_eq!(d.flat(), "one two three");
+        assert_eq!(first_line(&d.text), "one");
+        assert_eq!(first_line("\n  \n  fix   the header\nand more"), "fix the header");
+        assert_eq!(first_line(""), "");
+        assert!(flat("\n fix  it\nnow").starts_with(&first_line("\n fix  it\nnow")));
         assert!(d.belongs("w1", ""));
         assert!(d.belongs("w9", "dots"));
         assert!(!d.belongs("w9", "other"));
