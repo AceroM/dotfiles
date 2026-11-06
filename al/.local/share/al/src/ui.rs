@@ -1,8 +1,8 @@
 //! Drawing, straight into the frame buffer, in the look of jv's `;` dialog:
 //! the tabs on the left with relative numbers (drafts on top), the selected
 //! one's pane (with its own colors) on the right, or a draft's page: its
-//! prompt in a centered column with its images under it, which `d` and `e`
-//! write in place.
+//! prompt in a centered column with its images under it, which `d`, `D` (a
+//! reply) and `e` write in place.
 
 use std::ops::Range;
 
@@ -161,20 +161,29 @@ fn list(app: &App, buf: &mut Buffer) {
             Row::Tab(i) => &app.tabs[i],
             // A draft: a hollow mark, then its prompt's first line.
             Row::Draft(i) => {
-                let x = put(buf, x, y, max, "◇", fg(p.accent)) + 1;
+                let d = &app.drafts[i];
+                let mut x = put(buf, x, y, max, "◇", fg(p.accent)) + 1;
+                // A reply: ↳ and the tab it goes to (red once its agent is gone).
+                if let Some(r) = &d.reply {
+                    let (label, alive) = app.reply_label(r);
+                    x = put(buf, x, y, max, "↳", fg(p.accent));
+                    let lw = (max.saturating_sub(x) as usize / 3).max(6);
+                    x = text_with_hits(buf, x, y, max, &label, lw, title_hits, fg(if alive { p.muted } else { p.red }), p) + 1;
+                }
                 let st = if on { lst } else { fg(p.fg).add_modifier(Modifier::ITALIC) };
                 // The draft being changed shows its prompt as it's typed.
                 let w = max.saturating_sub(x) as usize;
                 match &app.target {
-                    Target::Edit(id) if editing && *id == app.drafts[i].id => {
+                    Target::Edit(id) if editing && *id == d.id => {
                         // Nothing typed yet: a placeholder, as on its page.
                         let text = drafts::first_line(&app.ask.text);
-                        let (text, st) = if text.is_empty() { ("new draft".to_string(), fg(p.dim).add_modifier(Modifier::ITALIC)) } else { (text, st) };
+                        let empty = if d.reply.is_some() { "new reply" } else { "new draft" };
+                        let (text, st) = if text.is_empty() { (empty.to_string(), fg(p.dim).add_modifier(Modifier::ITALIC)) } else { (text, st) };
                         put(buf, x, y, max, &truncate(&text, w), st);
                     }
                     _ => {
                         // Its first line only; the filter still searches all of it.
-                        text_with_hits(buf, x, y, max, &drafts::first_line(&app.drafts[i].text), w, name_hits, st, p);
+                        text_with_hits(buf, x, y, max, &drafts::first_line(&d.text), w, name_hits, st, p);
                     }
                 }
                 continue;
@@ -200,9 +209,15 @@ fn list(app: &App, buf: &mut Buffer) {
 fn preview(app: &App, buf: &mut Buffer, r: Rect) {
     let p = &app.pal;
     let editing = app.page_editing();
-    let mut title = match (&app.target, app.selected_draft()) {
+    // A draft says where ⏎ sends it: a new agent in its folder, or the tab it replies to.
+    let what = |d: &drafts::Draft| match &d.reply {
+        Some(r) => format!("reply to {} · {}", app.reply_label(r).0, herdr::tilde(&d.cwd.to_string_lossy())),
+        None => format!("draft · {} in {}", app.ask_kind, herdr::tilde(&d.cwd.to_string_lossy())),
+    };
+    let mut title = match (app.editing_draft(), app.selected_draft()) {
+        (Some(d), _) if editing => format!("{} · ⏎ sends", what(d)),
         _ if editing => format!("draft · {} in {} · ⏎ sends", app.ask_kind, herdr::tilde(&app.box_cwd().to_string_lossy())),
-        (_, Some(d)) => format!("draft · {} in {}", app.ask_kind, herdr::tilde(&d.cwd.to_string_lossy())),
+        (_, Some(d)) => what(d),
         _ => app.selected().map(|t| herdr::tilde(&t.cwd)).unwrap_or_default(),
     };
     if app.in_transcript {
@@ -276,7 +291,11 @@ fn preview(app: &App, buf: &mut Buffer, r: Rect) {
 fn caret(app: &App, buf: &mut Buffer, t: Rect, w: Range<usize>) {
     let p = &app.pal;
     if app.ask.text.is_empty() {
-        put(buf, t.x, t.y, t.right(), &format!("What should {} do?", app.ask_kind), fg(p.dim).add_modifier(Modifier::ITALIC));
+        let hint = match app.editing_draft().and_then(|d| d.reply.as_ref()) {
+            Some(r) => format!("Reply to {}…", app.reply_label(r).0),
+            None => format!("What should {} do?", app.ask_kind),
+        };
+        put(buf, t.x, t.y, t.right(), &hint, fg(p.dim).add_modifier(Modifier::ITALIC));
     }
     // The page's first lines are the text's rows, from the column's left edge.
     let rows = word_rows(&app.ask.text, t.width as usize);
@@ -323,8 +342,8 @@ fn status(app: &App, buf: &mut Buffer) {
         Mode::Ask if drafting => &[("⏎", "send"), ("esc", "keep for later"), ("^c", "clear"), ("⇧⏎ ^j", "newline"), ("^v", "image")],
         Mode::Ask if matches!(app.target, Target::Command) && app.ask_path.is_some() => &[("⏎", "run"), ("⇧⏎ ^j", "newline"), ("tab", "path"), ("^c", "clear"), ("esc", "back")],
         Mode::Ask if matches!(app.target, Target::Command) => &[("⏎", "run"), ("⇧⏎ ^j", "newline"), ("^c", "clear"), ("esc", "back")],
-        Mode::Ask if app.ask_path.is_some() => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("tab", "path"), ("^c", "clear"), ("esc", "back")],
-        Mode::Ask => &[("⏎", "send"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("^c", "clear"), ("esc", "back")],
+        Mode::Ask if app.ask_path.is_some() => &[("⏎", "send"), ("^s", "draft"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("tab", "path"), ("^c", "clear"), ("esc", "back")],
+        Mode::Ask => &[("⏎", "send"), ("^s", "draft"), ("⇧⏎ ^j", "newline"), ("^v", "image"), ("^c", "clear"), ("esc", "back")],
         // Codex's footer while its transcript has a mark.
         _ if app.sel.is_some() => &[("^c", "copy"), ("⏎", "copy & follow"), ("esc", "clear")],
         _ if app.selected_draft().is_some() => &[
@@ -345,6 +364,7 @@ fn status(app: &App, buf: &mut Buffer) {
             ("n", "run"),
             ("d", "draft"),
             ("r", "reply"),
+            ("D", "draft reply"),
             ("y Y", "pane · session"),
             ("J K", "scroll"),
             ("/", "find"),
@@ -473,7 +493,7 @@ pub fn ask_width(screen_w: u16) -> usize {
     (ask_box_width(screen_w) as usize).saturating_sub(4).max(8)
 }
 
-/// The agent box (`c`, `r` or `n`; `d` and `e` without a preview), centered: a bordered input growing with its
+/// The agent box (`c`, `r` or `n`; `d`, `D` and `e` without a preview), centered: a bordered input growing with its
 /// text. The border says where it goes: a new agent's kind and folder, a
 /// command's folder, or the tab a reply is for.
 fn ask(app: &App, buf: &mut Buffer, area: Rect) {
@@ -491,9 +511,12 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
     Clear.render(r, buf);
     let room = (w as usize).saturating_sub(16);
-    let title = match &app.target {
-        Target::Reply(to) => vec![Span::styled(" reply to ", fg(p.muted)), Span::styled(truncate(&to.label, room), fg(p.accent)), Span::raw(" ")],
-        Target::Command => {
+    // A reply draft written here (no preview to hold its page) names its tab, as `r` does.
+    let reply = app.editing_draft().and_then(|d| d.reply.as_ref()).map(|r| app.reply_label(r).0);
+    let title = match (&app.target, reply) {
+        (Target::Reply(to), _) => vec![Span::styled(" reply to ", fg(p.muted)), Span::styled(truncate(&to.label, room), fg(p.accent)), Span::raw(" ")],
+        (_, Some(label)) => vec![Span::styled(" reply draft · to ", fg(p.muted)), Span::styled(truncate(&label, room), fg(p.accent)), Span::raw(" ")],
+        (Target::Command, _) => {
             let cwd = herdr::tilde(&app.box_cwd().to_string_lossy());
             vec![
                 Span::styled(" run ", fg(p.muted)),
@@ -503,7 +526,7 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
                 Span::raw(" "),
             ]
         }
-        t => {
+        (t, _) => {
             // A draft says so (written here when there's no preview to hold its page).
             let what = if matches!(t, Target::Edit(_)) { " draft · " } else { " new " };
             let kind = &app.ask_kind;
@@ -570,6 +593,8 @@ const KEYS: &[(&str, &str)] = &[
     ("e l", "write in the selected draft"),
     ("u", "bring back the draft x deleted"),
     ("r", "reply to the selected tab's agent"),
+    ("D", "a new reply draft to it: ⏎ on it sends it there"),
+    ("  ^s", "in the c / r box: keep it as a draft, written on its page"),
     ("  ^v ^j tab", "in the box: image · newline (⇧⏎ too) · --path"),
     ("  ^a ^e ^u ^k", "in the box: the line's start / end · delete to them"),
     ("  ⌘↑ ⌘↓", "in the box: the text's start / end (⇧ selects)"),

@@ -52,7 +52,9 @@ preview, x or ; closes, c asks a new agent, r replies to the tab's agent, ⏎ go
 y / Y copy the tab's pane / session ID.
 d starts a draft: it's on top of the tabs at once, its page open on the right, saved as you
 type (in ~/.local/state/al, images and all). ⏎ sends it to a new agent; esc keeps it for
-later, when ⏎ on it sends it. e writes in it again, x deletes it, u undoes.
+later, when ⏎ on it sends it. e writes in it again, x deletes it, u undoes. D drafts a
+reply to the selected tab's agent the same way (⏎ sends it there), and ^s in the c or r
+box turns what you've written into a draft, carried on on its page.
 Its page draws its images (Kitty graphics: Ghostty, through Herdr). AL_IMAGES=0: off.
 In a box, as in a text editor: ^a ^e the line's start / end, ^u ^k delete to them, shift
 (⌥⇧ a word) with the arrows selects, ^c copies the selection or else clears the input

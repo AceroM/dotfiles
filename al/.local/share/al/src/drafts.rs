@@ -1,5 +1,7 @@
 //! Drafts: prompts written with `d` that wait on top of the tab list until ⏎
-//! starts an agent with them. They outlive al: one JSON file, and each
+//! starts an agent with them, and replies written with `D` (or saved from the
+//! `r` box with ^s) that wait until ⏎ sends them to the agent they answer.
+//! They outlive al: one JSON file, and each
 //! draft's images copied beside it (a pasted image lives in $TMPDIR, which
 //! macOS empties).
 //!
@@ -19,6 +21,28 @@ use serde_json::{json, Value};
 
 use crate::gfx;
 
+/// The agent a reply goes to: its pane, the tab it was in and what that tab
+/// was called, and its session (the pane is looked for first, then the
+/// session, in case the agent moved).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplyTo {
+    pub pane: String,
+    pub tab: String,
+    pub label: String,
+    pub session: Option<String>,
+}
+
+impl ReplyTo {
+    fn to_json(&self) -> Value {
+        json!({ "pane": self.pane, "tab": self.tab, "label": self.label, "session": self.session })
+    }
+
+    fn from_json(v: &Value) -> Option<ReplyTo> {
+        let s = |k: &str| v[k].as_str().map(String::from);
+        Some(ReplyTo { pane: s("pane")?, tab: s("tab").unwrap_or_default(), label: s("label").unwrap_or_default(), session: s("session") })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
     pub id: String,
@@ -34,6 +58,8 @@ pub struct Draft {
     pub images: Vec<PathBuf>,
     /// Seconds since the epoch.
     pub created: u64,
+    /// A reply: ⏎ sends it to this agent. None starts a new one in `cwd`.
+    pub reply: Option<ReplyTo>,
 }
 
 /// A prompt on one line: what the `/` filter searches.
@@ -75,6 +101,7 @@ impl Draft {
             "text": self.text,
             "images": self.images,
             "created": self.created,
+            "reply": self.reply.as_ref().map(ReplyTo::to_json),
         })
     }
 
@@ -88,6 +115,7 @@ impl Draft {
             text: s("text")?,
             images: v["images"].as_array().map(|a| a.iter().filter_map(|p| p.as_str().map(PathBuf::from)).collect()).unwrap_or_default(),
             created: v["created"].as_u64().unwrap_or(0),
+            reply: ReplyTo::from_json(&v["reply"]),
         })
     }
 }
@@ -281,6 +309,7 @@ mod tests {
             text: text.into(),
             images: images.iter().map(PathBuf::from).collect(),
             created: 1,
+            reply: None,
         }
     }
 
@@ -288,6 +317,18 @@ mod tests {
     fn round_trips_json() {
         let d = draft("look at [Image #1]\nand fix it", &["/a/1.png"]);
         assert_eq!(Draft::from_json(&d.to_json()), Some(d));
+    }
+
+    #[test]
+    fn round_trips_a_reply() {
+        let mut d = draft("and the footer too", &[]);
+        d.reply = Some(ReplyTo { pane: "w1:p3".into(), tab: "w1:t2".into(), label: "auth_tests".into(), session: Some("abc".into()) });
+        assert_eq!(Draft::from_json(&d.to_json()), Some(d.clone()));
+        d.reply.as_mut().unwrap().session = None;
+        assert_eq!(Draft::from_json(&d.to_json()), Some(d));
+        // A draft from before replies: a new agent's.
+        let old = json!({ "id": "x", "cwd": "/tmp", "text": "hi" });
+        assert_eq!(Draft::from_json(&old).map(|d| d.reply), Some(None));
     }
 
     #[test]

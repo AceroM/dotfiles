@@ -7,7 +7,9 @@
 //! (gfx.rs), and `d` / `e` write it right there; the page takes the mouse as
 //! a text area does (a click writes there, a drag selects). Elsewhere in the
 //! preview, the mouse marks text to copy as in Codex (select.rs), and
-//! ctrl-click opens a link (links.rs).
+//! ctrl-click opens a link (links.rs). `D` drafts a reply to the selected
+//! tab's agent instead, and ^s in the `c` or `r` box turns what's written
+//! there into a draft (a reply, for `r`), carried on on its page.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -21,7 +23,7 @@ use ratatui::style::Style;
 
 use crate::agent::{self, Field};
 use crate::ansi::{self, Line};
-use crate::drafts::{self, Draft, Pic};
+use crate::drafts::{self, Draft, Pic, ReplyTo};
 use crate::fuzzy;
 use crate::gfx::{self, Gfx};
 use crate::herdr::{self, Tab};
@@ -53,8 +55,8 @@ pub enum Mode {
     /// Typing the `/` filter.
     Filter,
     /// The agent box: `c` for a new agent, `r` to reply to the selected
-    /// tab's agent, `n` for a shell command, all in a box over the middle; `d` for a draft and `e`
-    /// to change one, written on the draft's page in the preview.
+    /// tab's agent, `n` for a shell command, all in a box over the middle; `d` for a draft
+    /// (`D` a reply) and `e` to change one, written on the draft's page in the preview.
     Ask,
     Help,
 }
@@ -77,8 +79,9 @@ pub enum Row {
 pub enum Target {
     /// `c`: an agent in a new tab, now.
     Agent,
-    /// `d` (a new one) or `e`: draft `id`. Each change is saved to it as you
-    /// type; ⏎ sends it to a new agent, esc leaves it for later.
+    /// `d` / `D` (a new one), `e`, or ^s in the `c` / `r` box: draft `id`.
+    /// Each change is saved to it as you type; ⏎ sends it (to a new agent,
+    /// or the one it replies to), esc leaves it for later.
     Edit(String),
     /// `r`: an agent already running.
     Reply(ReplyTo),
@@ -106,13 +109,6 @@ pub struct Layout {
     /// None when the screen is too small for it.
     pub preview: Option<Rect>,
     pub status: Rect,
-}
-
-/// An `r` reply's destination: the agent's pane, and its tab's name.
-#[derive(Clone)]
-pub struct ReplyTo {
-    pub pane: String,
-    pub label: String,
 }
 
 pub struct Opts {
@@ -405,10 +401,13 @@ impl App {
                 continue;
             }
             let text = fuzzy::score(&q, &d.flat());
+            // A reply: the tab it goes to, as a tab's title.
+            let to = d.reply.as_ref().and_then(|r| fuzzy::score(&q, &self.reply_label(r).0)).map(|(s, h)| (s - 8, h));
             let cwd = fuzzy::score(&q, &herdr::tilde(&d.cwd.to_string_lossy())).map(|(s, _)| s - 16);
-            let Some(best) = [text.as_ref().map(|x| x.0), cwd].into_iter().flatten().max() else { continue };
-            let hits = match text {
-                Some((s, h)) if s == best => (h, Vec::new()),
+            let Some(best) = [text.as_ref().map(|x| x.0), to.as_ref().map(|x| x.0), cwd].into_iter().flatten().max() else { continue };
+            let hits = match (text, to) {
+                (Some((s, h)), _) if s == best => (h, Vec::new()),
+                (_, Some((s, h))) if s == best => (Vec::new(), h),
                 _ => Default::default(),
             };
             v.push((Row::Draft(i), best, hits));
@@ -521,25 +520,117 @@ impl App {
         Some(self.drafts.remove(i))
     }
 
+    /// A new draft of `text` in this space: saved, on top of the list and
+    /// selected. Its id; None when it couldn't be saved.
+    fn add_draft(&mut self, text: String, images: Vec<PathBuf>, cwd: PathBuf, reply: Option<ReplyTo>) -> Option<String> {
+        let id = drafts::new_id();
+        let images = self.keep_images(&id, &text, images);
+        let d = Draft { id: id.clone(), workspace: self.ws.clone(), space: self.space.clone(), cwd, text, images, created: drafts::now(), reply };
+        // An empty draft matches no filter: show everything, so it's on top.
+        self.filter.clear();
+        if !self.put_draft(d) {
+            return None;
+        }
+        self.set_view(Some(draft_key(&id)));
+        Some(id)
+    }
+
     /// `d`: a new draft, there at once: on top of the list, selected, and
     /// its page open on the right to write. It's saved as you type, so ⏎
     /// sends it and esc leaves it for later.
     fn new_draft(&mut self) {
-        let d = Draft {
-            id: drafts::new_id(),
-            workspace: self.ws.clone(),
-            space: self.space.clone(),
-            cwd: self.ask_cwd.clone(),
-            text: String::new(),
-            images: Vec::new(),
-            created: drafts::now(),
-        };
-        let id = d.id.clone();
-        // An empty draft matches no filter: show everything, so it's on top.
-        self.filter.clear();
-        if self.put_draft(d) {
-            self.set_view(Some(draft_key(&id)));
+        if let Some(id) = self.add_draft(String::new(), Vec::new(), self.ask_cwd.clone(), None) {
             self.show_box(Target::Edit(id));
+        }
+    }
+
+    /// `D` on a tab: a new draft as `d` writes one, but a reply: ⏎ sends it
+    /// to the tab's agent.
+    fn new_reply_draft(&mut self) {
+        let Some(t) = self.selected() else {
+            return self.flash("D drafts a reply to the selected tab's agent");
+        };
+        let (to, name) = (reply_to(t), t.name().to_string());
+        let cwd = if t.cwd.is_empty() { self.ask_cwd.clone() } else { PathBuf::from(&t.cwd) };
+        let Some(to) = to else {
+            return self.flash(format!("no agent in {name} to reply to"));
+        };
+        if let Some(id) = self.add_draft(String::new(), Vec::new(), cwd, Some(to)) {
+            self.show_box(Target::Edit(id));
+        }
+    }
+
+    /// ^s in the `c` or `r` box: what it holds becomes a draft (a reply to
+    /// the box's agent, for `r`), on top of the list. The box is left empty
+    /// and the writing goes on on the draft's page, the cursor where it was.
+    fn box_to_draft(&mut self) {
+        let reply = match &self.target {
+            Target::Agent => None,
+            Target::Reply(to) => Some(to.clone()),
+            Target::Command => return self.flash("a command can't be a draft"),
+            Target::Edit(_) => return self.flash("it's a draft already: saved as you type"),
+        };
+        if self.ask.text.trim().is_empty() {
+            return self.flash("nothing written to keep yet");
+        }
+        // A reply's draft lives in its agent's folder (for links, and the filter).
+        let cwd = reply.as_ref().and_then(|r| self.reply_target(r)).map(|(_, t)| t.cwd.clone()).filter(|c| !c.is_empty());
+        let cwd = cwd.map_or_else(|| self.ask_cwd.clone(), PathBuf::from);
+        let field = std::mem::take(&mut self.ask);
+        let images = std::mem::take(&mut self.ask_images);
+        let Some(id) = self.add_draft(field.text.clone(), images.clone(), cwd, reply) else {
+            // Not saved: the box keeps it.
+            (self.ask, self.ask_images) = (field, images);
+            return;
+        };
+        // The box's slot gets the (now empty) field: its text went to the draft.
+        self.show_box(Target::Edit(id));
+        self.ask.cur = field.cur.min(self.ask.text.len());
+        self.ask.anchor = field.anchor.filter(|&a| a <= self.ask.text.len());
+        self.toast("saved as a draft · esc keeps it for later");
+    }
+
+    /// Copy the images `text` tags into draft `id`'s folder (not for
+    /// --snapshot), the pictures already loaded kept under their new names.
+    fn keep_images(&mut self, id: &str, text: &str, images: Vec<PathBuf>) -> Vec<PathBuf> {
+        if !self.live {
+            return images;
+        }
+        let kept = drafts::keep_images(id, text, &images);
+        // A copied image is the same picture: keep it ready under its new name.
+        for (from, to) in images.iter().zip(&kept) {
+            if from != to {
+                if let Some(pic) = self.pics.remove(from) {
+                    self.pics.insert(to.clone(), pic);
+                }
+            }
+        }
+        kept
+    }
+
+    /// Where reply `r` goes now: its pane, while an agent runs there, else
+    /// the pane its agent's session is in now; and that pane's tab.
+    pub fn reply_target(&self, r: &ReplyTo) -> Option<(&str, &Tab)> {
+        let agents = || self.tabs.iter().flat_map(|t| t.agents.iter().map(move |a| (a, t)));
+        let found = agents().find(|(a, _)| a.0 == r.pane);
+        let (a, t) = found.or_else(|| agents().find(|(a, _)| r.session.is_some() && a.1 == r.session))?;
+        Some((a.0.as_str(), t))
+    }
+
+    /// What reply `r`'s agent is called (its tab's name now), and whether
+    /// it's still there to send to.
+    pub fn reply_label(&self, r: &ReplyTo) -> (String, bool) {
+        match self.reply_target(r) {
+            Some((_, t)) => (t.name().to_string(), true),
+            None => (r.label.clone(), false),
+        }
+    }
+
+    /// The draft the box is writing (`d`, `D`, `e`, ^s).
+    pub fn editing_draft(&self) -> Option<&Draft> {
+        match &self.target {
+            Target::Edit(id) if self.mode == Mode::Ask => self.drafts.iter().find(|d| &d.id == id),
+            _ => None,
         }
     }
 
@@ -553,34 +644,25 @@ impl App {
         }
         let Some(old) = self.drafts.iter().find(|d| d.id == id).cloned() else { return };
         let text = self.ask.text.clone();
-        if self.live {
-            let kept = drafts::keep_images(&id, &text, &self.ask_images);
-            // A copied image is the same picture: keep it ready under its new name.
-            for (from, to) in self.ask_images.iter().zip(&kept) {
-                if from != to {
-                    if let Some(pic) = self.pics.remove(from) {
-                        self.pics.insert(to.clone(), pic);
-                    }
-                }
-            }
-            self.ask_images = kept;
-        }
+        let images = std::mem::take(&mut self.ask_images);
+        self.ask_images = self.keep_images(&id, &text, images);
         let key = self.selected_key();
         if self.store_draft(Draft { text, images: self.ask_images.clone(), ..old }) {
             self.set_view(key);
         }
     }
 
-    /// ⏎ in a draft's box: off to a new agent, in the draft's folder, and
-    /// the draft goes (its tab shows up in the list). An empty one just closes.
+    /// ⏎ in a draft's box: off to a new agent in the draft's folder (its
+    /// tab shows up in the list), or to the agent it replies to, and the
+    /// draft goes. An empty one just closes.
     fn send_draft(&mut self, id: String) {
         let text = self.ask.text.trim().to_string();
         if text.is_empty() {
             return self.close_box();
         }
-        let cwd = self.drafts.iter().find(|d| d.id == id).map_or_else(|| self.ask_cwd.clone(), |d| d.cwd.clone());
-        let prompt = agent::with_images(&text, &self.ask_images);
-        if self.drop_draft(&id).is_none() {
+        let Some(d) = self.drafts.iter().find(|d| d.id == id).cloned() else { return };
+        let images = self.ask_images.clone();
+        if !self.dispatch(&d, &text, &images) {
             return;
         }
         self.mode = Mode::Normal;
@@ -588,13 +670,52 @@ impl App {
         self.ask = Field::default();
         self.ask_images.clear();
         self.cleared = None;
-        if self.live {
-            agent::spawn(prompt, cwd, self.bg_tx.clone());
-        } else {
-            self.sent = Some(prompt);
+    }
+
+    /// Send draft `d` as `text` and `images`: to the agent it replies to,
+    /// else to a new agent in its folder; and the draft goes. A reply whose
+    /// agent is gone stays, saying so. True when it went.
+    fn dispatch(&mut self, d: &Draft, text: &str, images: &[PathBuf]) -> bool {
+        let to = match &d.reply {
+            None => None,
+            Some(r) => match self.reply_target(r) {
+                Some((pane, t)) => Some((pane.to_string(), t.name().to_string())),
+                None => {
+                    self.toast_err(format!("no agent in {} any more · the reply stays", r.label));
+                    return false;
+                }
+            },
+        };
+        let prompt = agent::with_images(text, images);
+        if self.drop_draft(&d.id).is_none() {
+            return false;
         }
         self.set_view(None);
-        self.toast(format!("sent: {} is starting in a new tab", self.ask_kind));
+        match to {
+            Some((pane, label)) => {
+                self.toast(format!("sent: replying to {label}"));
+                self.send_reply(pane, prompt, label);
+            }
+            None => {
+                if self.live {
+                    agent::spawn(prompt, d.cwd.clone(), self.bg_tx.clone());
+                } else {
+                    self.sent = Some(prompt);
+                }
+                self.toast(format!("sent: {} is starting in a new tab", self.ask_kind));
+            }
+        }
+        true
+    }
+
+    /// `prompt` to the agent in `pane` (tab `label`); how it went comes back
+    /// on the status line.
+    fn send_reply(&mut self, pane: String, prompt: String, label: String) {
+        if self.live {
+            agent::reply(pane, prompt, label, self.bg_tx.clone());
+        } else {
+            self.sent = Some(format!("[to {label} {pane}] {prompt}"));
+        }
     }
 
     /// Esc (or ^c on an empty box) out of a draft: it stays, as saved. One
@@ -613,21 +734,14 @@ impl App {
         }
     }
 
-    /// ⏎ on a draft: its agent starts in a new tab, in the draft's folder,
-    /// and the draft goes (its tab shows up in the list).
+    /// ⏎ on a draft: its agent starts in a new tab, in the draft's folder
+    /// (or a reply goes to its agent), and the draft goes.
     fn run_draft(&mut self) {
         let Some(d) = self.selected_draft().cloned() else { return };
-        let prompt = agent::with_images(&d.text, &d.images);
-        if self.drop_draft(&d.id).is_none() {
-            return;
+        if d.text.trim().is_empty() {
+            return self.flash("the draft is empty · e writes in it");
         }
-        if self.live {
-            agent::spawn(prompt, d.cwd.clone(), self.bg_tx.clone());
-        } else {
-            self.sent = Some(prompt);
-        }
-        self.set_view(None);
-        self.toast(format!("sent: {} is starting in a new tab", self.ask_kind));
+        self.dispatch(&d, &d.text, &d.images);
     }
 
     /// x / ; on a draft: gone, until `u`.
@@ -1223,8 +1337,16 @@ impl App {
 
     /// `Y`: the selected tab's agent session ID.
     fn copy_session(&mut self) {
-        if self.selected_draft().is_some() {
-            self.toast_err("a draft has no session until ⏎ runs it");
+        if let Some(d) = self.selected_draft() {
+            // A reply's: the session of the agent it goes to.
+            let session = d.reply.as_ref().and_then(|r| {
+                let now = self.reply_target(r).and_then(|(p, t)| t.agents.iter().find(|a| a.0 == p)?.1.clone());
+                now.or_else(|| r.session.clone())
+            });
+            match session {
+                Some(s) => self.clip(s.clone(), &format!("session {s}")),
+                None => self.toast_err("a draft has no session until ⏎ runs it"),
+            }
             return;
         }
         let Some(t) = self.selected() else { return };
@@ -1362,12 +1484,14 @@ impl App {
             KeyCode::Char('x' | ';') => self.close_selected(),
             KeyCode::Char('u') => self.undo(),
             // The agent box: c for a new agent (its tab shows up in the
-            // list), d for a draft (it shows up on top), e to change a
-            // draft, r to reply to the selected tab's agent. n: the same box
-            // for a shell command, run in a new tab.
+            // list), d for a draft (it shows up on top; D a reply to the
+            // selected tab's agent), e to change a draft, r to reply to the
+            // selected tab's agent. n: the same box for a shell command, run
+            // in a new tab.
             KeyCode::Char('c') => self.show_box(Target::Agent),
             KeyCode::Char('n') => self.show_box(Target::Command),
             KeyCode::Char('d') => self.new_draft(),
+            KeyCode::Char('D') => self.new_reply_draft(),
             KeyCode::Char('e') => self.edit_draft(),
             // l, vim's right: from the list into the selected draft's page.
             KeyCode::Char('l') if self.selected_draft().is_some() => self.edit_draft(),
@@ -1518,12 +1642,12 @@ impl App {
     /// `r`: the box, aimed at the selected tab's agent.
     fn open_reply(&mut self) {
         let Some(t) = self.selected() else { return };
-        let label = t.name().to_string();
-        let Some(pane) = t.agent_pane.clone() else {
+        let (to, label) = (reply_to(t), t.name().to_string());
+        let Some(to) = to else {
             self.flash(format!("no agent in {label} to reply to"));
             return;
         };
-        self.show_box(Target::Reply(ReplyTo { pane, label }));
+        self.show_box(Target::Reply(to));
     }
 
     /// Open the agent box for `to`, with that kind of box's text: the open
@@ -1602,12 +1726,7 @@ impl App {
         self.ask_images.clear();
         if let Target::Reply(to) = self.target.clone() {
             self.flash(format!("replying to {}…", to.label));
-            if self.live {
-                agent::reply(to.pane, prompt, to.label, self.bg_tx.clone());
-            } else {
-                self.sent = Some(prompt);
-            }
-            return;
+            return self.send_reply(to.pane, prompt, to.label);
         }
         if self.live {
             agent::spawn(prompt, self.ask_cwd.clone(), self.bg_tx.clone());
@@ -1641,6 +1760,8 @@ impl App {
             KeyCode::Char('c') if ctrl => self.ctrl_c(),
             KeyCode::Char('x') if ctrl => self.cut(),
             KeyCode::Char('z') if ctrl => self.unclear(),
+            // ^s: keep it as a draft (a reply, from `r`) and write on its page.
+            KeyCode::Char('s') if ctrl => self.box_to_draft(),
             // Newline: shift+Enter (the kitty keyboard protocol tells it from
             // Enter; see main.rs), alt+Enter, or ^j anywhere.
             KeyCode::Enter if alt || k.modifiers.contains(KeyModifiers::SHIFT) => f.insert("\n"),
@@ -1825,6 +1946,13 @@ impl App {
 
 fn draft_key(id: &str) -> String {
     format!("draft:{id}")
+}
+
+/// A reply to tab `t`'s agent (`r`, `D`); None when it has none.
+fn reply_to(t: &Tab) -> Option<ReplyTo> {
+    let pane = t.agent_pane.clone()?;
+    let session = t.agents.iter().find(|a| a.0 == pane).and_then(|a| a.1.clone()).or_else(|| t.session.clone());
+    Some(ReplyTo { pane, tab: t.id.clone(), label: t.name().to_string(), session })
 }
 
 /// The cells a `w`×`h` pixel image fills: its own size at most, else as big

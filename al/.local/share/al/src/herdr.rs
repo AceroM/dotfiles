@@ -49,6 +49,9 @@ pub struct Tab {
     /// The pane the tab's agent runs in (`r` replies to it): the shown pane's
     /// agent, else the first one in the tab.
     pub agent_pane: Option<String>,
+    /// Every agent in the tab: its pane, and its session ID. A reply draft
+    /// finds its agent here, even when the tab now shows another.
+    pub agents: Vec<(String, Option<String>)>,
 }
 
 impl Tab {
@@ -96,10 +99,12 @@ pub fn tabs(ws: &str, skip: &str) -> Result<(String, Vec<Tab>), String> {
             }
             let title = agent.as_ref().map(|(_, a)| str_of(a, "terminal_title_stripped")).filter(|t| !t.is_empty());
             let title = title.unwrap_or_else(|| tilde(&cwd));
-            let session = agent.as_ref().and_then(|(_, a)| a["agent_session"]["value"].as_str()).filter(|s| !s.is_empty()).map(String::from);
+            let session_of = |a: &Value| a["agent_session"]["value"].as_str().filter(|s| !s.is_empty()).map(String::from);
+            let session = agent.as_ref().and_then(|(_, a)| session_of(a));
             let claude_session = session.clone().filter(|_| agent.as_ref().is_some_and(|(_, a)| a["agent"] == "claude"));
             let agent_pane = agent.map(|(p, _)| p).filter(|p| !p.is_empty());
-            Some(Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, session, claude_session, agent_pane, id })
+            let agents = mine.iter().filter_map(|p| agent_of(p)).filter(|(p, _)| !p.is_empty()).map(|(p, a)| (p, session_of(a))).collect();
+            Some(Tab { label: str_of(t, "label"), pane, status: str_of(t, "agent_status"), title, cwd, session, claude_session, agent_pane, agents, id })
         })
         .collect();
     Ok((name, tabs))
