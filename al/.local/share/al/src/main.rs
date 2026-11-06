@@ -56,13 +56,15 @@ later, when ⏎ on it sends it. e writes in it again, x deletes it, u undoes. D 
 reply to the selected tab's agent the same way (⏎ sends it there), and ^s in the c or r
 box turns what you've written into a draft, carried on on its page.
 Its page draws its images (Kitty graphics: Ghostty, through Herdr). AL_IMAGES=0: off.
-In a box, as in a text editor: ^a ^e the line's start / end, ^u ^k delete to them, shift
-(⌥⇧ a word) with the arrows selects, ^c copies the selection or else clears the input
-(^z brings it back; ^c on an empty box leaves), ^x cuts.
+In a box, as in a text editor: ^a ^e the line's start / end, ^u ^k delete to them, ⌘↑ ⌘↓
+(or fn↑ fn↓) the text's start / end, shift (⌥⇧ a word) with the arrows selects, ^c copies
+the selection or else clears the input (^z brings it back; ^c on an empty box leaves), ^x cuts.
+shift+tab in the c box (or on a new agent's draft) switches it between claude and codex;
+^p in the c or r box (or on a draft) sends it as `/plan …`, so the agent plans first.
 In the preview, as in Codex: drag (or double/triple-click) marks text and ^c copies it;
 ctrl-click opens a link, a code location in Neovim in a Herdr popup.
-The agent is `claude --dangerously-skip-permissions` unless $AL_AGENT (else $JV_AGENT)
-names another, e.g. AL_AGENT=\"codex --yolo\".
+The agents are `claude --dangerously-skip-permissions` and `codex --no-daemon --yolo` (cx's
+flags); $AL_AGENT (else $JV_AGENT) names the first one, e.g. AL_AGENT=\"codex --yolo\".
 ";
 
 struct Cli {

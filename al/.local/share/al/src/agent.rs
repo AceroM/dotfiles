@@ -2,10 +2,14 @@
 //! the prompt, `r` sends it to the selected tab's agent, `n` runs it as a
 //! shell command in a new tab. al stays where it is.
 //!
-//! The agent is `claude --dangerously-skip-permissions` (the `c` alias) unless
-//! `$AL_AGENT` (else jv's `$JV_AGENT`) names another, e.g.
+//! The agent is `claude --dangerously-skip-permissions` (the `c` alias), or,
+//! after shift+tab in the box, `codex --no-daemon --yolo` (`cx`'s flags).
+//! `$AL_AGENT` (else jv's `$JV_AGENT`) names the first one, e.g.
 //! `AL_AGENT="codex --yolo"`: the first word is Herdr's agent kind, the rest
 //! go to the agent.
+//!
+//! ^p sends the prompt as `/plan …`: Claude Code and Codex both take that as
+//! "plan mode on, and here's the prompt", a new agent and a running one alike.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -22,9 +26,16 @@ use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const DEFAULT_AGENT: &str = "claude --dangerously-skip-permissions";
+/// The agents shift+tab cycles through in the `c` box: Herdr's kind and the
+/// agent's own arguments.
+const AGENTS: [(&str, &[&str]); 2] = [
+    ("claude", &["--dangerously-skip-permissions"]),
+    // As `cx` runs it (ac): in this process, not on Codex's background
+    // server, which also breaks when that server's install goes missing.
+    ("codex", &["--no-daemon", "--yolo"]),
+];
 
-/// Internal: `al --start-agent CWD PROMPT` does the Herdr calls. A separate
+/// Internal: `al --start-agent CWD KIND PROMPT` does the Herdr calls. A separate
 /// process, so quitting al right after Enter still gets the agent its prompt.
 pub const CHILD_FLAG: &str = "--start-agent";
 /// Internal: `al --run-command CWD COMMAND`, the same for `n`.
@@ -34,18 +45,40 @@ pub fn in_herdr() -> bool {
     std::env::var("HERDR_ENV").as_deref() == Ok("1")
 }
 
-/// Herdr's agent kind and the agent's own arguments.
-pub fn spec() -> (String, Vec<String>) {
-    let s = ["AL_AGENT", "JV_AGENT"].iter().find_map(|k| std::env::var(k).ok().filter(|s| !s.trim().is_empty()));
-    let s = s.as_deref().unwrap_or(DEFAULT_AGENT);
-    let mut words = s.split_whitespace().map(String::from);
-    (words.next().unwrap_or_else(|| "claude".into()), words.collect())
+/// The agents to start, the default first: Herdr's kind and the agent's own
+/// arguments. $AL_AGENT (else $JV_AGENT) is the first, its arguments taking
+/// the place of that kind's own.
+pub fn agents() -> Vec<(String, Vec<String>)> {
+    let mut all: Vec<(String, Vec<String>)> =
+        AGENTS.iter().map(|(k, args)| (k.to_string(), args.iter().map(|a| a.to_string()).collect())).collect();
+    let env = ["AL_AGENT", "JV_AGENT"].iter().find_map(|k| std::env::var(k).ok().filter(|s| !s.trim().is_empty()));
+    if let Some(env) = env {
+        let mut words = env.split_whitespace().map(String::from);
+        let kind = words.next().unwrap_or_default();
+        all.retain(|(k, _)| *k != kind);
+        all.insert(0, (kind, words.collect()));
+    }
+    all
 }
 
-/// Start the agent in the background. The outcome comes back on `tx` as a
-/// status-bar line.
-pub fn spawn(prompt: String, cwd: PathBuf, tx: mpsc::Sender<String>) {
-    background(vec![CHILD_FLAG.into(), cwd.into(), prompt.into()], spec().0, tx);
+/// Kind `kind`'s arguments: those `agents` gives it, else none.
+fn args_for(kind: &str) -> Vec<String> {
+    agents().into_iter().find(|(k, _)| k == kind).map(|(_, a)| a).unwrap_or_default()
+}
+
+/// The prompt as plan mode takes it. Claude Code and Codex both read
+/// `/plan TEXT` as plan mode on, then TEXT as the prompt (checked live:
+/// Claude Code 2.1, Codex 0.166). A Claude started with
+/// --dangerously-skip-permissions says its plan mode won't ask before edits,
+/// but the model still holds off until the plan is approved.
+pub fn plan(prompt: &str) -> String {
+    format!("/plan {prompt}")
+}
+
+/// Start agent `kind` in the background. The outcome comes back on `tx` as
+/// a status-bar line.
+pub fn spawn(kind: String, prompt: String, cwd: PathBuf, tx: mpsc::Sender<String>) {
+    background(vec![CHILD_FLAG.into(), cwd.into(), kind.clone().into(), prompt.into()], kind, tx);
 }
 
 /// `n`: run `command` in a new tab's shell, in the background, as `spawn`.
@@ -78,8 +111,8 @@ pub fn background(args: Vec<OsString>, what: String, tx: mpsc::Sender<String>) {
 
 /// The `--start-agent` process: one line on stdout says how it went.
 pub fn child(args: &[String]) -> ExitCode {
-    let [cwd, prompt] = args else { return ExitCode::from(2) };
-    report(start(prompt, Path::new(cwd)))
+    let [cwd, kind, prompt] = args else { return ExitCode::from(2) };
+    report(start(kind, prompt, Path::new(cwd)))
 }
 
 /// The `--run-command` process, as `child`.
@@ -120,13 +153,13 @@ fn run_in_tab(command: &str, cwd: &Path) -> Result<String, String> {
     Ok(format!("running in tab {label}"))
 }
 
-fn start(prompt: &str, cwd: &Path) -> Result<String, String> {
-    let (kind, args) = spec();
+fn start(kind: &str, prompt: &str, cwd: &Path) -> Result<String, String> {
+    let args = args_for(kind);
     let (pane, label) = new_tab(cwd)?;
     // Agent names are [a-z][a-z0-9_-]{0,31}; pane IDs are unique, and their
     // only uppercase is base-36 digits, so lowercasing keeps them unique.
     let name = format!("{kind}-{}", pane.to_ascii_lowercase().replace(':', "-"));
-    let mut cmd = vec!["agent", "start", &name, "--kind", &kind, "--pane", &pane];
+    let mut cmd = vec!["agent", "start", &name, "--kind", kind, "--pane", &pane];
     if !args.is_empty() {
         cmd.push("--");
         cmd.extend(args.iter().map(String::as_str));
@@ -329,8 +362,9 @@ fn is_word(c: char) -> bool {
 /// A text field with a cursor (a byte offset into `text`): the agent box.
 /// It edits as a multi-line text box does: ^a ^e (⌘← ⌘→ in Ghostty) and
 /// Home End go to the ends of the cursor's line, ^u ^k delete to them, ⌘↑ ⌘↓
-/// go to the ends of the whole text, and shift with a move (⌥⇧ for a word,
-/// ⌥⇧↑↓ for the line) marks a selection that typing, a paste or ⌫ replaces.
+/// (and fn↑ fn↓, PgUp PgDn) go to the ends of the whole text, and shift with
+/// a move (⌥⇧ for a word, ⌥⇧↑↓ for the line) marks a selection that typing,
+/// a paste or ⌫ replaces.
 #[derive(Default)]
 pub struct Field {
     pub text: String,
@@ -366,6 +400,10 @@ impl Field {
             // Ghostty binds them to jump_to_prompt unless unbound (ghostty/config).
             KeyCode::Up if sup => self.go(0, shift),
             KeyCode::Down if sup => self.go(self.text.len(), shift),
+            // fn↑ fn↓ (PgUp PgDn) too: they reach the app whatever Ghostty
+            // binds ⌘↑ ⌘↓ to.
+            KeyCode::PageUp => self.go(0, shift),
+            KeyCode::PageDown => self.go(self.text.len(), shift),
             // ⌥↑ ⌥↓, as on macOS: to the start (end) of the line, then the one before (after).
             KeyCode::Up if alt => self.go(self.paragraph(-1), shift),
             KeyCode::Down if alt => self.go(self.paragraph(1), shift),
@@ -752,6 +790,18 @@ mod tests {
         assert_eq!(f.selected(), Some("three\nfour"));
         press(&mut f, KeyCode::Up, KeyModifiers::SUPER.union(SHIFT));
         assert_eq!(f.selected(), Some("one\ntwo "));
+    }
+
+    #[test]
+    fn page_up_down_go_to_the_text_ends_too() {
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!((f.cur, f.selection()), (0, None));
+        press(&mut f, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!((f.cur, f.selection()), (18, None));
+        let mut f = field("one\ntwo three\nfour", 8);
+        press(&mut f, KeyCode::PageDown, SHIFT);
+        assert_eq!(f.selected(), Some("three\nfour"));
     }
 
     #[test]

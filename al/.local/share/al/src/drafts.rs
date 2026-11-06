@@ -60,6 +60,11 @@ pub struct Draft {
     pub created: u64,
     /// A reply: ⏎ sends it to this agent. None starts a new one in `cwd`.
     pub reply: Option<ReplyTo>,
+    /// The kind of agent a new one is (shift+tab): claude, codex. None, from
+    /// before there was a choice: the default (agent::agents).
+    pub kind: Option<String>,
+    /// ^p: it goes as `/plan …`, in plan mode.
+    pub plan: bool,
 }
 
 /// A prompt on one line: what the `/` filter searches.
@@ -102,6 +107,8 @@ impl Draft {
             "images": self.images,
             "created": self.created,
             "reply": self.reply.as_ref().map(ReplyTo::to_json),
+            "kind": self.kind,
+            "plan": self.plan,
         })
     }
 
@@ -116,6 +123,8 @@ impl Draft {
             images: v["images"].as_array().map(|a| a.iter().filter_map(|p| p.as_str().map(PathBuf::from)).collect()).unwrap_or_default(),
             created: v["created"].as_u64().unwrap_or(0),
             reply: ReplyTo::from_json(&v["reply"]),
+            kind: s("kind"),
+            plan: v["plan"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -310,12 +319,16 @@ mod tests {
             images: images.iter().map(PathBuf::from).collect(),
             created: 1,
             reply: None,
+            kind: None,
+            plan: false,
         }
     }
 
     #[test]
     fn round_trips_json() {
-        let d = draft("look at [Image #1]\nand fix it", &["/a/1.png"]);
+        let mut d = draft("look at [Image #1]\nand fix it", &["/a/1.png"]);
+        assert_eq!(Draft::from_json(&d.to_json()), Some(d.clone()));
+        (d.kind, d.plan) = (Some("codex".into()), true);
         assert_eq!(Draft::from_json(&d.to_json()), Some(d));
     }
 
@@ -328,7 +341,7 @@ mod tests {
         assert_eq!(Draft::from_json(&d.to_json()), Some(d));
         // A draft from before replies: a new agent's.
         let old = json!({ "id": "x", "cwd": "/tmp", "text": "hi" });
-        assert_eq!(Draft::from_json(&old).map(|d| d.reply), Some(None));
+        assert_eq!(Draft::from_json(&old).map(|d| (d.reply, d.kind, d.plan)), Some((None, None, false)));
     }
 
     #[test]

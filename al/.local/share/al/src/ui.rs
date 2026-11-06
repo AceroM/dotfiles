@@ -209,14 +209,18 @@ fn list(app: &App, buf: &mut Buffer) {
 fn preview(app: &App, buf: &mut Buffer, r: Rect) {
     let p = &app.pal;
     let editing = app.page_editing();
-    // A draft says where ⏎ sends it: a new agent in its folder, or the tab it replies to.
-    let what = |d: &drafts::Draft| match &d.reply {
-        Some(r) => format!("reply to {} · {}", app.reply_label(r).0, herdr::tilde(&d.cwd.to_string_lossy())),
-        None => format!("draft · {} in {}", app.ask_kind, herdr::tilde(&d.cwd.to_string_lossy())),
+    // A draft says where ⏎ sends it: a new agent in its folder, or the tab
+    // it replies to; and whether it goes in plan mode (^p).
+    let what = |d: &drafts::Draft| {
+        let plan = if d.plan { " · plan" } else { "" };
+        match &d.reply {
+            Some(r) => format!("reply to {}{plan} · {}", app.reply_label(r).0, herdr::tilde(&d.cwd.to_string_lossy())),
+            None => format!("draft · {}{plan} in {}", app.draft_kind(d), herdr::tilde(&d.cwd.to_string_lossy())),
+        }
     };
     let mut title = match (app.editing_draft(), app.selected_draft()) {
         (Some(d), _) if editing => format!("{} · ⏎ sends", what(d)),
-        _ if editing => format!("draft · {} in {} · ⏎ sends", app.ask_kind, herdr::tilde(&app.box_cwd().to_string_lossy())),
+        _ if editing => format!("draft · {} in {} · ⏎ sends", app.box_kind(), herdr::tilde(&app.box_cwd().to_string_lossy())),
         (_, Some(d)) => what(d),
         _ => app.selected().map(|t| herdr::tilde(&t.cwd)).unwrap_or_default(),
     };
@@ -293,7 +297,7 @@ fn caret(app: &App, buf: &mut Buffer, t: Rect, w: Range<usize>) {
     if app.ask.text.is_empty() {
         let hint = match app.editing_draft().and_then(|d| d.reply.as_ref()) {
             Some(r) => format!("Reply to {}…", app.reply_label(r).0),
-            None => format!("What should {} do?", app.ask_kind),
+            None => format!("What should {} do?", app.box_kind()),
         };
         put(buf, t.x, t.y, t.right(), &hint, fg(p.dim).add_modifier(Modifier::ITALIC));
     }
@@ -511,11 +515,24 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
     let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
     Clear.render(r, buf);
     let room = (w as usize).saturating_sub(16);
+    // ^p: what it sends goes in plan mode.
+    let plan = if app.box_plan() { " · plan" } else { "" };
+    let room = room.saturating_sub(plan.width());
     // A reply draft written here (no preview to hold its page) names its tab, as `r` does.
     let reply = app.editing_draft().and_then(|d| d.reply.as_ref()).map(|r| app.reply_label(r).0);
-    let title = match (&app.target, reply) {
-        (Target::Reply(to), _) => vec![Span::styled(" reply to ", fg(p.muted)), Span::styled(truncate(&to.label, room), fg(p.accent)), Span::raw(" ")],
-        (_, Some(label)) => vec![Span::styled(" reply draft · to ", fg(p.muted)), Span::styled(truncate(&label, room), fg(p.accent)), Span::raw(" ")],
+    let title = match (&app.target, reply.clone()) {
+        (Target::Reply(to), _) => vec![
+            Span::styled(" reply to ", fg(p.muted)),
+            Span::styled(truncate(&to.label, room), fg(p.accent)),
+            Span::styled(plan, fg(p.yellow)),
+            Span::raw(" "),
+        ],
+        (_, Some(label)) => vec![
+            Span::styled(" reply draft · to ", fg(p.muted)),
+            Span::styled(truncate(&label, room), fg(p.accent)),
+            Span::styled(plan, fg(p.yellow)),
+            Span::raw(" "),
+        ],
         (Target::Command, _) => {
             let cwd = herdr::tilde(&app.box_cwd().to_string_lossy());
             vec![
@@ -529,23 +546,32 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
         (t, _) => {
             // A draft says so (written here when there's no preview to hold its page).
             let what = if matches!(t, Target::Edit(_)) { " draft · " } else { " new " };
-            let kind = &app.ask_kind;
+            let kind = app.box_kind();
             let cwd = herdr::tilde(&app.box_cwd().to_string_lossy());
             let cwd = truncate(&cwd, room.saturating_sub(kind.width() + what.width() + 4));
             vec![
                 Span::styled(what, fg(p.muted)),
-                Span::styled(kind.clone(), fg(p.accent)),
+                Span::styled(kind, fg(p.accent)),
+                Span::styled(plan, fg(p.yellow)),
                 Span::styled(" in ", fg(p.muted)),
                 Span::styled(cwd, fg(p.fg)),
                 Span::raw(" "),
             ]
         }
     };
+    // The keys that change where it goes, on the bottom edge: a new agent's
+    // kind (a reply's agent is there already), and plan mode.
+    let keys = match (&app.target, &reply) {
+        (Target::Command, _) => "",
+        (Target::Reply(_), _) | (_, Some(_)) => " ^p plan ",
+        _ => " ⇧tab agent · ^p plan ",
+    };
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(fg(p.dim))
         .style(Style::new().bg(p.panel))
         .title(Line::from(title))
+        .title_bottom(Line::styled(keys, fg(p.dim)).right_aligned())
         .render(r, buf);
     let (tx, y0, max) = (r.x + 2, r.y + 1, r.right().saturating_sub(2));
 
@@ -597,7 +623,8 @@ const KEYS: &[(&str, &str)] = &[
     ("  ^s", "in the c / r box: keep it as a draft, written on its page"),
     ("  ^v ^j tab", "in the box: image · newline (⇧⏎ too) · --path"),
     ("  ^a ^e ^u ^k", "in the box: the line's start / end · delete to them"),
-    ("  ⌘↑ ⌘↓", "in the box: the text's start / end (⇧ selects)"),
+    ("  ⇧tab ^p", "in the c box: claude / codex · plan mode (r, a draft: ^p too)"),
+    ("  ⌘↑ ⌘↓ fn↑ fn↓", "in the box: the text's start / end (⇧ selects)"),
     ("  click drag", "on a draft's page: write there · select (2× a word, 3× a line)"),
     ("  ⇧ ⌥⇧ arrows", "in the box: select (⌥ a word, ⌥↑↓ to the line's end)"),
     ("  ^c ^x ^z", "in the box: copy (else clear) · cut · undo the clear"),

@@ -227,8 +227,13 @@ pub struct App {
     /// What ^c last cleared from the open box: ^z brings it back.
     cleared: Option<(Field, Vec<PathBuf>)>,
     pub ask_path: Option<String>,
-    /// The agent kind `c` starts.
-    pub ask_kind: String,
+    /// The agents shift+tab cycles through in the `c` box (agent::agents),
+    /// and the one it starts now.
+    pub agents: Vec<String>,
+    pub kind: usize,
+    /// ^p in the `c` and `r` boxes (by Target::slot): their text goes as
+    /// `/plan …`. Until it's sent, as the text is kept.
+    plan: [bool; 3],
     pub ask_cwd: PathBuf,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
@@ -315,7 +320,9 @@ impl App {
             parked: Default::default(),
             cleared: None,
             ask_path: opts.path,
-            ask_kind: agent::spec().0,
+            agents: agent::agents().into_iter().map(|(k, _)| k).collect(),
+            kind: 0,
+            plan: [false; 3],
             ask_cwd: opts.cwd,
             bg_tx,
             bg_rx,
@@ -522,10 +529,13 @@ impl App {
 
     /// A new draft of `text` in this space: saved, on top of the list and
     /// selected. Its id; None when it couldn't be saved.
-    fn add_draft(&mut self, text: String, images: Vec<PathBuf>, cwd: PathBuf, reply: Option<ReplyTo>) -> Option<String> {
+    fn add_draft(&mut self, text: String, images: Vec<PathBuf>, cwd: PathBuf, reply: Option<ReplyTo>, plan: bool) -> Option<String> {
         let id = drafts::new_id();
         let images = self.keep_images(&id, &text, images);
-        let d = Draft { id: id.clone(), workspace: self.ws.clone(), space: self.space.clone(), cwd, text, images, created: drafts::now(), reply };
+        // A new agent's draft keeps the kind the `c` box is on now.
+        let kind = reply.is_none().then(|| self.kind_name().to_string());
+        let (ws, space, created) = (self.ws.clone(), self.space.clone(), drafts::now());
+        let d = Draft { id: id.clone(), workspace: ws, space, cwd, text, images, created, reply, kind, plan };
         // An empty draft matches no filter: show everything, so it's on top.
         self.filter.clear();
         if !self.put_draft(d) {
@@ -539,7 +549,7 @@ impl App {
     /// its page open on the right to write. It's saved as you type, so ⏎
     /// sends it and esc leaves it for later.
     fn new_draft(&mut self) {
-        if let Some(id) = self.add_draft(String::new(), Vec::new(), self.ask_cwd.clone(), None) {
+        if let Some(id) = self.add_draft(String::new(), Vec::new(), self.ask_cwd.clone(), None, false) {
             self.show_box(Target::Edit(id));
         }
     }
@@ -555,7 +565,7 @@ impl App {
         let Some(to) = to else {
             return self.flash(format!("no agent in {name} to reply to"));
         };
-        if let Some(id) = self.add_draft(String::new(), Vec::new(), cwd, Some(to)) {
+        if let Some(id) = self.add_draft(String::new(), Vec::new(), cwd, Some(to), false) {
             self.show_box(Target::Edit(id));
         }
     }
@@ -578,11 +588,14 @@ impl App {
         let cwd = cwd.map_or_else(|| self.ask_cwd.clone(), PathBuf::from);
         let field = std::mem::take(&mut self.ask);
         let images = std::mem::take(&mut self.ask_images);
-        let Some(id) = self.add_draft(field.text.clone(), images.clone(), cwd, reply) else {
+        // Its agent kind and plan mode go with it.
+        let slot = self.target.slot().unwrap_or(0);
+        let Some(id) = self.add_draft(field.text.clone(), images.clone(), cwd, reply, self.plan[slot]) else {
             // Not saved: the box keeps it.
             (self.ask, self.ask_images) = (field, images);
             return;
         };
+        self.plan[slot] = false;
         // The box's slot gets the (now empty) field: its text went to the draft.
         self.show_box(Target::Edit(id));
         self.ask.cur = field.cur.min(self.ask.text.len());
@@ -687,6 +700,7 @@ impl App {
             },
         };
         let prompt = agent::with_images(text, images);
+        let prompt = if d.plan { agent::plan(&prompt) } else { prompt };
         if self.drop_draft(&d.id).is_none() {
             return false;
         }
@@ -697,12 +711,9 @@ impl App {
                 self.send_reply(pane, prompt, label);
             }
             None => {
-                if self.live {
-                    agent::spawn(prompt, d.cwd.clone(), self.bg_tx.clone());
-                } else {
-                    self.sent = Some(prompt);
-                }
-                self.toast(format!("sent: {} is starting in a new tab", self.ask_kind));
+                let kind = self.draft_kind(d);
+                self.start_agent(kind.clone(), prompt, d.cwd.clone());
+                self.toast(format!("sent: {kind} is starting in a new tab"));
             }
         }
         true
@@ -715,6 +726,16 @@ impl App {
             agent::reply(pane, prompt, label, self.bg_tx.clone());
         } else {
             self.sent = Some(format!("[to {label} {pane}] {prompt}"));
+        }
+    }
+
+    /// A new `kind` agent in a new tab in `cwd`, given `prompt`; how it
+    /// went comes back on the status line.
+    fn start_agent(&mut self, kind: String, prompt: String, cwd: PathBuf) {
+        if self.live {
+            agent::spawn(kind, prompt, cwd, self.bg_tx.clone());
+        } else {
+            self.sent = Some(format!("[new {kind}] {prompt}"));
         }
     }
 
@@ -1722,18 +1743,89 @@ impl App {
             return self.flash("running it in a new tab…");
         }
         let prompt = agent::with_images(&text, &self.ask_images);
+        let slot = self.target.slot().unwrap_or(0);
+        let prompt = if self.plan[slot] { agent::plan(&prompt) } else { prompt };
         self.ask = Field::default();
         self.ask_images.clear();
+        self.plan[slot] = false;
         if let Target::Reply(to) = self.target.clone() {
             self.flash(format!("replying to {}…", to.label));
             return self.send_reply(to.pane, prompt, to.label);
         }
-        if self.live {
-            agent::spawn(prompt, self.ask_cwd.clone(), self.bg_tx.clone());
-        } else {
-            self.sent = Some(prompt);
+        let kind = self.kind_name().to_string();
+        self.start_agent(kind.clone(), prompt, self.ask_cwd.clone());
+        self.flash(format!("starting {kind} in a new tab…"));
+    }
+
+    /// The kind of agent `c` starts now.
+    pub fn kind_name(&self) -> &str {
+        self.agents.get(self.kind).map_or("claude", String::as_str)
+    }
+
+    /// The kind of agent draft `d` starts: its own, else the default.
+    pub fn draft_kind(&self, d: &Draft) -> String {
+        d.kind.clone().unwrap_or_else(|| self.agents.first().cloned().unwrap_or_else(|| "claude".into()))
+    }
+
+    /// The kind of agent the open box starts: a draft's own, else `c`'s.
+    pub fn box_kind(&self) -> String {
+        match self.editing_draft() {
+            Some(d) => self.draft_kind(d),
+            None => self.kind_name().to_string(),
         }
-        self.flash(format!("starting {} in a new tab…", self.ask_kind));
+    }
+
+    /// Whether the open box's text goes in plan mode (^p).
+    pub fn box_plan(&self) -> bool {
+        match (&self.target, self.editing_draft()) {
+            (Target::Edit(_), Some(d)) => d.plan,
+            (t, _) => t.slot().is_some_and(|i| self.plan[i]),
+        }
+    }
+
+    /// shift+tab in the box: the next kind of agent, for `c` (and for a
+    /// draft of a new agent, saved in it). A reply's agent is running already.
+    fn cycle_kind(&mut self) {
+        let next = |app: &App, kind: &str| {
+            let i = app.agents.iter().position(|k| k == kind).map_or(0, |i| i + 1);
+            app.agents.get(i % app.agents.len().max(1)).cloned().unwrap_or_default()
+        };
+        match self.target.clone() {
+            Target::Agent => self.kind = (self.kind + 1) % self.agents.len().max(1),
+            Target::Command => self.flash("a command runs in a shell, not an agent"),
+            Target::Reply(to) => self.flash(format!("a reply goes to the agent already in {}", to.label)),
+            Target::Edit(_) => {
+                let Some(d) = self.editing_draft().cloned() else { return };
+                if let Some(r) = &d.reply {
+                    return self.flash(format!("a reply goes to the agent already in {}", self.reply_label(r).0));
+                }
+                let kind = next(self, &self.draft_kind(&d));
+                self.save_editing(Draft { kind: Some(kind), ..d });
+            }
+        }
+    }
+
+    /// ^p in the box: plan mode on or off for what it sends. A command has none.
+    fn toggle_plan(&mut self) {
+        match self.target.clone() {
+            Target::Command => self.flash("a command has no plan mode"),
+            Target::Edit(_) => {
+                let Some(d) = self.editing_draft().cloned() else { return };
+                self.save_editing(Draft { plan: !d.plan, ..d });
+            }
+            t => {
+                let i = t.slot().unwrap_or(0);
+                self.plan[i] = !self.plan[i];
+            }
+        }
+    }
+
+    /// The draft being written, changed to `d`, saved.
+    fn save_editing(&mut self, d: Draft) {
+        let key = self.selected_key();
+        if self.store_draft(d) {
+            self.set_view(key);
+        }
     }
 
     fn insert_ask_path(&mut self) {
@@ -1767,6 +1859,10 @@ impl App {
             KeyCode::Enter if alt || k.modifiers.contains(KeyModifiers::SHIFT) => f.insert("\n"),
             KeyCode::Char('j') if ctrl => f.insert("\n"),
             KeyCode::Enter => self.send_ask(),
+            // shift+tab: claude ↔ codex for a new agent; ^p: plan mode on or off.
+            KeyCode::BackTab => self.cycle_kind(),
+            KeyCode::Tab if shift => self.cycle_kind(),
+            KeyCode::Char('p') if ctrl => self.toggle_plan(),
             // ^i: the --path file. Without the kitty protocol ^i is a Tab, so Tab does it too.
             KeyCode::Char('i') if ctrl => self.insert_ask_path(),
             KeyCode::Tab => self.insert_ask_path(),
