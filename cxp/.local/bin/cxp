@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cxp_script="${BASH_SOURCE[0]}"
+while [[ -L "$cxp_script" ]]; do
+  cxp_link_dir="$(cd -P -- "$(dirname -- "$cxp_script")" && pwd)"
+  cxp_script="$(readlink "$cxp_script")"
+  [[ "$cxp_script" = /* ]] || cxp_script="$cxp_link_dir/$cxp_script"
+done
+cxp_bin_dir="$(cd -P -- "$(dirname -- "$cxp_script")" && pwd)"
+cxp_app_dir="$(cd -- "$cxp_bin_dir/../share/cxp" && pwd)"
+
+if ! command -v bun >/dev/null 2>&1; then
+  printf '%s\n' 'cxp: Bun 1.3 or newer is required (https://bun.sh).' >&2
+  exit 1
+fi
+
+if [[ ! -d "$cxp_app_dir/node_modules/@opentui/core" ]]; then
+  printf '%s\n' 'cxp: installing OpenTUI dependencies for the first run…' >&2
+  bun install --cwd "$cxp_app_dir" --frozen-lockfile --production
+fi
+
+exec bun "$cxp_app_dir/src/cli.ts" "$@"

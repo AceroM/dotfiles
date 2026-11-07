@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Read Slack through the shared desktop-session client.
+set -euo pipefail
+
+exec bun run "${HOME}/.local/share/slack-api/cli.ts" "$@"

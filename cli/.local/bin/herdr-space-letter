@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Jump to the first space whose label starts with a given letter.
+#
+#   herdr-space-letter s    focus the topmost space labelled s*
+#
+# Bound in config.toml as cmd+alt+shift+a..z, the letter sibling of
+# cmd+alt+shift+1..9 (switch_workspace): digits address a space by its position
+# in the sidebar, letters by its initial. Herdr has no built-in "focus the space
+# whose name starts with X" action -- keys.workspace_picker is an interactive
+# fuzzy prompt and keys.switch_workspace is indexed -- so this drives the CLI.
+#
+# Same constraints as herdr-space-edge, which this mirrors: `type = "shell"`
+# bindings are spawned detached with no $PATH worth trusting and no tty to print
+# errors to, hence the explicit PATH and the log file instead of stderr. Kept
+# bash-3.2 clean: the shebang resolves against whatever PATH the server hands
+# us, which may well find /bin/bash rather than homebrew's bash 5.
+set -uo pipefail
+
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
+# Fixed path on purpose: $TMPDIR is per-user-session on macOS, so the server's
+# detached spawn and a hand-run from a pane would otherwise log to two files.
+log_file="$HOME/.local/state/herdr-space-letter.log"
+mkdir -p "$(dirname "$log_file")" 2>/dev/null
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log_file"; }
+die() { log "error: $*"; exit 1; }
+
+letter="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+case "$letter" in
+  [a-z]) ;;
+  *) die "usage: herdr-space-letter <a-z> (got '${1:-}')" ;;
+esac
+
+# `workspace list` returns the spaces in sidebar order, so the first match is
+# the topmost one -- the same order the eye scans. Never guess IDs from that
+# order: they are opaque handles (w2, wX, w11) with no relation to position.
+list_json="$(herdr workspace list 2>/dev/null)" || die "workspace list failed"
+
+# No match yields no output at all (`empty`), which read turns into an empty
+# target below -- a missing letter is a no-op, not an error.
+IFS=$'\t' read -r target label focused < <(jq -r --arg l "$letter" '
+  .result.workspaces
+  | map(select((.label // "") | ascii_downcase | startswith($l)))
+  | first
+  | if . == null then empty
+    else [.workspace_id, (.label // ""), (.focused | tostring)] | @tsv
+    end' <<<"$list_json")
+
+if [ -z "${target:-}" ]; then
+  log "no space label starts with '$letter'"
+  exit 0
+fi
+
+# Already there: focusing again is harmless, but logging the no-op keeps the log
+# readable when the chord gets mashed.
+if [ "$focused" = "true" ]; then
+  log "'$letter' space $target ($label) already focused"
+  exit 0
+fi
+
+herdr workspace focus "$target" >/dev/null 2>&1 ||
+  die "workspace focus $target failed"
+log "focused '$letter' space $target ($label)"

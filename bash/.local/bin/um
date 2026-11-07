@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+trap 'echo "Error: command failed at line $LINENO with exit code $?" >&2; echo "Failed command: $BASH_COMMAND" >&2' ERR
+
+# Find the latest migration directory
+latest_migration=$(find ./prisma/migrations -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)
+
+if [ -z "$latest_migration" ]; then
+  echo "Error: No migration directories found in ./prisma/migrations" >&2
+  exit 1
+fi
+
+echo "Deleting latest migration: $latest_migration"
+rm -rf "$latest_migration"
+
+echo "Resetting database schema..."
+psql "$(doppler -c dev secrets get DATABASE_URL --plain)" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+
+echo "Running prisma migrate dev..."
+doppler -c dev run -- bunx prisma migrate dev

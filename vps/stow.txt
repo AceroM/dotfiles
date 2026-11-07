@@ -1,0 +1,4 @@
+git
+zsh
+tmux
+cli

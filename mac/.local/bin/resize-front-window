@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Tweak these to taste.
+WIDTH=1000
+HEIGHT=700
+
+/usr/bin/osascript <<APPLESCRIPT
+set targetWidth to ${WIDTH}
+set targetHeight to ${HEIGHT}
+
+tell application "Finder"
+  set desktopBounds to bounds of window of desktop
+end tell
+
+set screenLeft to item 1 of desktopBounds
+set screenTop to item 2 of desktopBounds
+set screenRight to item 3 of desktopBounds
+set screenBottom to item 4 of desktopBounds
+
+set screenWidth to screenRight - screenLeft
+set screenHeight to screenBottom - screenTop
+
+set targetX to screenLeft + ((screenWidth - targetWidth) div 2)
+set targetY to screenTop + ((screenHeight - targetHeight) div 2)
+set targetRight to targetX + targetWidth
+set targetBottom to targetY + targetHeight
+
+tell application "System Events"
+  set frontProcess to first process whose frontmost is true
+  tell frontProcess
+    if (count of windows) is 0 then error "No front window to resize"
+
+    try
+      set position of window 1 to {targetX, targetY}
+      set size of window 1 to {targetWidth, targetHeight}
+    on error
+      try
+        set bounds of window 1 to {targetX, targetY, targetRight, targetBottom}
+      on error errMsg number errNum
+        error "Unable to resize this window (" & errNum & "): " & errMsg
+      end try
+    end try
+  end tell
+end tell
+APPLESCRIPT

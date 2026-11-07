@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://dlvhdr.github.io/diffnav/configuration/gh-dash/schema.json
+prSections:
+  - title: Mine
+    filters: is:open author:@me repo:dlvhdr/diffnav updated:>={{ nowModify "-3w" }} sort:updated-desc
+    layout:
+      author:
+        hidden: true
+  - title: Review
+    filters: repo:dlvhdr/diffnav -author:@me is:open updated:>={{ nowModify "-2.5w" }}
+  - title: All
+    filters: repo:dlvhdr/diffnav
+issuesSections:
+  - title: Open
+    filters: author:@me repo:dlvhdr/diffnav is:open -author:@me sort:reactions
+  - title: Creator
+    filters: author:@me repo:dlvhdr/diffnav is:open
+  - title: All
+    filters: repo:dlvhdr/diffnav sort:reactions

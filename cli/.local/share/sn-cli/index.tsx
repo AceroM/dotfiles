@@ -1,0 +1,580 @@
+#!/usr/bin/env bun
+//
+// sn — live Slack notification inbox.
+//
+// Tails the feed Hammerspoon's notifications.lua writes for every Slack
+// notification macOS records (Focus or not), newest first. Slack only records
+// what your notification prefs allow: set a channel to "All new messages" to
+// see it here.
+//
+//   j/k or arrows  move
+//   enter or l     open the message in Slack
+//   c              reply from here, as you (see slack.ts)
+//   r              same, but threaded onto the message
+//   g              search Tenor and send a gif back (see gif.ts)
+//   q / esc        quit
+
+import React, {
+  Box,
+  Text,
+  render,
+  useApp,
+  useEffect,
+  useInput,
+  useRef,
+  useState,
+  useStdout,
+} from "@dotfiles/opentui-cli"
+import { existsSync, readFileSync, statSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+import { creds, reply, saveToken, type ReplyTarget } from "@dotfiles/slack"
+import { bestUrl, claudePick, search, type Gif } from "./gif"
+
+const FEED = join(homedir(), ".local/state/slack-notifications.jsonl")
+const MAX_ROWS = 500
+const ACCENT = "#74ade8" // Zed One Dark accent
+const DANGER = "#e06c75"
+const SELECTED_BG = "#3a4b5f" // Zed One Dark selection, composited over its background
+
+interface Notif {
+  date: number // unix seconds
+  title: string // Slack workspace
+  subtitle: string // channel or DM sender
+  body: string
+  iden: string
+  link: string | null
+  channel: string | null // set once notifdb.py matched the Slack log; needed to reply
+  ts: string | null
+  thread_ts: string | null
+}
+
+// A reply being typed. Rows without a channel cannot be answered — notifdb.py
+// only learns the channel id when the notification is still in Slack's log.
+interface Draft {
+  iden: string
+  target: ReplyTarget
+  where: string // header label: the channel/sender, plus "· thread" when threaded
+  text: string
+  sending: boolean
+  error: string | null
+}
+
+// A gif being found, then sent. It walks one way through its phases — you type
+// a query, Tenor answers, you pick — and the phase is what the keyboard means
+// at any moment: printable keys are the query while typing, and the picker's
+// controls once there is something to pick.
+interface GifPick {
+  run: number // bumped per search/send, so a slow answer cannot clobber a newer one
+  target: ReplyTarget
+  where: string
+  phase: "query" | "searching" | "picking" | "sending"
+  query: string
+  results: Gif[]
+  index: number
+  busy: boolean // claude is reading the descriptions
+  error: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Feed
+// ---------------------------------------------------------------------------
+
+function loadFeed(): Notif[] {
+  let raw = ""
+  try {
+    raw = readFileSync(FEED, "utf8")
+  } catch {
+    return []
+  }
+  const byIden = new Map<string, Notif>()
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue
+    try {
+      const row = JSON.parse(line)
+      if (!row.iden || row.bundle !== "com.tinyspeck.slackmacgap") continue
+      byIden.set(row.iden, {
+        date: row.date ?? 0,
+        title: row.title ?? "",
+        subtitle: row.subtitle ?? "",
+        body: (row.body ?? "").replace(/\s+/g, " ").trim(),
+        iden: row.iden,
+        link: row.link ?? null,
+        channel: row.channel ?? null,
+        ts: row.ts ?? null,
+        thread_ts: row.thread_ts ?? null,
+      })
+    } catch {
+      // torn write mid-append; the next poll re-reads a complete line
+    }
+  }
+  return [...byIden.values()].sort((a, b) => b.date - a.date).slice(0, MAX_ROWS)
+}
+
+// ---------------------------------------------------------------------------
+// Rendering helpers
+// ---------------------------------------------------------------------------
+
+function timeLabel(unix: number): string {
+  const d = new Date(unix * 1000)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay)
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+  return d.toLocaleDateString([], { month: "short", day: "numeric" })
+}
+
+function pad(text: string, width: number): string {
+  return text.length > width ? text.slice(0, width - 1) + "…" : text.padEnd(width)
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
+function App() {
+  const { exit } = useApp()
+  const { stdout } = useStdout()
+  const [rows, setRows] = useState<Notif[]>(loadFeed)
+  const [cursor, setCursor] = useState(0)
+  const [flash, setFlash] = useState("")
+  const [draft, setDraft] = useState<Draft | null>(null)
+  const [gif, setGif] = useState<GifPick | null>(null)
+  const feedSize = useRef(-1)
+  // Key repeats and pastes deliver many events before React re-renders, so the
+  // draft lives in a ref and state only mirrors it for display.
+  const draftRef = useRef<Draft | null>(null)
+  const gifRef = useRef<GifPick | null>(null)
+  const gifRun = useRef(0)
+
+  // Live tail: poll the feed's size and re-read on growth (it is small — the
+  // Hammerspoon side prunes it). fs.watch misses atomic rewrites, so poll.
+  useEffect(() => {
+    const tick = () => {
+      let size = 0
+      try {
+        size = statSync(FEED).size
+      } catch {
+        size = 0
+      }
+      if (size !== feedSize.current) {
+        feedSize.current = size
+        setRows(loadFeed())
+      }
+    }
+    tick()
+    const t = setInterval(tick, 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const clampedCursor = Math.min(cursor, Math.max(0, rows.length - 1))
+
+  const putDraft = (d: Draft | null) => {
+    draftRef.current = d
+    setDraft(d)
+  }
+
+  const editDraft = (edit: (text: string) => string) => {
+    const d = draftRef.current
+    if (!d || d.sending) return
+    putDraft({ ...d, text: edit(d.text) })
+  }
+
+  // Open the box straight away and resolve credentials behind it, so typing can
+  // start while the Keychain and Slack round-trips run.
+  //
+  // "reply" answers where the message already lives — inside its thread when it
+  // is threaded, in the channel otherwise. "thread" always answers in a thread,
+  // opening one on a top-level message. The two only differ on a top-level row.
+  const openDraft = (row: Notif, mode: "reply" | "thread") => {
+    if (!row.channel || !row.ts) {
+      setFlash("no channel on this row — open it in Slack instead")
+      return
+    }
+    const thread_ts = mode === "thread" ? (row.thread_ts ?? row.ts) : row.thread_ts
+    const where = row.subtitle || row.title || row.channel
+    putDraft({
+      iden: row.iden,
+      target: { channel: row.channel, ts: row.ts, thread_ts },
+      where: thread_ts ? `${where} · thread` : where,
+      text: "",
+      sending: false,
+      error: null,
+    })
+    creds().catch((e: Error) => {
+      const d = draftRef.current
+      if (d?.iden === row.iden) putDraft({ ...d, error: e.message })
+    })
+  }
+
+  const sendDraft = () => {
+    const d = draftRef.current
+    if (!d || d.sending || !d.text.trim()) return
+    putDraft({ ...d, sending: true, error: null })
+    reply(d.target, d.text.trim())
+      .then(() => {
+        putDraft(null)
+        setFlash(`replied in ${d.where}`)
+      })
+      .catch((e: Error) => {
+        const cur = draftRef.current
+        if (cur?.iden === d.iden) putDraft({ ...cur, sending: false, error: e.message })
+      })
+  }
+
+  const putGif = (g: GifPick | null) => {
+    gifRef.current = g
+    setGif(g)
+  }
+
+  const editGif = (edit: (text: string) => string) => {
+    const g = gifRef.current
+    if (!g || g.phase !== "query") return
+    putGif({ ...g, query: edit(g.query) })
+  }
+
+  // A gif goes where `c` would put a reply: inside the thread when the message
+  // is threaded, in the channel otherwise.
+  const openGif = (row: Notif) => {
+    if (!row.channel || !row.ts) {
+      setFlash("no channel on this row — open it in Slack instead")
+      return
+    }
+    const where = row.subtitle || row.title || row.channel
+    const run = ++gifRun.current
+    putGif({
+      run,
+      target: { channel: row.channel, ts: row.ts, thread_ts: row.thread_ts },
+      where: row.thread_ts ? `${where} · thread` : where,
+      phase: "query",
+      query: "",
+      results: [],
+      index: 0,
+      busy: false,
+      error: null,
+    })
+    creds().catch((e: Error) => {
+      const g = gifRef.current
+      if (g?.run === run) putGif({ ...g, error: e.message })
+    })
+  }
+
+  // Every async step stamps a fresh run and drops its own answer if the box has
+  // moved on since — an escape, or a second search started over the first.
+  const runSearch = () => {
+    const g = gifRef.current
+    if (!g || !g.query.trim()) return
+    const run = ++gifRun.current
+    putGif({ ...g, run, phase: "searching", error: null })
+    search(g.query.trim())
+      .then((results) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, phase: "picking", results, index: 0 })
+      })
+      .catch((e: Error) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, phase: "query", error: e.message })
+      })
+  }
+
+  const sendGif = () => {
+    const g = gifRef.current
+    const chosen = g?.results[g.index]
+    if (!g || g.phase !== "picking" || !chosen) return
+    const run = ++gifRun.current
+    putGif({ ...g, run, phase: "sending", error: null })
+    bestUrl(chosen.url)
+      .then((url) => reply(g.target, url))
+      .then(() => {
+        putGif(null)
+        setFlash(`sent a gif to ${g.where}`)
+      })
+      .catch((e: Error) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, phase: "picking", error: e.message })
+      })
+  }
+
+  const askClaude = () => {
+    const g = gifRef.current
+    if (!g || g.phase !== "picking" || g.busy) return
+    const run = g.run
+    putGif({ ...g, busy: true, error: null })
+    claudePick(g.query, g.results)
+      .then((index) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, index, busy: false })
+      })
+      .catch((e: Error) => {
+        const cur = gifRef.current
+        if (cur?.run !== run) return
+        putGif({ ...cur, busy: false, error: e.message })
+      })
+  }
+
+  useInput((input, key) => {
+    // The gif box owns the keyboard the same way the reply box does, except its
+    // meaning changes with the phase: printable keys are the query while you
+    // type it, and the picker's controls once Tenor has answered.
+    const g = gifRef.current
+    if (g) {
+      if (key.escape) {
+        gifRun.current++ // orphan anything still in flight
+        putGif(null)
+      } else if (g.phase === "query") {
+        if (key.return) runSearch()
+        else if (key.backspace || key.delete) editGif((t) => t.slice(0, -1))
+        else if (key.ctrl && input === "u") editGif(() => "")
+        else if (key.ctrl && input === "w") editGif((t) => t.replace(/\s*\S+\s*$/, ""))
+        else if (input && !key.ctrl && !key.meta) editGif((t) => t + input.replace(/\s+/g, " "))
+      } else if (g.phase === "picking") {
+        const step = (by: number) =>
+          putGif({ ...g, index: (g.index + by + g.results.length) % g.results.length })
+        if (key.return) sendGif()
+        else if (input === "n" || input === "j" || key.downArrow || key.rightArrow || key.tab)
+          step(1)
+        else if (input === "p" || input === "k" || key.upArrow || key.leftArrow) step(-1)
+        else if (input === "o")
+          // the terminal cannot show it, so preview in the browser — at the size
+          // Slack will post, not the thumbnail the search grid served
+          bestUrl(g.results[g.index].url).then((url) =>
+            Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" }),
+          )
+        else if (input === "a") askClaude()
+        else if (input === "e") putGif({ ...g, phase: "query", error: null })
+      }
+      return // searching / sending: only escape gets out
+    }
+
+    // The reply box owns the keyboard while it is open: every printable key is
+    // text, so `q` types a q rather than quitting, and escape only closes it.
+    const d = draftRef.current
+    if (d) {
+      if (key.escape) putDraft(null)
+      else if (d.sending) return // in flight; only escape gets out
+      else if (key.return) sendDraft()
+      else if (key.backspace || key.delete) editDraft((t) => t.slice(0, -1))
+      else if (key.ctrl && input === "u") editDraft(() => "")
+      else if (key.ctrl && input === "w") editDraft((t) => t.replace(/\s*\S+\s*$/, ""))
+      else if (input && !key.ctrl && !key.meta)
+        // a paste arrives as one chunk; flatten it onto the single input line
+        editDraft((t) => t + input.replace(/\s+/g, " "))
+      return
+    }
+
+    if (input === "q" || key.escape) {
+      exit()
+      return
+    }
+    if (rows.length === 0) return
+    const row = rows[clampedCursor]
+
+    if (input === "c") {
+      openDraft(row, "reply")
+    } else if (input === "r") {
+      openDraft(row, "thread")
+    } else if (input === "g") {
+      openGif(row)
+    } else if (input === "j" || key.downArrow) {
+      // functional update: key repeats can land within one render frame
+      setCursor((c) => Math.min(c + 1, rows.length - 1))
+    } else if (input === "k" || key.upArrow) {
+      setCursor((c) => Math.max(c - 1, 0))
+    } else if (key.return || input === "l") {
+      const url = row.link ?? "slack://open"
+      Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" })
+      setFlash(row.link ? `opened ${row.subtitle}` : "no channel link — opened Slack")
+    }
+  })
+
+  useEffect(() => {
+    if (!flash) return
+    const t = setTimeout(() => setFlash(""), 1500)
+    return () => clearTimeout(t)
+  }, [flash])
+
+  // border rows plus destination / input / hint, when either box is up
+  const draftH = draft || gif ? 5 : 0
+  const height = Math.max(6, (stdout.rows ?? 30) - 4 - draftH) // header + hints + padding
+  const width = stdout.columns ?? 100
+  const channelWidth = Math.max(12, Math.min(24, Math.floor(width * 0.2)))
+
+  // The Text shim truncates at the end, so window the draft by hand and keep the
+  // tail — where the cursor is — visible on a long reply.
+  const inputW = Math.max(12, width - 8)
+  const typed = draft?.text ?? ""
+  const shownDraft = typed.length > inputW ? `…${typed.slice(-(inputW - 1))}` : typed
+  const asked = gif?.query ?? ""
+  const shownQuery = asked.length > inputW ? `…${asked.slice(-(inputW - 1))}` : asked
+  const chosen = gif?.results[gif.index]
+
+  // Keep the selection inside the visible window.
+  const top = Math.max(0, Math.min(clampedCursor - Math.floor(height / 2), rows.length - height))
+  const visible = rows.slice(top, top + height)
+
+  return (
+    <Box flexDirection="column" flexGrow={1}>
+      <Box>
+        <Text bold> sn</Text>
+        <Text dimColor> — slack notifications · {rows.length} shown</Text>
+        {flash ? <Text color={ACCENT}> · {flash}</Text> : null}
+      </Box>
+      <Box flexDirection="column" flexGrow={1}>
+        {rows.length === 0 ? (
+          <Box flexDirection="column">
+            <Text> </Text>
+            <Text dimColor> no notifications yet</Text>
+            <Text dimColor>
+              {" "}
+              hammerspoon appends every slack notification to{" "}
+            </Text>
+            <Text dimColor> ~/.local/state/slack-notifications.jsonl</Text>
+            {!existsSync(FEED) ? (
+              <Text color={DANGER}> feed file missing — is Hammerspoon running?</Text>
+            ) : null}
+          </Box>
+        ) : (
+          visible.map((row, i) => {
+            const selected = top + i === clampedCursor
+            // Explicit colors throughout: `inverse` swaps whatever the terminal's
+            // defaults happen to be and renders inconsistently span to span.
+            const bg = selected ? SELECTED_BG : undefined
+            const fg = selected ? "#dce0e5" : undefined
+            return (
+              <Text key={row.iden} wrap="truncate-end" backgroundColor={bg}>
+                <Text color={ACCENT} backgroundColor={bg}>
+                  {selected ? " ▸ " : "   "}
+                </Text>
+                <Text color={fg} dimColor={!selected} backgroundColor={bg}>
+                  {pad(timeLabel(row.date), 7)}
+                </Text>
+                <Text color={fg} bold backgroundColor={bg}>
+                  {pad(row.subtitle || row.title, channelWidth)}
+                </Text>
+                <Text color={fg} backgroundColor={bg}>
+                  {" "}
+                  {row.body}
+                </Text>
+              </Text>
+            )
+          })
+        )}
+      </Box>
+      {/* reply box: esc closes, enter posts to the channel or thread */}
+      {draft ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={draft.error ? DANGER : ACCENT}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color={ACCENT}>
+              reply
+            </Text>
+            <Text dimColor>{" → "}</Text>
+            <Text>{draft.where}</Text>
+          </Text>
+          <Text wrap="truncate-end">
+            <Text color={ACCENT}>{"❯ "}</Text>
+            <Text>{shownDraft}</Text>
+            {draft.sending ? null : <Text inverse> </Text>}
+          </Text>
+          <Text dimColor={!draft.error} color={draft.error ? DANGER : undefined} wrap="truncate-end">
+            {draft.error
+              ? draft.error
+              : draft.sending
+                ? "sending…"
+                : "enter send · esc cancel · ctrl+w word · ctrl+u clear"}
+          </Text>
+        </Box>
+      ) : null}
+      {/* gif box: type what you want, pick from Tenor's answers, enter posts it */}
+      {gif ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={gif.error ? DANGER : ACCENT}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color={ACCENT}>
+              gif
+            </Text>
+            <Text dimColor>{" → "}</Text>
+            <Text>{gif.where}</Text>
+            {gif.phase !== "query" && gif.query ? <Text dimColor> · {gif.query}</Text> : null}
+          </Text>
+          {gif.phase === "query" ? (
+            <Text wrap="truncate-end">
+              <Text color={ACCENT}>{"❯ "}</Text>
+              {shownQuery ? (
+                <Text>{shownQuery}</Text>
+              ) : (
+                <Text dimColor>what type of gif would you like to send?</Text>
+              )}
+              <Text inverse> </Text>
+            </Text>
+          ) : (
+            <Text wrap="truncate-end">
+              <Text color={ACCENT}>
+                {gif.results.length ? `${gif.index + 1}/${gif.results.length}  ` : ""}
+              </Text>
+              <Text dimColor={!chosen}>
+                {chosen?.alt ?? (gif.phase === "searching" ? "searching tenor…" : "")}
+              </Text>
+            </Text>
+          )}
+          <Text dimColor={!gif.error} color={gif.error ? DANGER : undefined} wrap="truncate-end">
+            {gif.error
+              ? gif.error
+              : gif.phase === "query"
+                ? "enter search · esc cancel"
+                : gif.phase === "searching"
+                  ? "searching tenor…"
+                  : gif.phase === "sending"
+                    ? "sending…"
+                    : gif.busy
+                      ? "claude is reading the descriptions…"
+                      : "enter send · n/p cycle · o preview · a claude picks · e edit · esc"}
+          </Text>
+        </Box>
+      ) : null}
+      <Text dimColor wrap="truncate-end">
+        {" "}
+        j/k move · enter/l open in slack · c reply · r thread · g gif · q quit
+      </Text>
+    </Box>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Entry
+// ---------------------------------------------------------------------------
+
+// `sn auth --token xoxc-…` is the escape hatch for when Slack has rotated its
+// token into a compacted leveldb block the scan cannot read. Copy it out of the
+// Slack app's devtools (Application -> Local Storage -> localConfig_v2).
+const argv = process.argv.slice(2)
+if (argv[0] === "auth") {
+  const token = argv[argv.indexOf("--token") + 1]
+  if (!argv.includes("--token") || !token) {
+    console.error("usage: sn auth --token xoxc-…")
+    process.exit(2)
+  }
+  try {
+    await saveToken(token)
+    console.log("token saved to the login Keychain")
+  } catch (e) {
+    console.error((e as Error).message)
+    process.exit(1)
+  }
+} else {
+  await (await render(<App />)).waitUntilExit()
+}

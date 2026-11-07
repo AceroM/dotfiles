@@ -1,0 +1,11 @@
+{
+  "name": "@dotfiles/slack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./index.ts",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

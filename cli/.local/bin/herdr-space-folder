@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
+# Shared with the zsh hook: one source for the token, so the two writers
+# overwrite each other cleanly instead of racing two entries for one row.
+source_id="space-folder"
+state_dir="$HOME/.local/state/herdr-space-folder"
+
+# A popup closes the instant the command exits, so a bare `die` would flash the
+# message and vanish. Hold the window open when there is a tty to hold it with.
+die() {
+  printf 'herdr-space-folder: %s\n' "$*" >&2
+  if [ -t 0 ]; then
+    printf 'press enter to close ' >&2
+    read -r _ || true
+  fi
+  exit 1
+}
+
+# Which space to act on, in the order the answer is trustworthy:
+#
+#   HERDR_ACTIVE_PANE_ID  the pane that was active when the chord was pressed;
+#                         herdr injects it into custom commands, and a popup's
+#                         own env has no workspace of its own
+#   HERDR_WORKSPACE_ID    run by hand from a pane -- that pane's space, which
+#                         may not be the focused one (a background agent's, say)
+#   focused               last resort: whatever the sidebar highlights
+resolve_workspace() {
+  local pane
+  pane="${HERDR_ACTIVE_PANE_ID:-}"
+  if [ -n "$pane" ]; then
+    herdr pane list 2>/dev/null |
+      jq -r --arg p "$pane" '.result.panes[] | select(.pane_id == $p) | .workspace_id' |
+      head -n1
+    return
+  fi
+  if [ -n "${HERDR_WORKSPACE_ID:-}" ]; then
+    printf '%s\n' "$HERDR_WORKSPACE_ID"
+    return
+  fi
+  herdr workspace list 2>/dev/null |
+    jq -r '.result.workspaces[] | select(.focused) | .workspace_id' | head -n1
+}
+
+workspace="$(resolve_workspace)"
+[ -n "$workspace" ] || die "no space to act on (not in a Herdr pane, and none focused)"
+
+label="$(herdr workspace list 2>/dev/null |
+  jq -r --arg w "$workspace" '.result.workspaces[] | select(.workspace_id == $w) | .label // ""')"
+override_file="$state_dir/$workspace"
+
+# What the row shows right now, straight from the server rather than from the
+# state file: a space with no override shows a cwd basename this script never
+# wrote, and that is the value worth echoing back at a prompt.
+current="$(herdr workspace get "$workspace" 2>/dev/null |
+  jq -r '.result.workspace.tokens.folder // ""')"
+
+report() {
+  herdr workspace report-metadata "$workspace" \
+    --source "$source_id" --token folder="$1" >/dev/null 2>&1 ||
+    die "report-metadata failed for $workspace"
+}
+
+case "${1:-}" in
+  --show)
+    printf '%s\n' "$current"
+    exit 0
+    ;;
+  --auto|-)
+    rm -f "$override_file" 2>/dev/null
+    # Back to the basename immediately rather than waiting for someone to cd:
+    # the space's active pane is the same cwd the hook would have reported.
+    cwd="$(herdr workspace get "$workspace" 2>/dev/null |
+      jq -r '.result.workspace.active_tab_id // empty' |
+      while read -r tab; do
+        herdr pane list 2>/dev/null | jq -r --arg t "$tab" '
+          [.result.panes[] | select(.tab_id == $t)]
+          | sort_by(.focused | not) | .[0].cwd // empty'
+      done)"
+    [ -n "$cwd" ] && report "${cwd##*/}"
+    printf 'space %s (%s): following the folder again\n' "$workspace" "$label"
+    exit 0
+    ;;
+  --help|-h)
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  "")
+    # Prompt mode -- the popup binding. No readline prefill on bash 3.2, so the
+    # current value goes in the prompt text instead. Empty cancels, so a
+    # mistyped chord costs nothing; `-` is the visible way to say "auto again".
+    [ -t 0 ] || die "no tty to prompt on; pass the text as an argument"
+    printf 'Subtitle for space "%s" [%s]\n' "$label" "$current" >&2
+    printf 'New text (empty = keep, - = follow the folder): ' >&2
+    read -r answer || answer=""
+    case "$answer" in
+      "") exit 0 ;;
+      -)  exec "$0" --auto ;;
+      *)  text="$answer" ;;
+    esac
+    ;;
+  *)
+    text="$*"
+    ;;
+esac
+
+mkdir -p "$state_dir" 2>/dev/null || die "cannot create $state_dir"
+printf '%s' "$text" >"$override_file" || die "cannot write $override_file"
+report "$text"
+printf 'space %s (%s): %s\n' "$workspace" "$label" "$text"

@@ -1,0 +1,92 @@
+# Ghostty config
+# Stowed with: stow ghostty  ->  ~/.config/ghostty/config
+
+# Don't prompt "Close Tab? The terminal still has a running process."
+# when closing a surface/tab/window that has a running process.
+confirm-close-surface = false
+
+# Font size in points. Ghostty's default is 13; bump it up by 2.
+font-size = 14
+
+# Pin the local dark theme regardless of macOS appearance. It lives in
+# themes/zed-one-dark rather than using Ghostty's bundled "Atom One Dark". The
+# palettes differ: Atom One Dark sits on
+# #21252b and repeats the normal colors in the bright slots, while Zed's One
+# Dark -- and therefore herdr's one-dark chrome next to it -- sits on #282c34
+# with a real bright set. Run `ghostty +list-themes` to see the bundled ones;
+# user themes in themes/ shadow them by name.
+theme = zed-one-dark
+
+# Restore the macOS light/dark pair by replacing the theme above with:
+# theme = light:Rose Pine Dawn,dark:zed-one-dark
+
+# Keep the macOS titlebar (so the close/minimize/zoom buttons stay), but
+# blend it into the terminal background instead of removing it.
+macos-titlebar-style = transparent
+
+# Pin a static, blank window title so the titlebar doesn't show the cwd/path.
+# (Without this, Ghostty reports the shell's current directory up top.)
+title = " "
+
+# Hide the macOS document "proxy icon" (the little folder/file icon in the
+# titlebar that represents the cwd and can be dragged). "title" hides the text;
+# this hides the icon next to it.
+macos-titlebar-proxy-icon = hidden
+
+# Block cursor instead of the default "bar" (the Microsoft-Word-looking beam)
+cursor-style = block
+
+# Keep it solid (set to true if you want it to blink)
+cursor-style-blink = false
+
+# Shell integration can reset the cursor to a bar at the prompt.
+# Disabling the cursor feature keeps the block everywhere. The SSH features
+# prevent remote hosts from seeing xterm-ghostty without terminfo support.
+shell-integration-features = no-cursor,ssh-env,ssh-terminfo
+
+# Treat the Option key as Alt/Meta so tmux's M-* bindings work
+# (Option+arrows for pane nav, M-d detach, M-a picker, M-n new claude, etc.).
+# Tradeoff: you lose Option-based accent composition (é, ñ ...). Switch to
+# "right" if you want to keep the LEFT Option key for typing accents.
+macos-option-as-alt = true
+
+# Prevent Ghostty's automatic Secure Input detection from blocking global
+# shortcuts in apps such as Raycast when the macOS flag gets stuck.
+macos-auto-secure-input = false
+
+# Emit a distinct Shift+Enter sequence so TUIs can bind it separately from Enter.
+keybind = shift+enter=csi:13;2u
+
+# Cycle focus through split panes. With two panes, Cmd+I toggles between them.
+keybind = super+i=goto_split:next
+
+# Hand cmd+opt+shift+w and +j to herdr instead of keeping Ghostty's defaults.
+# herdr binds cmd+alt+shift+a..z to "jump to the space whose name starts with
+# this letter" (see ~/.config/herdr/config.toml), and these are the only two
+# letters of the 26 that Ghostty already claims:
+#
+#   super+alt+shift+w = close_all_windows        <- and confirm-close-surface is
+#                                                   false above, so it closed
+#                                                   every window without asking
+#   super+alt+shift+j = write_screen_file:open   <- dumps the screen to a file
+#
+# `unbind` removes the binding so the chord is encoded and sent to the running
+# program (herdr); `ignore` would swallow it here instead, which is not what we
+# want. Closing windows is still cmd+w (surface), cmd+opt+w (tab), and
+# cmd+shift+w (window) -- only the close-everything chord goes away.
+keybind = super+alt+shift+w=unbind
+keybind = super+alt+shift+j=unbind
+
+# Hand cmd+up/down (and with shift) to the running program instead of Ghostty's
+# jump_to_prompt, which has no prompts to jump to under herdr's full-screen UI.
+# herdr forwards them as CSI 1;9A / 1;9B (1;10A with shift), so text boxes like
+# al's can go to the start / end of their text the macOS way. zsh ignores them.
+keybind = super+arrow_up=unbind
+keybind = super+arrow_down=unbind
+keybind = super+shift+arrow_up=unbind
+keybind = super+shift+arrow_down=unbind
+
+# Don't dim the unfocused split. Ghostty defaults to 0.7, which fades the
+# terminal split whenever tmux-nav (the other split) is focused. Keep both
+# splits at full opacity so the terminal stays fully readable while navigating.
+unfocused-split-opacity = 1

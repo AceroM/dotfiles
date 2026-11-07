@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# sq — Slack in the terminal, so nothing has to interrupt you.
+#
+# A conversation list with unread counts on the left, messages on the right, a
+# line to type in. It talks to Slack as you, reusing the desktop app's own
+# session (../share/slack-api/index.ts) — no bot token, nothing to configure.
+# `sn auth --token xoxc-…` fixes it if that session ever goes stale.
+#
+# This Enterprise Grid refuses rtm.connect, so there is no websocket: sq polls
+# client.counts (~200ms, every conversation's read state in one call) and only
+# re-reads the messages of a conversation that has actually moved.
+#
+#   j/k      move
+#   enter    open the conversation, then write in it
+#   u        toggle unread — in the list, or on the way out of a conversation
+#   a        unread only
+#   /        filter by name          t  open a thread
+#   r        refresh names           o  open the message in Slack
+#   q        quit
+set -euo pipefail
+
+script_dir="${HOME}/.local/share/sq-cli"
+# bun resolves symlinks, so node_modules must be next to the real index.tsx
+real_script="$(readlink -f "${script_dir}/index.tsx")"
+real_dir="$(dirname "${real_script}")"
+opentui_dir="$(cd -P "${real_dir}/../opentui-cli" && pwd)"
+
+if [ ! -e "${opentui_dir}/node_modules/@opentui/core" ]; then
+  echo "Installing OpenTUI..." >&2
+  (cd "${opentui_dir}" && bun install --frozen-lockfile)
+fi
+
+if [ ! -e "${real_dir}/node_modules/@dotfiles/opentui-cli" ]; then
+  echo "Installing dependencies..." >&2
+  (cd "${real_dir}" && bun install --frozen-lockfile)
+fi
+
+exec bun run "${script_dir}/index.tsx" "$@"

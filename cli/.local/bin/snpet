@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# snpet — dancing miguel: a desktop pet for the Slack notification feed.
+#
+# The sprite sits on the desktop and dances while something in
+# ~/.local/state/slack-notifications.jsonl (the feed Hammerspoon writes for
+# `sn`) is unread. Click it, or ⌥` / ⌃`, for the inbox: j/k move, h/l page, / filters,
+# c replies, r replies in a thread, enter opens it in Slack, ⌘D dictates through
+# Wispr Flow's hands-free mode. Replies post as you through the Slack app's own
+# session, exactly like `sn` — the two share one cached token, so
+# `sn auth --token xoxc-…` fixes both when Slack rotates it away.
+#
+#   snpet            build if stale, then launch (or surface the running one)
+#   snpet run        same, in the foreground with logs on this terminal
+#   snpet restart    quit the running one and launch again
+#   snpet quit
+#   snpet auth       resolve the Slack session and print who you are
+#   snpet log        follow the running app's log
+#   snpet build
+set -euo pipefail
+
+src="$(readlink -f "$HOME/.local/share/snpet")"
+app="$src/.build/snpet.app"
+bin="$app/Contents/MacOS/snpet"
+
+build_if_stale() {
+  if [ ! -x "$bin" ] || [ -n "$(find "$src/Sources" "$src/Resources" "$src/Package.swift" \
+      "$src/Info.plist" "$src/build.sh" -newer "$bin" -print -quit)" ]; then
+    "$src/build.sh"
+  fi
+}
+
+stop_running() {
+  pkill -x snpet 2>/dev/null || return 0
+  for _ in $(seq 1 30); do pgrep -x snpet >/dev/null || return 0; sleep 0.1; done
+}
+
+case "${1:-}" in
+  build)   "$src/build.sh" ;;
+  run)     build_if_stale; stop_running; exec "$bin" ;;
+  quit)    stop_running ;;
+  restart) stop_running; build_if_stale; open "$app" ;;
+  auth)    build_if_stale; exec "$bin" --check-auth ;;
+  log)     exec log stream --style compact --predicate 'process == "snpet"' ;;
+  "")      build_if_stale; open "$app" ;;
+  *)       echo "usage: snpet [run|restart|quit|auth|log|build]" >&2; exit 2 ;;
+esac

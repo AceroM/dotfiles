@@ -1,0 +1,6 @@
+\.stow-local-ignore
+README\.md
+setup\.sh
+packages
+npm-global\.txt
+stow\.txt

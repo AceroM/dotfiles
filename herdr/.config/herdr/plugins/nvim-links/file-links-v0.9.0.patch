@@ -1,0 +1,107 @@
+diff --git a/src/app/actions.rs b/src/app/actions.rs
+index ca6f670..29d9589 100644
+--- a/src/app/actions.rs
++++ b/src/app/actions.rs
+@@ -1151,7 +1151,9 @@ fn url_at_runtime_cell(
+         .find('\n')
+         .map_or(visible_text.len(), |idx| logical_cell.byte_index + idx);
+     let line = visible_text.get(line_start..line_end)?;
+-    url_at_column(line, logical_cell.logical_col).map(str::to_owned)
++    url_at_column(line, logical_cell.logical_col)
++        .or_else(|| crate::file_links::file_location_at_column(line, logical_cell.logical_col))
++        .map(str::to_owned)
+ }
+ 
+ pub(crate) fn safe_web_url(url: &str) -> Option<&str> {
+diff --git a/src/main.rs b/src/main.rs
+index cf7cf5b..2b82636 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -22,6 +22,7 @@ mod config;
+ mod copy_mode;
+ mod detect;
+ mod events;
++mod file_links;
+ mod ghostty;
+ mod handoff_runtime;
+ mod input;
+diff --git a/src/file_links.rs b/src/file_links.rs
+new file mode 100644
+index 0000000..7822cd1
+--- /dev/null
++++ b/src/file_links.rs
+@@ -0,0 +1,74 @@
++//! File locations are recognized only on a modified click, never per render.
++use std::sync::OnceLock;
++
++use regex::Regex;
++use unicode_width::UnicodeWidthStr;
++
++pub(crate) fn file_location_at_column(row: &str, col: u16) -> Option<&str> {
++    static LOCATIONS: OnceLock<Option<Regex>> = OnceLock::new();
++    let regex = LOCATIONS
++        .get_or_init(|| {
++            Regex::new(
++                r#"(?:^|[\s`\"'(<])(?P<location>[\p{L}\p{N}_./~@+\-\[\]{}%\\][\p{L}\p{N}_./~@+\-\[\](){}%\\]*:[1-9][0-9]*(?::[1-9][0-9]*)?(?:-[1-9][0-9]*)?)(?:$|[\s`\"'>),.;])"#,
++            )
++            .ok()
++        })
++        .as_ref()?;
++    for captures in regex.captures_iter(row) {
++        let location = captures.name("location")?;
++        let path = location.as_str().split(':').next()?;
++        if !path.contains(['/', '\\', '.']) {
++            continue;
++        }
++        let start = UnicodeWidthStr::width(&row[..location.start()]);
++        let end = start + UnicodeWidthStr::width(location.as_str());
++        if (start..end).contains(&usize::from(col)) {
++            return Some(location.as_str());
++        }
++    }
++    None
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn click<'a>(row: &'a str, needle: &str) -> Option<&'a str> {
++        let byte = row.find(needle).expect("click text present");
++        file_location_at_column(row, UnicodeWidthStr::width(&row[..byte]) as u16)
++    }
++
++    #[test]
++    fn recognizes_agent_walkthroughs_and_markdown() {
++        let location = "src/components/setup/sections/PhysicalPresence.tsx:709";
++        let row = format!("  → PhysicalPresence form                 {location}");
++        assert_eq!(click(&row, "PhysicalPresence.tsx"), Some(location));
++        let row = "see `src/pages/(setup)/[id].tsx:12:3`, then AGENTS.md:7.";
++        assert_eq!(click(row, "[id]"), Some("src/pages/(setup)/[id].tsx:12:3"));
++        assert_eq!(click(row, "AGENTS"), Some("AGENTS.md:7"));
++        assert_eq!(click("(@src/a.ts:12-19)", "a.ts"), Some("@src/a.ts:12-19"));
++    }
++
++    #[test]
++    fn respects_terminal_columns_and_click_boundaries() {
++        let row = "界 → src/a.ts:42 text";
++        assert_eq!(click(row, "a.ts"), Some("src/a.ts:42"));
++        assert_eq!(click(row, "text"), None);
++        assert_eq!(file_location_at_column(row, 0), None);
++        assert_eq!(click("/tmp/a.rs:3", "tmp"), Some("/tmp/a.rs:3"));
++    }
++
++    #[test]
++    fn rejects_urls_and_nonlocations() {
++        for row in [
++            "https://example.com/a.ts:12",
++            "file:///tmp/a.rs:3",
++            "time:123",
++            "src/a.ts:0",
++            "src/a.ts",
++            "src/a.ts:12oops",
++        ] {
++            assert_eq!(file_location_at_column(row, 0), None, "{row}");
++        }
++    }
++}

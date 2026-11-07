@@ -1,0 +1,64 @@
+#!/usr/bin/swift
+
+// yy — copy file(s) to the macOS clipboard so they paste as the real thing.
+//
+// Puts each file's own UTI data on the pasteboard (public.png, com.compuserve.gif,
+// application/pdf, …) alongside public.file-url. Apps that want pixels get pixels —
+// an animated GIF pasted into Slack stays animated — and Finder still gets a file.
+//
+//   yy out/dance.gif           paste into Slack as the animated image
+//   yy a.png b.png             multi-file copy, paste into Finder/Mail
+//
+// pbcopy can't do this (text only), and AppleScript's `set the clipboard to`
+// offers only alias or a flattened static image flavor.
+
+import AppKit
+import UniformTypeIdentifiers
+
+// Data larger than this goes on the clipboard as a file reference only. Embedding
+// it would copy the whole payload into the pasteboard server for no gain.
+let maxInlineBytes = 64 * 1024 * 1024
+
+let args = Array(CommandLine.arguments.dropFirst())
+guard !args.isEmpty else {
+  FileHandle.standardError.write(Data("usage: yy <file> [file…]\n".utf8))
+  exit(2)
+}
+
+var items: [NSPasteboardItem] = []
+var copied: [String] = []
+
+for arg in args {
+  let url = URL(fileURLWithPath: (arg as NSString).expandingTildeInPath).standardizedFileURL
+  var isDir: ObjCBool = false
+  guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+    FileHandle.standardError.write(Data("yy: no such file: \(arg)\n".utf8))
+    exit(1)
+  }
+
+  let item = NSPasteboardItem()
+  item.setString(url.absoluteString, forType: .fileURL)
+
+  // Directories have no meaningful data flavor — the file URL is the whole story.
+  if !isDir.boolValue {
+    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    if size <= maxInlineBytes,
+      let type = UTType(filenameExtension: url.pathExtension),
+      let data = try? Data(contentsOf: url)
+    {
+      item.setData(data, forType: NSPasteboard.PasteboardType(type.identifier))
+    }
+  }
+
+  items.append(item)
+  copied.append(url.lastPathComponent)
+}
+
+let pb = NSPasteboard.general
+pb.clearContents()
+guard pb.writeObjects(items) else {
+  FileHandle.standardError.write(Data("yy: could not write to the clipboard\n".utf8))
+  exit(1)
+}
+
+print("copied \(copied.joined(separator: ", "))")

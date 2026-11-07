@@ -1,0 +1,14 @@
+{
+  "name": "tailscale-cli",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@dotfiles/opentui-cli": "file:../../../../cli/.local/share/opentui-cli",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.0"
+  }
+}
+

@@ -1,0 +1,18 @@
+[package]
+name = "ctab"
+version = "0.1.0"
+edition = "2021"
+description = "Chrome tab switcher: every tab on the left, the selected one's page on the right (jv's ; dialog, for the browser)"
+
+[dependencies]
+ratatui = "0.30"
+# The browser-use native host speaks newline-delimited JSON.
+serde_json = "1"
+unicode-width = "0.2"
+# poll(2) for the terminal's answer to the Kitty graphics query (gfx.rs).
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = false

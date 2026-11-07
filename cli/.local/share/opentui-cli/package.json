@@ -1,0 +1,19 @@
+{
+  "name": "@dotfiles/opentui-cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./index.tsx",
+  "dependencies": {
+    "@opentui/core": "^0.5.4",
+    "@opentui/react": "^0.5.4"
+  },
+  "peerDependencies": {
+    "react": ">=19.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,1 @@
+alias wb="webstorm"

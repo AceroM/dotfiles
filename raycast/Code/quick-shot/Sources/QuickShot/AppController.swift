@@ -1,0 +1,317 @@
+import AppKit
+import Carbon.HIToolbox
+import OSLog
+import ServiceManagement
+
+/// Where a finished capture goes: the annotation editor, or OCR straight to the clipboard.
+enum CaptureOutput {
+    case editor
+    case text
+}
+
+@MainActor
+final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private let logger = Logger(subsystem: "com.acerom.quickshot", category: "app")
+    private let hotKeys = HotKeys()
+    private let selector = RegionSelector()
+    private var statusItem: NSStatusItem?
+    private var editors: [ShotEditor] = []
+    private var scroller: ScrollCapture?
+    private var previousApp: NSRunningApplication?
+    private var isCapturing = false
+    private var missingHotKeys: [UInt32] = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let commandShift = cmdKey | shiftKey
+        hotKeys.add(1, keyCode: kVK_ANSI_2, modifiers: commandShift) { [weak self] in self?.capture(.area) }
+        hotKeys.add(2, keyCode: kVK_ANSI_1, modifiers: commandShift) { [weak self] in self?.captureAppWindow() }
+        hotKeys.add(3, keyCode: kVK_ANSI_3, modifiers: commandShift) { [weak self] in self?.captureFullScreen() }
+        hotKeys.add(4, keyCode: kVK_ANSI_0, modifiers: commandShift) { [weak self] in self?.capture(.area, output: .text) }
+        missingHotKeys = hotKeys.registerMissing()
+        if !missingHotKeys.isEmpty { logger.error("Hotkeys unavailable: \(self.missingHotKeys, privacy: .public)") }
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Quick Shot")
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        statusItem = item
+        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURL(_:reply:)),
+                                                     forEventClass: AEEventClass(kInternetEventClass),
+                                                     andEventID: AEEventID(kAEGetURL))
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        // Retry here so quitting a conflicting app (e.g. Shottr) frees the shortcut without a relaunch.
+        missingHotKeys = hotKeys.registerMissing()
+        menu.removeAllItems()
+        let area = menu.addItem(withTitle: "Capture Area", action: #selector(captureArea), keyEquivalent: "2")
+        area.keyEquivalentModifierMask = [.command, .shift]
+        let app = menu.addItem(withTitle: "Capture Active Window", action: #selector(captureAppWindow), keyEquivalent: "1")
+        app.keyEquivalentModifierMask = [.command, .shift]
+        let full = menu.addItem(withTitle: "Capture Full Screen", action: #selector(captureFullScreen), keyEquivalent: "3")
+        full.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(withTitle: "Capture Window", action: #selector(captureWindow), keyEquivalent: "")
+        menu.addItem(withTitle: "Capture Last Area", action: #selector(captureLastArea), keyEquivalent: "")
+        let text = menu.addItem(withTitle: "Copy Text from Area", action: #selector(captureText), keyEquivalent: "0")
+        text.keyEquivalentModifierMask = [.command, .shift]
+        if !missingHotKeys.isEmpty {
+            menu.addItem(.separator())
+            let warning = menu.addItem(withTitle: "Shortcut taken by another app (quit Shottr?)", action: nil,
+                                       keyEquivalent: "")
+            warning.isEnabled = false
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Open Saved Shots Folder", action: #selector(openFolder), keyEquivalent: "")
+        let login = menu.addItem(withTitle: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Quick Shot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.items.forEach { if $0.action != #selector(NSApplication.terminate(_:)) { $0.target = self } }
+    }
+
+    @objc private func captureArea() { capture(.area) }
+    @objc private func captureWindow() { capture(.window) }
+    @objc private func captureText() { capture(.area, output: .text) }
+
+    @objc private func openFolder() {
+        try? FileManager.default.createDirectory(at: ShotEditor.saveFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(ShotEditor.saveFolder)
+    }
+
+    @objc private func toggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
+            else { try SMAppService.mainApp.register() }
+        } catch {
+            alert("Couldn't change Open at Login", error.localizedDescription)
+        }
+    }
+
+    @objc private func handleURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let string = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: string) else { return }
+        switch url.host {
+        case "area": capture(.area)
+        case "window": capture(.window)
+        case "full": captureFullScreen()
+        case "app": captureAppWindow()
+        case "last": captureLastArea()
+        case "text": capture(.area, output: .text)
+        case "quit": NSApp.terminate(nil)
+        default: logger.error("Unknown command \(string, privacy: .public)")
+        }
+    }
+
+    /// The display under the pointer, straight into the editor.
+    @objc func captureFullScreen() {
+        if selector.isActive { selector.cancel() }
+        guard !isCapturing, hasScreenAccess() else { return }
+        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        guard let screen else { return }
+        isCapturing = true
+        rememberFrontApp()
+        Task {
+            defer { isCapturing = false }
+            do { open(try await Capture.display(id: screen.displayID)) }
+            catch {
+                restoreFocus()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
+    /// The frontmost app's front window, whole even where it's covered, straight into the editor.
+    @objc func captureAppWindow() {
+        if selector.isActive { selector.cancel() }
+        guard !isCapturing, hasScreenAccess() else { return }
+        rememberFrontApp()
+        guard let pid = previousApp?.processIdentifier, let target = Capture.frontWindow(of: pid) else {
+            captureFullScreen()
+            return
+        }
+        isCapturing = true
+        Task {
+            defer { isCapturing = false }
+            do {
+                var shot = try await Capture.window(id: target.id)
+                shot.region = target.region
+                open(shot)
+            } catch {
+                restoreFocus()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
+    /// The area of the last shot, live and with no selector, for an "after" that lines up with its "before".
+    @objc func captureLastArea() {
+        if selector.isActive { selector.cancel() }
+        guard !isCapturing, hasScreenAccess() else { return }
+        guard let region = LastArea.load() else {
+            Toast.show("No area to repeat yet")
+            return
+        }
+        isCapturing = true
+        rememberFrontApp()
+        Task {
+            defer { isCapturing = false }
+            do { open(try await Capture.region(region)) }
+            catch {
+                restoreFocus()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
+    private func hasScreenAccess() -> Bool {
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            alert("Screen Recording permission needed",
+                  "Enable Quick Shot in System Settings → Privacy & Security → Screen & System Audio Recording, then try again.")
+            return false
+        }
+        return true
+    }
+
+    private func rememberFrontApp() {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != getpid() {
+            previousApp = NSWorkspace.shared.frontmostApplication
+        }
+    }
+
+    /// The same shortcut again cancels an open selector.
+    func capture(_ mode: CaptureMode, output: CaptureOutput = .editor) {
+        if selector.isActive { selector.cancel(); return }
+        guard !isCapturing, hasScreenAccess() else { return }
+        isCapturing = true
+        rememberFrontApp()
+        Task {
+            do {
+                let frozen = mode == .area ? try await Capture.displays() : [:]
+                let prompt = output == .text ? "Drag over text to copy it" : nil
+                selector.show(mode: mode, frozen: frozen, prompt: prompt,
+                              last: mode == .area ? LastArea.load() : nil) { [weak self] selection in
+                    self?.finish(selection, frozen: frozen, output: output)
+                }
+            } catch {
+                isCapturing = false
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
+    private func finish(_ selection: Selection?, frozen: [CGDirectDisplayID: Shot], output: CaptureOutput) {
+        switch selection {
+        case nil:
+            isCapturing = false
+            restoreFocus()
+        case .region(let displayID, let rect):
+            isCapturing = false
+            guard let shot = frozen[displayID],
+                  let image = shot.image.cropping(to: CGRect(x: rect.minX * shot.scale, y: rect.minY * shot.scale,
+                                                             width: rect.width * shot.scale,
+                                                             height: rect.height * shot.scale).integral) else {
+                restoreFocus()
+                return
+            }
+            let region = ScreenRegion(displayID: displayID, rect: rect)
+            // Only shots remember their area, so copying text between a before and an after doesn't move it.
+            if output == .editor { LastArea.save(region) }
+            deliver(Shot(image: image, scale: shot.scale, region: region), to: output)
+        case .window(let id):
+            Task {
+                defer { isCapturing = false }
+                do { deliver(try await Capture.window(id: id), to: output) }
+                catch { alert("Capture failed", error.localizedDescription) }
+            }
+        }
+    }
+
+    private func deliver(_ shot: Shot, to output: CaptureOutput) {
+        switch output {
+        case .editor: open(shot)
+        case .text: copyText(from: shot)
+        }
+    }
+
+    /// OCRs the shot onto the clipboard as plain text; the clipboard is left alone when nothing is found.
+    private func copyText(from shot: Shot) {
+        restoreFocus()
+        Task {
+            do {
+                let text = try await TextRecognition.text(in: shot.image)
+                guard !text.isEmpty else {
+                    Toast.show("No text found")
+                    return
+                }
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                let lines = text.split(separator: "\n").count
+                Toast.show("Copied \(lines) line\(lines == 1 ? "" : "s") of text")
+            } catch {
+                alert("Text recognition failed", error.localizedDescription)
+            }
+        }
+    }
+
+    private func open(_ shot: Shot) {
+        let editor = ShotEditor(shot: shot)
+        editor.onClose = { [weak self] closed in
+            self?.editors.removeAll { $0 === closed }
+            if self?.editors.isEmpty == true { self?.restoreFocus() }
+        }
+        editor.onScrollCapture = { [weak self] editor in self?.scrollCapture(from: editor) }
+        editors.append(editor)
+        editor.show()
+    }
+
+    /// Hides the editor while J scrolls and captures the live area; Return opens the stitched shot in its place.
+    private func scrollCapture(from editor: ShotEditor) {
+        guard scroller == nil else { return }
+        guard let region = editor.shot.region else {
+            editor.status("Scrolling capture needs an area or full-screen shot")
+            return
+        }
+        guard CGPreflightPostEventAccess() else {
+            CGRequestPostEventAccess()
+            alert("Accessibility permission needed",
+                  "Scrolling capture sends scroll events. Enable Quick Shot in System Settings → Privacy & Security → Accessibility, then try again.")
+            return
+        }
+        editor.hide()
+        let scroller = ScrollCapture(region: region) { [weak self] shot in
+            self?.scroller = nil
+            if let shot {
+                self?.open(shot)
+                editor.close()
+            } else {
+                editor.show()
+            }
+        }
+        self.scroller = scroller
+        Task {
+            do { try await scroller.start() }
+            catch {
+                self.scroller = nil
+                editor.show()
+                alert("Capture failed", error.localizedDescription)
+            }
+        }
+    }
+
+    private func restoreFocus() {
+        previousApp?.activate()
+        previousApp = nil
+    }
+
+    private func alert(_ title: String, _ message: String) {
+        logger.error("\(title, privacy: .public): \(message, privacy: .public)")
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.runModal()
+    }
+}

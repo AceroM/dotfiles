@@ -1,0 +1,20 @@
+id = "miguel.jev-focus"
+name = "Jev Agent Focus"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Search live Herdr agents with Jev in a popup"
+platforms = ["macos"]
+
+[[actions]]
+id = "open"
+title = "Find agent with Jev"
+contexts = ["global"]
+command = ["/bin/sh", "open.sh"]
+
+[[panes]]
+id = "picker"
+title = "Find agent"
+placement = "popup"
+width = "74%"
+height = "58%"
+command = ["/bin/zsh", "run.zsh"]

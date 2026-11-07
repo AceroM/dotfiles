@@ -1,0 +1,102 @@
+{
+  "markdown_preview": {
+    "max_width": 1200.0
+  },
+  "diff_view_style": "split",
+  "icon_theme": {
+    "mode": "dark",
+    "light": "Zed (Default)",
+    "dark": "Zed (Default)"
+  },
+  "cli_default_open_behavior": "new_window",
+  "close_panel_on_toggle": false,
+  "project_panel": {
+    "dock": "left"
+  },
+  "outline_panel": {
+    "dock": "left"
+  },
+  "collaboration_panel": {
+    "dock": "left"
+  },
+  "git_panel": {
+    "dock": "left"
+  },
+  "autosave": "off",
+  "git": {
+    "inline_blame": {
+      "enabled": false
+    }
+  },
+  "agent": {
+    "enabled": false,
+    "button": false,
+    "dock": "left",
+    "show_merge_conflict_indicator": false
+  },
+  "toolbar": {
+    "agent_review": false
+  },
+  "languages": {
+    "TypeScript": {
+      "language_servers": ["vtsls"],
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "TSX": {
+      "language_servers": ["...", "oxfmt"],
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "JavaScript": {
+      "language_servers": ["...", "oxfmt"],
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "JSON": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    },
+    "JSONC": {
+      "format_on_save": "on",
+      "prettier": { "allowed": false },
+      "formatter": [{ "language_server": { "name": "oxfmt" } }]
+    }
+  },
+  "relative_line_numbers": "enabled",
+  "show_edit_predictions": true,
+  "edit_predictions": {
+    "provider": "zed",
+    "mode": "eager",
+    "copilot": {
+      "proxy": null,
+      "proxy_no_verify": null
+    }
+  },
+  "terminal": {
+    "option_as_meta": true,
+    "minimum_contrast": 0,
+    "dock": "bottom",
+    // Zed inherits HERDR_* when it is launched from a Herdr pane, which would
+    // make this plain shell think it is inside one. Blank the identity vars so
+    // the Zed terminal stays separate from Herdr.
+    "env": {
+      "HERDR_ENV": "",
+      "HERDR_PANE_ID": "",
+      "HERDR_TAB_ID": "",
+      "HERDR_WORKSPACE_ID": ""
+    }
+  },
+  "vim_mode": true,
+  "ui_font_size": 14,
+  "buffer_font_size": 14,
+  "theme": {
+    "light": "Rosé Pine Dawn",
+    "dark": "One Dark",
+    "mode": "dark"
+  }
+}

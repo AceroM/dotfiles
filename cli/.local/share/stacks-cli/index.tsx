@@ -1,0 +1,4478 @@
+#!/usr/bin/env bun
+
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  render,
+  Box,
+  Text,
+  useApp,
+  useInput,
+  useStdin,
+  useStdout,
+} from "@dotfiles/opentui-cli";
+import { realpathSync } from "node:fs";
+import {
+  changeTreeRows,
+  isTestPath,
+  type ChangedFile,
+} from "./change-tree";
+import {
+  dropDiffFiles,
+  groupDiffForDelta,
+  markDeltaFileHeaders,
+  parseAnsiDiff,
+  type DiffLine,
+  type DiffSpan,
+} from "./delta-diff";
+import {
+  forgetStampTarget,
+  stampOne,
+  stampTarget,
+  stampText,
+  type StampTarget,
+} from "./stamp";
+import {
+  findMatches,
+  firstMatch,
+  hOffsetFor,
+  MAX_HITS,
+  paintSpans,
+  sliceSpans,
+  stepMatch,
+  type SearchHit,
+} from "./search";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type StackBranch = {
+  branch: string;
+  prNumber: number | null;
+  prUrl: string | null;
+  prState: string | null; // OPEN | MERGED | CLOSED (from gh stack view)
+  isCurrent: boolean;
+  isMerged: boolean;
+  isQueued: boolean;
+  // True when this branch's base (the branch below it, or the trunk for the
+  // bottom one) has moved on without it — i.e. GitHub's "out-of-date with its
+  // base branch". Computed from the remote refs so it matches what the PR page
+  // shows, not just what happens to be checked out.
+  needsRebase: boolean;
+  // Local checkout vs origin/<branch>. A force-push from the GitHub UI leaves
+  // the worktree behind; unpushed work leaves it ahead. Either one silently
+  // breaks the next push, so surface both.
+  hasLocal: boolean;
+  localAhead: number;
+  localBehind: number;
+  // Base this branch is measured against (branch below it, or the trunk).
+  base: string;
+};
+
+type CheckItem = {
+  name: string;
+  status: "pass" | "fail" | "pending";
+  // The Actions run this check is a job of, when it is one. Commit statuses
+  // (Vercel and the like) have none, so they can't be rerun from here.
+  runId: number | null;
+  workflow: string | null;
+};
+
+type PrDetails = {
+  title: string;
+  state: string;
+  isDraft: boolean;
+  reviewDecision: string; // APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | ""
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  files: ChangedFile[];
+  checks: { pass: number; fail: number; pending: number };
+  checkList: CheckItem[];
+  labels: string[];
+};
+
+type StackData = {
+  label: string;
+  trunk: string;
+  currentBranch: string | null;
+  // GitHub's stack number, when we know it. `gh stack rebase` works off local
+  // tracking, but `gh stack merge` accepts this, which is the only way to act
+  // on a stack created by `gh stack link` (no local tracking is written).
+  stackNumber: number | null;
+  branches: StackBranch[]; // bottom -> top (closest to trunk first)
+  // Sync annotation (fetch + rebase/drift detection) is the slow, network-bound
+  // part of loading, so it runs behind the first paint. False until it lands.
+  synced?: boolean;
+};
+
+type Screen = "loading" | "pick" | "main" | "fatal";
+
+// Rebase rewrites history, merge is irreversible, and an approval or a status
+// flip goes out to the PR's author and its reviewers, so none fires on a bare
+// keypress — each stages a PendingAction that a second key has to confirm.
+// rebase spawns a Claude agent in a new Herdr pane; merge, approve, status,
+// tags and rerun run gh directly; stamp posts to Slack as you.
+type PendingAction = {
+  kind: "rebase" | "merge" | "approve" | "status" | "tags" | "stamp" | "rerun";
+  prompt: string;
+  exec: () => Promise<{ code: number; out: string; err: string }>;
+  after?: () => void; // on success, once the footer has the result
+};
+
+// The description dialog (space): the PR body plus its conversation, fetched
+// once per PR and re-rendered to the dialog width.
+type DescDialog = {
+  prNumber: number;
+  data: Discussion | null;
+  error: string | null;
+  loading: boolean;
+  scroll: number;
+  // Resolved threads and known-noisy bots (Vercel, Linear) fold to one line
+  // by default; x unfolds everything.
+  showAll: boolean;
+};
+
+// The status dialog (s): the four PR states gh can actually set. It acts on
+// every marked row at once — J/K build that selection — so a whole stack can
+// go ready-for-review under one confirmation instead of one PR at a time.
+type StatusAction = "ready" | "draft" | "close" | "reopen";
+
+type StatusOption = {
+  action: StatusAction;
+  icon: string;
+  label: string;
+  cmd: string; // spelled out in the dialog, so what runs is never a guess
+};
+
+type StatusDialog = {
+  // Resolved when the dialog opens, so the rows it names can't drift under it
+  // while it is up. Only rows that actually have a PR get in here.
+  targets: StackBranch[];
+  idx: number;
+};
+
+// The stamp dialog (S): hand PRs to the review bot in Slack, one message per
+// PR. It batches over the marked rows the way the status dialog does, and takes
+// a line of text for an optional note the bot reads
+// along with the request. The channel/bot lookup runs while you type.
+type StampDialog = {
+  targets: StackBranch[];
+  target: StampTarget | null;
+  error: string | null;
+  note: string;
+};
+
+type RepoLabel = { name: string; description: string | null };
+type TagDialog = {
+  targets: StackBranch[];
+  labels: RepoLabel[] | null;
+  error: string | null;
+  query: string;
+  idx: number;
+  chosen: Set<string>;
+};
+
+// `/` over the diff. The same shape carries the pattern being typed and the
+// one that has been committed: `origin` is only set while typing, and is the
+// scroll esc puts back, the way leaving vim's command line without a match
+// leaves the cursor where it started.
+type DiffSearch = {
+  query: string;
+  dir: 1 | -1;
+  idx: number; // into the hit list; -1 when the pattern matches nothing
+  origin?: number;
+};
+
+function matchingLabels(dialog: TagDialog): RepoLabel[] {
+  const query = dialog.query.trim().toLowerCase();
+  return (dialog.labels ?? []).filter((label) =>
+    `${label.name} ${label.description ?? ""}`.toLowerCase().includes(query),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// gh helpers
+// ---------------------------------------------------------------------------
+
+async function run(
+  cmd: string[],
+): Promise<{ code: number; out: string; err: string }> {
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, out, err };
+}
+
+async function runWithInput(
+  cmd: string[],
+  input: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  proc.stdin.write(input);
+  proc.stdin.end();
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, out, err };
+}
+
+// Placeholder sync fields. Every stack source fills these in later via
+// annotateSync(), which is the one place that talks to git about ref positions.
+const NO_SYNC = {
+  hasLocal: false,
+  localAhead: 0,
+  localBehind: 0,
+  base: "",
+} satisfies Pick<StackBranch, "hasLocal" | "localAhead" | "localBehind" | "base">;
+
+function parseViewJson(raw: string): StackData {
+  const j = JSON.parse(raw) as {
+    trunk: string;
+    currentBranch: string;
+    branches: Array<{
+      name: string;
+      isCurrent: boolean;
+      isMerged: boolean;
+      isQueued: boolean;
+      needsRebase: boolean;
+      pr: { number: number; url: string; state: string } | null;
+    }>;
+  };
+  return {
+    label: "current stack",
+    trunk: j.trunk,
+    currentBranch: j.currentBranch,
+    stackNumber: null,
+    branches: j.branches.map((b) => ({
+      branch: b.name,
+      prNumber: b.pr?.number ?? null,
+      prUrl: b.pr?.url ?? null,
+      prState: b.pr?.state ?? null,
+      isCurrent: b.isCurrent,
+      isMerged: b.isMerged,
+      isQueued: b.isQueued,
+      needsRebase: b.needsRebase,
+      ...NO_SYNC,
+    })),
+  };
+}
+
+// Fallback when the current branch isn't part of a stack: read gh's local
+// tracking file so any tracked stack in the repo can still be browsed.
+async function readTrackingFile(): Promise<StackData[]> {
+  // Bare --git-common-dir answers "\.git" in the primary worktree, which only
+  // resolves when the cwd happens to be the repo root.
+  const { code, out } = await run([
+    "git",
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  if (code !== 0) return [];
+  const path = `${out.trim()}/gh-stack`;
+  const file = Bun.file(path);
+  if (!(await file.exists())) return [];
+  const j = (await file.json()) as {
+    stacks?: Array<{
+      number?: number;
+      trunk: { branch: string };
+      branches: Array<{
+        branch: string;
+        pullRequest?: { number: number; url: string };
+      }>;
+    }>;
+  };
+  return (j.stacks ?? []).map((s) => ({
+    label: s.number ? `stack #${s.number}` : "untracked stack",
+    trunk: s.trunk.branch,
+    currentBranch: null,
+    stackNumber: s.number ?? null,
+    branches: s.branches.map((b) => ({
+      branch: b.branch,
+      prNumber: b.pullRequest?.number ?? null,
+      prUrl: b.pullRequest?.url ?? null,
+      prState: null,
+      isCurrent: false,
+      isMerged: false,
+      isQueued: false,
+      needsRebase: false,
+      ...NO_SYNC,
+    })),
+  }));
+}
+
+// `gh stack link` registers a stack on GitHub *without* writing local tracking,
+// and `gh stack view` reads nothing but that local file — so a linked stack is
+// invisible to both it and the .git/gh-stack fallback. Resolve those over the API.
+type RemoteStackRef = { id: string; number: number };
+
+async function currentBranch(): Promise<string | null> {
+  const { code, out } = await run(["git", "branch", "--show-current"]);
+  const name = out.trim();
+  return code === 0 && name ? name : null;
+}
+
+async function prForBranch(branch: string): Promise<number | null> {
+  const { code, out } = await run(["gh", "pr", "view", branch, "--json", "number"]);
+  if (code !== 0) return null;
+  const n = (JSON.parse(out) as { number?: number }).number;
+  return typeof n === "number" ? n : null;
+}
+
+// Branch tips along HEAD's first-parent ancestry, nearest first. The branch you
+// are writing on may have no PR yet, so anchor the lookup on the closest
+// ancestor branch that does have one.
+async function ancestorBranches(current: string | null): Promise<string[]> {
+  const [revs, refs] = await Promise.all([
+    run(["git", "rev-list", "--first-parent", "--max-count=50", "HEAD"]),
+    run([
+      "git",
+      "for-each-ref",
+      "--format=%(objectname) %(refname:short)",
+      "refs/heads",
+      "refs/remotes/origin",
+    ]),
+  ]);
+  if (revs.code !== 0 || refs.code !== 0) return [];
+
+  const byCommit = new Map<string, string[]>();
+  for (const line of refs.out.trim().split("\n")) {
+    const [sha, ref] = line.split(" ");
+    if (!sha || !ref) continue;
+    const name = ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
+    if (!name || name === current || name === "HEAD") continue;
+    const names = byCommit.get(sha) ?? [];
+    if (!names.includes(name)) names.push(name);
+    byCommit.set(sha, names);
+  }
+
+  const ordered: string[] = [];
+  for (const sha of revs.out.trim().split("\n")) {
+    for (const name of byCommit.get(sha) ?? []) {
+      if (!ordered.includes(name)) ordered.push(name);
+    }
+  }
+  return ordered;
+}
+
+async function remoteStackRef(prNumber: number): Promise<RemoteStackRef | null> {
+  const { code, out } = await run([
+    "gh",
+    "api",
+    "graphql",
+    "-F",
+    "owner={owner}",
+    "-F",
+    "name={repo}",
+    "-F",
+    `number=${prNumber}`,
+    "-f",
+    "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){stack{id number}}}}",
+  ]);
+  if (code !== 0) return null;
+  const stack = (
+    JSON.parse(out) as {
+      data?: { repository?: { pullRequest?: { stack?: RemoteStackRef | null } } };
+    }
+  ).data?.repository?.pullRequest?.stack;
+  return stack?.id ? stack : null;
+}
+
+async function isAncestor(branch: string, of: string): Promise<boolean> {
+  const { code } = await run(["git", "merge-base", "--is-ancestor", branch, of]);
+  return code === 0;
+}
+
+// Update the remote-tracking refs so "out of date" means out of date with what
+// GitHub actually has. Without this the whole panel can be confidently wrong —
+// a stale origin/main makes every branch look current. Read-only: no merge, no
+// checkout, nothing touched in the working tree.
+async function fetchRefs(): Promise<void> {
+  await run(["git", "fetch", "--quiet", "origin"]);
+}
+
+// Fill in needsRebase + local drift for every branch in the stack.
+//
+// Two independent questions, both of which have bitten this repo:
+//   1. Is the branch behind its base? (GitHub's "This stack is out-of-date")
+//      Measured on the REMOTE refs, because that's what the PR page compares.
+//   2. Has the local checkout drifted from origin? A "Rebase stack" click in
+//      the web UI force-pushes, leaving every worktree silently behind.
+// Batches every ref-existence lookup annotateSync needs into a single spawn
+// instead of up to 3 per branch — this runs on every load, so for a stack of
+// any size that's the difference between one git call and a burst of them.
+async function existingRefNames(): Promise<Set<string>> {
+  const { code, out } = await run([
+    "git",
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/heads",
+    "refs/remotes/origin",
+  ]);
+  if (code !== 0) return new Set();
+  return new Set(out.trim().split("\n").filter(Boolean));
+}
+
+async function annotateSync(data: StackData): Promise<StackData> {
+  const refs = await existingRefNames();
+  const hasLocalRef = (name: string) => refs.has(`refs/heads/${name}`);
+  const hasRemoteRef = (name: string) => refs.has(`refs/remotes/origin/${name}`);
+
+  const branches = await Promise.all(
+    data.branches.map(async (b, i) => {
+      // bottom branch measures against the trunk; the rest against the one below
+      const base = i === 0 ? data.trunk : data.branches[i - 1].branch;
+
+      const hasLocal = hasLocalRef(b.branch);
+      const hasRemote = hasRemoteRef(b.branch);
+      const hasRemoteBase = hasRemoteRef(base);
+
+      // Prefer remote-vs-remote; fall back to local refs when a branch hasn't
+      // been pushed yet, so an unpushed top-of-stack still reports honestly.
+      let needsRebase = b.needsRebase;
+      if (hasRemote && hasRemoteBase) {
+        needsRebase =
+          needsRebase || !(await isAncestor(`origin/${base}`, `origin/${b.branch}`));
+      } else if (hasLocal && hasRemoteBase) {
+        needsRebase =
+          needsRebase || !(await isAncestor(`origin/${base}`, b.branch));
+      }
+
+      let localAhead = 0;
+      let localBehind = 0;
+      if (hasLocal && hasRemote) {
+        const { code, out } = await run([
+          "git",
+          "rev-list",
+          "--left-right",
+          "--count",
+          `origin/${b.branch}...${b.branch}`,
+        ]);
+        if (code === 0) {
+          const [behind, ahead] = out.trim().split(/\s+/).map(Number);
+          localBehind = Number.isFinite(behind) ? behind : 0;
+          localAhead = Number.isFinite(ahead) ? ahead : 0;
+        }
+      }
+
+      return { ...b, base, hasLocal, needsRebase, localAhead, localBehind };
+    }),
+  );
+  return { ...data, branches, synced: true };
+}
+
+// A merged branch can't be rebased and doesn't need it, so ignore those when
+// deciding whether the stack as a whole is stale.
+function staleBranches(data: StackData): StackBranch[] {
+  return data.branches.filter((b) => b.needsRebase && !b.isMerged);
+}
+
+function driftedBranches(data: StackData): StackBranch[] {
+  return data.branches.filter((b) => b.localAhead > 0 || b.localBehind > 0);
+}
+
+async function readRemoteStack(): Promise<StackData | null> {
+  const current = await currentBranch();
+  const candidates = [
+    ...(current ? [current] : []),
+    ...(await ancestorBranches(current)),
+  ].slice(0, 12);
+
+  let ref: RemoteStackRef | null = null;
+  for (const branch of candidates) {
+    const pr = await prForBranch(branch);
+    if (pr == null) continue;
+    ref = await remoteStackRef(pr);
+    if (ref) break;
+  }
+  if (!ref) return null;
+
+  const { code, out } = await run([
+    "gh",
+    "api",
+    "graphql",
+    "-F",
+    `id=${ref.id}`,
+    "-f",
+    "query=query($id:ID!){node(id:$id){... on PullRequestStack{number baseRefName entries(first:50){nodes{position pullRequest{number url headRefName state}}}}}}",
+  ]);
+  if (code !== 0) return null;
+
+  type Entry = {
+    position: number;
+    pullRequest: {
+      number: number;
+      url: string;
+      headRefName: string;
+      state: string;
+    } | null;
+  };
+  const node = (
+    JSON.parse(out) as {
+      data?: {
+        node?: {
+          number: number;
+          baseRefName: string;
+          entries?: { nodes?: Entry[] };
+        } | null;
+      };
+    }
+  ).data?.node;
+  if (!node) return null;
+
+  const branches: StackBranch[] = [...(node.entries?.nodes ?? [])]
+    .filter((e): e is Entry & { pullRequest: NonNullable<Entry["pullRequest"]> } =>
+      e.pullRequest != null,
+    )
+    .sort((a, b) => a.position - b.position)
+    .map((e) => ({
+      branch: e.pullRequest.headRefName,
+      prNumber: e.pullRequest.number,
+      prUrl: e.pullRequest.url,
+      prState: e.pullRequest.state,
+      isCurrent: e.pullRequest.headRefName === current,
+      isMerged: e.pullRequest.state === "MERGED",
+      isQueued: false,
+      needsRebase: false,
+      ...NO_SYNC,
+    }));
+  if (branches.length === 0) return null;
+
+  // A PR-less branch stacked on top of the topmost PR still belongs to the
+  // stack from the author's point of view. Only append it when it really does
+  // sit on top — a branch forked off the middle would be shown in the wrong place.
+  const top = branches[branches.length - 1].branch;
+  if (current && !branches.some((b) => b.branch === current)) {
+    if (await isAncestor(top, "HEAD")) {
+      branches.push({
+        branch: current,
+        prNumber: null,
+        prUrl: null,
+        prState: null,
+        isCurrent: true,
+        isMerged: false,
+        isQueued: false,
+        needsRebase: false,
+        ...NO_SYNC,
+      });
+    }
+  }
+
+  return {
+    label: `stack #${node.number} · on github`,
+    trunk: node.baseRefName,
+    currentBranch: current,
+    stackNumber: node.number,
+    branches,
+  };
+}
+
+async function resolveStacks(): Promise<{
+  stacks: StackData[];
+  source: "tracked" | "github" | "file" | "none";
+  error?: string;
+}> {
+  // No fetch, no sync annotation here: this is the critical path to first
+  // paint. openStack() runs fetchRefs + annotateSync in the background.
+  const view = await run(["gh", "stack", "view", "--json"]);
+  if (view.code === 0) {
+    return { stacks: [parseViewJson(view.out)], source: "tracked" };
+  }
+  const remote = await readRemoteStack();
+  if (remote) return { stacks: [remote], source: "github" };
+  const tracked = await readTrackingFile();
+  if (tracked.length > 0) return { stacks: tracked, source: "file" };
+  return {
+    stacks: [],
+    source: "none",
+    error:
+      (view.err || view.out).trim() ||
+      "No stack found. Run this from a branch that is part of a gh stack.",
+  };
+}
+
+// An Actions job's detailsUrl is .../actions/runs/<run-id>/job/<job-id>; the
+// run ID is what `gh run rerun` takes. Anything else (a commit status's
+// targetUrl, say) has no run behind it.
+function runIdFromUrl(url: string | undefined): number | null {
+  const m = url?.match(/\/actions\/runs\/(\d+)(?:[/?#]|$)/);
+  return m ? Number(m[1]) : null;
+}
+
+function parseChecks(rollup: unknown): {
+  checks: PrDetails["checks"];
+  checkList: CheckItem[];
+} {
+  const checks = { pass: 0, fail: 0, pending: 0 };
+  const checkList: CheckItem[] = [];
+  if (!Array.isArray(rollup)) return { checks, checkList };
+  for (const c of rollup as Array<Record<string, string>>) {
+    const s = (c.conclusion || c.state || c.status || "").toUpperCase();
+    let status: CheckItem["status"];
+    if (s === "SUCCESS" || s === "NEUTRAL" || s === "SKIPPED") status = "pass";
+    else if (
+      ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].includes(s)
+    )
+      status = "fail";
+    else status = "pending";
+    checks[status]++;
+    checkList.push({
+      name: c.name || c.context || "check",
+      status,
+      runId: runIdFromUrl(c.detailsUrl),
+      workflow: c.workflowName || null,
+    });
+  }
+  // Failures first, then pending, so the checks that need eyes surface at the
+  // top of an expanded PR row.
+  const rank = { fail: 0, pending: 1, pass: 2 } as const;
+  checkList.sort((a, b) => rank[a.status] - rank[b.status]);
+  return { checks, checkList };
+}
+
+async function fetchPrDetails(prNumber: number): Promise<PrDetails | null> {
+  const { code, out } = await run([
+    "gh",
+    "pr",
+    "view",
+    String(prNumber),
+    "--json",
+    "title,state,isDraft,reviewDecision,additions,deletions,changedFiles,files,statusCheckRollup,labels",
+  ]);
+  if (code !== 0) return null;
+  const j = JSON.parse(out) as Record<string, unknown>;
+  const { checks, checkList } = parseChecks(j.statusCheckRollup);
+  return {
+    title: String(j.title ?? ""),
+    state: String(j.state ?? ""),
+    isDraft: Boolean(j.isDraft),
+    reviewDecision: String(j.reviewDecision ?? ""),
+    additions: Number(j.additions ?? 0),
+    deletions: Number(j.deletions ?? 0),
+    changedFiles: Number(j.changedFiles ?? 0),
+    files: ((j.files ?? []) as Array<Record<string, unknown>>)
+      .map((file) => ({
+        path: String(file.path ?? ""),
+        additions: Number(file.additions ?? 0),
+        deletions: Number(file.deletions ?? 0),
+      }))
+      .filter((file) => file.path.length > 0),
+    checks,
+    checkList,
+    labels: ((j.labels ?? []) as RepoLabel[]).map((label) => label.name),
+  };
+}
+
+async function fetchRepoLabels(): Promise<RepoLabel[]> {
+  const r = await run([
+    "gh", "api", "repos/{owner}/{repo}/labels?per_page=100", "--paginate", "--slurp",
+  ]);
+  if (r.code !== 0)
+    throw new Error(firstLine(r.err || r.out) || `exit ${r.code}`);
+  return (JSON.parse(r.out) as RepoLabel[][])
+    .flat()
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function addPrLabels(prNumber: number, labels: string[]) {
+  // POST adds to the existing labels. Raw array fields preserve names with
+  // commas, spaces, or @ prefixes without CSV parsing or file interpolation.
+  return run([
+    "gh", "api", `repos/{owner}/{repo}/issues/${prNumber}/labels`,
+    "--method", "POST", "--silent",
+    ...labels.flatMap((name) => ["--raw-field", `labels[]=${name}`]),
+  ]);
+}
+
+function pathFromDiffHeader(header: string): string {
+  const rest = header.slice("diff --git ".length);
+  const marker = Math.max(rest.lastIndexOf(" b/"), rest.lastIndexOf(' "b/'));
+  if (marker === -1) return rest;
+
+  const path = rest.slice(marker + 1);
+  if (path.startsWith('"b/'))
+    return path.slice(3, path.endsWith('"') ? -1 : undefined);
+  return path.startsWith("b/") ? path.slice(2) : path;
+}
+
+function formatDiff(raw: string): string[] {
+  const formatted: string[] = [];
+  const metadata = /^(?:index |--- |\+\+\+ |(?:new|deleted) file mode |(?:old|new) mode |(?:dis)?similarity index |(?:rename|copy) (?:from|to) )/;
+  let inHunk = false;
+
+  for (const line of raw.replace(/\r/g, "").split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      inHunk = false;
+      if (formatted.length && formatted[formatted.length - 1] !== "")
+        formatted.push("");
+      formatted.push(`Δ ${pathFromDiffHeader(line)}`, "");
+    } else if (line.startsWith("@@")) {
+      inHunk = true;
+      if (formatted.length && formatted[formatted.length - 1] !== "")
+        formatted.push("");
+    } else if (inHunk || !metadata.test(line)) {
+      formatted.push(line.replaceAll("\t", "    "));
+    }
+  }
+
+  while (formatted[formatted.length - 1] === "") formatted.pop();
+  return formatted;
+}
+
+function fallbackDiff(raw: string): DiffLine[] {
+  return formatDiff(raw).map((text) => ({
+    text,
+    spans: [],
+    ...(text.startsWith("Δ ") ? { filePath: text.slice(2) } : {}),
+  }));
+}
+
+async function fetchDiff(prNumber: number): Promise<DiffLine[]> {
+  const { code, out, err } = await run([
+    "gh",
+    "pr",
+    "diff",
+    String(prNumber),
+    "--color",
+    "never",
+  ]);
+  if (code !== 0)
+    return [{
+      text: `(gh pr diff failed: ${(err || out).trim()})`,
+      spans: [],
+    }];
+
+  const rendered: DiffLine[] = [];
+  for (const group of groupDiffForDelta(out)) {
+    const args = [
+      "delta",
+      "--paging",
+      "never",
+      "--detect-dark-light",
+      "never",
+      "--dark",
+      "--width",
+      "variable",
+      ...(group.defaultLanguage
+        ? ["--default-language", group.defaultLanguage]
+        : []),
+    ];
+    let result: Awaited<ReturnType<typeof runWithInput>>;
+    try {
+      result = await runWithInput(args, group.raw);
+    } catch {
+      return fallbackDiff(out);
+    }
+    if (result.code !== 0) return fallbackDiff(out);
+
+    const lines = markDeltaFileHeaders(parseAnsiDiff(result.out), group.paths);
+    while (lines[0]?.text === "") lines.shift();
+    while (lines[lines.length - 1]?.text === "") lines.pop();
+    if (rendered.length > 0 && rendered[rendered.length - 1]?.text !== "")
+      rendered.push({ text: "", spans: [] });
+    rendered.push(...lines);
+  }
+  return rendered.length > 0 ? rendered : fallbackDiff(out);
+}
+
+// The states GitHub lets the CLI set, in the order the dialog lists them. Each
+// option carries its own invocation because `gh pr ready --undo` is the only
+// way back to draft, which is worth reading off the screen rather than
+// remembering.
+const STATUS_OPTIONS: StatusOption[] = [
+  { action: "ready", icon: "⚑", label: "Ready for review", cmd: "gh pr ready" },
+  { action: "draft", icon: "✎", label: "Convert to draft", cmd: "gh pr ready --undo" },
+  { action: "close", icon: "✕", label: "Close", cmd: "gh pr close" },
+  { action: "reopen", icon: "⟲", label: "Reopen", cmd: "gh pr reopen" },
+];
+
+function statusArgs(action: StatusAction, prNumber: number): string[] {
+  const n = String(prNumber);
+  switch (action) {
+    case "ready":
+      return ["gh", "pr", "ready", n];
+    case "draft":
+      return ["gh", "pr", "ready", n, "--undo"];
+    case "close":
+      return ["gh", "pr", "close", n];
+    case "reopen":
+      return ["gh", "pr", "reopen", n];
+  }
+}
+
+// Where the dialog's cursor lands when it opens: on the option that moves the
+// PR under the cursor off where it currently is — a draft wants to be ready, a
+// closed PR wants reopening, anything else is presumably being pulled back to
+// draft. It is only a starting highlight; nothing runs without enter and y.
+function defaultStatusIdx(
+  b: StackBranch | undefined,
+  d: PrDetails | undefined,
+): number {
+  const state = d?.state ?? b?.prState ?? "";
+  const want: StatusAction =
+    state === "CLOSED" ? "reopen" : d?.isDraft ? "ready" : "draft";
+  return Math.max(
+    0,
+    STATUS_OPTIONS.findIndex((o) => o.action === want),
+  );
+}
+
+// The N-th mark past `from` (or before it, walking back), so a count works on
+// n/p the way it does on every other motion. A count larger than the number of
+// marks left lands on the last one rather than nowhere.
+function nthMark(
+  marks: number[],
+  from: number,
+  n: number,
+  dir: 1 | -1,
+  fallback: number,
+): number {
+  const ahead =
+    dir === 1
+      ? marks.filter((m) => m > from)
+      : [...marks].reverse().filter((m) => m < from);
+  if (ahead.length === 0) return fallback;
+  return ahead[Math.min(n, ahead.length) - 1];
+}
+
+// ---------------------------------------------------------------------------
+// herdr: rebase agent
+// ---------------------------------------------------------------------------
+
+// herdr reports a failure as a JSON envelope, and prints it on stdout — dig the
+// message out rather than dropping a line of JSON into the footer.
+function herdrError(r: { code: number; out: string; err: string }): string {
+  const raw = (r.err || r.out).trim();
+  try {
+    const m = (JSON.parse(raw) as { error?: { message?: string } }).error?.message;
+    if (m) return m;
+  } catch {
+    // not JSON — fall through to the raw first line
+  }
+  return firstLine(raw) || `exit ${r.code}`;
+}
+
+// R doesn't run the rebase here: it splits a sibling pane on the right, starts
+// a Claude agent in it, and hands it the whole job — including resolving merge
+// conflicts — so the human reviews a finished rebase instead of babysitting one.
+function rebaseTask(s: StackData): string {
+  const branches = s.branches.filter((b) => !b.isMerged).map((b) => b.branch);
+  return [
+    `Rebase my gh stack onto ${s.trunk}.`,
+    `Branches, bottom to top: ${branches.join(", ")}.`,
+    "Try `gh stack rebase` first; if it stops on merge conflicts (or the stack has no local tracking), rebase each branch onto the one below it manually, bottom first.",
+    "Resolve every merge conflict yourself — keep both sides' intent, reading the surrounding code when unsure. Do not leave conflicts for me.",
+    "Force-push each rebased branch with --force-with-lease.",
+    "Do not merge or close any PRs. When done, summarize what was rebased and how each conflict was resolved so I can review.",
+  ].join(" ");
+}
+
+async function launchRebaseAgent(
+  s: StackData,
+): Promise<{ code: number; out: string; err: string }> {
+  if (process.env.HERDR_ENV !== "1")
+    return { code: 1, out: "", err: "not inside a Herdr pane (HERDR_ENV unset)" };
+
+  const split = await run([
+    "herdr",
+    "pane",
+    "split",
+    "--current",
+    "--direction",
+    "right",
+    "--cwd",
+    process.cwd(),
+    "--no-focus",
+  ]);
+  if (split.code !== 0)
+    return { code: 1, out: "", err: `pane split failed — ${herdrError(split)}` };
+  let paneId: string | undefined;
+  try {
+    paneId = (
+      JSON.parse(split.out) as { result?: { pane?: { pane_id?: string } } }
+    ).result?.pane?.pane_id;
+  } catch {
+    // fall through to the missing-id error
+  }
+  if (!paneId)
+    return { code: 1, out: "", err: "pane split returned no pane_id" };
+
+  const name = `rebase-${Date.now().toString(36)}`;
+  const start = await run([
+    "herdr",
+    "agent",
+    "start",
+    name,
+    "--kind",
+    "claude",
+    "--pane",
+    paneId,
+  ]);
+  if (start.code !== 0)
+    return { code: 1, out: "", err: `agent start failed — ${herdrError(start)}` };
+
+  const prompt = await run(["herdr", "agent", "prompt", name, rebaseTask(s)]);
+  if (prompt.code !== 0)
+    return { code: 1, out: "", err: `agent prompt failed — ${herdrError(prompt)}` };
+  return {
+    code: 0,
+    out: `handed to claude (${name}, pane ${paneId}) — review there, then r to refresh`,
+    err: "",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Presentation helpers
+// ---------------------------------------------------------------------------
+
+type Badge = { text: string; color: string };
+
+// High-contrast diff colors tuned for dark terminal backgrounds.
+const DIFF_ADD_COLOR = "#98c379";
+const DIFF_DELETE_COLOR = "#e06c75";
+const DIFF_META_COLOR = "#74ade8";
+const DIFF_MUTED_COLOR = "#636d83";
+// vim's Search / CurSearch, in the same spirit: every hit takes a dark amber
+// background and keeps delta's own foreground (so a hit in an added line still
+// reads as added), while the one n/N is sitting on inverts to bright amber.
+const SEARCH_BG = "#5f5000";
+const CUR_SEARCH_BG = "#ffaf00";
+const CUR_SEARCH_FG = "#101010";
+const MIN_STACK_PANEL_W = 24;
+const MIN_CHANGES_PANEL_W = 22;
+const MIN_DIFF_PANEL_W = 24;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(Math.max(min, max), value));
+}
+
+function badgeFor(b: StackBranch, d: PrDetails | undefined): Badge {
+  if (b.prNumber == null) return { text: "no PR", color: "gray" };
+  const state = d?.state ?? b.prState ?? "";
+  if (b.isMerged || state === "MERGED") return { text: "Merged", color: "magenta" };
+  if (state === "CLOSED") return { text: "Closed", color: "red" };
+  if (b.isQueued) return { text: "Queued", color: "cyan" };
+  if (d?.isDraft) return { text: "Draft", color: "gray" };
+  if (d?.reviewDecision === "APPROVED") return { text: "Approved", color: "green" };
+  if (d?.reviewDecision === "CHANGES_REQUESTED")
+    return { text: "Changes", color: "red" };
+  return { text: "Not ready", color: "yellow" };
+}
+
+function dotFor(b: StackBranch, d: PrDetails | undefined): Badge {
+  const state = d?.state ?? b.prState ?? "";
+  if (b.isMerged || state === "MERGED") return { text: "✓", color: "magenta" };
+  if (state === "CLOSED") return { text: "✗", color: "red" };
+  if (b.isQueued) return { text: "◎", color: "cyan" };
+  if (b.needsRebase) return { text: "⚠", color: "yellow" };
+  if (d?.isDraft) return { text: "◌", color: "gray" };
+  return { text: "●", color: "yellow" };
+}
+
+// Compact per-branch sync marker for the sidebar's meta line, e.g.
+//   "⚠ rebase"   base moved on without this branch
+//   "↓2"         local checkout is 2 commits behind origin (someone force-pushed)
+//   "↑1"         1 unpushed commit
+//   "local only" never pushed
+function syncTags(b: StackBranch, synced: boolean): Badge[] {
+  const tags: Badge[] = [];
+  if (b.isMerged) return tags;
+  if (b.needsRebase) tags.push({ text: "⚠ rebase", color: "yellow" });
+  // hasLocal/ahead/behind are only meaningful once annotateSync has run;
+  // before that every branch would falsely read "no local".
+  if (!synced) return tags;
+  if (b.localBehind > 0) tags.push({ text: `↓${b.localBehind}`, color: "red" });
+  if (b.localAhead > 0) tags.push({ text: `↑${b.localAhead}`, color: "cyan" });
+  if (b.hasLocal && b.prNumber != null && b.localAhead === 0 && b.localBehind === 0)
+    return tags;
+  if (!b.hasLocal && b.prNumber != null)
+    tags.push({ text: "no local", color: "gray" });
+  return tags;
+}
+
+// Rows shown under an expanded PR: one per failing/pending check (the ones
+// worth expanding for), passes rolled up into a single line.
+type CheckRow = { icon: string; color?: string; dim?: boolean; text: string };
+
+function checkRowsFor(d: PrDetails | undefined): CheckRow[] {
+  if (!d) return [{ icon: "◌", dim: true, text: "loading checks…" }];
+  const rows: CheckRow[] = d.checkList
+    .filter((c) => c.status !== "pass")
+    .map((c) => ({
+      icon: c.status === "fail" ? "✗" : "◌",
+      color: c.status === "fail" ? "red" : "yellow",
+      text: c.name,
+    }));
+  if (d.checks.pass > 0)
+    rows.push({ icon: "✓", color: "green", text: `${d.checks.pass} passed` });
+  if (rows.length === 0) rows.push({ icon: "–", dim: true, text: "no checks" });
+  return rows;
+}
+
+// One glyph per viewport row for a vertical scrollbar, or null when the
+// content fits and no bar is due. The thumb is the viewport's share of the
+// content, never under one row, so a long diff still shows where you are.
+function scrollbar(
+  total: number,
+  viewH: number,
+  scroll: number,
+): Array<"thumb" | "track"> | null {
+  if (viewH <= 0 || total <= viewH) return null;
+  const size = Math.max(1, Math.round((viewH * viewH) / total));
+  const maxScroll = total - viewH;
+  const start = Math.round((Math.min(scroll, maxScroll) / maxScroll) * (viewH - size));
+  return Array.from({ length: viewH }, (_, i) =>
+    i >= start && i < start + size ? "thumb" : "track",
+  );
+}
+
+const SCROLL_THUMB_COLOR = "#abb2bf";
+
+function ScrollCell({
+  bar,
+  row,
+}: {
+  bar: Array<"thumb" | "track"> | null;
+  row: number;
+}) {
+  if (!bar) return null;
+  const thumb = bar[row] === "thumb";
+  return (
+    <Text flexShrink={0} color={thumb ? SCROLL_THUMB_COLOR : undefined} dimColor={!thumb}>
+      {thumb ? "┃" : "│"}
+    </Text>
+  );
+}
+
+function firstLine(s: string): string {
+  return (
+    s
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? ""
+  );
+}
+
+function truncate(s: string, max: number): string {
+  if (max <= 0) return "";
+  return s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
+}
+
+function diffLineStyle(line: string): { color?: string; bold?: boolean; dim?: boolean } {
+  if (line.startsWith("Δ ")) return { color: DIFF_META_COLOR, bold: true };
+  if (line.startsWith("+++") || line.startsWith("---"))
+    return { color: DIFF_MUTED_COLOR };
+  if (line.startsWith("@@")) return { color: DIFF_META_COLOR };
+  if (line.startsWith("+")) return { color: DIFF_ADD_COLOR };
+  if (line.startsWith("-")) return { color: DIFF_DELETE_COLOR };
+  if (
+    line.startsWith("index ") ||
+    line.startsWith("new file") ||
+    line.startsWith("deleted file") ||
+    line.startsWith("similarity") ||
+    line.startsWith("rename ")
+  )
+    return { color: DIFF_MUTED_COLOR };
+  return {};
+}
+
+function useTermSize() {
+  const { stdout } = useStdout();
+  const [size, setSize] = useState({
+    cols: stdout.columns ?? 80,
+    rows: stdout.rows ?? 24,
+  });
+  useEffect(() => {
+    const onResize = () =>
+      setSize({ cols: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+    stdout.on("resize", onResize);
+    return () => {
+      stdout.off("resize", onResize);
+    };
+  }, [stdout]);
+  return size;
+}
+
+// ---------------------------------------------------------------------------
+// zed: check the branch out and open its worktree
+// ---------------------------------------------------------------------------
+
+type Worktree = { path: string; branch: string | null };
+
+async function listWorktrees(): Promise<Worktree[]> {
+  const { code, out } = await run(["git", "worktree", "list", "--porcelain"]);
+  if (code !== 0) return [];
+  const trees: Worktree[] = [];
+  let cur: Worktree | null = null;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      cur = { path: line.slice("worktree ".length), branch: null };
+      trees.push(cur);
+    } else if (line.startsWith("branch ") && cur) {
+      cur.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+    }
+  }
+  return trees;
+}
+
+function realPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+function shortPath(p: string): string {
+  const home = process.env.HOME;
+  return home && p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+// Check out a branch in this worktree. If Zed is opening it, an existing
+// checkout in another worktree can be used there; c reports that location
+// because it cannot change the caller's working directory.
+// Nothing is stashed or forced: a checkout git rejects is reported as-is.
+async function checkoutBranch(
+  branch: string,
+  useOtherWorktree = false,
+): Promise<{ code: number; out: string; err: string; dir: string }> {
+  const top = await run(["git", "rev-parse", "--show-toplevel"]);
+  if (top.code !== 0)
+    return { code: 1, out: "", err: "not inside a git worktree", dir: "" };
+  const here = realPath(top.out.trim());
+  const holder = (await listWorktrees()).find((w) => w.branch === branch);
+
+  let dir = here;
+  let did: string;
+  if (holder && realPath(holder.path) !== here) {
+    dir = realPath(holder.path);
+    if (!useOtherWorktree)
+      return {
+        code: 1,
+        out: "",
+        err: `${branch} is already checked out in ${shortPath(dir)}`,
+        dir,
+      };
+    did = `${branch} lives in ${shortPath(dir)}`;
+  } else if (holder) {
+    did = `already on ${branch}`;
+  } else {
+    // Never checked out here means no local ref; make sure the remote one is
+    // present so checkout can create the tracking branch from it.
+    const refs = await existingRefNames();
+    if (
+      !refs.has(`refs/heads/${branch}`) &&
+      !refs.has(`refs/remotes/origin/${branch}`)
+    )
+      await run(["git", "fetch", "--quiet", "origin", branch]);
+    const co = await run(["git", "checkout", "--quiet", branch]);
+    if (co.code !== 0)
+      return {
+        code: co.code,
+        out: "",
+        err: (co.err || co.out).trim() || `git checkout exited ${co.code}`,
+        dir: here,
+      };
+    did = `checked out ${branch}`;
+  }
+
+  return { code: 0, out: did, err: "", dir };
+}
+
+// Put `branch` in a working tree and open that tree in Zed.
+async function openInZed(
+  branch: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const checkout = await checkoutBranch(branch, true);
+  if (checkout.code !== 0) return checkout;
+  // The zed CLI is a symlink into Zed.app; fall back to Launch Services when
+  // it isn't on PATH.
+  const zed = await run(
+    Bun.which("zed")
+      ? ["zed", checkout.dir]
+      : ["open", "-a", "Zed", checkout.dir],
+  );
+  if (zed.code !== 0)
+    return {
+      code: zed.code,
+      out: "",
+      err: (zed.err || zed.out).trim() || `zed exited ${zed.code}`,
+    };
+  return {
+    code: 0,
+    out: `${checkout.out} — opened ${shortPath(checkout.dir)} in zed`,
+    err: "",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PR discussion: description + comments, rendered as terminal markdown
+// ---------------------------------------------------------------------------
+
+type Reply = { author: string; when: string; body: string };
+
+type DiscussionItem = {
+  kind: "comment" | "review" | "thread";
+  author: string;
+  when: string; // ISO timestamp; items sort on it
+  body: string;
+  state?: string; // review: APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED
+  path?: string; // thread: file the inline comment is anchored to
+  line?: number | null;
+  resolved?: boolean;
+  outdated?: boolean;
+  replies: Reply[];
+};
+
+type Discussion = {
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  createdAt: string;
+  body: string;
+  items: DiscussionItem[]; // chronological
+};
+
+// One round trip for everything the dialog shows. `gh pr view --json` has no
+// inline review comments, which is where Greptile puts its findings, so this
+// goes through GraphQL; gh fills {owner}/{repo} from the cwd's remote.
+const DISCUSSION_QUERY = `query($owner: String!, $repo: String!, $n: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $n) {
+      number title body url createdAt author { login }
+      comments(first: 100) { nodes { author { login } body createdAt } }
+      reviews(first: 100) { nodes { author { login } body state submittedAt } }
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved isOutdated path line originalLine
+          comments(first: 50) { nodes { author { login } body createdAt } }
+        }
+      }
+    }
+  }
+}`;
+
+type GqlAuthor = { login?: string } | null;
+type GqlComment = { author: GqlAuthor; body: string; createdAt: string };
+type GqlPr = {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  createdAt: string;
+  author: GqlAuthor;
+  comments: { nodes: GqlComment[] };
+  reviews: {
+    nodes: Array<{
+      author: GqlAuthor;
+      body: string;
+      state: string;
+      submittedAt: string | null;
+    }>;
+  };
+  reviewThreads: {
+    nodes: Array<{
+      isResolved: boolean;
+      isOutdated: boolean;
+      path: string;
+      line: number | null;
+      originalLine: number | null;
+      comments: { nodes: GqlComment[] };
+    }>;
+  };
+};
+
+async function fetchDiscussion(
+  n: number,
+): Promise<{ data?: Discussion; error?: string }> {
+  const r = await run([
+    "gh",
+    "api",
+    "graphql",
+    "-F",
+    "owner={owner}",
+    "-F",
+    "repo={repo}",
+    "-F",
+    `n=${n}`,
+    "-f",
+    `query=${DISCUSSION_QUERY}`,
+  ]);
+  if (r.code !== 0)
+    return { error: firstLine(r.err || r.out) || `gh api exited ${r.code}` };
+  let pr: GqlPr | null | undefined;
+  try {
+    pr = (
+      JSON.parse(r.out) as {
+        data?: { repository?: { pullRequest?: GqlPr | null } };
+      }
+    ).data?.repository?.pullRequest;
+  } catch (e) {
+    return { error: `unreadable gh api response — ${(e as Error).message}` };
+  }
+  if (!pr) return { error: `PR #${n} not found` };
+
+  const login = (a: GqlAuthor) => a?.login || "ghost";
+  const items: DiscussionItem[] = [];
+  for (const c of pr.comments.nodes)
+    items.push({
+      kind: "comment",
+      author: login(c.author),
+      when: c.createdAt,
+      body: c.body,
+      replies: [],
+    });
+  for (const rv of pr.reviews.nodes) {
+    // A bodiless COMMENTED review is just the container for inline threads
+    // (Greptile's shape); the threads carry the content.
+    if (
+      !rv.body.trim() &&
+      rv.state !== "APPROVED" &&
+      rv.state !== "CHANGES_REQUESTED"
+    )
+      continue;
+    items.push({
+      kind: "review",
+      author: login(rv.author),
+      when: rv.submittedAt ?? "",
+      body: rv.body,
+      state: rv.state,
+      replies: [],
+    });
+  }
+  for (const t of pr.reviewThreads.nodes) {
+    const [first, ...rest] = t.comments.nodes;
+    if (!first) continue;
+    items.push({
+      kind: "thread",
+      author: login(first.author),
+      when: first.createdAt,
+      body: first.body,
+      path: t.path,
+      line: t.line ?? t.originalLine ?? null,
+      resolved: t.isResolved,
+      outdated: t.isOutdated,
+      replies: rest.map((c) => ({
+        author: login(c.author),
+        when: c.createdAt,
+        body: c.body,
+      })),
+    });
+  }
+  items.sort((a, b) => a.when.localeCompare(b.when));
+  return {
+    data: {
+      number: pr.number,
+      title: pr.title,
+      author: login(pr.author),
+      url: pr.url,
+      createdAt: pr.createdAt,
+      body: pr.body,
+      items,
+    },
+  };
+}
+
+function ago(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// ----- markdown → styled lines -----------------------------------------
+//
+// PR bodies are GitHub-flavored markdown with HTML mixed in (Greptile's
+// badges, <details> blocks, Vercel's deployment tables). OpenTUI owns
+// terminal styling, so this renders to spans rather than ANSI: the HTML is
+// rewritten to the markdown it stands for, each line gets its block shape
+// (GitHub treats a newline in a comment as a hard break, so lines never
+// merge), inline marks are parsed within it, and the result is word-wrapped
+// to the dialog width. Images come out as a labeled "⧉ alt" placeholder: the
+// terminal renderer can't take GitHub's private attachments or SVG badges.
+
+type Span = {
+  text: string;
+  color?: string;
+  bold?: boolean;
+  dim?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+};
+type Style = Omit<Span, "text">;
+type StyledLine = Span[];
+
+const MD_HEADING_COLOR = "#74ade8";
+const MD_CODE_COLOR = "#e5c07b";
+const MD_IMAGE_COLOR = "magenta";
+const MD_MARK_COLOR = "#636d83";
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+// Rewrite the HTML GitHub allows in comments into the markdown it stands for,
+// so one inline parser handles both. Inline code is masked first: a literal
+// `Array<string>` has to survive the tag stripping.
+function htmlToMarkdown(text: string): string {
+  const codes: string[] = [];
+  const masked = text.replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (m) => {
+    codes.push(m);
+    return `@@code${codes.length - 1}@@`;
+  });
+  const out = masked
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(?:picture|source)\b[^>]*>|<\/picture>/gi, "")
+    .replace(/<img\b[^>]*>/gi, (tag) => {
+      const alt = /\balt="([^"]*)"/i.exec(tag)?.[1] ?? "";
+      const src = /\bsrc="([^"]*)"/i.exec(tag)?.[1] ?? "";
+      return `![${alt}](${src || "#"})`;
+    })
+    // a linked image becomes [![alt](src)](href), which the inline pass reads
+    // as a badge and renders as its label
+    .replace(/<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, "[$2]($1)")
+    .replace(/<summary\b[^>]*>([\s\S]*?)<\/summary>/gi, "\n▸ $1\n")
+    .replace(/<(b|strong)\b[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**")
+    .replace(/<(i|em)\b[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*")
+    .replace(/<(code|kbd)\b[^>]*>([\s\S]*?)<\/\1>/gi, "`$2`")
+    .replace(/<li\b[^>]*>/gi, "\n- ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?(?:p|div|details|ul|ol|li|table|thead|tbody|tr|h[1-6])\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
+  return decodeEntities(out).replace(
+    /@@code(\d+)@@/g,
+    (_m, i: string) => codes[Number(i)] ?? "",
+  );
+}
+
+// Run the HTML rewrite over everything outside fenced code, which is kept
+// byte-for-byte: a `<T>` in a code sample is code, not a tag.
+function preprocessMarkdown(body: string): string {
+  const out: string[] = [];
+  let prose: string[] = [];
+  let fence: string | null = null;
+  const flush = () => {
+    if (prose.length) out.push(htmlToMarkdown(prose.join("\n")));
+    prose = [];
+  };
+  for (const line of body.replace(/\r/g, "").split("\n")) {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      out.push(line);
+      if (m && m[1][0] === fence[0] && m[1].length >= fence.length) fence = null;
+    } else if (m) {
+      flush();
+      fence = m[1];
+      out.push(line);
+    } else {
+      prose.push(line);
+    }
+  }
+  flush();
+  return out.join("\n");
+}
+
+// Inline marks, tried in this order at each position. Groups:
+//   1-2 code   3 badge link ([![alt](img)](href))   4-5 image   6-7 link
+//   8-9 bold   10 strike   11-12 emphasis   13 bare url
+const INLINE_RE =
+  /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\[!\[([^\]]*)\]\([^)]*\)\]\([^)]*\)|!\[([^\]]*)\]\(([^)\s]*)(?:\s+"[^"]*")?\)|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|(?<![\w`*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])|(?<![\w`])_(?!\s)(.+?)(?<!\s)_(?!\w)|<?(https?:\/\/[^\s<>)\]]+)>?/g;
+
+function inline(text: string, base: Style): Span[] {
+  const spans: Span[] = [];
+  const push = (t: string, st: Style) => {
+    if (t) spans.push({ ...st, text: t });
+  };
+  const re = new RegExp(INLINE_RE.source, "g");
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    push(text.slice(last, m.index), base);
+    last = m.index + m[0].length;
+    if (m[2] != null) push(m[2].trim(), { ...base, color: MD_CODE_COLOR });
+    else if (m[3] != null) {
+      // a linked badge (Greptile's P1 / security tags) reads as its label
+      if (m[3].trim()) push(`[${m[3].trim()}]`, { ...base, color: MD_IMAGE_COLOR });
+    } else if (m[4] != null) {
+      // an inline image with no alt is decoration (Vercel's avatars): drop it.
+      // Screenshots sit on their own line and are handled as a block.
+      if (m[4].trim()) push(`⧉ ${m[4].trim()}`, { ...base, color: MD_IMAGE_COLOR });
+    } else if (m[6] != null) spans.push(...inline(m[6], { ...base, underline: true }));
+    else if (m[8] != null || m[9] != null)
+      spans.push(...inline((m[8] ?? m[9])!, { ...base, bold: true }));
+    else if (m[10] != null) spans.push(...inline(m[10], { ...base, strike: true }));
+    else if (m[11] != null || m[12] != null)
+      spans.push(...inline((m[11] ?? m[12])!, { ...base, italic: true }));
+    else if (m[13] != null) push(m[13], { ...base, underline: true, dim: true });
+  }
+  push(text.slice(last), base);
+  return spans;
+}
+
+// Width in terminal cells as the renderer measures it: East-Asian-ambiguous
+// characters (em dash, arrows, ●) count as two cells there, and a line that
+// only fits by string length comes back truncated.
+function cellWidth(text: string): number {
+  return Bun.stringWidth(text, { ambiguousIsNarrow: false });
+}
+
+function spanWidth(spans: Span[]): number {
+  return spans.reduce((n, s) => n + cellWidth(s.text), 0);
+}
+
+// Word-wrap spans to `width`. `first` prefixes the first line (a bullet), and
+// `hang` every continuation. Adjacent non-space text is one word even when it
+// crosses a style boundary — "(`code`)" never breaks after the paren — and a
+// word wider than the room left is hard-broken, so a long URL or hash still
+// lands inside the box.
+function wrapSpans(
+  spans: Span[],
+  width: number,
+  first: Span[],
+  hang: Span[],
+): StyledLine[] {
+  type Piece = { span: Span; text: string };
+  type Token = { pieces: Piece[]; width: number; space: boolean };
+  const tokens: Token[] = [];
+  for (const sp of spans) {
+    for (const part of sp.text.match(/\s+|\S+/g) ?? []) {
+      const space = /^\s+$/.test(part);
+      const last = tokens[tokens.length - 1];
+      if (!space && last && !last.space) {
+        last.pieces.push({ span: sp, text: part });
+        last.width += cellWidth(part);
+      } else {
+        tokens.push({ pieces: [{ span: sp, text: part }], width: cellWidth(part), space });
+      }
+    }
+  }
+
+  const out: StyledLine[] = [];
+  let cur: Span[] = [...first];
+  let curW = spanWidth(first);
+  let lineStart = true;
+  // trailing whitespace would hang past the width and get the line truncated
+  const trimEnd = (line: Span[]) => {
+    while (line.length && /^\s*$/.test(line[line.length - 1].text)) line.pop();
+    const last = line[line.length - 1];
+    if (last) last.text = last.text.replace(/\s+$/, "");
+    return line;
+  };
+  const flush = () => {
+    out.push(trimEnd(cur));
+    cur = [...hang];
+    curW = spanWidth(hang);
+    lineStart = true;
+  };
+  const put = (sp: Span, text: string) => {
+    cur.push({ ...sp, text });
+    curW += cellWidth(text);
+  };
+  for (const tok of tokens) {
+    if (tok.space) {
+      if (!lineStart) put(tok.pieces[0].span, tok.pieces[0].text); // none after a wrap
+      continue;
+    }
+    if (curW + tok.width > width && !lineStart) flush();
+    for (const piece of tok.pieces) {
+      let text = piece.text;
+      while (cellWidth(text) > width - curW && width > curW) {
+        const take = width - curW; // by char; only ASCII-long words (urls) get here
+        put(piece.span, text.slice(0, take));
+        text = text.slice(take);
+        flush();
+      }
+      put(piece.span, text);
+      lineStart = false;
+    }
+  }
+  if (!lineStart || out.length === 0) out.push(trimEnd(cur));
+  return out;
+}
+
+function renderMarkdown(body: string, width: number): StyledLine[] {
+  const lines: StyledLine[] = [];
+  let fence: string | null = null;
+  let blankPending = false; // runs of blank lines collapse to one
+  const emit = (l: StyledLine) => {
+    if (blankPending && lines.length) lines.push([]);
+    blankPending = false;
+    lines.push(l);
+  };
+  const emitWrapped = (spans: Span[], first: Span[], hang: Span[]) => {
+    for (const l of wrapSpans(spans, width, first, hang)) emit(l);
+  };
+  const gutter: Span = { text: "  │ ", dim: true };
+  const src = preprocessMarkdown(body).split("\n");
+
+  for (let i = 0; i < src.length; i++) {
+    const line = src[i].replace(/\t/g, "    ");
+    const fm = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (fm && fm[1][0] === fence[0] && fm[1].length >= fence.length) fence = null;
+      else emit([gutter, { text: line, color: MD_CODE_COLOR }]); // truncated, never wrapped
+      continue;
+    }
+    if (fm) {
+      fence = fm[1];
+      continue;
+    }
+    if (!line.trim()) {
+      blankPending = true;
+      continue;
+    }
+    // reference-style link definition (Vercel's "[vc]: #…" marker) — invisible
+    // in rendered markdown
+    if (/^\[[^\]]+\]:\s+\S+/.test(line)) continue;
+
+    let m: RegExpExecArray | null;
+    if ((m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
+      blankPending = blankPending || lines.length > 0; // room above a heading
+      const color = m[1].length <= 2 ? MD_HEADING_COLOR : undefined;
+      emitWrapped(inline(m[2], { bold: true, color }), [], []);
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      emit([{ text: "─".repeat(Math.min(width, 40)), dim: true }]);
+      continue;
+    }
+    if ((m = /^\s*!\[([^\]]*)\]\(([^)\s]+)[^)]*\)\s*$/.exec(line))) {
+      // a block-level image is usually a screenshot: keep its address in view
+      emit([
+        { text: `⧉ ${m[1].trim() || "image"}`, color: MD_IMAGE_COLOR },
+        { text: `  ${m[2]}`, dim: true },
+      ]);
+      continue;
+    }
+    if ((m = /^▸ (.*)$/.exec(line))) {
+      // a <details> summary: bold, with the disclosure mark as its bullet
+      emitWrapped(
+        inline(m[1], { bold: true }),
+        [{ text: "▸ ", color: MD_MARK_COLOR }],
+        [{ text: "  " }],
+      );
+      continue;
+    }
+    if ((m = /^\s*>\s?(.*)$/.exec(line))) {
+      const bar: Span = { text: "▎ ", dim: true };
+      emitWrapped(inline(m[1], { dim: true }), [bar], [bar]);
+      continue;
+    }
+    if ((m = /^(\s*)([-*+]|\d+[.)])\s+(?:\[([ xX])\]\s+)?(.*)$/.exec(line))) {
+      const depth = Math.floor(m[1].length / 2);
+      const pad = "  ".repeat(depth);
+      const marker =
+        m[3] != null
+          ? m[3] === " "
+            ? "☐"
+            : "☑"
+          : /^\d/.test(m[2])
+            ? m[2]
+            : ["•", "◦", "▪"][depth % 3];
+      const hang = " ".repeat(pad.length + marker.length + 1);
+      emitWrapped(
+        inline(m[4], {}),
+        [{ text: pad }, { text: marker, color: MD_MARK_COLOR }, { text: " " }],
+        [{ text: hang }],
+      );
+      continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      if (/^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(line)) continue; // alignment row
+      const header = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(src[i + 1] ?? "");
+      const cells = line.trim().slice(1, -1).split("|");
+      const spans: Span[] = [];
+      cells.forEach((c, ci) => {
+        if (ci > 0) spans.push({ text: " │ ", dim: true });
+        spans.push(...inline(c.trim(), { bold: header }));
+      });
+      emit(spans); // rows keep their columns: truncated, never wrapped
+      continue;
+    }
+    if ((m = /^(\s{2,})(.*)$/.exec(line))) {
+      // indented continuation of a list item or nested block
+      const pad: Span = { text: "  ".repeat(Math.min(4, Math.floor(m[1].length / 2))) };
+      emitWrapped(inline(m[2], {}), [pad], [pad]);
+      continue;
+    }
+    emitWrapped(inline(line, {}), [], []);
+  }
+  return lines;
+}
+
+// First readable line of a body, marks and tags stripped — the one-line peek
+// a folded thread shows.
+function plainText(md: string): string {
+  return (
+    preprocessMarkdown(md)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !/^(```|~~~|\[[^\]]+\]:)/.test(l))
+      .map((l) =>
+        l
+          .replace(/\[!\[([^\]]*)\]\([^)]*\)\]\([^)]*\)/g, "[$1]")
+          .replace(/!\[([^\]]*)\]\([^)]*\)/g, "[$1]")
+          .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+          .replace(/[*_`~#>]+/g, "")
+          .trim(),
+      )
+      .find(Boolean) ?? ""
+  );
+}
+
+function reviewVerb(state: string | undefined): { text: string; color?: string } {
+  if (state === "APPROVED") return { text: "approved", color: "green" };
+  if (state === "CHANGES_REQUESTED") return { text: "requested changes", color: "red" };
+  if (state === "DISMISSED") return { text: "review dismissed" };
+  return { text: "reviewed" };
+}
+
+// Bots whose comments are deployment tables and link-backs, not review. They
+// fold to a header line unless the dialog is unfolded (x).
+const NOISY_BOTS = new Set([
+  "vercel",
+  "linear",
+  "github-actions",
+  "codecov",
+  "dependabot",
+  "renovate",
+  "netlify",
+]);
+
+function indentLines(ls: StyledLine[], pad: string): StyledLine[] {
+  return ls.map((l) => (l.length ? [{ text: pad }, ...l] : l));
+}
+
+// The whole dialog body as lines, plus the line index where each comment
+// starts (n/p jump between them).
+function renderDiscussion(
+  d: Discussion,
+  width: number,
+  showAll: boolean,
+): { lines: StyledLine[]; marks: number[] } {
+  const lines: StyledLine[] = [];
+  const marks: number[] = [];
+
+  lines.push(
+    ...(d.body.trim()
+      ? renderMarkdown(d.body, width)
+      : [[{ text: "(no description)", dim: true }]]),
+  );
+
+  const unresolved = d.items.filter((i) => i.kind === "thread" && !i.resolved).length;
+  lines.push([]);
+  marks.push(lines.length);
+  lines.push([{ text: "─".repeat(Math.min(width, 40)), dim: true }]);
+  const head: Span[] = [
+    {
+      text: `${d.items.length} comment${d.items.length === 1 ? "" : "s"}`,
+      bold: true,
+      color: MD_HEADING_COLOR,
+    },
+  ];
+  if (unresolved)
+    head.push({
+      text: ` · ${unresolved} unresolved thread${unresolved === 1 ? "" : "s"}`,
+      color: "yellow",
+    });
+  lines.push(head);
+  if (d.items.length === 0) lines.push([{ text: "(none yet)", dim: true }]);
+
+  for (const it of d.items) {
+    lines.push([]);
+    marks.push(lines.length);
+    const noisy = NOISY_BOTS.has(it.author) && !showAll;
+    const folded = noisy || (it.kind === "thread" && it.resolved && !showAll);
+
+    const row: Span[] = [];
+    if (it.kind === "thread")
+      row.push(
+        it.resolved ? { text: "✓ ", color: "green" } : { text: "● ", color: "yellow" },
+      );
+    else if (it.kind === "review")
+      row.push(
+        it.state === "APPROVED"
+          ? { text: "✓ ", color: "green" }
+          : it.state === "CHANGES_REQUESTED"
+            ? { text: "✗ ", color: "red" }
+            : { text: "● ", color: "cyan" },
+      );
+    else row.push({ text: "● ", color: noisy ? "gray" : "cyan" });
+    row.push({ text: it.author, bold: !folded, dim: folded });
+    if (it.kind === "review") {
+      const v = reviewVerb(it.state);
+      row.push({ text: ` ${v.text}`, color: v.color, dim: !v.color });
+    }
+    if (it.kind === "thread" && it.path)
+      row.push({
+        text: ` · ${it.path}${it.line != null ? `:${it.line}` : ""}`,
+        dim: true,
+      });
+    if (it.resolved) row.push({ text: " · resolved", color: "green" });
+    if (it.outdated) row.push({ text: " · outdated", dim: true });
+    row.push({ text: ` · ${ago(it.when)}`, dim: true });
+    if (it.replies.length)
+      row.push({
+        text: ` · ${it.replies.length} repl${it.replies.length === 1 ? "y" : "ies"}`,
+        dim: true,
+      });
+    if (folded)
+      row.push({
+        text: noisy ? "  (bot · x to show)" : "  (x to unfold)",
+        dim: true,
+        italic: true,
+      });
+    // a long path would otherwise be truncated out of the header
+    lines.push(...wrapSpans(row, width, [], [{ text: "  " }]));
+
+    if (folded) {
+      // one dim line keeps a resolved thread findable without reading it
+      const peek = noisy ? "" : plainText(it.body);
+      if (peek)
+        lines.push(
+          ...wrapSpans(
+            [{ text: peek, dim: true }],
+            width,
+            [{ text: "  " }],
+            [{ text: "  " }],
+          ).slice(0, 1),
+        );
+      continue;
+    }
+    lines.push(...indentLines(renderMarkdown(it.body, width - 2), "  "));
+    for (const r of it.replies) {
+      lines.push([]);
+      lines.push([
+        { text: "  ↳ ", dim: true },
+        { text: r.author, bold: true },
+        { text: ` · ${ago(r.when)}`, dim: true },
+      ]);
+      lines.push(...indentLines(renderMarkdown(r.body, width - 4), "    "));
+    }
+  }
+  return { lines, marks };
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
+function App() {
+  const { exit } = useApp();
+  const { cols, rows } = useTermSize();
+
+  const [screen, setScreen] = useState<Screen>("loading");
+  const [fatal, setFatal] = useState<string | null>(null);
+  const [stackChoices, setStackChoices] = useState<StackData[]>([]);
+  const [pickIdx, setPickIdx] = useState(0);
+  const [stack, setStack] = useState<StackData | null>(null);
+  const [details, setDetails] = useState<Map<number, PrDetails>>(new Map());
+  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<Badge | null>(null);
+  // space: the selected PR's description + conversation. Fetched once per PR
+  // (r inside the dialog refreshes), cached for the session.
+  const [desc, setDesc] = useState<DescDialog | null>(null);
+  const discussionCache = useRef(new Map<number, Discussion>());
+
+  // display order: trunk on top, then the stack bottom-up — the oldest PR
+  // (closest to trunk) first, the newest last — so the list reads in merge order
+  const entries = useMemo(() => stack?.branches ?? [], [stack]);
+
+  const [selected, setSelected] = useState(0);
+  // Multi-select, vim's visual-line mode: J/K drop an anchor where the cursor
+  // is and then walk its far end. The cursor is always one end of the range,
+  // so the marked rows are derived from it rather than stored — nothing can
+  // drift out of step with `selected`, and plain j/k drops the anchor.
+  const [markAnchor, setMarkAnchor] = useState<number | null>(null);
+  // s: set the GitHub state of every marked row at once.
+  const [status, setStatus] = useState<StatusDialog | null>(null);
+  const [tags, setTags] = useState<TagDialog | null>(null);
+  // S: stamp every marked row at the Slack review bot.
+  const [stamp, setStamp] = useState<StampDialog | null>(null);
+  // The note is typed into a ref because a paste arrives faster than React
+  // re-renders.
+  const stampRef = useRef<StampDialog | null>(null);
+  const putStamp = useCallback((dialog: StampDialog | null) => {
+    stampRef.current = dialog;
+    setStamp(dialog);
+  }, []);
+  // Search and toggle events can arrive before React renders the previous key.
+  const tagsRef = useRef<TagDialog | null>(null);
+  const putTags = useCallback((dialog: TagDialog | null) => {
+    tagsRef.current = dialog;
+    setTags(dialog);
+  }, []);
+  // vim counts — 3j, 3J, 5d, 12G. A digit burst can outrun a React render the
+  // same way a pasted note can, so the count lives in a ref and state only
+  // mirrors it for the footer; reading it off the last render would drop keys.
+  const countRef = useRef<number | null>(null);
+  const [countShown, setCountShown] = useState<number | null>(null);
+  const setCount = useCallback((v: number | null) => {
+    countRef.current = v;
+    setCountShown(v);
+  }, []);
+
+  const markedIdx = useMemo(() => {
+    const marks = new Set<number>();
+    if (markAnchor === null || entries.length === 0) return marks;
+    const lo = Math.max(0, Math.min(markAnchor, selected));
+    const hi = Math.min(entries.length - 1, Math.max(markAnchor, selected));
+    for (let i = lo; i <= hi; i++) marks.add(i);
+    return marks;
+  }, [markAnchor, selected, entries.length]);
+
+  // branch names whose sidebar row is expanded to show individual CI checks
+  const [expandedPrs, setExpandedPrs] = useState<Set<string>>(new Set());
+  // v: a compact file tree for the selected PR. Open on startup so the file
+  // context is visible immediately; the center diff still gets most of the room.
+  // V mirrors that interaction for the stack panel on the left.
+  const [stackOpen, setStackOpen] = useState(true);
+  const [changesOpen, setChangesOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(null);
+  const [changesWidth, setChangesWidth] = useState<number | null>(null);
+  const [draggingPanel, setDraggingPanel] = useState<"left" | "right" | null>(
+    null,
+  );
+  const draggingPanelRef = useRef<"left" | "right" | null>(null);
+  const [rawDiffLines, setDiffLines] = useState<DiffLine[] | null>(null);
+  // T hides test files (*.test.ts, __tests__/) from the diff and changes tree.
+  const [hideTests, setHideTests] = useState(false);
+  const diffLines = useMemo(
+    () => (rawDiffLines && hideTests ? dropDiffFiles(rawDiffLines, isTestPath) : rawDiffLines),
+    [rawDiffLines, hideTests],
+  );
+  const [scroll, setScroll] = useState(0);
+  // The wheel scrolls the side panels on their own. null means a panel is
+  // following: the stack list windows around the selection and the changes
+  // tree centers on the file at the top of the diff. A wheeled offset holds
+  // until what the panel was following moves off its rows.
+  const [stackScroll, setStackScroll] = useState<number | null>(null);
+  const [changesScroll, setChangesScroll] = useState<number | null>(null);
+  // `/` searches the diff. The committed pattern is what n/N walk and what the
+  // pane highlights; the draft is the pattern still being typed in the footer.
+  // Both live in refs as well, because a fast-typed pattern (or a paste) can
+  // outrun a React render the same way the stamp note and tag filter can.
+  const [search, setSearch] = useState<DiffSearch | null>(null);
+  const searchRef = useRef<DiffSearch | null>(null);
+  const putSearch = useCallback((s: DiffSearch | null) => {
+    searchRef.current = s;
+    setSearch(s);
+  }, []);
+  const [searchDraft, setSearchDraft] = useState<DiffSearch | null>(null);
+  const searchDraftRef = useRef<DiffSearch | null>(null);
+  const putSearchDraft = useCallback((s: DiffSearch | null) => {
+    searchDraftRef.current = s;
+    setSearchDraft(s);
+  }, []);
+
+  const diffCache = useRef(new Map<number, DiffLine[]>());
+  // in-flight diff fetches, so a prefetch and a selection never fetch twice
+  const diffPromises = useRef(new Map<number, Promise<DiffLine[]>>());
+  const scrollMemo = useRef(new Map<number, number>());
+  // n/N read the scroll position to decide whether the last hit is still on
+  // screen, and two n presses can land between renders — keep it in a ref.
+  const scrollRef = useRef(0);
+  const diffSeq = useRef(0);
+  const syncSeq = useRef(0);
+
+  const refreshDetails = useCallback((prNumber: number) => {
+    fetchPrDetails(prNumber).then((d) => {
+      if (!d) return;
+      setDetails((m) => {
+        const next = new Map(m);
+        next.set(prNumber, d);
+        return next;
+      });
+    });
+  }, []);
+
+  const openStack = useCallback(
+    (s: StackData) => {
+      setStack(s);
+      const cur = s.branches.findIndex((b) => b.isCurrent);
+      setSelected(cur >= 0 ? cur : 0);
+      setMarkAnchor(null);
+      setScreen("main");
+      // enrich each PR with title/state/checks in parallel
+      for (const b of s.branches) {
+        if (b.prNumber != null) refreshDetails(b.prNumber);
+      }
+      // Fetch + sync detection is the slow, network-bound part of loading, so
+      // it runs behind the first paint and patches the stack when it lands.
+      const seq = ++syncSeq.current;
+      fetchRefs()
+        .then(() => annotateSync(s))
+        .then((annotated) => {
+          if (syncSeq.current === seq) setStack(annotated);
+        })
+        .catch(() => {});
+    },
+    [refreshDetails],
+  );
+
+  const load = useCallback(() => {
+    setScreen("loading");
+    setMarkAnchor(null);
+    setDetails(new Map());
+    diffCache.current.clear();
+    diffPromises.current.clear();
+    syncSeq.current++;
+    setDiffLines(null);
+    resolveStacks()
+      .then(({ stacks, error }) => {
+        if (error || stacks.length === 0) {
+          setFatal(error ?? "No stacks found.");
+          setScreen("fatal");
+        } else if (stacks.length === 1) {
+          openStack(stacks[0]);
+        } else {
+          setStackChoices(stacks);
+          setPickIdx(0);
+          setScreen("pick");
+        }
+      })
+      .catch((e: Error) => {
+        setFatal(e.message);
+        setScreen("fatal");
+      });
+  }, [openStack]);
+
+  useEffect(load, [load]);
+
+  useEffect(() => {
+    scrollRef.current = scroll;
+  }, [scroll]);
+
+  // A search survives switching PRs, but the position in it does not: hit 7 of
+  // one diff means nothing in another, so drop the cursor and let the next n
+  // pick up from whatever is on screen rather than yanking the pane to a hit
+  // in a file you have not looked at yet. The highlight stays.
+  useEffect(() => {
+    const running = searchRef.current;
+    if (running && running.idx !== -1) putSearch({ ...running, idx: -1 });
+  }, [diffLines, putSearch]);
+
+  // Run a confirmed action. A merge finishes here, so reload after it; a
+  // rebase only *starts* here (the agent in the new pane does the work), so
+  // reloading immediately would just show the pre-rebase state.
+  const runAction = useCallback(
+    (action: PendingAction) => {
+      setPending(null);
+      setActionMsg(null);
+      setBusy(
+        action.kind === "rebase"
+          ? "starting rebase agent…"
+          : action.kind === "merge"
+            ? "merging stack…"
+            : action.kind === "status"
+              ? "setting status…"
+              : action.kind === "tags"
+                ? "adding tags…"
+                : action.kind === "stamp"
+                  ? "stamping…"
+                  : action.kind === "rerun"
+                    ? "rerunning failed jobs…"
+                    : "approving…",
+      );
+      action
+        .exec()
+        .then(({ code, out, err }) => {
+          setBusy(null);
+          if (code === 0) {
+            setActionMsg({
+              text: `${action.kind} ok — ${firstLine(out) || "done"}`,
+              color: "green",
+            });
+            if (action.kind === "merge") load();
+            action.after?.();
+            return;
+          }
+          setActionMsg({
+            text: `${action.kind} failed — ${firstLine(err) || firstLine(out) || `exit ${code}`}`,
+            color: "red",
+          });
+        })
+        .catch((e: Error) => {
+          setBusy(null);
+          setActionMsg({ text: `${action.kind} failed — ${e.message}`, color: "red" });
+        });
+    },
+    [load],
+  );
+
+  const ensureDiff = useCallback((num: number): Promise<DiffLine[]> => {
+    let p = diffPromises.current.get(num);
+    if (!p) {
+      p = fetchDiff(num).then((lines) => {
+        diffCache.current.set(num, lines);
+        return lines;
+      });
+      diffPromises.current.set(num, p);
+    }
+    return p;
+  }, []);
+
+  // load the diff for the selected PR (cached per PR number)
+  const sel = entries[selected];
+  const selectedDetails = sel?.prNumber != null ? details.get(sel.prNumber) : undefined;
+  const changeRows = useMemo(
+    () =>
+      changeTreeRows(
+        (selectedDetails?.files ?? []).filter((f) => !hideTests || !isTestPath(f.path)),
+      ),
+    [selectedDetails?.files, hideTests],
+  );
+  useEffect(() => {
+    if (screen !== "main" || !sel) return;
+    setScroll(sel.prNumber != null ? (scrollMemo.current.get(sel.prNumber) ?? 0) : 0);
+    if (sel.prNumber == null) {
+      setDiffLines([
+        { text: "(no PR for this branch yet — nothing to diff)", spans: [] },
+      ]);
+    } else {
+      const cached = diffCache.current.get(sel.prNumber);
+      if (cached) {
+        setDiffLines(cached);
+      } else {
+        setDiffLines(null);
+        const seq = ++diffSeq.current;
+        ensureDiff(sel.prNumber).then((lines) => {
+          if (diffSeq.current === seq) setDiffLines(lines);
+        });
+      }
+    }
+    // prefetch the neighbors so j/k lands on an already-loaded diff
+    for (const nb of [entries[selected + 1], entries[selected - 1]]) {
+      if (nb?.prNumber != null && !diffCache.current.has(nb.prNumber))
+        ensureDiff(nb.prNumber);
+    }
+  }, [screen, sel, entries, selected, ensureDiff]);
+
+  // ----- description dialog ---------------------------------------------
+  const loadDiscussion = useCallback((prNumber: number) => {
+    setDesc((d) => (d && d.prNumber === prNumber ? { ...d, loading: true } : d));
+    fetchDiscussion(prNumber).then(({ data, error }) => {
+      if (data) discussionCache.current.set(prNumber, data);
+      setDesc((d) =>
+        d && d.prNumber === prNumber
+          ? { ...d, data: data ?? d.data, error: error ?? null, loading: false }
+          : d,
+      );
+    });
+  }, []);
+
+  const openDesc = useCallback(
+    (b: StackBranch, showAll = false) => {
+      if (b.prNumber == null) {
+        setActionMsg({
+          text: `no PR for ${b.branch} yet — nothing to describe`,
+          color: "red",
+        });
+        return;
+      }
+      const cached = discussionCache.current.get(b.prNumber) ?? null;
+      setDesc({
+        prNumber: b.prNumber,
+        data: cached,
+        error: null,
+        loading: !cached,
+        scroll: 0,
+        showAll,
+      });
+      if (!cached) loadDiscussion(b.prNumber);
+    },
+    [loadDiscussion],
+  );
+
+  const refreshCheckout = useCallback(async () => {
+    const cur = await currentBranch();
+    setStack(
+      (s) =>
+        s && {
+          ...s,
+          currentBranch: cur,
+          branches: s.branches.map((x) => ({
+            ...x,
+            isCurrent: x.branch === cur,
+            hasLocal: x.hasLocal || x.branch === cur,
+          })),
+        },
+    );
+  }, []);
+
+  // ----- checkout -------------------------------------------------------
+  // c: check out the selected branch in this worktree without opening an editor.
+  const checkoutSelected = useCallback(
+    (b: StackBranch) => {
+      setActionMsg(null);
+      setBusy(`checking out ${b.branch}…`);
+      checkoutBranch(b.branch)
+        .then(async (r) => {
+          if (r.code !== 0) {
+            setActionMsg({
+              text: `checkout failed — ${firstLine(r.err) || `exit ${r.code}`}`,
+              color: "red",
+            });
+            return;
+          }
+          await refreshCheckout();
+          setActionMsg({ text: r.out, color: "green" });
+        })
+        .catch((e: Error) => {
+          setActionMsg({ text: `checkout failed — ${e.message}`, color: "red" });
+        })
+        .finally(() => setBusy(null));
+    },
+    [refreshCheckout],
+  );
+
+  // ----- zed ------------------------------------------------------------
+  // z: check the selected branch out (when it isn't already) and open its
+  // worktree in Zed. Runs as a busy action so a second z can't race the
+  // checkout; the sidebar's ✦ follows HEAD once git has answered.
+  const openZed = useCallback((b: StackBranch) => {
+    setActionMsg(null);
+    setBusy(`opening ${b.branch} in zed…`);
+    openInZed(b.branch)
+      .then(async (r) => {
+        if (r.code !== 0) {
+          setBusy(null);
+          setActionMsg({
+            text: `zed failed — ${firstLine(r.err) || `exit ${r.code}`}`,
+            color: "red",
+          });
+          return;
+        }
+        await refreshCheckout();
+        setBusy(null);
+        setActionMsg({ text: r.out, color: "green" });
+      })
+      .catch((e: Error) => {
+        setBusy(null);
+        setActionMsg({ text: `zed failed — ${e.message}`, color: "red" });
+      });
+  }, [refreshCheckout]);
+
+  // ----- approve --------------------------------------------------------
+  // a: stage an approval of the selected PR; y submits `gh pr review
+  // --approve`. GitHub refuses to approve your own PR, which surfaces as the
+  // failure text in the footer.
+  const approvePr = useCallback(
+    (b: StackBranch) => {
+      if (b.prNumber == null) {
+        setActionMsg({
+          text: `no PR for ${b.branch} yet — nothing to approve`,
+          color: "red",
+        });
+        return;
+      }
+      const n = b.prNumber;
+      setPending({
+        kind: "approve",
+        prompt: `Approve #${n} (${details.get(n)?.title ?? b.branch})?`,
+        exec: () => run(["gh", "pr", "review", String(n), "--approve"]),
+        after: () => refreshDetails(n),
+      });
+    },
+    [details, refreshDetails],
+  );
+
+  // A: the same, for every PR in the stack that is still open. One
+  // confirmation, then the approvals run in order; a refusal on one (your own
+  // PR, say) is reported without stopping the rest.
+  const approveAll = useCallback(() => {
+    if (!stack) return;
+    const open = stack.branches.filter((b) => {
+      if (b.prNumber == null || b.isMerged) return false;
+      const state = details.get(b.prNumber)?.state ?? b.prState ?? "";
+      return state !== "MERGED" && state !== "CLOSED";
+    });
+    if (open.length === 0) {
+      setActionMsg({ text: "no open PRs in this stack to approve", color: "red" });
+      return;
+    }
+    const nums = open.map((b) => b.prNumber!);
+    setPending({
+      kind: "approve",
+      prompt: `Approve ${nums.length} open PR${nums.length === 1 ? "" : "s"} in ${stack.label} (${nums.map((n) => `#${n}`).join(" ")})?`,
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        for (const n of nums) {
+          const r = await run(["gh", "pr", "review", String(n), "--approve"]);
+          if (r.code === 0) ok.push(n);
+          else failed.push(`#${n}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+        }
+        const done = `${ok.length}/${nums.length} approved`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => nums.forEach(refreshDetails),
+    });
+  }, [stack, details, refreshDetails]);
+
+  // ----- status ---------------------------------------------------------
+  // What a batch action acts on: the marked rows when J/K have built a
+  // selection, otherwise just the row under the cursor. The cursor is always
+  // inside the marked range, so these never disagree about the current PR.
+  const markedBranches = useMemo(
+    () =>
+      markedIdx.size > 0
+        ? entries.filter((_, i) => markedIdx.has(i))
+        : sel
+          ? [sel]
+          : [],
+    [entries, markedIdx, sel],
+  );
+
+  // s: open the state dropdown. Rows with no PR are dropped here rather than
+  // at apply time, so the count the dialog shows is the count it will touch.
+  const openStatus = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null);
+    if (targets.length === 0) {
+      setActionMsg({
+        text:
+          markedBranches.length > 1
+            ? "no PRs in the selection — nothing to set a status on"
+            : "no PR for this branch yet — nothing to set a status on",
+        color: "red",
+      });
+      return;
+    }
+    setStatus({
+      targets,
+      idx: defaultStatusIdx(
+        sel,
+        sel?.prNumber != null ? details.get(sel.prNumber) : undefined,
+      ),
+    });
+  }, [markedBranches, sel, details]);
+
+  // enter in the dialog doesn't run anything — it stages the same confirmation
+  // every other mutating key uses, which is the only place the whole batch is
+  // spelled out before it goes out to reviewers.
+  const applyStatus = useCallback(
+    (action: StatusAction) => {
+      if (!status) return;
+      const opt = STATUS_OPTIONS.find((o) => o.action === action)!;
+      const nums = status.targets.map((b) => b.prNumber!);
+      setStatus(null);
+      setPending({
+        kind: "status",
+        prompt: `${opt.label} — ${nums.map((n) => `#${n}`).join(" ")} (${opt.cmd})?`,
+        exec: async () => {
+          const ok: number[] = [];
+          const failed: string[] = [];
+          for (const n of nums) {
+            const r = await run(statusArgs(action, n));
+            // Badges come from the PR, not from us: re-read each one as it
+            // lands, so a batch that half-fails still shows what did change.
+            if (r.code === 0) {
+              ok.push(n);
+              refreshDetails(n);
+            } else {
+              failed.push(`#${n}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+            }
+          }
+          const done = `${ok.length}/${nums.length} → ${opt.label.toLowerCase()}`;
+          return failed.length === 0
+            ? { code: 0, out: done, err: "" }
+            : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+        },
+        // Only on a clean sweep: a partial failure keeps the selection so the
+        // ones GitHub refused can be retried without rebuilding it.
+        after: () => setMarkAnchor(null),
+      });
+    },
+    [status, refreshDetails],
+  );
+
+  // ----- rerun checks ---------------------------------------------------
+  // x: rerun the failed jobs behind every failing check on the selected PR,
+  // or on every marked one. Each failing CheckRun's detailsUrl names its
+  // workflow run, and one `gh run rerun <id> --failed` per distinct run
+  // re-queues every failed job in it plus what they depend on — the two
+  // staging-migration jobs are one run, so one call. Commit statuses have no
+  // run to rerun and are named and skipped. Acts on the checks as shown (l
+  // re-fetches them), so the confirmation spells out exactly what goes out.
+  const rerunChecks = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null);
+    if (targets.length === 0) {
+      setActionMsg({
+        text:
+          markedBranches.length > 1
+            ? "no PRs in the selection — nothing to rerun"
+            : "no PR for this branch yet — nothing to rerun",
+        color: "red",
+      });
+      return;
+    }
+    const runs = new Map<number, { workflow: string; prs: Set<number> }>();
+    const skipped: string[] = [];
+    const loading: number[] = [];
+    for (const b of targets) {
+      const n = b.prNumber!;
+      const d = details.get(n);
+      if (!d) {
+        loading.push(n);
+        continue;
+      }
+      for (const c of d.checkList) {
+        if (c.status !== "fail") continue;
+        if (c.runId == null) {
+          skipped.push(`${c.name} (#${n})`);
+          continue;
+        }
+        const entry = runs.get(c.runId) ?? {
+          workflow: c.workflow ?? c.name,
+          prs: new Set<number>(),
+        };
+        entry.prs.add(n);
+        runs.set(c.runId, entry);
+      }
+    }
+    if (loading.length > 0) {
+      setActionMsg({
+        text: `checks for ${loading.map((n) => `#${n}`).join(" ")} still loading — try again in a moment`,
+        color: "yellow",
+      });
+      return;
+    }
+    if (runs.size === 0) {
+      setActionMsg({
+        text:
+          skipped.length > 0
+            ? `only commit statuses are failing (${skipped.join(", ")}) — nothing gh can rerun`
+            : "no failing checks to rerun",
+        color: "red",
+      });
+      return;
+    }
+    const prs = [...new Set([...runs.values()].flatMap((r) => [...r.prs]))];
+    const workflows = [...new Set([...runs.values()].map((r) => r.workflow))];
+    const ids = [...runs.keys()];
+    const plural = (k: number, w: string) => `${k} ${w}${k === 1 ? "" : "s"}`;
+    setPending({
+      kind: "rerun",
+      prompt:
+        `Rerun failed jobs on ${prs.map((n) => `#${n}`).join(" ")} — ${workflows.join(", ")} (${plural(ids.length, "run")}, gh run rerun --failed)?` +
+        (skipped.length > 0
+          ? ` Skipping ${skipped.join(", ")}: not an Actions run.`
+          : ""),
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        const touched = new Set<number>();
+        for (const id of ids) {
+          const r = await run(["gh", "run", "rerun", String(id), "--failed"]);
+          if (r.code === 0) {
+            ok.push(id);
+            runs.get(id)!.prs.forEach((n) => touched.add(n));
+          } else {
+            failed.push(
+              `${runs.get(id)!.workflow}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`,
+            );
+          }
+        }
+        // GitHub queues the rerun jobs right away; re-read the PRs that got
+        // one so their expanded rows show ◌ instead of the stale ✗, whether
+        // or not another run was refused.
+        touched.forEach(refreshDetails);
+        const done = `${ok.length}/${plural(ids.length, "run")} re-queued`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => setMarkAnchor(null),
+    });
+  }, [markedBranches, details, refreshDetails]);
+
+  // t: freeze the same targets as the status picker, then load all repo labels.
+  const openTags = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null);
+    if (targets.length === 0) {
+      setActionMsg({ text: "no PRs in the selection — nothing to tag", color: "red" });
+      return;
+    }
+    putTags({ targets, labels: null, error: null, query: "", idx: 0, chosen: new Set() });
+    fetchRepoLabels()
+      .then((labels) => {
+        const dialog = tagsRef.current;
+        if (dialog?.targets === targets) putTags({ ...dialog, labels });
+      })
+      .catch((e: Error) => {
+        const dialog = tagsRef.current;
+        if (dialog?.targets === targets) putTags({ ...dialog, error: e.message });
+      });
+  }, [markedBranches, putTags]);
+
+  const applyTags = useCallback(() => {
+    const dialog = tagsRef.current;
+    if (!dialog?.labels || dialog.error) return;
+    const highlighted = matchingLabels(dialog)[dialog.idx];
+    const labels = dialog.chosen.size > 0
+      ? [...dialog.chosen]
+      : highlighted ? [highlighted.name] : [];
+    if (labels.length === 0) return;
+    const nums = dialog.targets.map((b) => b.prNumber!);
+    putTags(null);
+    setPending({
+      kind: "tags",
+      prompt: `Add ${labels.map((name) => JSON.stringify(name)).join(", ")} to ${nums.map((n) => `#${n}`).join(" ")}?`,
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        for (const n of nums) {
+          try {
+            const r = await addPrLabels(n, labels);
+            if (r.code === 0) {
+              ok.push(n);
+              refreshDetails(n);
+            } else {
+              failed.push(`#${n}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+            }
+          } catch (e) {
+            failed.push(`#${n}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        const done = `${ok.length}/${nums.length} PRs tagged`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => setMarkAnchor(null),
+    });
+  }, [putTags, refreshDetails]);
+
+  // ----- stamp ----------------------------------------------------------
+  // S: ask the Slack review bot to look at the marked PRs. Open the dialog
+  // first and resolve the channel/bot behind it, so a note can be typed while
+  // the lookup runs while the note is typed.
+  const openStamp = useCallback(() => {
+    const targets = markedBranches.filter((b) => b.prNumber != null && b.prUrl);
+    if (targets.length === 0) {
+      setActionMsg({
+        text:
+          markedBranches.length > 1
+            ? "no PRs in the selection — nothing to stamp"
+            : "no PR for this branch yet — nothing to stamp",
+        color: "red",
+      });
+      return;
+    }
+    putStamp({ targets, target: null, error: null, note: "" });
+    stampTarget().then(
+      (target) => {
+        const d = stampRef.current;
+        if (d) putStamp({ ...d, target, error: null });
+      },
+      (e: Error) => {
+        const d = stampRef.current;
+        // A cached id that Slack no longer accepts would fail the same way
+        // every time, so drop the cache on the way out.
+        forgetStampTarget().catch(() => {});
+        if (d) putStamp({ ...d, error: e.message });
+      },
+    );
+  }, [markedBranches, putStamp]);
+
+  // One Slack message per PR, because the bot answers in a thread under each:
+  // a single message naming four PRs comes back as one tangled thread. They go
+  // out in stack order, and a failure part-way reports what did land.
+  const applyStamp = useCallback(() => {
+    const dialog = stampRef.current;
+    if (!dialog?.target) return;
+    const { target, note, targets } = dialog;
+    const nums = targets.map((b) => b.prNumber!);
+    putStamp(null);
+    setPending({
+      kind: "stamp",
+      prompt:
+        `Ask @${target.botName} to stamp ${nums.map((n) => `#${n}`).join(" ")} ` +
+        `in #${target.channelName}? ${nums.length} message${nums.length === 1 ? "" : "s"}, posted as you.`,
+      exec: async () => {
+        const ok: number[] = [];
+        const failed: string[] = [];
+        for (const b of targets) {
+          try {
+            await stampOne(target, b.prUrl!, note);
+            ok.push(b.prNumber!);
+          } catch (e) {
+            failed.push(`#${b.prNumber}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        const done = `${ok.length}/${nums.length} stamped in #${target.channelName}`;
+        return failed.length === 0
+          ? { code: 0, out: done, err: "" }
+          : { code: 1, out: "", err: `${done}; ${failed.join("; ")}` };
+      },
+      after: () => setMarkAnchor(null),
+    });
+  }, [putStamp]);
+
+  // ----- layout ---------------------------------------------------------
+  // Three more columns than the rows strictly need: the relative-number gutter
+  // costs two, and the titles were already tight at the old minimum.
+  const defaultSidebarW = Math.max(28, Math.min(40, Math.floor(cols * 0.28)));
+  const defaultChangesW = Math.max(24, Math.min(34, Math.floor(cols * 0.22)));
+  // On a narrow terminal, opening the summary temporarily gives the left-hand
+  // branch list's space to the diff. j/k still changes PRs and v restores it.
+  const showStackSidebar =
+    stackOpen &&
+    (!changesOpen ||
+      cols >= MIN_STACK_PANEL_W + MIN_CHANGES_PANEL_W + MIN_DIFF_PANEL_W);
+  let sidebarW = clamp(
+    sidebarWidth ?? defaultSidebarW,
+    MIN_STACK_PANEL_W,
+    cols - MIN_DIFF_PANEL_W - (changesOpen ? MIN_CHANGES_PANEL_W : 0),
+  );
+  let changesW = clamp(
+    changesWidth ?? defaultChangesW,
+    MIN_CHANGES_PANEL_W,
+    cols - MIN_DIFF_PANEL_W - (showStackSidebar ? MIN_STACK_PANEL_W : 0),
+  );
+  if (showStackSidebar && changesOpen) {
+    let overflow = sidebarW + changesW - (cols - MIN_DIFF_PANEL_W);
+    if (overflow > 0) {
+      const old = changesW;
+      changesW = Math.max(MIN_CHANGES_PANEL_W, changesW - overflow);
+      overflow -= old - changesW;
+      if (overflow > 0)
+        sidebarW = Math.max(MIN_STACK_PANEL_W, sidebarW - overflow);
+    }
+  }
+  // OpenTUI reserves the terminal's first line and Yoga needs room for the
+  // header, footer, and their separating rows. Keep the visible diff within
+  // the actual flex body so its title rows never collapse under line content.
+  // border rows plus the target line, one row per option, and the hint
+  const statusH = status ? STATUS_OPTIONS.length + 4 : 0;
+  const tagMatches = tags ? matchingLabels(tags) : [];
+  const tagRows = Math.max(1, Math.min(6, rows - 16, tagMatches.length));
+  const tagStart = tags ? Math.max(0, tags.idx - tagRows + 1) : 0;
+  // Borders, target, search, chosen tags, hint, and the windowed label list.
+  const tagsH = tags ? tagRows + 6 : 0;
+  // border rows plus destination / note / hint
+  const stampH = stamp ? 5 : 0;
+  const bodyH = Math.max(4, rows - 5 - statusH - tagsH - stampH);
+  const diffViewH = Math.max(1, bodyH - 2); // pane title line + meta line
+  const changesViewH = Math.max(1, bodyH - 4); // borders + title + totals
+
+  // sidebar windowing: 2 rows per entry, plus its check rows when expanded,
+  // plus the trunk row. Heights vary, so grow the window outward from the
+  // selection until the row budget is spent.
+  const isExpanded = (b: StackBranch) =>
+    b.prNumber != null && expandedPrs.has(b.branch);
+  const entryHeights = entries.map(
+    (b) =>
+      2 + (isExpanded(b) ? checkRowsFor(details.get(b.prNumber!)).length : 0),
+  );
+  // Keep room for the borders, trunk, and both overflow indicators, including
+  // when a picker leaves only a few rows for the sidebar.
+  const rowBudget = Math.max(2, bodyH - 5);
+  // The lowest the list can start and still fill the budget from the last
+  // entry, so a wheeled list stops at the bottom the way the diff does.
+  let maxStackStart = Math.max(0, entries.length - 1);
+  for (let i = entries.length - 1, used = 0; i >= 0; i--) {
+    used += entryHeights[i];
+    if (used > rowBudget) break;
+    maxStackStart = i;
+  }
+  let winStart = Math.min(selected, Math.max(0, entries.length - 1));
+  let winEnd = entries.length === 0 ? 0 : winStart + 1;
+  if (stackScroll != null) {
+    // wheeled: start where the wheel left the list and fill downward
+    winStart = Math.min(stackScroll, maxStackStart);
+    winEnd = entries.length === 0 ? 0 : winStart + 1;
+    let used = entryHeights[winStart] ?? 0;
+    while (winEnd < entries.length && used + entryHeights[winEnd] <= rowBudget)
+      used += entryHeights[winEnd++];
+  } else {
+    // following: grow outward from the selection until the budget is spent
+    let used = entryHeights[winStart] ?? 0;
+    let up = winStart - 1;
+    let down = winEnd;
+    let grew = true;
+    while (grew) {
+      grew = false;
+      if (up >= 0 && used + entryHeights[up] <= rowBudget) {
+        used += entryHeights[up];
+        winStart = up--;
+        grew = true;
+      }
+      if (down < entries.length && used + entryHeights[down] <= rowBudget) {
+        used += entryHeights[down];
+        winEnd = ++down;
+        grew = true;
+      }
+    }
+  }
+  const winEntries = entries.slice(winStart, winEnd);
+
+  const fileMarks = useMemo(() => {
+    if (!diffLines) return [] as number[];
+    const marks: number[] = [];
+    diffLines.forEach((line, i) => {
+      if (line.filePath) marks.push(i);
+    });
+    return marks;
+  }, [diffLines]);
+
+  let activeDiffPath: string | null = null;
+  for (const mark of fileMarks) {
+    if (mark > scroll) break;
+    activeDiffPath = diffLines?.[mark]?.filePath ?? null;
+  }
+  const activeChangeIdx = Math.max(
+    0,
+    changeRows.findIndex(
+      (row) => row.kind === "file" && row.path === activeDiffPath,
+    ),
+  );
+  const maxChangesScroll = Math.max(0, changeRows.length - changesViewH);
+  // following: the tree centers on the file at the top of the diff;
+  // wheeled: it stays where the wheel left it
+  const changeStart =
+    changesScroll != null
+      ? Math.min(changesScroll, maxChangesScroll)
+      : clamp(activeChangeIdx - Math.floor(changesViewH / 2), 0, maxChangesScroll);
+  const visibleChanges = changeRows.slice(
+    changeStart,
+    changeStart + changesViewH,
+  );
+  const changesBar = scrollbar(changeRows.length, changesViewH, changeStart);
+
+  // A wheeled side panel is left alone while what it was following is still
+  // on its rows, and goes back to following once that moves off them: the
+  // cursor for the stack list (j/k, a count, a click), the file at the top of
+  // the diff for the changes tree. The windows are read through a ref so
+  // these fire on the change itself and not on every wheel notch.
+  const panelWin = useRef({ stack: [0, 0], changes: [0, 0] });
+  panelWin.current = {
+    stack: [winStart, winEnd],
+    changes: [changeStart, changeStart + changesViewH],
+  };
+  useEffect(() => {
+    const [lo, hi] = panelWin.current.stack;
+    if (selected < lo || selected >= hi) setStackScroll(null);
+  }, [selected]);
+  useEffect(() => {
+    const [lo, hi] = panelWin.current.changes;
+    if (activeChangeIdx < lo || activeChangeIdx >= hi) setChangesScroll(null);
+  }, [activeChangeIdx]);
+  // a different PR is a different tree, so it starts out following
+  useEffect(() => setChangesScroll(null), [sel?.prNumber]);
+
+  const maxScroll = Math.max(0, (diffLines?.length ?? 0) - diffViewH);
+
+  const setScrollFor = useCallback(
+    (updater: (v: number) => number) => {
+      setScroll((v) => {
+        const next = Math.max(0, Math.min(maxScroll, updater(v)));
+        if (sel?.prNumber != null) scrollMemo.current.set(sel.prNumber, next);
+        scrollRef.current = next;
+        return next;
+      });
+    },
+    [maxScroll, sel],
+  );
+
+  // ----- / search over the diff -----------------------------------------
+  // The pattern on screen is the draft while one is being typed, so the
+  // highlight and the view follow every keystroke, and the committed one
+  // otherwise. Hits are every occurrence, which is what n/N walk.
+  const activeSearch = searchDraft ?? search;
+  const searchHits = useMemo(
+    () => findMatches(diffLines, activeSearch?.query ?? ""),
+    [diffLines, activeSearch?.query],
+  );
+  const hitIdx =
+    activeSearch && activeSearch.idx >= 0 && activeSearch.idx < searchHits.length
+      ? activeSearch.idx
+      : -1;
+  const curHit = hitIdx >= 0 ? searchHits[hitIdx] : undefined;
+  const hitsByLine = useMemo(() => {
+    const byLine = new Map<number, SearchHit[]>();
+    for (const hit of searchHits) {
+      const row = byLine.get(hit.line);
+      if (row) row.push(hit);
+      else byLine.set(hit.line, [hit]);
+    }
+    return byLine;
+  }, [searchHits]);
+  // delta runs with --width variable, so a long line runs off the pane. The
+  // whole pane slides sideways together (rather than nudging the one row) so
+  // the code stays column-aligned, and only ever while a hit needs it.
+  const diffTextW = Math.max(
+    10,
+    cols - (showStackSidebar ? sidebarW : 0) - (changesOpen ? changesW : 0) - 2,
+  );
+  const hOff = hOffsetFor(curHit, diffTextW);
+
+  // Put a hit on screen without yanking the view around: one already inside
+  // the viewport with a row of margin stays exactly where it is, anything else
+  // lands a third of the way down so there is context above it.
+  const revealMatch = useCallback(
+    (hit: SearchHit | undefined) => {
+      if (!hit) return;
+      setScrollFor((v) =>
+        hit.line >= v && hit.line <= v + diffViewH - 2
+          ? v
+          : hit.line - Math.floor(diffViewH / 3),
+      );
+    },
+    [setScrollFor, diffViewH],
+  );
+
+  // The description dialog replaces the body: border rows plus its two header
+  // rows. Prose wraps at a readable measure; code and table rows keep the
+  // full width and truncate.
+  const descViewH = Math.max(1, bodyH - 4 - (desc?.error ? 1 : 0));
+  const descTextW = Math.max(20, Math.min(100, cols - 5)); // border, padding, bar
+  const descRender = useMemo(
+    () =>
+      desc?.data
+        ? renderDiscussion(desc.data, descTextW, desc.showAll)
+        : { lines: [] as StyledLine[], marks: [] as number[] },
+    [desc?.data, desc?.showAll, descTextW],
+  );
+  const descMax = Math.max(0, descRender.lines.length - descViewH);
+  const scrollDesc = useCallback(
+    (updater: (v: number) => number) =>
+      setDesc(
+        (d) =>
+          d && { ...d, scroll: Math.max(0, Math.min(descMax, updater(d.scroll))) },
+      ),
+    [descMax],
+  );
+
+  // ----- mouse ----------------------------------------------------------
+  const { stdin } = useStdin();
+
+  const onMouse = useRef<
+    (button: number, x: number, y: number, released: boolean) => void
+  >(() => {});
+  onMouse.current = (button, x, y, released) => {
+    if (released) {
+      draggingPanelRef.current = null;
+      setDraggingPanel(null);
+      return;
+    }
+    const activeDrag = draggingPanelRef.current;
+    if (button === 32 && activeDrag) {
+      if (activeDrag === "left") {
+        setSidebarWidth(
+          clamp(
+            x,
+            MIN_STACK_PANEL_W,
+            cols - MIN_DIFF_PANEL_W - (changesOpen ? changesW : 0),
+          ),
+        );
+      } else {
+        setChangesWidth(
+          clamp(
+            cols - x - 1,
+            MIN_CHANGES_PANEL_W,
+            cols - MIN_DIFF_PANEL_W - (showStackSidebar ? sidebarW : 0),
+          ),
+        );
+      }
+      return;
+    }
+    if (status || tagsRef.current || stampRef.current) return; // a dialog owns the screen while it is open
+    // Geometry, 0-based like x/y and measured with injected clicks rather than
+    // assumed: OpenTUI draws with a one-cell margin, so terminal row 0 and
+    // column 0 stay blank, the header is row 1, the body starts at row 2
+    // (sidebar border / diff title / dialog border), and the rightmost drawn
+    // column is cols - 2. A scrollbar is one column wide, so its hit zone is
+    // widened by a column either side.
+    const DIFF_TOP = 4; // body + diff title + meta
+    const CHANGES_TOP = 5; // body + border + title + totals
+    const LEFT_DIVIDER_X = sidebarW;
+    const RIGHT_DIVIDER_X = cols - changesW - 1;
+    const DIFF_BAR_X = changesOpen ? cols - changesW - 2 : cols - 2;
+    // The tree's bar sits inside its border + padding. Its rows end in the
+    // +/− counts, so the zone widens toward the border only, never over them.
+    const CHANGES_BAR_X = cols - 4;
+    const DESC_BAR_X = cols - 4; // inside the dialog's border + padding
+    if (button === 64 || button === 65) {
+      // wheel: each panel scrolls on its own — the stack list and the changes
+      // tree under the pointer, the diff everywhere else
+      const dir = button === 64 ? -1 : 1;
+      if (desc) scrollDesc((v) => v + dir * 3);
+      else if (screen === "pick")
+        setPickIdx((i) => Math.max(0, Math.min(stackChoices.length - 1, i + dir)));
+      else if (screen !== "main") return;
+      else if (showStackSidebar && x < sidebarW)
+        setStackScroll((v) =>
+          clamp(Math.min(v ?? winStart, maxStackStart) + dir, 0, maxStackStart),
+        );
+      else if (changesOpen && x > RIGHT_DIVIDER_X)
+        setChangesScroll((v) =>
+          clamp(
+            Math.min(v ?? changeStart, maxChangesScroll) + dir * 3,
+            0,
+            maxChangesScroll,
+          ),
+        );
+      else setScrollFor((v) => v + dir * 3);
+      return;
+    }
+    if (
+      button === 0 &&
+      screen === "main" &&
+      !desc &&
+      y >= 2 &&
+      y < 2 + bodyH
+    ) {
+      const panel =
+        showStackSidebar && x === LEFT_DIVIDER_X
+          ? "left"
+          : changesOpen && x === RIGHT_DIVIDER_X
+            ? "right"
+            : null;
+      if (panel) {
+        draggingPanelRef.current = panel;
+        setDraggingPanel(panel);
+        return;
+      }
+    }
+    // a click (or left drag, 32) on a scrollbar column jumps to that spot
+    if ((button === 0 || button === 32) && screen === "main") {
+      if (desc) {
+        const top = 5 + (desc.error ? 1 : 0); // body + border + title + meta[, error]
+        if (
+          Math.abs(x - DESC_BAR_X) <= 1 &&
+          y >= top &&
+          y < top + descViewH &&
+          descMax > 0
+        ) {
+          scrollDesc(() =>
+            Math.round(((y - top) / Math.max(1, descViewH - 1)) * descMax),
+          );
+          return;
+        }
+      } else if (
+        Math.abs(x - DIFF_BAR_X) <= 1 &&
+        y >= DIFF_TOP &&
+        y < DIFF_TOP + diffViewH &&
+        maxScroll > 0
+      ) {
+        setScrollFor(() =>
+          Math.round(((y - DIFF_TOP) / Math.max(1, diffViewH - 1)) * maxScroll),
+        );
+        return;
+      } else if (
+        changesOpen &&
+        x >= CHANGES_BAR_X &&
+        x <= cols - 2 &&
+        y >= CHANGES_TOP &&
+        y < CHANGES_TOP + changesViewH &&
+        maxChangesScroll > 0
+      ) {
+        setChangesScroll(() =>
+          Math.round(
+            ((y - CHANGES_TOP) / Math.max(1, changesViewH - 1)) * maxChangesScroll,
+          ),
+        );
+        return;
+      }
+    }
+    if (button !== 0) return; // left click only
+    if (desc) return; // nothing else to click in the description dialog
+
+    if (screen === "pick") {
+      // padding row + title + subtitle + margin row, then 2 rows per stack
+      const i = Math.floor((y - 4) / 2);
+      if (y >= 4 && i < stackChoices.length) openStack(stackChoices[i]);
+      return;
+    }
+    // The changes tree doubles as a table of contents: clicking a row scrolls
+    // the diff to that file's header, the way n/p walks them. A directory
+    // lands on the first file under it, so no row is a dead click.
+    if (screen === "main" && changesOpen && x > RIGHT_DIVIDER_X && x <= cols - 2) {
+      if (y >= CHANGES_TOP && y < CHANGES_TOP + changesViewH) {
+        const i = changeStart + (y - CHANGES_TOP);
+        const row = changeRows[i];
+        const file =
+          row?.kind === "file"
+            ? row
+            : row
+              ? changeRows
+                  .slice(i + 1)
+                  .find((r) => r.kind === "file" && r.path.startsWith(row.path))
+              : undefined;
+        const mark = file
+          ? fileMarks.find((m) => diffLines?.[m]?.filePath === file.path)
+          : undefined;
+        if (mark != null) setScrollFor(() => mark);
+      }
+      return;
+    }
+    if (screen !== "main" || !showStackSidebar || x >= sidebarW) return;
+    // blank row, header, border, trunk row, plus the "↑ N more" line when windowed
+    const top = 4 + (winStart > 0 ? 1 : 0);
+    let rem = y - top;
+    if (rem < 0) return;
+    for (let i = winStart; i < winEnd; i++) {
+      rem -= entryHeights[i];
+      if (rem < 0) {
+        // a click is a plain move: it drops any J/K selection, like j/k does
+        setMarkAnchor(null);
+        setSelected(i);
+        return;
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!stdin) return;
+    const onData = (data: Buffer | string) => {
+      // SGR mouse reports: \x1b[<button;col;row then M (press) / m (release)
+      const re = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+      const s = data.toString();
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(s)))
+        onMouse.current(
+          Number(m[1]),
+          Number(m[2]) - 1,
+          Number(m[3]) - 1,
+          m[4] === "m",
+        );
+    };
+    stdin.on("data", onData);
+    return () => {
+      stdin.off("data", onData);
+    };
+  }, [stdin]);
+
+  // ----- input ----------------------------------------------------------
+  useInput((input, key) => {
+    if (input.includes("[<")) return; // mouse reports, handled above
+
+    // The stamp dialog owns the keyboard:
+    // every printable key goes into the note, so nothing falls through.
+    const stampDraft = stampRef.current;
+    if (stampDraft) {
+      const editNote = (note: string) => putStamp({ ...stampDraft, note });
+      if (key.escape) putStamp(null);
+      else if (key.return) applyStamp();
+      else if (key.backspace || key.delete) editNote(stampDraft.note.slice(0, -1));
+      else if (key.ctrl && input === "u") editNote("");
+      else if (key.ctrl && input === "w")
+        editNote(stampDraft.note.replace(/\s*\S+\s*$/, ""));
+      else if (input && !key.ctrl && !key.meta)
+        editNote(stampDraft.note + input.replace(/\s+/g, " "));
+      return;
+    }
+
+    const tagDraft = tagsRef.current;
+    if (tagDraft) {
+      const matches = matchingLabels(tagDraft);
+      const editQuery = (query: string) => putTags({ ...tagDraft, query, idx: 0 });
+      if (key.escape) putTags(null);
+      else if (key.return) applyTags();
+      else if (key.upArrow || key.downArrow) {
+        const dir = key.upArrow ? -1 : 1;
+        putTags({ ...tagDraft, idx: Math.max(0, Math.min(matches.length - 1, tagDraft.idx + dir)) });
+      } else if (key.tab) {
+        const label = matches[tagDraft.idx];
+        if (label) {
+          const chosen = new Set(tagDraft.chosen);
+          if (chosen.has(label.name)) chosen.delete(label.name);
+          else chosen.add(label.name);
+          putTags({ ...tagDraft, chosen });
+        }
+      } else if (key.backspace || key.delete) editQuery(tagDraft.query.slice(0, -1));
+      else if (key.ctrl && input === "u") editQuery("");
+      else if (key.ctrl && input === "w") editQuery(tagDraft.query.replace(/\s*\S+\s*$/, ""));
+      else if (input && !key.ctrl && !key.meta)
+        editQuery(tagDraft.query + input.replace(/\s+/g, " "));
+      return;
+    }
+
+    // `/` opens vim's command line in the footer, and it owns the keyboard
+    // while it is up: every printable key is pattern text — digits included,
+    // so a count can't steal them — enter commits the pattern, and esc puts
+    // the view back where the search started.
+    const typing = searchDraftRef.current;
+    if (typing) {
+      const origin = typing.origin ?? 0;
+      const abort = () => {
+        putSearchDraft(null);
+        setScrollFor(() => origin);
+      };
+      // Incremental search: re-run the pattern from where / was pressed on
+      // every keystroke, so the view walks forward as the pattern narrows and
+      // walks back when characters come off it.
+      const retype = (query: string) => {
+        const hits = findMatches(diffLines, query);
+        const idx = query ? firstMatch(hits, origin, typing.dir) : -1;
+        putSearchDraft({ ...typing, query, idx });
+        if (idx >= 0) revealMatch(hits[idx]);
+        else setScrollFor(() => origin);
+      };
+      if (key.escape) abort();
+      else if (key.return) {
+        putSearchDraft(null);
+        if (typing.query)
+          putSearch({ query: typing.query, dir: typing.dir, idx: typing.idx });
+        else if (searchRef.current) {
+          // A bare / repeats the last pattern, the way it does in vim.
+          const last = searchRef.current;
+          const hits = findMatches(diffLines, last.query);
+          const idx = firstMatch(hits, origin, typing.dir);
+          putSearch({ ...last, dir: typing.dir, idx });
+          revealMatch(hits[idx]);
+        }
+      } else if (key.backspace || key.delete) {
+        // Backspacing past the / leaves the command line, as vim does.
+        if (typing.query) retype(typing.query.slice(0, -1));
+        else abort();
+      } else if (key.ctrl && input === "u") retype("");
+      else if (key.ctrl && input === "w")
+        retype(typing.query.replace(/\s*\S+\s*$/, ""));
+      else if (input && !key.ctrl && !key.meta)
+        // a paste arrives as one chunk; flatten it onto the single pattern line
+        retype(typing.query + input.replace(/\s+/g, " "));
+      return;
+    }
+
+    // The status dropdown owns the keyboard while it is up: enter stages the
+    // change as a confirmation, esc backs out having touched nothing.
+    if (status) {
+      const last = STATUS_OPTIONS.length - 1;
+      if (key.escape || input === "q") setStatus(null);
+      else if (key.upArrow || input === "k" || (key.tab && key.shift))
+        setStatus((d) => d && { ...d, idx: Math.max(0, d.idx - 1) });
+      else if (key.downArrow || input === "j" || key.tab)
+        setStatus((d) => d && { ...d, idx: Math.min(last, d.idx + 1) });
+      else if (/^[1-9]$/.test(input)) {
+        const n = parseInt(input, 10) - 1;
+        if (n <= last) setStatus((d) => d && { ...d, idx: n });
+      } else if (key.return) applyStatus(STATUS_OPTIONS[status.idx].action);
+      return;
+    }
+
+    // A staged rebase/merge swallows every key until it is answered, so a
+    // stray keystroke can't trigger it and can't be lost behind it either.
+    if (pending) {
+      if (input === "y" || input === "Y") runAction(pending);
+      else setPending(null);
+      return;
+    }
+    if (busy) return; // an action is in flight; ignore input until it settles
+    // Clear a finished action's result on the next key, but still let that key
+    // do its job — dismissing shouldn't cost a keystroke.
+    if (actionMsg) setActionMsg(null);
+
+    // vim counts: a digit run prefixes the next motion — 3j moves three PRs,
+    // 3J takes three more into the selection, 5d scrolls five half-pages, 12G
+    // jumps to the 12th PR. 0 only ever extends a count that is already
+    // running; on its own it is not a motion here, so it does nothing rather
+    // than jumping somewhere surprising.
+    if (/^[0-9]$/.test(input) && !key.ctrl && !key.meta) {
+      const running = countRef.current;
+      if (input === "0" && running === null) return;
+      setCount(Math.min(9999, (running ?? 0) * 10 + parseInt(input, 10)));
+      return;
+    }
+    // Every other key consumes the pending count, whether or not it has any
+    // use for one — a count never survives into a later keystroke.
+    const rawCount = countRef.current;
+    if (rawCount !== null) setCount(null);
+    const N = rawCount ?? 1;
+
+    // The description dialog is modal: it reads like the diff pane (same
+    // scroll keys), adds a few of its own, and nothing falls through to the
+    // main view — q closes it rather than quitting.
+    if (desc) {
+      if (key.escape || input === "q") setDesc(null);
+      else if (key.upArrow || input === "k") scrollDesc((v) => v - N);
+      else if (key.downArrow || input === "j") scrollDesc((v) => v + N);
+      else if (key.pageDown || input === " " || input === "f")
+        scrollDesc((v) => v + descViewH * N);
+      else if (key.pageUp || input === "b") scrollDesc((v) => v - descViewH * N);
+      else if (input === "d") scrollDesc((v) => v + Math.ceil(descViewH / 2) * N);
+      else if (input === "u") scrollDesc((v) => v - Math.ceil(descViewH / 2) * N);
+      else if (input === "g") scrollDesc(() => 0);
+      else if (input === "G") scrollDesc(() => descMax);
+      else if (input === "n")
+        scrollDesc((v) => nthMark(descRender.marks, v, N, 1, v));
+      else if (input === "p")
+        scrollDesc((v) => nthMark(descRender.marks, v, N, -1, 0));
+      else if (input === "x") setDesc((d) => d && { ...d, showAll: !d.showAll });
+      else if (key.tab || input === "J" || input === "K") {
+        // step to the neighboring PR without leaving the dialog — N of them
+        // with a count, stopping at whichever end of the stack comes first
+        const dir = (key.tab && key.shift) || input === "K" ? -1 : 1;
+        let at = selected;
+        for (let step = 0; step < N; step++) {
+          let next = -1;
+          for (let i = at + dir; i >= 0 && i < entries.length; i += dir) {
+            if (entries[i].prNumber != null) {
+              next = i;
+              break;
+            }
+          }
+          if (next < 0) break;
+          at = next;
+        }
+        if (at !== selected) {
+          setSelected(at);
+          openDesc(entries[at], desc.showAll);
+        }
+      } else if (input === "c" && sel) checkoutSelected(sel);
+      else if (input === "s") openStatus();
+      else if (input === "S") openStamp();
+      else if (input === "t") openTags();
+      else if (input === "o")
+        Bun.spawn(["gh", "pr", "view", String(desc.prNumber), "--web"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+      else if (input === "r") loadDiscussion(desc.prNumber);
+      else if (input === "z" && sel) openZed(sel);
+      else if (input === "a" && sel) approvePr(sel);
+      else if (input === "A") approveAll();
+      return;
+    }
+
+    if (input === "q" || key.escape) {
+      // esc peels one layer at a time — a half-typed count, then the search,
+      // then the J/K selection, then the app — so it never quits out from
+      // under a selection you were about to act on. q always quits.
+      if (key.escape) {
+        if (rawCount !== null) return;
+        if (searchRef.current) {
+          putSearch(null);
+          return;
+        }
+        if (markAnchor !== null) {
+          setMarkAnchor(null);
+          return;
+        }
+      }
+      exit();
+      return;
+    }
+
+    if (screen === "pick") {
+      if (key.upArrow || input === "k") setPickIdx((i) => Math.max(0, i - N));
+      else if (key.downArrow || input === "j")
+        setPickIdx((i) => Math.min(stackChoices.length - 1, i + N));
+      else if (key.return) openStack(stackChoices[pickIdx]);
+      return;
+    }
+
+    if (screen !== "main") return;
+
+    const move = (delta: number) =>
+      setSelected((i) => Math.max(0, Math.min(entries.length - 1, i + delta)));
+
+    // Arrow keys belong to the diff and honor vim counts (10↓ / 4↑). j/k are
+    // the only sequential PR motions; shift is the select modifier, so J/K
+    // move the same way while dragging a selection behind them.
+    if (key.upArrow) {
+      setScrollFor((v) => v - N);
+    } else if (key.downArrow) {
+      setScrollFor((v) => v + N);
+    } else if (input === "k") {
+      setMarkAnchor(null);
+      move(-N);
+    } else if (input === "j") {
+      setMarkAnchor(null);
+      move(N);
+    } else if (input === "J" || input === "K") {
+      // The first shift-motion anchors where the cursor already is, so the row
+      // you started on is always part of the selection: from row 1, 3J marks
+      // rows 1 through 4 and leaves the cursor on 4.
+      setMarkAnchor((a) => (a === null ? selected : a));
+      move(input === "J" ? N : -N);
+    } else if (input === "l" || key.rightArrow) {
+      // expand the selected PR into its CI checks
+      const b = sel;
+      if (b?.prNumber != null) {
+        setExpandedPrs((s) => {
+          if (s.has(b.branch)) return s;
+          const next = new Set(s);
+          next.add(b.branch);
+          return next;
+        });
+        // re-fetch so the check list reflects CI right now, not load time
+        refreshDetails(b.prNumber);
+      }
+    } else if (input === "h" || key.leftArrow) {
+      const b = sel;
+      if (b && expandedPrs.has(b.branch))
+        setExpandedPrs((s) => {
+          const next = new Set(s);
+          next.delete(b.branch);
+          return next;
+        });
+    } else if (input === "V") setStackOpen((open) => !open);
+    else if (input === "v") setChangesOpen((open) => !open);
+    else if (input === "T") {
+      setHideTests((h) => !h);
+      // the diff gets shorter or longer underneath us; start from the top
+      setScrollFor(() => 0);
+    }
+    else if (key.pageDown || input === "f") setScrollFor((v) => v + diffViewH * N);
+    else if (key.pageUp || input === "b") setScrollFor((v) => v - diffViewH * N);
+    else if (input === "d") setScrollFor((v) => v + Math.ceil(diffViewH / 2) * N);
+    else if (input === "u") setScrollFor((v) => v - Math.ceil(diffViewH / 2) * N);
+    else if (input === "g") setScrollFor(() => 0);
+    else if (input === "G") {
+      // vim's NG, against the sidebar's own gutter: 12G selects the 12th PR.
+      // Bare G keeps meaning the bottom of the diff.
+      if (rawCount !== null) {
+        setMarkAnchor(null);
+        setSelected(Math.max(0, Math.min(entries.length - 1, N - 1)));
+      } else setScrollFor(() => maxScroll);
+    } else if (input === "/" || input === "?") {
+      // vim's command line: / searches forward, ? backward. The scroll we
+      // start from is remembered so esc can put it back.
+      putSearchDraft({
+        query: "",
+        dir: input === "/" ? 1 : -1,
+        idx: -1,
+        origin: scrollRef.current,
+      });
+    } else if (input === "n" || input === "N") {
+      // A committed search lends n/N to its hits, the way vim does. With no
+      // search running — or a pattern that matches nothing in this PR's diff —
+      // n stays the next-file motion and N does nothing.
+      const running = searchRef.current;
+      const hits = running ? findMatches(diffLines, running.query) : [];
+      if (running && hits.length > 0) {
+        const dir = (input === "n" ? running.dir : -running.dir) as 1 | -1;
+        const idx = stepMatch(hits, running.idx, scrollRef.current, diffViewH, dir, N);
+        putSearch({ ...running, idx });
+        revealMatch(hits[idx]);
+      } else if (input === "n")
+        setScrollFor((v) => nthMark(fileMarks, v, N, 1, v));
+    } else if (input === "p")
+      setScrollFor((v) => nthMark(fileMarks, v, N, -1, 0));
+    else if (input === "s") openStatus();
+    else if (input === "S") openStamp();
+    else if (input === "t") openTags();
+    else if (input === " " && sel) openDesc(sel);
+    else if (input === "z" && sel) openZed(sel);
+    else if (input === "a" && sel) approvePr(sel);
+    else if (input === "A") approveAll();
+    else if (input === "x") rerunChecks();
+    else if (input === "c" && sel) checkoutSelected(sel);
+    else if (input === "o" && sel?.prNumber != null)
+      Bun.spawn(["gh", "pr", "view", String(sel.prNumber), "--web"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+    else if (input === "r") load();
+    else if (input === "R") {
+      const s = stack;
+      if (!s) return;
+      const stale = staleBranches(s);
+      const drift = driftedBranches(s);
+      const what =
+        stale.length > 0
+          ? `${stale.length} branch${stale.length === 1 ? "" : "es"} behind their base`
+          : "nothing looks stale";
+      setPending({
+        kind: "rebase",
+        prompt:
+          `Hand the rebase to a Claude agent in a new pane on the right? (${what}` +
+          (drift.length > 0 ? `; ${drift.length} with local drift` : "") +
+          `) — it rebases onto ${s.trunk}, resolves conflicts itself, and force-pushes for review.`,
+        exec: () => launchRebaseAgent(s),
+      });
+    } else if (input === "M") {
+      const n = stack?.stackNumber;
+      const open = stack ? stack.branches.filter((b) => !b.isMerged).length : 0;
+      // Pass the stack number when we have it so this also works for a
+      // linked stack with no local tracking.
+      const cmd = n
+        ? ["gh", "stack", "merge", String(n), "--yes", "--squash"]
+        : ["gh", "stack", "merge", "--yes", "--squash"];
+      setPending({
+        kind: "merge",
+        prompt:
+          `Squash-merge ${open} PR${open === 1 ? "" : "s"} in ${stack?.label ?? "this stack"} into ${stack?.trunk ?? "trunk"}? ` +
+          "This is irreversible.",
+        exec: () => run(cmd),
+      });
+    }
+  });
+
+  // ----- screens --------------------------------------------------------
+  if (screen === "loading") {
+    return (
+      <Box padding={1}>
+        <Text color="cyan">loading stack…</Text>
+      </Box>
+    );
+  }
+
+  if (screen === "fatal") {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text color="red">{fatal}</Text>
+        <Text dimColor>press q to quit</Text>
+      </Box>
+    );
+  }
+
+  if (screen === "pick") {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text bold color="cyan">
+          Pick a stack
+        </Text>
+        <Text dimColor>current branch isn't in any stack — tracked stacks in this repo:</Text>
+        <Box flexDirection="column" marginTop={1}>
+          {stackChoices.map((s, i) => (
+            <Box key={i} flexDirection="column">
+              <Text color={i === pickIdx ? "cyan" : undefined}>
+                {i === pickIdx ? "❯ " : "  "}
+                <Text bold={i === pickIdx}>{s.label}</Text>
+                <Text dimColor>
+                  {"  "}
+                  {s.branches.length} branch{s.branches.length === 1 ? "" : "es"} · trunk{" "}
+                  {s.trunk}
+                </Text>
+              </Text>
+              <Text dimColor>
+                {"    "}
+                {s.branches
+                  .map((b) => b.branch)
+                  .join(", ")
+                  .slice(0, cols - 6)}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>↑↓ choose · enter open · q quit</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (!stack || !sel) return null;
+
+  // ----- main -----------------------------------------------------------
+  const stale = staleBranches(stack);
+  const drift = driftedBranches(stack);
+  const selDetails = selectedDetails;
+  const baseBranch =
+    stack.branches[stack.branches.indexOf(sel) - 1]?.branch ?? stack.trunk;
+
+  const pct =
+    maxScroll === 0 ? 100 : Math.round((Math.min(scroll, maxScroll) / maxScroll) * 100);
+  const diffBar = scrollbar(diffLines?.length ?? 0, diffViewH, scroll);
+  const descBar = desc ? scrollbar(descRender.lines.length, descViewH, desc.scroll) : null;
+  const descPct =
+    descMax === 0 ? 100 : Math.round((Math.min(desc?.scroll ?? 0, descMax) / descMax) * 100);
+  const visible = (diffLines ?? []).slice(scroll, scroll + diffViewH);
+
+  // A pathological pattern stops collecting at the cap; say so rather than
+  // reporting a total that is not the total.
+  const hitCount = `${searchHits.length}${searchHits.length >= MAX_HITS ? "+" : ""}`;
+  // "3/17" once n/N have a hit under the cursor, a plain "17 matches" before
+  // that — a freshly committed pattern, or one a PR switch dropped the cursor
+  // out of, has hits but nothing you are standing on yet.
+  const hitLabel =
+    searchHits.length === 0
+      ? "no matches"
+      : hitIdx >= 0
+        ? `${hitIdx + 1}/${hitCount}`
+        : `${hitCount} matches`;
+
+  // The Text shim truncates at the end, so window the stamp note by hand and
+  // keep the tail visible.
+  const inputW = Math.max(12, cols - 8);
+  const stampNote = stamp?.note ?? "";
+  const shownNote =
+    stampNote.length > inputW ? `…${stampNote.slice(-(inputW - 1))}` : stampNote;
+
+  return (
+    <Box flexDirection="column" width={cols} height={rows} overflow="hidden">
+      {/* header: one row always — the mouse math below counts on it */}
+      <Box paddingX={1} flexShrink={0}>
+        <Text wrap="truncate-end">
+          <Text bold color="cyan">
+            {stack.label}
+          </Text>
+          <Text dimColor>
+            {" "}
+            · {entries.length} PR{entries.length === 1 ? "" : "s"} · trunk {stack.trunk}
+          </Text>
+          {stale.length > 0 ? (
+            <Text color="yellow">
+              {"  "}⚠ {stale.length} behind base ({stale
+                .map((b) => (b.prNumber != null ? `#${b.prNumber}` : b.branch))
+                .join(" ")}) — R to rebase
+            </Text>
+          ) : null}
+          {drift.length > 0 ? (
+            <Text color="red">
+              {"  "}⇅ {drift.length} local drift
+            </Text>
+          ) : null}
+          {stale.length === 0 && drift.length === 0 ? (
+            stack.synced ? (
+              <Text color="green">{"  "}✓ in sync</Text>
+            ) : (
+              <Text dimColor>{"  "}⟳ checking sync…</Text>
+            )
+          ) : null}
+          {markedIdx.size > 0 ? (
+            <Text color="magenta">
+              {"  "}▌{markedIdx.size} selected · s status · t tags
+            </Text>
+          ) : null}
+        </Text>
+      </Box>
+
+      {desc ? (
+        /* description dialog: the PR body and its conversation, in place of
+           the sidebar + diff. esc closes. */
+        <Box
+          flexDirection="column"
+          flexGrow={1}
+          minHeight={0}
+          borderStyle="round"
+          borderColor="cyan"
+          paddingX={1}
+          overflow="hidden"
+        >
+          <Text wrap="truncate-end" flexShrink={0}>
+            <Text bold color="cyan">
+              #{desc.prNumber}{" "}
+            </Text>
+            <Text bold>{desc.data?.title ?? selDetails?.title ?? sel.branch}</Text>
+          </Text>
+          <Text dimColor wrap="truncate-end" flexShrink={0}>
+            {desc.data
+              ? `${desc.data.author} · opened ${ago(desc.data.createdAt)} · ${desc.data.items.length} comment${desc.data.items.length === 1 ? "" : "s"}`
+              : sel.branch}
+            {desc.loading ? " · ⟳ loading…" : ""}
+            {desc.showAll ? " · unfolded" : ""}
+            {selDetails?.labels.length ? ` · tags: ${selDetails.labels.join(", ")}` : ""}
+            {" · "}
+            {descPct}%
+          </Text>
+          {desc.error ? (
+            <Text color="red" wrap="truncate-end" flexShrink={0}>
+              {desc.error}
+            </Text>
+          ) : null}
+          {!desc.data && !desc.error ? (
+            <Text dimColor>loading description…</Text>
+          ) : (
+            descRender.lines
+              .slice(desc.scroll, desc.scroll + descViewH)
+              .map((line, i) => (
+                <Box
+                  key={desc.scroll + i}
+                  width="100%"
+                  flexDirection="row"
+                  flexShrink={0}
+                  overflow="hidden"
+                >
+                  <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+                    <Text wrap="truncate-end">
+                      {line.length === 0
+                        ? " "
+                        : line.map((s, si) => (
+                            <Text
+                              key={si}
+                              color={s.color}
+                              bold={s.bold}
+                              dimColor={s.dim}
+                              italic={s.italic}
+                              underline={s.underline}
+                              strikethrough={s.strike}
+                            >
+                              {s.text}
+                            </Text>
+                          ))}
+                    </Text>
+                  </Box>
+                  <ScrollCell bar={descBar} row={i} />
+                </Box>
+              ))
+          )}
+        </Box>
+      ) : (
+      <Box flexDirection="row" flexGrow={1} minHeight={0} overflow="hidden">
+        {/* sidebar */}
+        {showStackSidebar ? <Box
+          flexDirection="column"
+          width={sidebarW}
+          height="100%"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={draggingPanel === "left" ? "cyan" : "gray"}
+          paddingX={1}
+          overflow="hidden"
+        >
+          <Text dimColor>{"   "}○ {stack.trunk}</Text>
+          {winStart > 0 ? <Text dimColor>↑ {winStart} more</Text> : null}
+          {winEntries.map((b, wi) => {
+            const i = winStart + wi;
+            const active = i === selected;
+            const marked = markedIdx.has(i);
+            const d = b.prNumber != null ? details.get(b.prNumber) : undefined;
+            const dot = dotFor(b, d);
+            const badge = badgeFor(b, d);
+            const innerW = sidebarW - 4; // border + padding
+            // vim's hybrid relativenumber: the distance from the cursor on
+            // every other row, the row's own 1-based number on the cursor
+            // itself — which is what a count like 3j or 12G is counting.
+            const gutter = (
+              active ? String(i + 1) : String(Math.abs(i - selected))
+            )
+              .padStart(2)
+              .slice(-2);
+            const titleW = Math.max(4, innerW - 5 - badge.text.length - 1);
+            const title = truncate(d?.title ?? b.branch, titleW).padEnd(titleW);
+            const tags = syncTags(b, stack.synced ?? false);
+            const tagW = tags.reduce((n, t) => n + t.text.length + 1, 0);
+            const meta = truncate(
+              `${b.prNumber != null ? `#${b.prNumber} · ` : ""}${b.branch}${b.isCurrent ? " ✦" : ""}`,
+              Math.max(4, innerW - 6 - tagW),
+            );
+            return (
+              <Box key={b.branch} flexDirection="column" flexShrink={0}>
+                <Text wrap="truncate-end">
+                  <Text
+                    color={marked ? "magenta" : undefined}
+                    bold={marked}
+                    dimColor={!marked && !active}
+                  >
+                    {gutter}
+                  </Text>
+                  {/* one column carries both cursor and selection: the cursor
+                      is always an end of the range, so the bar it draws there
+                      wins and the magenta gutter says it is also marked */}
+                  <Text color={active ? "blue" : "magenta"}>
+                    {active ? "▎" : marked ? "▌" : " "}
+                  </Text>
+                  <Text color={dot.color}>{dot.text}</Text>{" "}
+                  <Text bold={active} color={active ? "white" : undefined}>
+                    {title}
+                  </Text>{" "}
+                  <Text color={badge.color}>{badge.text}</Text>
+                </Text>
+                <Text wrap="truncate-end">
+                  <Text dimColor>
+                    {"    │ "}
+                    {meta}
+                  </Text>
+                  {tags.map((t, ti) => (
+                    <Text key={ti} color={t.color}>
+                      {" "}
+                      {t.text}
+                    </Text>
+                  ))}
+                </Text>
+                {isExpanded(b)
+                  ? checkRowsFor(d).map((r, ri) => (
+                      <Text key={ri} wrap="truncate-end">
+                        <Text dimColor>{"    │  "}</Text>
+                        <Text color={r.color} dimColor={r.dim}>
+                          {r.icon} {truncate(r.text, Math.max(4, innerW - 9))}
+                        </Text>
+                      </Text>
+                    ))
+                  : null}
+              </Box>
+            );
+          })}
+          {winEnd < entries.length ? (
+            <Text dimColor>↓ {entries.length - winEnd} more</Text>
+          ) : null}
+        </Box> : null}
+
+        {/* diff pane */}
+        <Box
+          flexDirection="column"
+          flexGrow={1}
+          flexShrink={1}
+          minWidth={0}
+          paddingLeft={1}
+          overflow="hidden"
+        >
+          <Text wrap="truncate-end" flexShrink={0}>
+            {sel.prNumber != null ? (
+              <Text bold color="cyan">
+                #{sel.prNumber}{" "}
+              </Text>
+            ) : null}
+            <Text bold>{selDetails?.title ?? sel.branch}</Text>
+          </Text>
+          <Text dimColor wrap="truncate-end" flexShrink={0}>
+            {sel.branch} → {baseBranch}
+            {selDetails ? (
+              <>
+                {" · "}
+                <Text color={DIFF_ADD_COLOR}>+{selDetails.additions}</Text>{" "}
+                <Text color={DIFF_DELETE_COLOR}>−{selDetails.deletions}</Text>
+                {selDetails.checks.fail > 0 ? (
+                  <Text color={DIFF_DELETE_COLOR}> · ✗ {selDetails.checks.fail} checks</Text>
+                ) : selDetails.checks.pending > 0 ? (
+                  <Text color="yellow"> · ◌ {selDetails.checks.pending} pending</Text>
+                ) : selDetails.checks.pass > 0 ? (
+                  <Text color={DIFF_ADD_COLOR}> · ✓ checks</Text>
+                ) : null}
+              </>
+            ) : null}
+            {" · "}
+            {pct}%
+            {hOff > 0 ? <Text color="yellow"> · ↔{hOff}</Text> : null}
+            {selDetails?.labels.length ? ` · tags: ${selDetails.labels.join(", ")}` : ""}
+            {sel.needsRebase && !sel.isMerged ? (
+              <Text color="yellow"> · ⚠ behind {baseBranch}</Text>
+            ) : null}
+            {sel.localBehind > 0 ? (
+              <Text color="red"> · local ↓{sel.localBehind} behind origin</Text>
+            ) : null}
+            {sel.localAhead > 0 ? (
+              <Text color="cyan"> · local ↑{sel.localAhead} unpushed</Text>
+            ) : null}
+          </Text>
+          {diffLines === null ? (
+            <Text dimColor>loading diff…</Text>
+          ) : (
+            visible.map((line, i) => {
+              const row = scroll + i;
+              const marks = hitsByLine.get(row);
+              // A search paints over delta's own colors and can slide the pane
+              // sideways, so a row carrying hits — or any row while the pane is
+              // shifted — renders from spans even when delta gave us none.
+              const styled = line.spans.length > 0 || marks !== undefined || hOff > 0;
+              const s = styled ? {} : diffLineStyle(line.text);
+              let spans: DiffSpan[] = !styled
+                ? []
+                : line.spans.length > 0
+                  ? line.spans
+                  : [{ text: line.text, ...diffLineStyle(line.text) }];
+              if (marks)
+                spans = paintSpans(
+                  spans,
+                  marks.map((hit) => ({
+                    start: hit.start,
+                    end: hit.end,
+                    style:
+                      hit === curHit
+                        ? {
+                            backgroundColor: CUR_SEARCH_BG,
+                            color: CUR_SEARCH_FG,
+                            bold: true,
+                            dim: false,
+                            inverse: false,
+                          }
+                        : { backgroundColor: SEARCH_BG, dim: false },
+                  })),
+                );
+              if (hOff > 0) spans = sliceSpans(spans, hOff);
+              return (
+                <Box
+                  key={row}
+                  width="100%"
+                  flexDirection="row"
+                  flexShrink={0}
+                  overflow="hidden"
+                >
+                  <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+                    <Text color={s.color} bold={s.bold} dimColor={s.dim} wrap="truncate-end">
+                      {styled
+                        ? spans.length > 0
+                          ? spans.map((span, si) => (
+                              <Text
+                                key={si}
+                                color={span.color}
+                                backgroundColor={span.backgroundColor}
+                                bold={span.bold}
+                                dimColor={span.dim}
+                                italic={span.italic}
+                                underline={span.underline}
+                                strikethrough={span.strike}
+                                inverse={span.inverse}
+                              >
+                                {span.text}
+                              </Text>
+                            ))
+                          : " "
+                        : line.text.length
+                          ? line.text
+                          : " "}
+                    </Text>
+                  </Box>
+                  <ScrollCell bar={diffBar} row={i} />
+                </Box>
+              );
+            })
+          )}
+        </Box>
+
+        {/* v toggles this read-only overview of the selected PR. It tracks the
+            file currently at the top of the diff and windows long trees around
+            that row — or wherever the wheel last left them — making the panel
+            useful without taking keyboard focus. */}
+        {changesOpen ? (
+          <Box
+            flexDirection="column"
+            width={changesW}
+            height="100%"
+            flexShrink={0}
+            borderStyle="round"
+            borderColor={draggingPanel === "right" ? "cyan" : "gray"}
+            paddingX={1}
+            overflow="hidden"
+          >
+            <Text wrap="truncate-end" flexShrink={0}>
+              <Text bold color="cyan">changes</Text>
+              <Text dimColor>
+                {" · "}
+                {selDetails?.changedFiles ?? selDetails?.files.length ?? 0} files
+                {hideTests ? " · tests hidden" : ""}
+              </Text>
+            </Text>
+            <Text dimColor wrap="truncate-end" flexShrink={0}>
+              {sel.prNumber != null ? `#${sel.prNumber}` : "no PR"}
+              {selDetails ? (
+                <>
+                  {" · "}
+                  <Text color={DIFF_ADD_COLOR}>+{selDetails.additions}</Text>{" "}
+                  <Text color={DIFF_DELETE_COLOR}>−{selDetails.deletions}</Text>
+                </>
+              ) : null}
+            </Text>
+            {sel.prNumber == null ? (
+              <Text dimColor>no PR yet — no change summary</Text>
+            ) : !selDetails ? (
+              <Text dimColor>loading changes…</Text>
+            ) : changeRows.length === 0 ? (
+              <Text dimColor>no changed files</Text>
+            ) : (
+              visibleChanges.map((row, i) => {
+                const active = row.kind === "file" && row.path === activeDiffPath;
+                const indent = "  ".repeat(row.depth);
+                const prefix = row.kind === "directory" ? "▾ " : "• ";
+                const additions = row.additions > 0 ? `+${row.additions}` : "";
+                const deletions = row.deletions > 0 ? `−${row.deletions}` : "";
+                const gap = additions && deletions ? " " : "";
+                const statW = additions.length + gap.length + deletions.length;
+                const labelW = Math.max(4, changesW - 5 - statW);
+                const label = truncate(`${indent}${prefix}${row.label}`, labelW).padEnd(
+                  labelW,
+                );
+                return (
+                  <Box
+                    key={`${row.kind}:${row.path}`}
+                    width="100%"
+                    flexDirection="row"
+                    flexShrink={0}
+                    overflow="hidden"
+                  >
+                    <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+                      <Text
+                        bold={active || row.kind === "directory"}
+                        color={
+                          active
+                            ? "white"
+                            : row.kind === "directory"
+                              ? "cyan"
+                              : undefined
+                        }
+                        backgroundColor={active ? "selected" : undefined}
+                        dimColor={!active && row.kind === "directory"}
+                        wrap="truncate-end"
+                      >
+                        {label}
+                        <Text
+                          color={DIFF_ADD_COLOR}
+                          dimColor={row.kind === "directory"}
+                        >
+                          {additions}
+                        </Text>
+                        {gap}
+                        <Text
+                          color={DIFF_DELETE_COLOR}
+                          dimColor={row.kind === "directory"}
+                        >
+                          {deletions}
+                        </Text>
+                      </Text>
+                    </Box>
+                    <ScrollCell bar={changesBar} row={i} />
+                  </Box>
+                );
+              })
+            )}
+          </Box>
+        ) : null}
+      </Box>
+      )}
+
+      {/* status dialog: the PR states gh can set, over every marked row at
+          once. enter stages the confirmation, esc backs out. */}
+      {status ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor="magenta"
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color="magenta">
+              set status
+            </Text>
+            <Text dimColor>
+              {" "}
+              {status.targets.length} PR{status.targets.length === 1 ? "" : "s"} ·{" "}
+              {status.targets.map((b) => `#${b.prNumber}`).join(" ")}
+            </Text>
+          </Text>
+          {STATUS_OPTIONS.map((o, i) => {
+            const on = i === status.idx;
+            return (
+              <Text key={o.action} wrap="truncate-end">
+                <Text color="magenta">{on ? "❯ " : "  "}</Text>
+                <Text color={on ? "magenta" : undefined} dimColor={!on}>
+                  {o.icon}{" "}
+                </Text>
+                <Text bold={on} dimColor={!on}>
+                  {o.label.padEnd(18)}
+                </Text>
+                <Text dimColor>{o.cmd}</Text>
+              </Text>
+            );
+          })}
+          <Text dimColor wrap="truncate-end">
+            ↑↓/j/k pick · 1-4 jump · enter confirm · esc cancel
+          </Text>
+        </Box>
+      ) : null}
+
+      {tags ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={tags.error ? "red" : "magenta"}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color="magenta">add tags</Text>
+            <Text dimColor>
+              {" · "}{tags.targets.length} PR{tags.targets.length === 1 ? "" : "s"}
+              {" · "}{tags.targets.map((b) => `#${b.prNumber}`).join(" ")}
+            </Text>
+          </Text>
+          <Text wrap="truncate-end">
+            <Text color="magenta">{"❯ "}</Text>
+            {tags.query.length > inputW ? `…${tags.query.slice(-(inputW - 1))}` : tags.query}
+            <Text inverse>{" "}</Text>
+            <Text dimColor>{" · "}{tagMatches.length} matches</Text>
+          </Text>
+          {tags.error ? (
+            <Text color="red" wrap="truncate-end">{tags.error}</Text>
+          ) : tags.labels === null ? (
+            <Text dimColor>loading repository tags…</Text>
+          ) : tagMatches.length === 0 ? (
+            <Text dimColor>
+              {tags.labels.length === 0 ? "no tags in this repository" : "no matching tags"}
+            </Text>
+          ) : tagMatches.slice(tagStart, tagStart + tagRows).map((label, i) => {
+            const active = tagStart + i === tags.idx;
+            return (
+              <Text key={label.name} wrap="truncate-end">
+                <Text color="magenta">{active ? "❯ " : "  "}{tags.chosen.has(label.name) ? "☑ " : "☐ "}</Text>
+                <Text bold={active} color={active ? "magenta" : undefined}>{label.name}</Text>
+                <Text dimColor>{label.description ? ` · ${label.description}` : ""}</Text>
+              </Text>
+            );
+          })}
+          <Text dimColor wrap="truncate-end">
+            {tags.chosen.size > 0
+              ? `${tags.chosen.size} chosen: ${[...tags.chosen].join(", ")}`
+              : "enter adds the highlighted tag · tab selects multiple tags"}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            ↑↓ pick · type search · tab toggle · enter confirm · esc cancel
+          </Text>
+        </Box>
+      ) : null}
+
+      {/* stamp dialog: the marked PRs, the Slack channel they are headed for,
+          and an optional note. enter stages the usual y-confirm. */}
+      {stamp ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle="round"
+          borderColor={stamp.error ? "red" : "magenta"}
+          paddingX={1}
+        >
+          <Text wrap="truncate-end">
+            <Text bold color="magenta">
+              stamp
+            </Text>
+            <Text dimColor>
+              {" · "}
+              {stamp.targets.length} PR{stamp.targets.length === 1 ? "" : "s"}
+              {" · "}
+              {stamp.targets.map((b) => `#${b.prNumber}`).join(" ")}
+              {" → "}
+            </Text>
+            {stamp.target ? (
+              <Text>
+                @{stamp.target.botName}
+                <Text dimColor>
+                  {" · #"}
+                  {stamp.target.channelName}
+                </Text>
+              </Text>
+            ) : stamp.error ? (
+              <Text color="red">{stamp.error}</Text>
+            ) : (
+              <Text dimColor>finding the channel…</Text>
+            )}
+          </Text>
+          <Text wrap="truncate-end">
+            <Text color="magenta">{"❯ "}</Text>
+            <Text>{shownNote}</Text>
+            <Text inverse>{" "}</Text>
+            {stampNote ? null : (
+              <Text dimColor> a note for the bot, or nothing</Text>
+            )}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {stamp.target
+              ? "enter stamp · esc cancel · ctrl+w word · ctrl+u clear"
+              : "esc cancel"}
+          </Text>
+        </Box>
+      ) : null}
+
+      {/* footer: confirmation and action status take over the key hints */}
+      <Box paddingX={1} flexShrink={0}>
+        {pending ? (
+          <Text wrap="truncate-end">
+            <Text
+              bold
+              color={
+                pending.kind === "merge"
+                  ? "red"
+                  : pending.kind === "approve"
+                    ? "green"
+                    : pending.kind === "status" ||
+                        pending.kind === "tags" ||
+                        pending.kind === "stamp"
+                      ? "magenta"
+                      : pending.kind === "rerun"
+                        ? "cyan"
+                        : "yellow"
+              }
+            >
+              {pending.kind.toUpperCase()}
+            </Text>
+            <Text> {pending.prompt} </Text>
+            <Text bold color="white">
+              y
+            </Text>
+            <Text dimColor>/any other key cancels</Text>
+          </Text>
+        ) : busy ? (
+          <Text color="cyan" wrap="truncate-end">
+            {busy}
+          </Text>
+        ) : actionMsg ? (
+          <Text color={actionMsg.color} wrap="truncate-end">
+            {actionMsg.text}
+            <Text dimColor> · any key to dismiss</Text>
+          </Text>
+        ) : searchDraft ? (
+          <Text wrap="truncate-end">
+            <Text bold color="cyan">
+              {searchDraft.dir === 1 ? "/" : "?"}
+            </Text>
+            <Text>{searchDraft.query}</Text>
+            <Text inverse> </Text>
+            {searchDraft.query ? (
+              <Text color={searchHits.length > 0 ? "yellow" : "red"}>
+                {"  "}
+                {hitLabel}
+              </Text>
+            ) : null}
+            <Text dimColor>
+              {"  · enter accept · esc cancel · ctrl+w word · ctrl+u clear"}
+            </Text>
+          </Text>
+        ) : desc ? (
+          <Text dimColor wrap="truncate-end">
+            {countShown !== null ? (
+              <Text bold color="yellow">
+                {countShown}{" "}
+              </Text>
+            ) : null}
+            t tags · s status · S stamp · ↑↓/j/k scroll · space/b page · d/u half · g/G top/bot · n/p comment · tab next pr · x {desc.showAll ? "fold" : "unfold"} · a/A approve one/all · c checkout · o open · z zed · r refresh · esc close
+          </Text>
+        ) : (
+          <Text dimColor wrap="truncate-end">
+            {countShown !== null ? (
+              <Text bold color="yellow">
+                {countShown}{" "}
+              </Text>
+            ) : null}
+            {search ? (
+              <>
+                <Text bold color="cyan">
+                  {search.dir === 1 ? "/" : "?"}
+                  {search.query}
+                </Text>
+                <Text color={searchHits.length > 0 ? "yellow" : "red"}>
+                  {" "}
+                  {hitLabel}
+                </Text>
+                <Text dimColor> · </Text>
+              </>
+            ) : null}
+            ↑/↓ line · j/k/click pr · J/K select · V {stackOpen ? "hide stack" : "stack"} · v {changesOpen ? "hide changes" : "changes"} · T {hideTests ? "show tests" : "hide tests"} · drag panel borders · / search · t tags · s status · S stamp · counts work on arrows/motions · space discussion · l/h checks · x rerun failed · f/b page · d/u half · g/G top/bot · {search ? "n/N match · p/click file" : "n/p/click file"} · a/A approve one/all · z zed · c checkout · o open · R rebase · M merge · r refresh · {search ? "esc clear search" : markAnchor !== null ? "esc clear" : "q quit"}
+          </Text>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Entry
+// ---------------------------------------------------------------------------
+
+const argv = process.argv.slice(2);
+
+if (argv.includes("--dump")) {
+  // headless mode for debugging: print resolved stack data as JSON, with the
+  // sync annotation the TUI defers to the background applied inline
+  await fetchRefs();
+  const { stacks, source, error } = await resolveStacks();
+  if (error) {
+    console.error(error);
+    process.exit(1);
+  }
+  const first = await annotateSync(stacks[0]);
+  const enriched = await Promise.all(
+    first.branches.map(async (b) => ({
+      ...b,
+      details: b.prNumber != null ? await fetchPrDetails(b.prNumber) : null,
+    })),
+  );
+  console.log(JSON.stringify({ source, stackCount: stacks.length, ...first, branches: enriched }, null, 2));
+  process.exit(0);
+}
+
+if (argv.includes("--zed")) {
+  // headless z: check the branch out and open its worktree in Zed from the
+  // shell, and the way the key's checkout logic gets exercised without a TTY
+  const branch = argv[argv.indexOf("--zed") + 1];
+  if (!branch) {
+    console.error("usage: stacks --zed <branch>");
+    process.exit(2);
+  }
+  const r = await openInZed(branch);
+  if (r.code !== 0) {
+    console.error(r.err);
+    process.exit(r.code || 1);
+  }
+  console.log(r.out);
+  process.exit(0);
+}
+
+if (argv.includes("--checkout")) {
+  // Headless c for shell use and checkout verification without a TTY.
+  const branch = argv[argv.indexOf("--checkout") + 1];
+  if (!branch) {
+    console.error("usage: stacks --checkout <branch>");
+    process.exit(2);
+  }
+  const r = await checkoutBranch(branch);
+  if (r.code !== 0) {
+    console.error(r.err);
+    process.exit(r.code || 1);
+  }
+  console.log(r.out);
+  process.exit(0);
+}
+
+if (argv.includes("--discussion")) {
+  // headless mode for the description dialog: render a PR's body + comments
+  // as plain text, at the given width, so the markdown pass can be checked
+  // without a terminal
+  const n = Number(argv[argv.indexOf("--discussion") + 1]);
+  const width = Number(argv[argv.indexOf("--width") + 1]) || 80;
+  if (!Number.isInteger(n)) {
+    console.error("usage: stacks --discussion <pr-number> [--width N] [--all]");
+    process.exit(2);
+  }
+  const { data, error } = await fetchDiscussion(n);
+  if (!data) {
+    console.error(error);
+    process.exit(1);
+  }
+  const { lines, marks } = renderDiscussion(data, width, argv.includes("--all"));
+  lines.forEach((l, i) =>
+    console.log(`${marks.includes(i) ? "▶" : " "} ${l.map((s) => s.text).join("")}`),
+  );
+  process.exit(0);
+}
+
+if (argv.includes("--stamp")) {
+  // headless S: stamp the given PRs from the shell. Without --send it resolves
+  // the channel and the bot and prints the exact messages, which is how the
+  // whole path gets exercised without posting anything.
+  const send = argv.includes("--send");
+  const note = argv.includes("--note") ? (argv[argv.indexOf("--note") + 1] ?? "") : "";
+  const refs = argv
+    .slice(argv.indexOf("--stamp") + 1)
+    .filter((a) => !a.startsWith("--") && a !== note);
+  if (refs.length === 0) {
+    console.error(
+      "usage: stacks --stamp <pr-number|url>… [--note TEXT] [--send]",
+    );
+    process.exit(2);
+  }
+  let target: StampTarget;
+  try {
+    target = await stampTarget();
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
+  // A bare number needs the repo's own URL; anything URL-shaped is taken as is.
+  const urls: string[] = [];
+  for (const ref of refs) {
+    if (/^https?:/.test(ref)) {
+      urls.push(ref);
+      continue;
+    }
+    const r = await run(["gh", "pr", "view", ref, "--json", "url", "-q", ".url"]);
+    if (r.code !== 0) {
+      console.error(`#${ref}: ${firstLine(r.err || r.out) || `exit ${r.code}`}`);
+      process.exit(1);
+    }
+    urls.push(r.out.trim());
+  }
+  console.log(`#${target.channelName} (${target.channel}) · @${target.botName} (${target.bot})`);
+  let failed = 0;
+  for (const url of urls) {
+    const text = stampText(target, url, note);
+    if (!send) {
+      console.log(`would post: ${text}`);
+      continue;
+    }
+    try {
+      const ts = await stampOne(target, url, note);
+      console.log(`posted ${ts}: ${text}`);
+    } catch (e) {
+      failed++;
+      console.error(`failed: ${text} — ${(e as Error).message}`);
+    }
+  }
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+if (argv.includes("-h") || argv.includes("--help")) {
+  console.log(`stacks — browse a gh stack: PRs on the left, gh pr diff on the right
+
+usage: stacks [--dump] [--discussion <pr> [--width N] [--all]] [--zed <branch>] [--checkout <branch>]
+       stacks --stamp <pr-number|url>… [--note TEXT] [--send]
+
+keys: ↑↓ scroll the diff by line · j/k pick PR · J/K extend the selection ·
+      V toggle stack panel · v toggle changed-files tree · T hide/show test
+      files (*.test.ts, __tests__/) · space PR description +
+      comments · l/h (or ←→) expand/collapse a PR's CI checks · x rerun its
+      failed checks · f/b page · d/u half page · g/G top/bottom · / ? search the diff · n/N next/prev match ·
+      n/p next/prev file (with no search running) · s set PR status · S stamp
+      PRs at the Slack review bot · t add tags ·
+      a approve · A approve every open PR in the stack · z check out + open in
+      Zed · c check out in this worktree · o open in browser · R rebase via
+      a claude agent · M squash-merge stack · r refresh · q quit
+counts: every motion takes a vim count — 10↓ scrolls ten diff lines, 4↑ scrolls
+      four lines up, 3j moves three PRs down, 3J takes three more rows into the
+      selection, 5d scrolls five half-pages, 2n jumps two files on, and 12G
+      selects the 12th PR. The sidebar's left gutter is a
+      hybrid relative-number column (distance from the cursor on every row, the
+      row's own number on the cursor), so the count to type is on screen. A
+      half-typed count shows in the footer; esc throws it away.
+mouse: click a PR to select it · click a row in the changes tree to jump the
+       diff to that file (a folder jumps to its first file) · wheel scrolls
+       whatever it is over — the stack list, the diff, or the changes tree, each
+       on its own; a wheeled side panel follows the cursor / current file again
+       once that leaves its rows · click a scrollbar to jump · drag either panel
+       border to resize it
+
+/ searches the diff the way vim does, with the pattern on the footer's command
+line: it matches as you type (the view walks to each hit and walks back as
+characters come off the pattern), enter accepts the position, and esc puts the
+view back where you pressed /. ? searches backwards. ctrl+w drops a word,
+ctrl+u clears the pattern, and backspacing past the / leaves the command line.
+The pattern is a regex when it compiles as one and the literal text when it
+does not, so a half-typed \`(\` searches for a paren instead of erroring; case is
+smart, so \`todo\` also finds TODO while \`TODO\` only finds TODO.
+  Once a pattern is committed, n/N walk its matches — every occurrence, so
+three hits on one line are three stops — and take a count like every other
+motion (3n). Matches highlight in amber across the whole diff with the one
+you are on inverted, the footer shows which hit of how many, and a hit that
+has scrolled off screen re-anchors the next n on what is actually in view
+rather than resuming from somewhere you can no longer see. esc clears the
+search, which gives n/p back to the file motions; a bare / (enter on an empty
+pattern) repeats the last one. A search survives switching PRs, so the same
+pattern carries down the stack. A hit that sits past the right edge of the
+pane slides the whole pane sideways to reach it (the meta line shows ↔N) since
+delta lays the diff out at its natural width.
+
+space opens the selected PR's description with its whole conversation under
+it: issue comments, reviews, and inline review threads (where Greptile leaves
+its findings), oldest first, rendered as terminal markdown. Inside it: j/k,
+space/b, d/u, g/G scroll like the diff · n/p jump between comments · tab /
+shift-tab step to the next/previous PR · x unfolds resolved threads and bot
+comments (Vercel, Linear), which fold to one line by default · a approves ·
+c checks out the selected branch · o opens the PR in the browser · z opens it
+in Zed · r re-fetches · esc closes. Images show as a "⧉ alt" placeholder (o for the real
+thing).
+
+z checks the selected branch out — creating the local tracking branch from
+origin when it has never been checked out here — and opens the worktree in
+Zed. A branch already checked out in another worktree opens there instead
+(git won't check it out twice), and a checkout git refuses (dirty tree) is
+reported, never stashed or forced.
+
+c checks the selected branch out in the current worktree without opening an
+editor. It creates a local tracking branch when needed. If the branch already
+lives in another worktree, the location is shown instead; use z to open it there.
+Git errors (including dirty-tree conflicts) are reported without stashing or forcing.
+
+J and K extend a selection the way vim's visual line mode does: the first one
+anchors on the row the cursor is already on, and each further J/K (or count)
+walks the far end, so from row 1, 3J marks rows 1-4 and leaves the cursor on 4.
+Plain j/k/arrows/tab or a click drop the selection again, and esc peels one
+layer at a time — a half-typed count first, then the selection, then the app.
+The header says how many rows are marked while any are.
+
+s opens the status dropdown over the marked rows, or over the selected PR when
+nothing is marked: ready for review (\`gh pr ready\`), convert to draft
+(\`gh pr ready --undo\`), close, reopen. It opens on whichever option moves the
+PR under the cursor off where it is now, enter stages the change as the usual
+y-confirm naming every PR it will touch, and each PR's badge is re-read as it
+lands — so a batch GitHub half-refuses still shows what actually changed and
+keeps the selection for a retry. Rows with no PR are dropped before the dialog
+opens, so its count is the count it will act on.
+
+S stamps the marked PRs — or just the selected one — at the review bot in
+Slack, which is the keyboard version of typing "@Purple Rhino stamp this <url>"
+into #bot-pr-stamper by hand. The dialog names the PRs and the channel they are
+headed for, takes an optional note the bot reads with the request, and enter
+stages the usual y-confirm. It posts one message per PR, in stack order,
+because the bot answers in a thread under each one — 3J, S, y asks for four
+reviews and gets four threads back. A batch that half-fails reports which PRs
+did land and keeps the selection for a retry.
+  The messages go out as you, over the session the Slack desktop app already
+holds (the same one \`sn\` replies with), so there is no token to configure — if
+Slack has rotated it, \`sn auth --token xoxc-…\`. The channel and the bot are
+looked up by name and cached in ~/.local/state/stacks-stamp.json;
+STACKS_STAMP_CHANNEL and STACKS_STAMP_BOT point them somewhere else. From the
+shell, \`stacks --stamp 16961 --send\` does the same thing, and without --send it
+prints the messages it would post.
+
+t opens the repository's GitHub labels as a searchable tag picker for the
+marked PRs, or just the current PR when nothing is marked. Type to filter by
+name or description, use arrows to move, and tab to toggle multiple tags.
+Selections survive filtering; ctrl+u clears the search. Enter stages the chosen
+tags (or the highlighted tag if none are checked), then y adds them to every
+target PR, preserving existing labels. Esc cancels the picker. Rows without a
+PR are skipped; a partial failure reports the failed PRs and keeps the range
+selected for a retry. For example: 3J, t, type a tag, enter, y tags four PRs.
+
+l expands the selected PR into its CI checks — failures and pending ones get a
+row each (worst first), passes roll up into a single "✓ N passed" line, and
+expanding re-fetches the PR so the list reflects CI right now. h collapses.
+
+x reruns the failed jobs behind the selected PR's failing checks — or every
+marked PR's, with J/K — after a confirmation that names the workflows. It runs
+one \`gh run rerun <run-id> --failed\` per workflow run, which re-queues each
+failed job plus whatever it depends on and leaves the passes alone; the two
+staging-migration jobs are one run, so one call. Apply the migration to
+staging, press x, and the ✗ rows flip to ◌. Checks that are commit statuses
+rather than Actions jobs (Vercel, for one) have no run to rerun and are named
+and skipped. GitHub refuses a rerun while the run is still in progress and
+only allows one within 30 days of the original; either refusal shows in the
+footer, and a partial failure keeps the selection so it can be retried.
+
+V collapses/restores the stack panel on the left. v toggles the right panel,
+which starts open for the selected PR. It groups
+changed files into a compact directory tree, shows per-folder and per-file
+addition/deletion totals, and follows the file currently visible in the diff.
+Clicking a row scrolls the diff to that file, so the tree is also a table of
+contents; clicking a folder lands on the first file under it.
+On narrow terminals it temporarily replaces the stack sidebar so the diff
+keeps enough width; j/k still switches PRs and v restores the normal layout.
+Drag either panel's border to resize it; the center diff keeps a readable
+minimum width.
+
+sync: each PR shows whether it has fallen behind its base ("⚠ rebase", the same
+      condition as GitHub's "This stack is out-of-date"), and whether the local
+      checkout has drifted from origin ("↓N" behind — e.g. after someone hit
+      Rebase stack in the web UI, "↑N" unpushed). The stack renders immediately;
+      the ref fetch + drift detection run behind it ("⟳ checking sync…" in the
+      header until they land), so the answers still reflect the remote.
+
+a, A, s, t, S, x, R and M all stage a confirmation first and only run on "y". a submits
+\`gh pr review <n> --approve\` for the selected PR (from the main view or the
+description dialog) and refreshes its badge; A does the same for every PR in
+the stack that is still open, in order, and reports any that GitHub refused
+(your own, for one) without stopping on them. R splits a new
+Herdr pane on the right and hands the whole rebase to a Claude agent there —
+rebase onto the trunk, resolve merge conflicts itself, force-push with
+--force-with-lease — so you review a finished rebase instead of the conflicts
+(needs HERDR_ENV=1). M runs \`gh stack merge <n> --yes --squash\`, which works by
+stack number either way.`);
+  process.exit(0);
+}
+
+if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  console.error("stacks requires an interactive terminal (or use --dump).");
+  process.exit(1);
+}
+
+const app = await render(<App />);
+await app.waitUntilExit();

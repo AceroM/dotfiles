@@ -1,0 +1,191 @@
+// The human's tab switcher (`ctab`): every tab in the browser, not just the Agents group.
+//
+// None of these touch chrome.debugger, so browsing tabs with ctab never puts up Chrome's
+// "started debugging this browser" bar, and they don't take tabs over the way the agent commands
+// in background.js do. The browser-use CLI doesn't expose them; agents keep to the gated commands.
+
+// Cached thumbnails are at most this wide (pixels); one per tab, for this many tabs. Wide enough
+// for ctab to draw them as real pictures (Kitty graphics) across most of a terminal.
+const THUMB_W = 1600;
+const THUMB_CAP = 120;
+// A tab showing in a window gets a fresh thumbnail when ctab peeks and the last is older than this.
+const THUMB_FRESH_MS = 3000;
+
+// tabId → { blob, at, rev, url }: `at` when it was taken, `rev` when the picture last changed (a
+// re-take of an unchanged page keeps it, so ctab needn't resend the same image). Lives as long as
+// the worker, which the native port keeps alive.
+const thumbs = new Map();
+
+// ---------------------------------------------------------------- thumbnails
+
+// captureVisibleTab only sees the tab a window is showing, at most twice a second, so take one
+// whenever a tab is the one on screen: when it's switched to, when it finishes loading, when its
+// window comes forward. Debounced per window so tabbing through quickly takes one shot at the end.
+const timers = new Map(); // windowId → timeout
+
+function scheduleCapture(windowId, delay = 400) {
+  clearTimeout(timers.get(windowId));
+  timers.set(
+    windowId,
+    setTimeout(() => {
+      timers.delete(windowId);
+      capture(windowId);
+    }, delay),
+  );
+}
+
+async function capture(windowId) {
+  try {
+    const win = await chrome.windows.get(windowId);
+    if (win.state === "minimized") return;
+    const [tab] = await chrome.tabs.query({ windowId, active: true });
+    if (!tab || tab.status !== "complete") return;
+    const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 85 });
+    // A switch during the capture would file this shot under the wrong tab.
+    const [now] = await chrome.tabs.query({ windowId, active: true });
+    if (now?.id !== tab.id) return;
+    const bmp = await createImageBitmap(await (await fetch(dataUrl)).blob());
+    const scale = Math.min(1, THUMB_W / bmp.width);
+    const canvas = new OffscreenCanvas(Math.round(bmp.width * scale), Math.round(bmp.height * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.85 });
+    const prev = thumbs.get(tab.id);
+    const same = prev && prev.url === tab.url && (await sameBytes(prev.blob, blob));
+    const at = Date.now();
+    thumbs.delete(tab.id);
+    thumbs.set(tab.id, same ? { ...prev, at } : { blob, at, rev: at, url: tab.url });
+    while (thumbs.size > THUMB_CAP) thumbs.delete(thumbs.keys().next().value);
+  } catch {
+    // chrome:// pages, the Web Store, a window that went away: no thumbnail, nothing to report.
+  }
+}
+
+async function sameBytes(a, b) {
+  if (a.size !== b.size) return false;
+  const [x, y] = await Promise.all([a.arrayBuffer(), b.arrayBuffer()]).then((bs) => bs.map((b) => new Uint8Array(b)));
+  for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+  return true;
+}
+
+chrome.tabs.onActivated.addListener(({ windowId }) => scheduleCapture(windowId));
+chrome.tabs.onUpdated.addListener((_id, info, tab) => {
+  if (info.status === "complete" && tab.active) scheduleCapture(tab.windowId, 600);
+});
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId !== chrome.windows.WINDOW_ID_NONE) scheduleCapture(windowId);
+});
+chrome.tabs.onRemoved.addListener((tabId) => thumbs.delete(tabId));
+
+// The cached thumbnail scaled to fit w×h pixels, as raw RGB (base64), so ctab needs no image decoder.
+async function thumbPixels(tabId, w, h) {
+  const t = thumbs.get(tabId);
+  if (!t || !(w > 0) || !(h > 0)) return null;
+  const bmp = await createImageBitmap(t.blob);
+  const s = Math.min(w / bmp.width, h / bmp.height);
+  const tw = Math.max(1, Math.round(bmp.width * s));
+  const th = Math.max(1, Math.round(bmp.height * s));
+  const canvas = new OffscreenCanvas(tw, th);
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bmp, 0, 0, tw, th);
+  const rgba = ctx.getImageData(0, 0, tw, th).data;
+  const rgb = new Uint8Array(tw * th * 3);
+  for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
+    rgb[j] = rgba[i];
+    rgb[j + 1] = rgba[i + 1];
+    rgb[j + 2] = rgba[i + 2];
+  }
+  return { w: tw, h: th, rgb: base64(rgb), at: t.at, url: t.url };
+}
+
+// The cached thumbnail as a PNG (base64) no bigger than w×h pixels, for a terminal that draws
+// images: ctab passes it straight to the terminal (Kitty graphics, f=100). `have` is the `rev` of
+// the copy ctab already holds; while the picture is unchanged, only that is said.
+async function thumbPng(tabId, w, h, have) {
+  const t = thumbs.get(tabId);
+  if (!t || !(w > 0) || !(h > 0)) return null;
+  if (have != null && Number(have) === t.rev) return { same: true, at: t.at, rev: t.rev };
+  const bmp = await createImageBitmap(t.blob);
+  const s = Math.min(1, w / bmp.width, h / bmp.height);
+  const tw = Math.max(1, Math.round(bmp.width * s));
+  const th = Math.max(1, Math.round(bmp.height * s));
+  const canvas = new OffscreenCanvas(tw, th);
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bmp, 0, 0, tw, th);
+  bmp.close();
+  const png = new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer());
+  return { w: tw, h: th, png: base64(png), at: t.at, rev: t.rev, url: t.url };
+}
+
+function base64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// ---------------------------------------------------------------- commands
+
+export const SWITCHER = {
+  // Every tab, with its window and group, in no particular order (ctab sorts).
+  async "switcher.tabs"() {
+    const [tabs, windows, groups, { owners = {} }] = await Promise.all([
+      chrome.tabs.query({}),
+      chrome.windows.getAll(),
+      chrome.tabGroups.query({}),
+      chrome.storage.local.get("owners"),
+    ]);
+    return {
+      windows: windows.map((w) => ({ id: w.id, focused: w.focused, type: w.type, incognito: w.incognito, state: w.state })),
+      groups: groups.map((g) => ({ id: g.id, title: g.title ?? "", color: g.color, collapsed: g.collapsed, windowId: g.windowId })),
+      tabs: tabs.map((t) => ({
+        id: t.id,
+        windowId: t.windowId,
+        index: t.index,
+        title: t.title ?? "",
+        url: t.url || t.pendingUrl || "",
+        active: t.active,
+        pinned: t.pinned,
+        audible: !!t.audible,
+        muted: !!t.mutedInfo?.muted,
+        discarded: !!t.discarded,
+        status: t.status ?? "",
+        groupId: t.groupId,
+        lastAccessed: t.lastAccessed ?? 0,
+        owner: owners[t.id] ?? null,
+        thumbAt: thumbs.get(t.id)?.at ?? null,
+      })),
+    };
+  },
+
+  // What a tab shows: its thumbnail scaled to fit w×h, raw RGB for ctab's half blocks or a PNG
+  // (fmt "png") when its terminal draws images. The page itself is never read.
+  async "switcher.peek"(args) {
+    const tab = await chrome.tabs.get(Number(args.tab));
+    const t = thumbs.get(tab.id);
+    if (tab.active && tab.status === "complete" && (!t || Date.now() - t.at > THUMB_FRESH_MS)) {
+      await capture(tab.windowId);
+    }
+    const out = { id: tab.id, url: tab.url ?? "", error: null, thumb: null };
+    const [w, h] = [Number(args.w), Number(args.h)];
+    const shot = args.fmt === "png" ? thumbPng(tab.id, w, h, args.have) : thumbPixels(tab.id, w, h);
+    out.thumb = await shot.catch(() => null);
+    if (tab.discarded) out.error = "asleep: Chrome unloaded this tab to save memory · ⏎ wakes it";
+    return out;
+  },
+
+  // Bring a tab and its window to the front.
+  async "switcher.focus"(args) {
+    const tab = await chrome.tabs.update(Number(args.tab), { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+    return { focused: tab.id };
+  },
+
+  async "switcher.close"(args) {
+    const ids = (Array.isArray(args.tabs) ? args.tabs : [args.tab]).map(Number);
+    await chrome.tabs.remove(ids);
+    return { closed: ids };
+  },
+};

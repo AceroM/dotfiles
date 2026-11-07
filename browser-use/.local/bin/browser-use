@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Drive the shared "Agents" tab group in the browser (see ~/.agents/skills/browser-use).
+set -euo pipefail
+
+exec bun run "${HOME}/.local/share/browser-use/cli.ts" "$@"

@@ -1,0 +1,90 @@
+// Zed debug scenarios (global — symlinked to ~/.config/zed/debug.json, so every project gets them).
+// Start one with `debugger: start` (f5 / ctrl-alt-cmd-s) → "Debug" tab.
+//
+// SHAPE MATTERS: launch scenarios use `program` (a file Node can execute directly) with the
+// documented substitutions ($ZED_FILE / $ZED_WORKTREE_ROOT). A `runtimeExecutable` pointing at a
+// shell wrapper does NOT work — the adapter connects but never spawns a process, leaving an empty
+// terminal and "no adapter running to send request: ThreadsCommand" in ~/Library/Logs/Zed/Zed.log.
+//
+// The TypeScript scenario runs through `tsx`, so breakpoints land in .ts sources with no build step.
+[
+  {
+    "label": "Debug current file with Node (tsx)",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "$ZED_FILE",
+    "runtimeExecutable": "node",
+    "runtimeArgs": ["--import", "tsx"],
+    "autoAttachChildProcesses": true,
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    // Plain Node for scratch files.
+    "label": "Debug current file with Node (no secrets)",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "launch",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "$ZED_FILE",
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    // Attach to any Node process started with --inspect-brk=127.0.0.1:9229.
+    // e.g. `node --inspect-brk=127.0.0.1:9229 script.js`.
+    "label": "Attach to Node on :9229",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "attach",
+    "port": 9229,
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    // Server-side breakpoints (tRPC routers, API routes, middleware, getServerSideProps) in a
+    // dev server started with NODE_OPTIONS=--inspect=9239. Next runs route handlers in a
+    // next-server CHILD process, which node gives inspect port + 1 → attach to 9240, not 9239.
+    "label": "Attach to Next.js server on :9240",
+    "adapter": "JavaScript",
+    "type": "node",
+    "request": "attach",
+    "port": 9240,
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "autoAttachChildProcesses": true,
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    // Client-side debugging of an already running dev server.
+    // Launches Chrome only; it does not start Next.js.
+    "label": "Launch web app in Chrome (:3001)",
+    "adapter": "JavaScript",
+    "type": "chrome",
+    "request": "launch",
+    "url": "http://localhost:3001",
+    "webRoot": "$ZED_WORKTREE_ROOT/src",
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    "label": "Launch web app in Chrome (:3002)",
+    "adapter": "JavaScript",
+    "type": "chrome",
+    "request": "launch",
+    "url": "http://127.0.0.1:3002",
+    "webRoot": "$ZED_WORKTREE_ROOT/src",
+    "console": "integratedTerminal",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  },
+  {
+    "label": "Attach to browser on :9222",
+    "adapter": "JavaScript",
+    "type": "chrome",
+    "request": "attach",
+    "port": 9222,
+    "webRoot": "$ZED_WORKTREE_ROOT/src",
+    "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+  }
+]

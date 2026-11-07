@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# au — upload a page to Claude Artifacts for sharing, and copy its claude.ai link.
+#
+#   au              the 5 most recently changed pages (the same list as af)
+#   au <n>          publish page n and copy its link; running it again updates the same link
+#   au <file>       publish any HTML file the same way
+#   au -n <n|file>  publish to a new link instead of updating the one it already has
+#   au ls           pages you've shared, with their links
+#
+# Same pages, same numbers as af: au 1 shares the page af 1 opens. A same-named folder
+# of images (foo.html + foo/) goes up with the page.
+#
+# The publish runs in a background Claude Code session (`claude --bg`), because only a full
+# session has the Artifact tool: `claude -p` doesn't load it. The link starts private;
+# share it from the page on claude.ai. Links are remembered in ~/.local/state/au/links.tsv.
+#
+# A page's directory has to be a trusted workspace. Once for ~/artifacts:
+#   cd ~/artifacts && claude    (accept the prompt, then quit)
+#
+#   AU_MODEL    model for the publishing session (default: haiku)
+#   AU_TIMEOUT  seconds to wait for the link (default: 300)
+set -euo pipefail
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}/au"
+links="$state/links.tsv"
+model="${AU_MODEL:-haiku}"
+timeout="${AU_TIMEOUT:-300}"
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+
+# The link a page was published to before, if any.
+link_for() {
+  [ -f "$links" ] || return 0
+  awk -F'\t' -v p="$1" '$1 == p { u = $2 } END { if (u) print u }' "$links"
+}
+
+remember() {
+  mkdir -p "$state"
+  local tmp; tmp=$(mktemp "$state/links.XXXXXX")
+  { [ -f "$links" ] && awk -F'\t' -v p="$1" '$1 != p' "$links"; printf '%s\t%s\n' "$1" "$2"; } > "$tmp"
+  mv "$tmp" "$links"
+}
+
+list_links() {
+  [ -s "$links" ] || { echo "Nothing shared yet: au <n>"; return 0; }
+  local dim="" off=""
+  if [ -t 1 ]; then dim=$'\e[2m'; off=$'\e[0m'; fi
+  while IFS=$'\t' read -r path url; do
+    printf '%s  %s%s%s\n' "$url" "$dim" "${path/#"$HOME"/'~'}" "$off"
+  done < <(tail -r "$links")
+}
+
+publish() {
+  local fresh=0
+  if [ "${1:-}" = -n ]; then fresh=1; shift; fi
+  [ -n "${1:-}" ] || { usage >&2; exit 2; }
+
+  local page dir base
+  page=$(af path "$1") || exit 1
+  case "$page" in *.html|*.htm) ;; *) echo "au: not an HTML file: $page" >&2; exit 1 ;; esac
+  dir=$(cd "$(dirname "$page")" && pwd -P)
+  base=$(basename "$page")
+  page="$dir/$base"
+  base=${base%.html}
+
+  local assets=()
+  if [ -d "$dir/$base" ]; then
+    while IFS= read -r f; do assets+=("${f#"$dir"/}"); done \
+      < <(find "$dir/$base" -type f ! -name '.DS_Store' | LC_ALL=C sort)
+  fi
+
+  local url=""
+  (( fresh )) || url=$(link_for "$page")
+
+  local out; out=$(mktemp -d "${TMPDIR:-/tmp}/au.XXXXXX")
+  # shellcheck disable=SC2064  # expand now: $out is local and gone by the time EXIT fires
+  trap "rm -rf '$out'" EXIT
+
+  local prompt="Publish the finished HTML page $page as a Claude Artifact with the Artifact tool, exactly as it is."
+  if (( ${#assets[@]} )); then
+    prompt+=" Publish its supporting files with it through \`files\` (root $dir), each at its own relative path, which is how the page references them: ${assets[*]}."
+  fi
+  if [ -n "$url" ]; then
+    prompt+=" It was published before at $url: read that artifact with action \"read\" first, then publish the local file to it with url $url so the link stays the same, replacing its content with the local file."
+  else
+    prompt+=" It is a new artifact: give it a one-word generic icon and a one-sentence description taken from the page."
+  fi
+  prompt+=" Read the whole file first, as the Artifact tool requires, but do not change it, write any other page, or load any skills: there is no design work to do."
+  prompt+=" When the publish succeeds, use the Write tool to write only the artifact's claude.ai URL to $out/url and nothing else. If it fails, write ERROR: and the reason to $out/url instead."
+
+  local started id
+  started=$(cd "$dir" && env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    HERDR_AUTONAME=0 claude --bg --model "$model" --name "au: $base" \
+    --settings '{"disableAllHooks": true}' \
+    --allowedTools "Artifact,Read,Write" --add-dir "$out" -- "$prompt" 2>&1) || true
+  id=$(printf '%s\n' "$started" | sed -n 's/.*backgrounded · \([0-9a-f][0-9a-f]*\).*/\1/p' | head -1)
+  if [ -z "$id" ]; then
+    printf '%s\n' "$started" >&2
+    exit 1
+  fi
+
+  local spin='|/-\' i=0 waited=0
+  while [ ! -s "$out/url" ]; do
+    if (( waited >= timeout * 4 )); then
+      [ -t 2 ] && printf '\r\e[K' >&2
+      echo "au: no link after ${timeout}s. The session is still there: claude attach $id" >&2
+      exit 1
+    fi
+    [ -t 2 ] && printf '\r%s publishing %s' "${spin:i++%4:1}" "$base.html" >&2
+    sleep 0.25
+    waited=$(( waited + 1 ))
+  done
+  [ -t 2 ] && printf '\r\e[K' >&2
+
+  local result; result=$(tr -d '[:space:]' < "$out/url")
+  case "$result" in
+    https://claude.ai/*) ;;
+    *)
+      echo "au: $(cat "$out/url")" >&2
+      echo "au: the session is still there: claude attach $id" >&2
+      exit 1
+      ;;
+  esac
+
+  { claude stop "$id" && claude rm "$id"; } >/dev/null 2>&1 || true
+  remember "$page" "$result"
+  printf '%s' "$result" | pbcopy
+  echo "$result"
+  [ -t 2 ] && echo "copied$([ -n "$url" ] && echo ", same link updated")" >&2
+  return 0
+}
+
+case "${1:-}" in
+  "")             exec af ;;
+  -h|--help|help) usage ;;
+  ls)             list_links ;;
+  *)              publish "$@" ;;
+esac
