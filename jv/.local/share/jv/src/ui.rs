@@ -935,6 +935,7 @@ const HELP: [&[Section]; 2] = [
             "Act",
             &[
                 ("o", "open at this line in Zed ($EDITOR otherwise)"),
+                ("E", "open the selected file in nvim in a new Herdr tab"),
                 ("O", "open this line in the PR on GitHub"),
                 ("y Y", "copy path · path:line"),
                 ("drag", "select code · copied on release"),

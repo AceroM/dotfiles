@@ -3,6 +3,7 @@ mod app;
 mod commit;
 mod diff;
 mod doc;
+mod edit;
 mod fuzzy;
 mod highlight;
 mod snapshot;
@@ -49,6 +50,7 @@ options:
       --no-tests     hide test files (__tests__/, *.test.*, *.spec.*)
       --theme NAME   syntax theme (default TwoDark; also $JV_THEME)
       --themes       list syntax themes
+      --popup        Esc quits once it has nothing left to clear; E leaves for its tab
   -h, --help
 
 Inside jv, press ? for keys. With no PR on the current branch, jv shows
@@ -64,6 +66,7 @@ struct Cli {
     cmd: Option<String>,
     local: bool,
     git: Option<Vec<String>>,
+    popup: bool,
     snapshot: Option<(u16, u16)>,
     keys: String,
     out: Option<String>,
@@ -79,6 +82,7 @@ fn parse_cli() -> Result<Cli, String> {
         cmd: None,
         local: false,
         git: None,
+        popup: false,
         snapshot: None,
         keys: String::new(),
         out: None,
@@ -101,6 +105,7 @@ fn parse_cli() -> Result<Cli, String> {
             "--no-wrap" | "--nowrap" => c.wrap = false,
             "--tests" => c.tests = Some(true),
             "--no-tests" => c.tests = Some(false),
+            "--popup" => c.popup = true,
             "--theme" => c.theme = args.next().ok_or("--theme needs a name")?,
             "-c" | "--cmd" => c.cmd = Some(args.next().ok_or("--cmd needs a command")?),
             "-l" | "--local" | "." => c.local = true,
@@ -229,7 +234,7 @@ fn main() -> ExitCode {
     };
     let bg = std::env::var("JV_BG").ok().and_then(|s| Rgb::parse(&s)).unwrap_or(Rgb(0x28, 0x2c, 0x34));
     let viewed = if cli.snapshot.is_some() { Viewed::ephemeral() } else { Viewed::load() };
-    let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests };
+    let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests, popup: cli.popup };
     let mut app = App::new(source, &text, hl, Palette::new(bg), opts, viewed);
     app.meta_rx = meta_rx;
     if let Some(n) = note {

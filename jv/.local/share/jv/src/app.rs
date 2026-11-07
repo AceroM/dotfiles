@@ -17,6 +17,7 @@ use crate::agent::{self, Field};
 use crate::commit;
 use crate::diff::{self, FileDiff, Kind, Status};
 use crate::doc::{self, Doc, Geo, Note, Row};
+use crate::edit;
 use crate::fuzzy;
 use crate::highlight::{FileHl, Hl};
 use crate::source::{self, PrMeta, Source};
@@ -132,6 +133,7 @@ pub struct Opts {
     pub split: Option<bool>,
     pub wrap: bool,
     pub show_tests: bool,
+    pub popup: bool,
 }
 
 pub struct App {
@@ -197,6 +199,9 @@ pub struct App {
     /// Off for --snapshot, so a scripted run leaves the clipboard alone and
     /// starts no agent tabs.
     pub live: bool,
+    /// --popup: Esc with nothing left to clear quits, and so does `E`, which
+    /// would otherwise open its tab underneath.
+    popup: bool,
     /// The last text copied, whether or not it reached the clipboard.
     pub copied: Option<String>,
     /// The agent box's draft, kept across Esc until it's sent.
@@ -272,6 +277,7 @@ impl App {
             scrolled_at: Instant::now(),
             clicks: None,
             live: true,
+            popup: opts.popup,
             copied: None,
             ask: Field::default(),
             ask_images: Vec::new(),
@@ -1026,6 +1032,44 @@ impl App {
         self.flash("committing & pushing in a new tab…");
     }
 
+    /// `E`: the selected file in nvim, in a new Herdr tab (edit.rs).
+    fn edit_in_tab(&mut self) -> Act {
+        if !agent::in_herdr() {
+            self.flash("E opens nvim in a new Herdr tab · run jv inside Herdr");
+            return Act::None;
+        }
+        let Some((rel, line)) = self.selected_path() else { return Act::None };
+        if !self.ask_cwd.join(&rel).exists() {
+            self.flash(format!("{rel} isn't in this checkout"));
+            return Act::None;
+        }
+        if !self.live {
+            self.copied = Some(edit::command(&rel, line));
+            return Act::None;
+        }
+        match edit::open(&self.ask_cwd, &rel, line) {
+            Ok(()) if self.popup => return Act::Quit,
+            Ok(()) => self.flash(format!("opened {rel}:{line} in a new tab")),
+            Err(e) => self.flash(e),
+        }
+        Act::None
+    }
+
+    /// The path `E` opens and the line to open it at: the tree's selected row
+    /// when the tree has focus, else the top of the diff. The diff can't always
+    /// scroll a short file to the top, so the row is the only reliable answer.
+    fn selected_path(&self) -> Option<(String, u32)> {
+        let row = self.tree_rows.get(self.tree_cur).filter(|_| self.tree_on());
+        match row.map(|r| &r.kind) {
+            Some(RowKind::Dir { path, .. }) => Some((path.clone(), 1)),
+            Some(RowKind::File { idx, .. }) => {
+                let f = &self.files[*idx];
+                Some((f.path.clone(), f.hunks.first().map_or(1, |h| h.new_start.max(1))))
+            }
+            None => self.first_code_line().map(|(f, line)| (self.files[f].path.clone(), line)),
+        }
+    }
+
     /// Leave the agent box.
     fn close_ask(&mut self) {
         self.mode = Mode::Normal;
@@ -1731,6 +1775,7 @@ impl App {
             (KeyCode::Char('r'), false) => self.reload(),
             (KeyCode::Char('c'), false) => self.open_ask(sel.as_ref()),
             (KeyCode::Char('C'), false) => self.commit(),
+            (KeyCode::Char('E'), false) => return self.edit_in_tab(),
             (KeyCode::Char(';'), false) => return self.open_tabs(),
             // The focused pane's filter or search goes first, then the other's.
             (KeyCode::Esc, _) => {
@@ -1739,6 +1784,9 @@ impl App {
                     || self.search.take().is_some()
                     || (!tree && self.clear_filter());
                 if !cleared {
+                    if self.popup {
+                        return Act::Quit;
+                    }
                     self.msg = None;
                 }
             }
