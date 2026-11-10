@@ -37,6 +37,7 @@ usage:
 Runs inside a Herdr pane. The keys are al's box's:
   ⏎ sends (to a new tab, in the background) · ^⏎ or ^o sends and goes to the tab
   ⇧⏎ ⌥⏎ ^j newline · ^p plan mode (sends `/plan …`)
+  ↑ on an empty prompt selects a created session · ↑ ↓ choose · ⏎ focus · esc compose
   ⇧tab the next configuration (round to the first) · ^1 … ^9 the Nth
   ^v pastes the clipboard's image (⌘V too, with only an image on it); a file dragged
   in from Finder is attached. Either is an [Image #N] tag, its file listed at the end

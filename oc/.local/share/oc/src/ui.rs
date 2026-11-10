@@ -78,9 +78,13 @@ fn text_row(buf: &mut Buffer, x: u16, y: u16, max: u16, text: &str, r: std::ops:
 pub fn draw(app: &App) -> Buffer {
     let w = app.lay.width.saturating_sub(1).max(1);
     let mut buf = Buffer::empty(Rect::new(0, 0, w, app.lay.height));
-    match app.list {
-        Some(sel) => list(app, &mut buf, sel),
-        None => lines(app, &mut buf),
+    if let Some(sel) = app.sent_at {
+        sent_selection(app, &mut buf, sel);
+    } else {
+        match app.list {
+            Some(sel) => list(app, &mut buf, sel),
+            None => lines(app, &mut buf),
+        }
     }
     let mut y = app.lay.text.bottom();
     if toast(app, &mut buf, y) {
@@ -88,6 +92,26 @@ pub fn draw(app: &App) -> Buffer {
     }
     starting(app, &mut buf, y);
     buf
+}
+
+fn sent_selection(app: &App, buf: &mut Buffer, sel: usize) {
+    let s = &app.sent[sel];
+    let max = buf.area.width;
+    let p = &app.pal;
+    put(buf, 0, 0, max, "▸", fg(p.accent));
+    let title = format!("{} · {}", s.name, field::first_line(&s.text));
+    put(buf, 2, 0, max, &truncate(&title, max.saturating_sub(2) as usize), Style::new());
+    if app.lay.text.height > 1 {
+        let (destination, color) = match &s.outcome {
+            Some((message, ok, _)) => (message.as_str(), if *ok { p.accent } else { p.red }),
+            None => ("starting…", p.yellow),
+        };
+        put(buf, 2, 1, max, destination, fg(color));
+    }
+    if app.lay.text.height > 2 {
+        let keys = format!("{}/{} · ↑ ↓ sessions · ⏎ focus · esc compose", sel + 1, app.sent.len());
+        put(buf, 2, 2, max, &keys, fg(p.dim));
+    }
 }
 
 fn lines(app: &App, buf: &mut Buffer) {
@@ -231,14 +255,14 @@ pub fn entry(app: &App, s: &Sent, width: u16) -> Buffer {
     }
     let x = put(&mut buf, 2, y, w, "⎿  ", fg(p.dim));
     match &s.outcome {
-        Some((m, true)) => {
+        Some((m, true, _)) => {
             let mut x = put(&mut buf, x, y, w, &s.name, fg(p.accent));
             if s.plan {
                 x = put(&mut buf, x, y, w, " · plan", fg(p.yellow));
             }
             put(&mut buf, x + 1, y, w, m, fg(p.dim));
         }
-        Some((m, false)) => {
+        Some((m, false, _)) => {
             put(&mut buf, x, y, w, &format!("✗ {m}"), fg(p.red));
         }
         None => {}

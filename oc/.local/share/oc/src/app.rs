@@ -147,6 +147,7 @@ pub struct App {
     last_key: Instant,
     pub toast: Option<(String, bool, Instant)>,
     pub sent: Vec<Sent>,
+    pub sent_at: Option<usize>,
     /// Sends that finished, to print above the prompt.
     done: Vec<usize>,
     sent_tx: Sender<(usize, Outcome)>,
@@ -203,6 +204,7 @@ impl App {
             last_key: Instant::now(),
             toast,
             sent: Vec::new(),
+            sent_at: None,
             done: Vec::new(),
             sent_tx,
             sent_rx,
@@ -293,6 +295,12 @@ impl App {
             self.lay = Lay { width, screen_h, text: Rect::new(2, 0, tw as u16, body as u16), height: (body + extra) as u16 };
             return;
         }
+        if self.sent_at.is_some() {
+            self.rows.clear();
+            let body = room.min(3);
+            self.lay = Lay { width, screen_h, text: Rect::new(2, 0, tw as u16, body as u16), height: (body + extra) as u16 };
+            return;
+        }
         self.rows = field::word_rows(&self.field.text, tw);
         let view = self.rows.len().clamp(1, room);
         let gutter = self.prefix_at(width).width() as u16 + 1;
@@ -315,7 +323,7 @@ impl App {
     /// Where the terminal's cursor goes, from the prompt's first line: on
     /// the cursor's cell, when its row is in view.
     pub fn cursor_cell(&self) -> Option<(u16, u16)> {
-        if self.list.is_some() {
+        if self.list.is_some() || self.sent_at.is_some() {
             return None;
         }
         let cr = self.cursor_row();
@@ -439,7 +447,22 @@ impl App {
         if self.list.is_some() {
             return self.list_key(k);
         }
+        if let Some(sel) = self.sent_at {
+            match k.code {
+                KeyCode::Up if !shift && !alt && !ctrl && !sup => self.sent_at = Some(sel.saturating_sub(1)),
+                KeyCode::Down if !shift && !alt && !ctrl && !sup => {
+                    self.sent_at = if sel + 1 < self.sent.len() { Some(sel + 1) } else { None };
+                }
+                KeyCode::Enter if !shift && !alt => self.focus_sent(sel),
+                KeyCode::Esc => self.sent_at = None,
+                _ => { self.sent_at = None; return self.key(k); }
+            }
+            return Act::None;
+        }
         match k.code {
+            KeyCode::Up if k.modifiers.is_empty() && self.field.text.is_empty() && self.editing.is_none() && !self.sent.is_empty() => {
+                self.sent_at = Some(self.sent.len() - 1);
+            }
             // Esc drops a selection, then (twice) clears the prompt, then quits.
             // Out of a draft it just leaves: the draft stays, as saved.
             KeyCode::Esc if self.field.selection().is_some() => self.field.anchor = None,
@@ -621,6 +644,20 @@ impl App {
         self.agent_of(d).map(|i| self.agents[i].name.as_str())
     }
 
+    fn focus_sent(&mut self, index: usize) {
+        let Some(sent) = self.sent.get(index) else { return };
+        let target = match &sent.outcome {
+            None => return self.toast("agent is still starting · try Enter again shortly", false),
+            Some((_, true, Some(target))) => target.clone(),
+            _ => return self.toast("this send has no agent to focus", false),
+        };
+        let result = if self.live { spawn::focus(&target) } else { Ok(()) };
+        match result {
+            Ok(()) => self.toast(format!("focused {target}"), true),
+            Err(e) => self.toast(format!("couldn't focus agent: {e}"), false),
+        }
+    }
+
     /// ⏎: start the agent with the prompt in a new tab (`focus`: and go
     /// there). The prompt empties for the next one; ^z brings this one back.
     fn send(&mut self, focus: bool) {
@@ -650,7 +687,7 @@ impl App {
         } else {
             // --snapshot: as if it started.
             self.would_send = Some(prompt);
-            let _ = self.sent_tx.send((n, (format!("→ tab {}", if focus { "snapshot (went there)" } else { "snapshot" }), true)));
+            let _ = self.sent_tx.send((n, (format!("→ tab {}", if focus { "snapshot (went there)" } else { "snapshot" }), true, Some(format!("snapshot-{n}")))));
         }
         // A note's name labels the tab it went to, not the ones after.
         self.label.clear();
@@ -899,7 +936,7 @@ impl App {
         }
         self.remember(text, images);
         let n = self.sent.len();
-        let done = |m: &str| (format!("→ {m}"), true);
+        let done = |m: &str| (format!("→ {m}"), true, Some(format!("snapshot-{n}")));
         match to {
             Some((pane, label)) => {
                 self.sent.push(Sent { name: format!("↳{label}"), text: text.to_string(), plan: d.plan, outcome: None });
@@ -1282,6 +1319,51 @@ mod tests {
         // ^z brings it back, to send again.
         press(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
         assert_eq!(a.field.text, "fix the header");
+    }
+
+    #[test]
+    fn selecting_a_sent_session_focuses_without_resending() {
+        let mut a = app("first");
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        a.tick();
+        type_in(&mut a, "second");
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        a.tick();
+        press(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(a.sent_at, Some(1));
+        press(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        a.layout(80, 24);
+        assert_eq!(a.sent_at, Some(0));
+        assert_eq!(a.cursor_cell(), None);
+        let rendered = crate::ui::draw(&a);
+        assert!(crate::term::plain(&rendered, 0).contains("first"));
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.sent.len(), 2);
+        assert_eq!(a.toast.as_ref().unwrap().0, "focused snapshot-0");
+        press(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(a.sent_at, None);
+        assert!(a.field.text.is_empty());
+        press(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        assert!(!press(&mut a, KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(a.sent_at, None);
+    }
+
+    #[test]
+    fn pending_and_failed_sessions_cannot_be_focused() {
+        let mut a = app("first");
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.toast.as_ref().unwrap().0.contains("still starting"));
+        a.tick();
+        a.sent[0].outcome = Some(("failed".into(), false, None));
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.toast.as_ref().unwrap().0.contains("no agent"));
+        type_in(&mut a, "new prompt");
+        assert_eq!(a.sent_at, None);
+        assert_eq!(a.field.text, "new prompt");
+        assert_eq!(a.sent.len(), 1);
     }
 
     #[test]

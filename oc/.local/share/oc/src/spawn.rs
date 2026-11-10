@@ -27,8 +27,8 @@ pub fn in_herdr() -> bool {
     std::env::var("HERDR_ENV").as_deref() == Ok("1")
 }
 
-/// One send, as the child reports it: its line, and whether it worked.
-pub type Outcome = (String, bool);
+/// One send: its display line, whether it worked, and its focus target.
+pub type Outcome = (String, bool, Option<String>);
 
 /// Start `agent` with `prompt` in a new tab in `cwd`, in the background.
 /// `label` names the tab (empty: Herdr's, until the Stop hook names it);
@@ -58,9 +58,13 @@ pub fn send(n: usize, agent: &Agent, prompt: &str, cwd: &Path, label: &str, focu
         let out = match child.and_then(|c| c.wait_with_output()) {
             Ok(o) => {
                 let msg = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                (if msg.is_empty() { format!("{kind} didn't start") } else { msg }, o.status.success())
+                if o.status.success() {
+                    serde_json::from_str::<Outcome>(&msg).unwrap_or_else(|e| (format!("invalid start result: {e}"), false, None))
+                } else {
+                    (if msg.is_empty() { format!("{kind} didn't start") } else { msg }, false, None)
+                }
             }
-            Err(e) => (format!("couldn't start {kind}: {e}"), false),
+            Err(e) => (format!("couldn't start {kind}: {e}"), false, None),
         };
         let _ = tx.send((n, out));
     });
@@ -70,7 +74,11 @@ pub fn send(n: usize, agent: &Agent, prompt: &str, cwd: &Path, label: &str, focu
 pub fn child(args: &[String]) -> ExitCode {
     let [cwd, kind, prompt, label, focus, agent_args @ ..] = args else { return ExitCode::from(2) };
     let res = start(kind, agent_args, prompt, Path::new(cwd), label, focus == "1");
-    let _ = writeln!(std::io::stdout(), "{}", res.as_ref().unwrap_or_else(|e| e));
+    let output = match &res {
+        Ok(out) => serde_json::to_string(out).expect("serializable outcome"),
+        Err(e) => e.clone(),
+    };
+    let _ = writeln!(std::io::stdout(), "{output}");
     if res.is_ok() {
         ExitCode::SUCCESS
     } else {
@@ -78,7 +86,7 @@ pub fn child(args: &[String]) -> ExitCode {
     }
 }
 
-fn start(kind: &str, args: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<String, String> {
+fn start(kind: &str, args: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<Outcome, String> {
     let ws = std::env::var("HERDR_WORKSPACE_ID").map_err(|_| "not in a Herdr pane (no HERDR_WORKSPACE_ID)".to_string())?;
     let cwd = cwd.to_string_lossy();
     let mut cmd = vec!["tab", "create", "--workspace", &ws, "--cwd", &cwd, if focus { "--focus" } else { "--no-focus" }];
@@ -112,7 +120,7 @@ fn start(kind: &str, args: &[String], prompt: &str, cwd: &Path, label: &str, foc
     }
     // No `--` here: Herdr would read a prompt starting with - as an option.
     herdr(&["agent", "prompt", &name, prompt]).map_err(|e| format!("{kind} is up in tab {label}, but the prompt failed: {e}"))?;
-    Ok(format!("→ tab {label}"))
+    Ok((format!("→ tab {label}"), true, Some(name)))
 }
 
 /// Send `prompt` to the agent in `pane` (a reply draft's), in the
@@ -122,8 +130,8 @@ pub fn reply(n: usize, pane: &str, prompt: &str, tx: mpsc::Sender<(usize, Outcom
     thread::spawn(move || {
         // No `--`: Herdr would read a prompt starting with - as an option.
         let out = match herdr(&["agent", "prompt", &pane, &prompt]) {
-            Ok(_) => (format!("→ pane {pane}"), true),
-            Err(e) => (format!("couldn't reply: {e}"), false),
+            Ok(_) => (format!("→ pane {pane}"), true, Some(pane.clone())),
+            Err(e) => (format!("couldn't reply: {e}"), false, None),
         };
         let _ = tx.send((n, out));
     });
@@ -148,6 +156,11 @@ pub fn agent_pane(pane: &str, session: Option<&str>) -> Option<String> {
     let found = agents().find(|p| p["pane_id"] == pane);
     let found = found.or_else(|| agents().find(|p| session.is_some() && p["agent_session"]["value"].as_str() == session));
     found.and_then(|p| p["pane_id"].as_str()).map(String::from)
+}
+
+/// Focus the exact agent returned by a successful send.
+pub fn focus(target: &str) -> Result<(), String> {
+    herdr(&["agent", "focus", target]).map(|_| ())
 }
 
 /// Run `herdr ARGS`: stdout on success, else the error's message.
