@@ -1,0 +1,31 @@
+#!/bin/bash
+# oc — a fast `>` prompt (Rust). Source lives in ~/.local/share/oc (stowed from
+# oc/.local/share/oc); this launcher builds it on first run and again whenever a
+# source file is newer than the binary. It runs on every launch, so it uses
+# builtins only: no find, dirname, readlink or subshells (al's launcher spends
+# ~40ms on those).
+app_dir="${OC_HOME:-$HOME/.local/share/oc}"
+bin="$app_dir/target/release/oc"
+
+stale=
+if [[ ! -x "$bin" ]]; then
+  stale=1
+else
+  for f in "$app_dir"/src/*.rs "$app_dir/Cargo.toml" "$app_dir/Cargo.lock"; do
+    if [[ "$f" -nt "$bin" ]]; then
+      stale=1
+      break
+    fi
+  done
+fi
+
+if [[ -n "$stale" ]]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    printf '%s\n' 'oc: cargo is required to build oc (https://rustup.rs).' >&2
+    exit 1
+  fi
+  printf '%s\n' 'oc: building (first run or sources changed)…' >&2
+  cargo build --release --quiet --manifest-path "$app_dir/Cargo.toml" >&2 || exit 1
+fi
+
+exec "$bin" "$@"

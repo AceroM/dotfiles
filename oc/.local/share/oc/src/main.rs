@@ -1,0 +1,429 @@
+mod app;
+mod drafts;
+mod field;
+mod probe;
+mod spawn;
+mod term;
+mod theme;
+mod ui;
+
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::Duration;
+
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::terminal;
+
+use app::{Act, App, Opts};
+use term::Inline;
+use theme::{Palette, Rgb};
+
+const HELP: &str = "\
+oc — a `>` prompt made to type into fast: ⏎ starts claude (or codex) with it in a new
+Herdr tab, and the prompt empties for the next one. Drawn in place, writing only the
+cells a key changes; each send is printed above it.
+
+usage:
+  oc                   write a prompt
+  oc NOTE              start from a note: its path and contents, the tab named after it
+  oc TEXT…             start from TEXT
+  oc -d, --drafts      start in the drafts list
+  --cwd DIR            where the agents start (default: here)
+  -h, --help
+
+Runs inside a Herdr pane. The keys are al's box's:
+  ⏎ sends (to a new tab, in the background) · ^⏎ or ^o sends and goes to the tab
+  ⇧⏎ ⌥⏎ ^j newline · ⇧tab claude ↔ codex · ^p plan mode (sends `/plan …`)
+  ^v pastes the clipboard's image (⌘V too, with only an image on it); a file dragged
+  in from Finder is attached. Either is an [Image #N] tag, its file listed at the end
+  of what's sent (not drawn).
+  The mouse is the terminal's (its own selecting and scrolling); OC_MOUSE=1 gives it
+  to oc: a click puts the cursor there, a drag selects, the wheel scrolls a long prompt.
+  `>` is claude, `›` codex; yellow is plan mode.
+  As in a shell: ^l clears the screen (the prompt kept), ↑ on the first row goes back
+  through what was sent (↓ forward again), ^a ^e the line's start / end, ^u ^k ^w ⌥d
+  delete (^y puts it back), ^b ^f ^h ^d ^t, ⌥← ⌥→ by word; ⌘↑ ⌘↓ (fn↑ fn↓) the text's
+  ends; shift (⌥⇧ a word) with the arrows selects
+  ^c copies the selection, else clears the prompt (^z brings it back, or what ⏎ sent);
+  esc esc clears it too; ^c, ^d or esc on an empty prompt quits
+Drafts (al's: one written here waits in al's list too, and al's show up here):
+  ^s keeps the prompt as a draft, saved as you type from then on (the prompt reads ◇);
+  esc leaves it for later, ⏎ sends it (from the folder it was written in) and it goes
+  ^g goes through this space's drafts: j k move · ⏎ sends (^⏎ ^o and goes there) ·
+  e (l, r) edits · x ; deletes · u brings it back · d a new one · esc back to the prompt
+The agents are `claude --dangerously-skip-permissions` and `codex --no-daemon --yolo`;
+$OC_AGENT (else $AL_AGENT) names the first one, e.g. OC_AGENT=\"codex --yolo\".
+";
+
+struct Cli {
+    cwd: Option<PathBuf>,
+    words: Vec<String>,
+    snapshot: Option<(u16, u16)>,
+    keys: String,
+    drafts: bool,
+}
+
+fn parse_cli() -> Result<Cli, String> {
+    let mut c = Cli { cwd: None, words: Vec::new(), snapshot: None, keys: String::new(), drafts: false };
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                print!("{HELP}");
+                std::process::exit(0);
+            }
+            "-d" | "--drafts" => c.drafts = true,
+            "--cwd" => c.cwd = Some(args.next().ok_or("--cwd needs a folder")?.into()),
+            // Hidden: render one frame as plain text after --keys, for UI work
+            // without a terminal. Nothing is sent.
+            "--snapshot" => {
+                let v = args.next().ok_or("--snapshot needs WxH")?;
+                let (w, h) = v.split_once('x').ok_or("--snapshot needs WxH")?;
+                c.snapshot = Some((w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?));
+            }
+            "--keys" => c.keys = args.next().ok_or("--keys needs keys")?,
+            "--" => c.words.extend(args.by_ref()),
+            s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s} (oc -h)")),
+            _ => c.words.push(a),
+        }
+    }
+    Ok(c)
+}
+
+/// A note's tab label, as the shell's `_h_slug`: lowercase, runs of anything
+/// but [a-z0-9] one `_`, none at the ends, at most 28 characters.
+fn slug(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_');
+    out.chars().take(28).collect::<String>().trim_end_matches('_').to_string()
+}
+
+/// What the box starts with, and the first tab's label: a note's path and
+/// contents (and its name), or the words as they are.
+fn start_text(words: &[String]) -> Result<(String, String), String> {
+    if let [one] = words {
+        let path = Path::new(one);
+        if path.is_file() {
+            let abs = std::fs::canonicalize(path).map_err(|e| format!("{one}: {e}"))?;
+            let body = std::fs::read_to_string(&abs).map_err(|e| format!("{one}: {e}"))?;
+            let label = slug(&abs.file_stem().unwrap_or_default().to_string_lossy());
+            return Ok((format!("Source Obsidian note: {}\n\n{}", abs.display(), body.trim_end()), label));
+        }
+    }
+    Ok((words.join(" "), String::new()))
+}
+
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some(spawn::CHILD_FLAG) {
+        return spawn::child(&argv[2..]);
+    }
+    let cli = match parse_cli() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("oc: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let (text, label) = match start_text(&cli.words) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("oc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cwd = cli.cwd.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ".".into());
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    let bg = ["OC_BG", "AL_BG", "JV_BG"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().and_then(|s| Rgb::parse(&s)))
+        .unwrap_or(Rgb(0x28, 0x2c, 0x34));
+    let mut app = App::new(Palette::new(bg), Opts { cwd, text, label });
+    if let Some((w, h)) = cli.snapshot {
+        return snapshot(app, w, h, &cli.keys);
+    }
+    if !spawn::in_herdr() {
+        eprintln!("oc: not inside a Herdr pane (HERDR_ENV isn't 1)");
+        return ExitCode::FAILURE;
+    }
+    if cli.drafts {
+        app.start_in_list();
+    }
+    match run(&mut app) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("oc: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(app: &mut App) -> io::Result<()> {
+    terminal::enable_raw_mode()?;
+    restore_on_panic();
+    // Before anything else reads input: the answers come back on stdin.
+    let probe = probe::probe();
+    let mouse = std::env::var("OC_MOUSE").is_ok_and(|v| matches!(v.as_str(), "1" | "on" | "yes" | "true"));
+    modes(true, probe.kitty_keys, mouse);
+    let (w, h) = terminal::size().unwrap_or((80, 24));
+    let cursor = probe.cursor.or_else(|| ratatui::crossterm::cursor::position().ok()).unwrap_or((0, 0));
+    let mut term = Inline::new(w, h, cursor);
+    let res = event_loop(app, &mut term);
+    app.flush();
+    let mut s = Vec::new();
+    term.clear(&mut s);
+    let mut out = io::stdout();
+    let _ = out.write_all(&s);
+    let _ = out.flush();
+    modes(false, probe.kitty_keys, mouse);
+    let _ = terminal::disable_raw_mode();
+    res
+}
+
+/// A panic leaves the terminal as it found it, then says what happened.
+fn restore_on_panic() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        modes(false, true, true);
+        let mut out = io::stdout();
+        let _ = out.write_all(b"\x1b[0m\x1b[?25h\r\n");
+        let _ = out.flush();
+        let _ = terminal::disable_raw_mode();
+        prev(info);
+    }));
+}
+
+/// The terminal modes oc turns on: bracketed paste (a pasted newline
+/// mustn't send the prompt); where the terminal has it, the kitty keyboard
+/// protocol's first level, so shift+Enter and ^⏎ arrive as themselves
+/// instead of as Enter; and with OC_MOUSE=1, mouse buttons and drags (not
+/// motion: every move would be an event to read).
+fn modes(on: bool, kitty: bool, mouse: bool) {
+    let mut s: Vec<u8> = Vec::new();
+    if on {
+        s.extend_from_slice(b"\x1b[?2004h");
+        if mouse {
+            s.extend_from_slice(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+        }
+        if kitty {
+            s.extend_from_slice(b"\x1b[>1u");
+        }
+    } else {
+        if kitty {
+            s.extend_from_slice(b"\x1b[<1u");
+        }
+        if mouse {
+            s.extend_from_slice(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+        }
+        s.extend_from_slice(b"\x1b[?2004l");
+    }
+    let mut out = io::stdout();
+    let _ = out.write_all(&s);
+    let _ = out.flush();
+}
+
+fn event_loop(app: &mut App, term: &mut Inline) -> io::Result<()> {
+    let mut out = io::stdout();
+    let mut dirty = true;
+    loop {
+        dirty |= app.tick();
+        let done = app.take_done();
+        if dirty || !done.is_empty() {
+            // What started printed above (the prompt drawn again under it,
+            // all landing at once), then only what changed in the prompt:
+            // for a key typed, its character.
+            let mut s = Vec::new();
+            let printed = !done.is_empty();
+            if printed {
+                s.extend_from_slice(b"\x1b[?2026h");
+            }
+            for n in done {
+                let b = ui::entry(app, &app.sent[n], term.width);
+                term.print_above(&mut s, &b);
+            }
+            app.layout(term.width, term.rows);
+            term.draw(&mut s, &ui::draw(app), app.cursor_cell());
+            if printed {
+                s.extend_from_slice(b"\x1b[?2026l");
+            }
+            if !s.is_empty() {
+                out.write_all(&s)?;
+                out.flush()?;
+            }
+            dirty = false;
+        }
+        // Keys wake it at once; the wait only paces what changes on its own.
+        if !event::poll(app.wait())? {
+            dirty |= app.idle();
+            continue;
+        }
+        // Drain everything queued (a paste's worth of keys, fast scrolling) before redrawing.
+        loop {
+            match event::read()? {
+                Event::Resize(w, h) => {
+                    let mut s = Vec::new();
+                    term.resize(&mut s, w, h);
+                    out.write_all(&s)?;
+                }
+                // Rows counted from the prompt's first line. Above it is
+                // the scrollback: only a drag from the prompt reaches there.
+                Event::Mouse(mut m) => {
+                    if m.row < term.top && !matches!(m.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_)) {
+                        continue;
+                    }
+                    m.row = m.row.saturating_sub(term.top);
+                    app.handle(Event::Mouse(m));
+                }
+                ev => match app.handle(ev) {
+                    Act::Quit => return Ok(()),
+                    Act::ClearScreen => {
+                        let mut s = Vec::new();
+                        term.clear_screen(&mut s);
+                        out.write_all(&s)?;
+                    }
+                    Act::None => {}
+                },
+            }
+            dirty = true;
+            if !event::poll(Duration::ZERO)? {
+                break;
+            }
+        }
+    }
+}
+
+// ---- --snapshot --------------------------------------------------------------
+
+/// `oc --snapshot WxH [--keys …]`: play keys on a WxH terminal, then print
+/// what oc would have printed above the prompt and the prompt itself, as
+/// plain text. Nothing is sent: a send counts as started, and what it would
+/// have sent goes to stderr, with where the terminal's cursor would be.
+fn snapshot(mut app: App, w: u16, h: u16, keys: &str) -> ExitCode {
+    app.live = false;
+    app.layout(w, h);
+    let mut above = Vec::new();
+    for ev in parse_keys(keys) {
+        match app.handle(ev) {
+            Act::Quit => {
+                eprintln!("quit");
+                break;
+            }
+            Act::ClearScreen => above.clear(),
+            Act::None => {}
+        }
+        app.tick();
+        for n in app.take_done() {
+            let b = ui::entry(&app, &app.sent[n], w);
+            above.extend((0..b.area.height).map(|y| term::plain(&b, y)));
+        }
+        app.layout(w, h);
+    }
+    if let Some(t) = &app.would_send {
+        eprintln!("sent: {t:?}");
+    }
+    if let Some(t) = &app.would_copy {
+        eprintln!("copied: {t:?}");
+    }
+    if let Some((x, y)) = app.cursor_cell() {
+        eprintln!("cursor: {x},{y}");
+    }
+    let b = ui::draw(&app);
+    for line in above.into_iter().chain((0..b.area.height).map(|y| term::plain(&b, y))) {
+        println!("{line}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// `<P40,5>` press the left button at column 40, row 5 (0-based cells,
+/// rows from the prompt's first line);
+/// `D` drags there, `R` releases, `W`/`w` wheel up/down.
+fn mouse_tok(t: &str) -> Option<Event> {
+    let kind = match t.as_bytes().first()? {
+        b'P' => MouseEventKind::Down(MouseButton::Left),
+        b'D' => MouseEventKind::Drag(MouseButton::Left),
+        b'R' => MouseEventKind::Up(MouseButton::Left),
+        b'W' => MouseEventKind::ScrollUp,
+        b'w' => MouseEventKind::ScrollDown,
+        _ => return None,
+    };
+    let (x, y) = t[1..].split_once(',')?;
+    Some(Event::Mouse(MouseEvent { kind, column: x.parse().ok()?, row: y.parse().ok()?, modifiers: KeyModifiers::NONE }))
+}
+
+/// `abc<S-CR><C-p><BackTab>` style key sequences (modifiers stack:
+/// `<M-S-Left>`), plus mouse tokens (`mouse_tok`) and `<paste:text>`.
+fn parse_keys(s: &str) -> Vec<Event> {
+    let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
+    let mut out = Vec::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '<' {
+            let mods = if c.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
+            out.push(key(KeyCode::Char(c), mods));
+            continue;
+        }
+        let tok: String = chars.by_ref().take_while(|&d| d != '>').collect();
+        if let Some(ev) = mouse_tok(&tok) {
+            out.push(ev);
+            continue;
+        }
+        if let Some(text) = tok.strip_prefix("paste:") {
+            out.push(Event::Paste(text.replace("\\n", "\n")));
+            continue;
+        }
+        // Modifiers first, vim's way: C- ctrl, M- alt, S- shift, D- super (⌘).
+        let (mut name, mut mods) = (tok.as_str(), KeyModifiers::NONE);
+        while name.len() > 2 && name.as_bytes()[1] == b'-' {
+            mods |= match name.as_bytes()[0] {
+                b'C' => KeyModifiers::CONTROL,
+                b'M' => KeyModifiers::ALT,
+                b'S' => KeyModifiers::SHIFT,
+                b'D' => KeyModifiers::SUPER,
+                _ => break,
+            };
+            name = &name[2..];
+        }
+        let code = match name {
+            "CR" | "Enter" => KeyCode::Enter,
+            "Esc" => KeyCode::Esc,
+            "Tab" => KeyCode::Tab,
+            "BackTab" => KeyCode::BackTab,
+            "PgUp" => KeyCode::PageUp,
+            "PgDn" => KeyCode::PageDown,
+            "BS" => KeyCode::Backspace,
+            "Del" => KeyCode::Delete,
+            "Down" => KeyCode::Down,
+            "Up" => KeyCode::Up,
+            "Left" => KeyCode::Left,
+            "Right" => KeyCode::Right,
+            "Home" => KeyCode::Home,
+            "End" => KeyCode::End,
+            "Space" => KeyCode::Char(' '),
+            "lt" => KeyCode::Char('<'),
+            n if n.chars().count() == 1 && mods != KeyModifiers::NONE => KeyCode::Char(n.chars().next().unwrap_or(' ')),
+            _ => continue,
+        };
+        out.push(key(code, mods));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugs_like_the_shell() {
+        assert_eq!(slug("Fix Header (mobile)"), "fix_header_mobile");
+        assert_eq!(slug("__a--b__"), "a_b");
+        assert_eq!(slug("a very long note name that goes on and on"), "a_very_long_note_name_that_g");
+    }
+}

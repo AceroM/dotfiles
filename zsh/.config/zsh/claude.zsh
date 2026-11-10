@@ -559,20 +559,3 @@ if (windowMode) {
 }
 TSEOF
 }
-
-# New Herdr tab in the current space and cwd, running claude with the note's
-# path and contents as the opening prompt. The tab is labeled after the note's filename.
-function oc() {
-  local note="${1:A}"
-  [[ -f "$note" ]] || { print -u2 "usage: oc <note.md>"; return 1 }
-  _h_guard || return 1
-
-  local label; label="$(_h_slug "${note:t:r}")"
-  local pane
-  pane="$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$PWD" \
-    --label "${label[1,28]}" --focus | jq -r '.result.root_pane.pane_id')"
-  [[ -n "$pane" && "$pane" != null ]] || { print -u2 "oc: tab create failed"; return 1 }
-
-  local preamble="Source Obsidian note: $note"
-  herdr pane run "$pane" "claude --dangerously-skip-permissions \"\$(printf '%s\\n\\n' ${(q)preamble}; cat ${(q)note})\""
-}
