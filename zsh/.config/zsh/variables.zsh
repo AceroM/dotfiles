@@ -3,6 +3,10 @@ PATH="$PATH:/Applications/WezTerm.app/Contents/MacOS"
 # Claude Code checks VISUAL first, then EDITOR.
 export EDITOR="nvim"
 export VISUAL="nvim"
+# Pin emacs keys. zsh picks vi mode by itself when EDITOR/VISUAL contain "vi"
+# at startup, so any shell that inherits the export above (every Herdr pane,
+# once the server was started from a shell) loses alt+backspace, ctrl+a/e, etc.
+bindkey -e
 DROP_TABLES_SQL="DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
 # Shared adjective/noun pools for tmux/Claude session names.

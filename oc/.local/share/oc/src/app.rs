@@ -1,6 +1,8 @@
-//! State, keys and the mouse. One prompt, as `claude >` and `codex ›` have:
-//! write it (as many lines as it takes, images pasted in), ⏎ starts the
-//! agent with it in a new Herdr tab, and the prompt empties for the next one.
+//! State, keys and the mouse. One prompt, as `claude >` has, named for the
+//! configuration ⏎ starts (`claude(opus) >`, config.rs; ⇧tab the next one,
+//! ^1…^9 the Nth): write it (as many lines as it takes, images pasted in), ⏎
+//! starts that agent with it in a new Herdr tab, and the prompt empties for
+//! the next one.
 //! A pasted image is an `[Image #N]` tag in the text, its file listed at the
 //! end of what's sent; it isn't drawn.
 //!
@@ -18,6 +20,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
+use crate::config::Agent;
 use crate::drafts::{self, Draft};
 use crate::field::{self, Field};
 use crate::spawn::{self, Outcome};
@@ -46,10 +49,14 @@ pub enum Act {
 /// Prompts kept for ↑, the newest last.
 const HISTORY: usize = 500;
 
-/// A prompt sent: its agent, its text, and how the start went (None while
-/// it's starting).
+/// Narrower than this many columns of text, the prompt shows `>` only, not
+/// the configuration's name.
+const NAMED_MIN_TEXT: usize = 20;
+
+/// A prompt sent: its agent (the configuration's name, or `↳tab` for a
+/// reply), its text, and how the start went (None while it's starting).
 pub struct Sent {
-    pub kind: String,
+    pub name: String,
     pub text: String,
     pub plan: bool,
     pub outcome: Option<Outcome>,
@@ -61,7 +68,7 @@ pub struct Lay {
     /// The terminal's size.
     pub width: u16,
     pub screen_h: u16,
-    /// Where the text's rows go (the prompt glyph is left of them).
+    /// Where the text's rows go (the prompt's name and glyph are left of them).
     pub text: Rect,
     /// All of it: the text, a toast, what's starting.
     pub height: u16,
@@ -88,6 +95,11 @@ pub struct Opts {
     pub text: String,
     /// The first tab's label (a note's name); empty leaves it to Herdr.
     pub label: String,
+    /// The configurations (config.rs), and the one to start on.
+    pub agents: Vec<Agent>,
+    pub start: usize,
+    /// Said in a toast at the start: what was wrong with the config file.
+    pub notice: Option<String>,
 }
 
 pub struct App {
@@ -97,9 +109,9 @@ pub struct App {
     pub images: Vec<PathBuf>,
     pub cwd: PathBuf,
     pub label: String,
-    pub agents: Vec<(String, Vec<String>)>,
-    /// Which of `agents` ⏎ starts (shift+tab).
-    pub kind: usize,
+    pub agents: Vec<Agent>,
+    /// Which of `agents` ⏎ starts (⇧tab the next, ^1…^9 the Nth).
+    pub agent: usize,
     /// ^p: it goes as `/plan …`.
     pub plan: bool,
     /// What ^c or esc esc cleared, or ⏎ sent: ^z brings it back.
@@ -128,7 +140,7 @@ pub struct App {
     /// The draft being written was opened from the list: esc goes back there.
     from_list: bool,
     /// The prompt that was being written when a draft took its place: its
-    /// text, images, agent and plan mode. Back when the draft is left.
+    /// text, images, configuration and plan mode. Back when the draft is left.
     aside: Option<(Field, Vec<PathBuf>, usize, bool)>,
     /// The draft `x` deleted last: `u` brings it back.
     undo: Option<Draft>,
@@ -146,7 +158,7 @@ pub struct App {
     pub scroll: usize,
     /// The cursor, text and width the view last followed: the wheel can
     /// leave the cursor out of view until it moves.
-    followed: Option<(usize, usize, Option<usize>, u16, u16)>,
+    followed: Option<(usize, usize, Option<usize>, usize, u16)>,
     /// A press in the text: the span it took, and how many presses in a row.
     press: Option<(Range<usize>, u8)>,
     last_press: Option<(Instant, u16, u16, u8)>,
@@ -161,14 +173,17 @@ impl App {
         let (sent_tx, sent_rx) = mpsc::channel();
         let mut field = Field { text: opts.text, ..Default::default() };
         field.end();
+        let toast = opts.notice.map(|m| (m, false, Instant::now()));
+        let agents = if opts.agents.is_empty() { crate::config::defaults() } else { opts.agents };
+        let agent = opts.start.min(agents.len() - 1);
         App {
             pal,
             field,
             images: Vec::new(),
             cwd: opts.cwd,
             label: opts.label,
-            agents: spawn::agents(),
-            kind: 0,
+            agents,
+            agent,
             plan: false,
             cleared: None,
             killed: String::new(),
@@ -186,7 +201,7 @@ impl App {
             aside: None,
             undo: None,
             last_key: Instant::now(),
-            toast: None,
+            toast,
             sent: Vec::new(),
             done: Vec::new(),
             sent_tx,
@@ -203,8 +218,27 @@ impl App {
         }
     }
 
-    pub fn kind(&self) -> &str {
-        &self.agents[self.kind].0
+    /// The configuration ⏎ starts.
+    pub fn agent(&self) -> &Agent {
+        &self.agents[self.agent]
+    }
+
+    /// What's left of the text on its first row: the configuration ⏎
+    /// starts, then `>` (`◇` in a draft): `claude(opus) >`. A reply, which
+    /// goes to an agent already running, is `◇` only; so is a terminal
+    /// too narrow for the name.
+    pub fn prefix(&self) -> String {
+        self.prefix_at(self.lay.width)
+    }
+
+    fn prefix_at(&self, width: u16) -> String {
+        let glyph = if self.editing.is_some() { "◇" } else { ">" };
+        let name = &self.agent().name;
+        let reply = self.editing.as_ref().is_some_and(|d| d.reply.is_some());
+        if reply || (width as usize) < name.width() + 4 + NAMED_MIN_TEXT {
+            return glyph.to_string();
+        }
+        format!("{name} {glyph}")
     }
 
     pub fn toast(&mut self, m: impl Into<String>, ok: bool) {
@@ -213,18 +247,20 @@ impl App {
 
     // ---- layout ------------------------------------------------------------
 
-    /// The columns the text wraps to on a terminal `w` wide: less the `> `
-    /// gutter, a column for the cursor past a full row, and the last column,
-    /// left alone (writing there leaves the terminal waiting to wrap).
-    fn text_width(w: u16) -> usize {
-        (w as usize).saturating_sub(4).max(4)
+    /// The columns the text wraps to on a terminal `w` wide: less the
+    /// `claude(opus) > ` gutter, a column for the cursor past a full row, and
+    /// the last column, left alone (writing there leaves the terminal
+    /// waiting to wrap).
+    fn text_width(&self, w: u16) -> usize {
+        let gutter = self.prefix_at(w).width() + 1;
+        (w as usize).saturating_sub(gutter + 2).max(4)
     }
 
     /// Lay the prompt out for a `width`×`screen_h` terminal: its text's rows,
     /// as many as there are up to the screen, scrolled to keep the cursor in
     /// view; under them a toast and what's starting, when there are.
     pub fn layout(&mut self, width: u16, screen_h: u16) {
-        let tw = Self::text_width(width);
+        let tw = self.text_width(width);
         let starting = self.sent.iter().filter(|s| s.outcome.is_none()).count();
         let extra = usize::from(self.toast.is_some()) + starting;
         // A line of what was there before stays in view.
@@ -243,6 +279,8 @@ impl App {
             } else if sel >= top + shown {
                 top = sel + 1 - shown;
             }
+            // The list has no name on the left: its text is as wide as `> `'s.
+            let tw = (width as usize).saturating_sub(4).max(4);
             let text = &self.drafts[sel].text;
             let rows = if text.trim().is_empty() { Vec::new() } else { field::word_rows(text, tw.saturating_sub(2).max(4)) };
             let fits = room.saturating_sub(shown + 1).min(PREVIEW_ROWS);
@@ -257,9 +295,10 @@ impl App {
         }
         self.rows = field::word_rows(&self.field.text, tw);
         let view = self.rows.len().clamp(1, room);
-        let text = Rect::new(2, 0, tw as u16, view as u16);
+        let gutter = self.prefix_at(width).width() as u16 + 1;
+        let text = Rect::new(gutter, 0, tw as u16, view as u16);
         self.lay = Lay { width, screen_h, text, height: (view + extra) as u16 };
-        self.follow(view);
+        self.follow(view, tw);
     }
 
     /// Something will change without a key: a send starting, a toast to
@@ -290,8 +329,8 @@ impl App {
 
     /// Keep the cursor's row in view when it moved or the text changed
     /// since last time.
-    fn follow(&mut self, view: usize) {
-        let now = (self.field.cur, self.field.text.len(), self.field.anchor, self.lay.width, view as u16);
+    fn follow(&mut self, view: usize, tw: usize) {
+        let now = (self.field.cur, self.field.text.len(), self.field.anchor, tw, view as u16);
         if self.followed != Some(now) {
             self.followed = Some(now);
             let cr = self.cursor_row();
@@ -433,8 +472,19 @@ impl App {
             KeyCode::Enter if ctrl => self.send(true),
             KeyCode::Char('o') if ctrl => self.send(true),
             KeyCode::Enter => self.send(false),
-            KeyCode::BackTab => self.cycle_kind(),
-            KeyCode::Tab if shift => self.cycle_kind(),
+            // ⇧tab: the next configuration (round to the first after the
+            // last); ^1…^9 the Nth, as config.toml lists them. ^digits come
+            // as themselves through the kitty keyboard protocol (main.rs).
+            KeyCode::BackTab => self.pick_agent(self.agent + 1),
+            KeyCode::Tab if shift => self.pick_agent(self.agent + 1),
+            KeyCode::Char(c @ '1'..='9') if ctrl && !alt => {
+                let n = c as usize - '1' as usize;
+                if n < self.agents.len() {
+                    self.pick_agent(n);
+                } else {
+                    self.toast(format!("there's no configuration {} · oc --config lists them", n + 1), false);
+                }
+            }
             KeyCode::Char('p') if ctrl => {
                 self.plan = !self.plan;
                 self.toast(if self.plan { "plan mode: sends `/plan …`" } else { "plan mode off" }, true);
@@ -455,7 +505,7 @@ impl App {
             // Field::key.)
             KeyCode::Up | KeyCode::Down if !alt && !sup => {
                 let up = k.code == KeyCode::Up;
-                let rows = field::word_rows(&self.field.text, Self::text_width(self.lay.width));
+                let rows = field::word_rows(&self.field.text, self.text_width(self.lay.width));
                 let row = rows.iter().rposition(|r| r.start <= self.field.cur).unwrap_or(0);
                 let edge = if up { row == 0 } else { row + 1 == rows.len() };
                 // (Not in a draft: what's recalled would be saved over it.)
@@ -546,10 +596,29 @@ impl App {
         }
     }
 
-    fn cycle_kind(&mut self) {
-        self.kind = (self.kind + 1) % self.agents.len();
-        let msg = format!("{} next", self.kind());
-        self.toast(msg, true);
+    /// Configuration `n` (round the list) is what ⏎ starts, and where oc
+    /// starts next time (config.rs). The prompt's name says so; no toast.
+    fn pick_agent(&mut self, n: usize) {
+        if self.editing.as_ref().is_some_and(|d| d.reply.is_some()) {
+            return self.toast("a reply goes to the agent it answers", false);
+        }
+        let n = n % self.agents.len();
+        if n != self.agent && self.live {
+            crate::config::remember(&self.agents[n].name);
+        }
+        self.agent = n;
+    }
+
+    /// Which configuration draft `d` starts: the one it names, else the
+    /// first of its kind. None when neither is configured.
+    fn agent_of(&self, d: &Draft) -> Option<usize> {
+        let by_name = d.config.as_ref().and_then(|n| self.agents.iter().position(|a| &a.name == n));
+        by_name.or_else(|| d.kind.as_ref().and_then(|k| self.agents.iter().position(|a| &a.kind == k)))
+    }
+
+    /// The name of the configuration draft `d` starts, for the list.
+    pub fn draft_agent(&self, d: &Draft) -> Option<&str> {
+        self.agent_of(d).map(|i| self.agents[i].name.as_str())
     }
 
     /// ⏎: start the agent with the prompt in a new tab (`focus`: and go
@@ -573,11 +642,11 @@ impl App {
         let prompt = if self.plan { format!("/plan {body}") } else { body };
         let images = self.images.clone();
         self.remember(&text, &images);
-        let kind = self.kind().to_string();
+        let agent = self.agent().clone();
         let n = self.sent.len();
-        self.sent.push(Sent { kind: kind.clone(), text: text.clone(), plan: self.plan, outcome: None });
+        self.sent.push(Sent { name: agent.name.clone(), text: text.clone(), plan: self.plan, outcome: None });
         if self.live {
-            spawn::send(n, &kind, &prompt, &self.cwd, &self.label, focus, self.sent_tx.clone());
+            spawn::send(n, &agent, &prompt, &self.cwd, &self.label, focus, self.sent_tx.clone());
         } else {
             // --snapshot: as if it started.
             self.would_send = Some(prompt);
@@ -655,12 +724,16 @@ impl App {
     }
 
     /// The draft being written as the prompt has it now: its text, images,
-    /// agent and plan mode.
+    /// configuration and plan mode.
     fn current(&self) -> Option<Draft> {
         let d = self.editing.as_ref()?;
         // A reply has no agent of its own to start.
-        let kind = if d.reply.is_some() { d.kind.clone() } else { Some(self.kind().to_string()) };
-        Some(Draft { text: self.field.text.clone(), images: self.images.clone(), kind, plan: self.plan, ..d.clone() })
+        let (kind, config) = if d.reply.is_some() {
+            (d.kind.clone(), d.config.clone())
+        } else {
+            (Some(self.agent().kind.clone()), Some(self.agent().name.clone()))
+        };
+        Some(Draft { text: self.field.text.clone(), images: self.images.clone(), kind, config, plan: self.plan, ..d.clone() })
     }
 
     /// Whether the draft being written has changes not saved yet.
@@ -698,8 +771,9 @@ impl App {
         let id = drafts::new_id();
         let text = self.field.text.clone();
         let images = if self.live { drafts::keep_images(&id, &text, &self.images) } else { self.images.clone() };
-        let (cwd, kind, plan) = (self.cwd.clone(), Some(self.kind().to_string()), self.plan);
-        let d = Draft { id, workspace, space, cwd, text, images: images.clone(), created: drafts::now(), reply: None, kind, plan };
+        let (cwd, plan) = (self.cwd.clone(), self.plan);
+        let (kind, config) = (Some(self.agent().kind.clone()), Some(self.agent().name.clone()));
+        let d = Draft { id, workspace, space, cwd, text, images: images.clone(), created: drafts::now(), reply: None, kind, config, plan };
         if !self.store_draft(d.clone()) {
             return;
         }
@@ -735,8 +809,8 @@ impl App {
 
     /// The prompt set aside for a draft, back (when there's one).
     fn restore_aside(&mut self) {
-        if let Some((f, images, kind, plan)) = self.aside.take() {
-            (self.field, self.images, self.kind, self.plan) = (f, images, kind, plan);
+        if let Some((f, images, agent, plan)) = self.aside.take() {
+            (self.field, self.images, self.agent, self.plan) = (f, images, agent, plan);
         }
     }
 
@@ -755,11 +829,11 @@ impl App {
                 self.sync_draft();
             }
         } else if self.aside.is_none() && !self.field.text.trim().is_empty() {
-            self.aside = Some((std::mem::take(&mut self.field), std::mem::take(&mut self.images), self.kind, self.plan));
+            self.aside = Some((std::mem::take(&mut self.field), std::mem::take(&mut self.images), self.agent, self.plan));
         }
         self.show(d.text.clone(), d.images.clone());
-        if let Some(i) = d.kind.as_ref().and_then(|k| self.agents.iter().position(|a| &a.0 == k)) {
-            self.kind = i;
+        if let Some(i) = self.agent_of(&d) {
+            self.agent = i;
         }
         self.plan = d.plan;
         (self.hist_at, self.draft, self.cleared, self.scroll) = (None, None, None, 0);
@@ -828,7 +902,7 @@ impl App {
         let done = |m: &str| (format!("→ {m}"), true);
         match to {
             Some((pane, label)) => {
-                self.sent.push(Sent { kind: format!("↳{label}"), text: text.to_string(), plan: d.plan, outcome: None });
+                self.sent.push(Sent { name: format!("↳{label}"), text: text.to_string(), plan: d.plan, outcome: None });
                 if self.live {
                     spawn::reply(n, &pane, &prompt, self.sent_tx.clone());
                 } else {
@@ -837,10 +911,10 @@ impl App {
                 }
             }
             None => {
-                let kind = d.kind.clone().filter(|k| self.agents.iter().any(|a| &a.0 == k)).unwrap_or_else(|| self.agents[0].0.clone());
-                self.sent.push(Sent { kind: kind.clone(), text: text.to_string(), plan: d.plan, outcome: None });
+                let agent = self.agents[self.agent_of(d).unwrap_or(0)].clone();
+                self.sent.push(Sent { name: agent.name.clone(), text: text.to_string(), plan: d.plan, outcome: None });
                 if self.live {
-                    spawn::send(n, &kind, &prompt, &d.cwd, "", focus, self.sent_tx.clone());
+                    spawn::send(n, &agent, &prompt, &d.cwd, "", focus, self.sent_tx.clone());
                 } else {
                     self.would_send = Some(prompt);
                     let _ = self.sent_tx.send((n, done(if focus { "tab snapshot (went there)" } else { "tab snapshot" })));
@@ -897,11 +971,23 @@ impl App {
                 }
                 None => self.toast("no deleted draft to bring back", false),
             },
-            // A new one, empty, to write.
+            // A new one, empty, to write, on the configuration the prompt is on.
             KeyCode::Char('d') => {
                 let (workspace, space) = self.scope();
-                let (cwd, kind) = (self.cwd.clone(), Some(self.agents[0].0.clone()));
-                let d = Draft { id: drafts::new_id(), workspace, space, cwd, text: String::new(), images: Vec::new(), created: drafts::now(), reply: None, kind, plan: false };
+                let (cwd, kind, config) = (self.cwd.clone(), Some(self.agent().kind.clone()), Some(self.agent().name.clone()));
+                let d = Draft {
+                    id: drafts::new_id(),
+                    workspace,
+                    space,
+                    cwd,
+                    text: String::new(),
+                    images: Vec::new(),
+                    created: drafts::now(),
+                    reply: None,
+                    kind,
+                    config,
+                    plan: false,
+                };
                 if self.store_draft(d.clone()) {
                     self.edit_draft(d, true);
                 }
@@ -1171,7 +1257,8 @@ mod tests {
     use crate::theme::Rgb;
 
     fn app(text: &str) -> App {
-        let mut a = App::new(Palette::new(Rgb(0x28, 0x2c, 0x34)), Opts { cwd: "/tmp".into(), text: text.into(), label: String::new() });
+        let opts = Opts { cwd: "/tmp".into(), text: text.into(), label: String::new(), agents: crate::config::defaults(), start: 0, notice: None };
+        let mut a = App::new(Palette::new(Rgb(0x28, 0x2c, 0x34)), opts);
         a.live = false;
         a
     }
@@ -1344,12 +1431,17 @@ mod tests {
         let mut a = app("");
         a.field = Field { text: "look at [Image #1] here\nand this".into(), ..Default::default() };
         a.layout(60, 30);
-        // 60 wide: 56 columns of text, after `> `; nothing over or under it.
-        assert_eq!((a.lay.text, a.lay.height), (Rect::new(2, 0, 56, 2), 2));
-        assert_eq!(a.cursor_cell(), Some((2, 0)));
+        // 60 wide: 43 columns of text, after `claude(opus) > `; nothing over
+        // or under it.
+        assert_eq!(a.prefix(), "claude(opus) >");
+        assert_eq!((a.lay.text, a.lay.height), (Rect::new(15, 0, 43, 2), 2));
+        assert_eq!(a.cursor_cell(), Some((15, 0)));
         a.field.end();
         a.layout(60, 30);
-        assert_eq!(a.cursor_cell(), Some((10, 1)));
+        assert_eq!(a.cursor_cell(), Some((23, 1)));
+        // Too narrow for the name: `>` only, as before.
+        a.layout(30, 30);
+        assert_eq!((a.prefix().as_str(), a.lay.text), (">", Rect::new(2, 0, 26, 2)));
         // A toast takes a line under it.
         a.toast("hi", true);
         a.layout(60, 30);
@@ -1362,7 +1454,58 @@ mod tests {
         a.layout(60, 10);
         // 9 rows (one left for what was above); the cursor on the last.
         assert_eq!((a.lay.text.height, a.scroll), (9, 32));
-        assert_eq!(a.cursor_cell(), Some((2, 8)));
+        assert_eq!(a.cursor_cell(), Some((15, 8)));
+    }
+
+    #[test]
+    fn shift_tab_and_ctrl_digits_pick_the_configuration() {
+        let mut a = app("fix it");
+        a.layout(80, 30);
+        assert_eq!(a.prefix(), "claude(opus) >");
+        press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+        a.layout(80, 30);
+        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("claude(fable) >", 16));
+        press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+        a.layout(80, 30);
+        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("codex >", 8));
+        // Round to the first.
+        press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(a.agent().name, "claude(opus)");
+        press(&mut a, KeyCode::Char('3'), KeyModifiers::CONTROL);
+        assert_eq!(a.agent().name, "codex");
+        press(&mut a, KeyCode::Char('2'), KeyModifiers::CONTROL);
+        assert_eq!(a.agent().name, "claude(fable)");
+        // Nothing typed, and no configuration 7: it stays.
+        press(&mut a, KeyCode::Char('7'), KeyModifiers::CONTROL);
+        assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("claude(fable)", "fix it"));
+        assert!(a.toast.as_ref().is_some_and(|t| !t.1));
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.sent[0].name, "claude(fable)");
+    }
+
+    #[test]
+    fn a_draft_keeps_its_configuration() {
+        let mut a = app("on fable");
+        press(&mut a, KeyCode::Char('2'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!((a.drafts[0].kind.as_deref(), a.drafts[0].config.as_deref()), (Some("claude"), Some("claude(fable)")));
+        a.layout(80, 30);
+        assert_eq!(a.prefix(), "claude(fable) ◇");
+        // Switched while it's written: saved with it.
+        press(&mut a, KeyCode::Char('3'), KeyModifiers::CONTROL);
+        a.sync_draft();
+        assert_eq!(a.drafts[0].config.as_deref(), Some("codex"));
+        press(&mut a, KeyCode::Char('2'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        // Back on the first; opening the draft goes back to fable.
+        press(&mut a, KeyCode::Char('1'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(a.agent().name, "claude(fable)");
+        // One al saved (no config): the first of its kind.
+        a.drafts[0].config = None;
+        a.drafts[0].kind = Some("codex".into());
+        assert_eq!(a.agent_of(&a.drafts[0].clone()), Some(2));
     }
 
     #[test]

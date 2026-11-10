@@ -1,5 +1,6 @@
-//! What oc draws: `> ` (Codex's `›` for codex, yellow in plan mode) and the
-//! text in the terminal's own color, `[Image #N]` tags in blue; under it a
+//! What oc draws: the configuration ⏎ starts and `>` (`claude(opus) >`,
+//! yellow in plan mode), then the text in the terminal's own color,
+//! `[Image #N]` tags in blue; under it a
 //! toast and what's starting, only when there are. Nothing else, so a key
 //! changes as few cells as it can (term.rs writes only those). Each send,
 //! once started, is printed above in the scrollback: the prompt as it went,
@@ -48,15 +49,6 @@ fn truncate(s: &str, w: usize) -> String {
     }
     out.push('…');
     out
-}
-
-/// The prompt's glyph: Claude Code's `>`, Codex's `›`.
-fn glyph(kind: &str) -> &'static str {
-    if kind == "codex" {
-        "›"
-    } else {
-        ">"
-    }
 }
 
 /// Row `r` of `text` at (x, y) in `st`, its `[Image #N]` tags in `tag`.
@@ -108,9 +100,8 @@ fn lines(app: &App, buf: &mut Buffer) {
     for (r, row) in app.rows.iter().enumerate().skip(app.scroll).take(t.height as usize) {
         let y = t.y + (r - app.scroll) as u16;
         if r == 0 {
-            // A draft's prompt is al's ◇.
-            let g = if app.editing.is_some() { "◇" } else { glyph(app.kind()) };
-            put(buf, 0, y, max, g, fg(if app.plan { p.yellow } else { p.muted }));
+            // `claude(opus) >`; a draft's glyph is al's ◇.
+            put(buf, 0, y, max, &app.prefix(), fg(if app.plan { p.yellow } else { p.muted }));
         }
         let x_end = text_row(buf, t.x, y, max, text, row.clone(), Style::new(), p.accent);
         // The selection lit; a selected line break shows as a cell past the
@@ -149,9 +140,13 @@ fn list(app: &App, buf: &mut Buffer, sel: usize) {
         if on {
             put(buf, 0, y, max, "▸", fg(p.accent));
         }
-        // Its folder (and codex), at the right, when there's room.
+        // Its folder (and its configuration, when it isn't the first), at
+        // the right, when there's room.
         let folder = d.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let side = if d.kind.as_deref() == Some("codex") && d.reply.is_none() { format!("codex · {folder}") } else { folder };
+        let side = match app.draft_agent(d) {
+            Some(name) if d.reply.is_none() && name != app.agents[0].name => format!("{name} · {folder}"),
+            _ => folder,
+        };
         let side_w = side.width() as u16;
         let text_max = if max > side_w + 24 { max - side_w - 2 } else { max };
         let mut x = put(buf, 2, y, text_max, "◇ ", fg(if d.plan { p.yellow } else { p.dim }));
@@ -202,7 +197,7 @@ fn starting(app: &App, buf: &mut Buffer, y0: u16) {
     let rows = app.sent.iter().filter(|s| s.outcome.is_none());
     for (y, s) in (y0..buf.area.bottom()).zip(rows) {
         let mut x = put(buf, 2, y, max, "• ", fg(p.yellow));
-        x = put(buf, x, y, max, &s.kind, fg(p.accent));
+        x = put(buf, x, y, max, &s.name, fg(p.accent));
         x = put(buf, x, y, max, " · ", fg(p.dim));
         let room = max.saturating_sub(x + 14) as usize;
         x = put(buf, x, y, max, &truncate(&field::first_line(&s.text), room), fg(p.muted));
@@ -225,7 +220,7 @@ pub fn entry(app: &App, s: &Sent, width: u16) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, w, h as u16));
     for (i, r) in rows.iter().take(shown).enumerate() {
         if i == 0 {
-            put(&mut buf, 0, 0, w, glyph(&s.kind), fg(p.muted));
+            put(&mut buf, 0, 0, w, ">", fg(p.muted));
         }
         text_row(&mut buf, 2, i as u16, w, &s.text, r.clone(), fg(p.muted), p.accent);
     }
@@ -237,7 +232,7 @@ pub fn entry(app: &App, s: &Sent, width: u16) -> Buffer {
     let x = put(&mut buf, 2, y, w, "⎿  ", fg(p.dim));
     match &s.outcome {
         Some((m, true)) => {
-            let mut x = put(&mut buf, x, y, w, &s.kind, fg(p.accent));
+            let mut x = put(&mut buf, x, y, w, &s.name, fg(p.accent));
             if s.plan {
                 x = put(&mut buf, x, y, w, " · plan", fg(p.yellow));
             }

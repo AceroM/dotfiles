@@ -56,6 +56,9 @@ pub struct Draft {
     pub reply: Option<ReplyTo>,
     /// The kind of agent a new one is: claude, codex. None: the default.
     pub kind: Option<String>,
+    /// oc's configuration of it, by name (`claude(fable)`; config.rs). al
+    /// doesn't keep it: without it, the first configuration of `kind`.
+    pub config: Option<String>,
     /// It goes as `/plan …`.
     pub plan: bool,
 }
@@ -77,6 +80,7 @@ impl Draft {
             "created": self.created,
             "reply": self.reply.as_ref().map(ReplyTo::to_json),
             "kind": self.kind,
+            "config": self.config,
             "plan": self.plan,
         })
     }
@@ -93,6 +97,7 @@ impl Draft {
             created: v["created"].as_u64().unwrap_or(0),
             reply: ReplyTo::from_json(&v["reply"]),
             kind: s("kind"),
+            config: s("config"),
             plan: v["plan"].as_bool().unwrap_or(false),
         })
     }
@@ -217,6 +222,7 @@ mod tests {
             created: 1,
             reply: None,
             kind: Some("codex".into()),
+            config: Some("codex".into()),
             plan: true,
         };
         assert_eq!(Draft::from_json(&d.to_json()), Some(d.clone()));

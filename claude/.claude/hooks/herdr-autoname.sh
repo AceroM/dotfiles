@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Label the herdr tab (or this pane, when the tab is shared) after the chat's subject.
 #
-# Stop hook for both Claude Code (~/.claude/settings.json) and Codex (~/.codex/hooks.json).
+# Stop hook for both Claude Code (~/.claude/settings.json) and Codex (~/.codex/hooks.json);
+# Claude Code also runs it as an async PostToolUse hook so a chat is named mid first turn.
 # It summarizes the title each agent already generates into a cached short label —
 #   claude → last {"type":"ai-title"} entry in the transcript
 #   codex  → thread_name for the session in ~/.codex/session_index.jsonl
@@ -9,7 +10,8 @@
 #
 # Rules (from ~/.claude/CLAUDE.md "Name the work after the work"):
 #   - a cwd listed in HERDR_AUTONAME_COORDINATOR_DIRS (colon-separated, exact match) is a
-#     coordinator: never rename anything.
+#     coordinator: never rename anything. Either the session's current cwd or the pane's
+#     launch cwd matching counts, so a coordinator that cd's into a worktree stays one.
 #   - one chat in the tab (including editor/shell splits) → rename the tab;
 #     several chats → rename this pane only.
 #   - only overwrite a tab label that is herdr-generated (a bare number), one we set
@@ -39,11 +41,38 @@ inherited_session=${CODEX_THREAD_ID:-}
 session=$(field .session_id)
 [ -n "$inherited_session" ] && [ "$inherited_session" != "$session" ] && exit 0
 
+state_dir="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-autoname"
+mkdir -p "$state_dir/early" 2>/dev/null
+
+# PostToolUse (registered async) names a new chat during its first turn instead of
+# leaving the tab numbered until the first Stop. It does that once per session: mkdir
+# claims the session, and the claim is dropped only while there is no title yet, so the
+# next tool call retries. Stop keeps the label current from then on.
+early=""
+if [ "$(field .hook_event_name)" = PostToolUse ]; then
+  [ -n "$session" ] || exit 0
+  early="$state_dir/early/$(printf '%s' "$session" | tr -c 'A-Za-z0-9._-' '_')"
+  mkdir "$early" 2>/dev/null || exit 0
+else
+  find "$state_dir/early" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rmdir {} + 2>/dev/null
+fi
+
+# A coordinator stays one after it cd's into a worktree. The hook's cwd follows those
+# cd's, so also check the directory the pane was launched in (Herdr's pane cwd).
+pane=$(herdr pane get "$HERDR_PANE_ID" 2>/dev/null | jq -c '.result.pane // empty' 2>/dev/null)
 cwd=$(field .cwd); cwd=${cwd:-$PWD}
-case ":${HERDR_AUTONAME_COORDINATOR_DIRS:-}:" in
-  ::) ;;
-  *":${cwd%/}:"*) log "coordinator cwd, skipping"; exit 0 ;;
-esac
+launch_cwd=$(printf '%s' "$pane" | jq -r '.cwd // empty' 2>/dev/null)
+is_coordinator() {
+  [ -n "$1" ] || return 1
+  case ":${HERDR_AUTONAME_COORDINATOR_DIRS:-}:" in
+    ::) return 1 ;;
+    *":${1%/}:"*) return 0 ;;
+  esac
+  return 1
+}
+if is_coordinator "$cwd" || is_coordinator "$launch_cwd"; then
+  log "coordinator cwd ($cwd, launched in ${launch_cwd:-?}), skipping"; exit 0
+fi
 
 # --- title -------------------------------------------------------------------------
 title=""
@@ -56,17 +85,18 @@ if [ -z "$title" ] && [ -n "$session" ] && [ -f "$HOME/.codex/session_index.json
 fi
 if [ -z "$title" ]; then
   # Claude: "✳ Fix the thing" (glyph already stripped); Codex: "Fix the thing | <dir>"
-  title=$(herdr pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.terminal_title_stripped // empty')
+  title=$(printf '%s' "$pane" | jq -r '.terminal_title_stripped // empty' 2>/dev/null)
   title=${title%% | *}
   case "$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]')" in
     ""|"claude code"|claude|codex|*/*|*~*) title="" ;;
   esac
 fi
-[ -n "$title" ] || { log "no title yet"; exit 0; }
+if [ -z "$title" ]; then
+  [ -n "$early" ] && rmdir "$early" 2>/dev/null
+  log "no title yet"; exit 0
+fi
 
 # --- target ------------------------------------------------------------------------
-state_dir="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-autoname"
-mkdir -p "$state_dir" 2>/dev/null
 state="$state_dir/$(printf '%s' "$HERDR_PANE_ID" | tr ':/' '__')"
 mine=$(cat "$state" 2>/dev/null)
 

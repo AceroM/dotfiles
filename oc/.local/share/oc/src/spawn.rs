@@ -3,11 +3,8 @@
 //! `oc --start-agent …`, in its own process group, so quitting oc right after
 //! ⏎ still gets the agent its prompt.
 //!
-//! The agent is `claude --dangerously-skip-permissions` (the `c` alias), or,
-//! after shift+tab, `codex --no-daemon --yolo` (`cx`'s flags). `$OC_AGENT`
-//! (else al's `$AL_AGENT`, jv's `$JV_AGENT`) names the first one, e.g.
-//! `OC_AGENT="codex --yolo"`: the first word is Herdr's agent kind, the rest
-//! go to the agent.
+//! Which agent, and its arguments, is the configuration the prompt is on
+//! (config.rs).
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -20,58 +17,33 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// The agents shift+tab cycles through: Herdr's kind and the agent's own
-/// arguments.
-const AGENTS: [(&str, &[&str]); 2] = [
-    ("claude", &["--dangerously-skip-permissions"]),
-    // As `cx` runs it: in this process, not on Codex's background server.
-    ("codex", &["--no-daemon", "--yolo"]),
-];
+use crate::config::Agent;
 
-/// Internal: `oc --start-agent CWD KIND PROMPT LABEL FOCUS` does the Herdr calls.
+/// Internal: `oc --start-agent CWD KIND PROMPT LABEL FOCUS [ARGS…]` does the
+/// Herdr calls; ARGS go to the agent.
 pub const CHILD_FLAG: &str = "--start-agent";
 
 pub fn in_herdr() -> bool {
     std::env::var("HERDR_ENV").as_deref() == Ok("1")
 }
 
-/// The agents to start, the default first: Herdr's kind and the agent's own
-/// arguments. $OC_AGENT (else $AL_AGENT, $JV_AGENT) is the first, its
-/// arguments taking the place of that kind's own.
-pub fn agents() -> Vec<(String, Vec<String>)> {
-    let mut all: Vec<(String, Vec<String>)> =
-        AGENTS.iter().map(|(k, args)| (k.to_string(), args.iter().map(|a| a.to_string()).collect())).collect();
-    let env = ["OC_AGENT", "AL_AGENT", "JV_AGENT"].iter().find_map(|k| std::env::var(k).ok().filter(|s| !s.trim().is_empty()));
-    if let Some(env) = env {
-        let mut words = env.split_whitespace().map(String::from);
-        let kind = words.next().unwrap_or_default();
-        all.retain(|(k, _)| *k != kind);
-        all.insert(0, (kind, words.collect()));
-    }
-    all
-}
-
-/// Kind `kind`'s arguments: those `agents` gives it, else none.
-fn args_for(kind: &str) -> Vec<String> {
-    agents().into_iter().find(|(k, _)| k == kind).map(|(_, a)| a).unwrap_or_default()
-}
-
 /// One send, as the child reports it: its line, and whether it worked.
 pub type Outcome = (String, bool);
 
-/// Start agent `kind` with `prompt` in a new tab in `cwd`, in the
-/// background. `label` names the tab (empty: Herdr's, until the Stop hook
-/// names it); `focus` goes there. The outcome comes back on `tx`, tagged `n`.
-pub fn send(n: usize, kind: &str, prompt: &str, cwd: &Path, label: &str, focus: bool, tx: mpsc::Sender<(usize, Outcome)>) {
-    let args: Vec<OsString> = vec![
+/// Start `agent` with `prompt` in a new tab in `cwd`, in the background.
+/// `label` names the tab (empty: Herdr's, until the Stop hook names it);
+/// `focus` goes there. The outcome comes back on `tx`, tagged `n`.
+pub fn send(n: usize, agent: &Agent, prompt: &str, cwd: &Path, label: &str, focus: bool, tx: mpsc::Sender<(usize, Outcome)>) {
+    let mut args: Vec<OsString> = vec![
         CHILD_FLAG.into(),
         cwd.into(),
-        kind.into(),
+        agent.kind.as_str().into(),
         prompt.into(),
         label.into(),
         if focus { "1" } else { "0" }.into(),
     ];
-    let kind = kind.to_string();
+    args.extend(agent.args.iter().map(OsString::from));
+    let kind = agent.name.clone();
     thread::spawn(move || {
         let child = std::env::current_exe().and_then(|exe| {
             Command::new(exe)
@@ -96,8 +68,8 @@ pub fn send(n: usize, kind: &str, prompt: &str, cwd: &Path, label: &str, focus: 
 
 /// The `--start-agent` process: one line on stdout says how it went.
 pub fn child(args: &[String]) -> ExitCode {
-    let [cwd, kind, prompt, label, focus] = args else { return ExitCode::from(2) };
-    let res = start(kind, prompt, Path::new(cwd), label, focus == "1");
+    let [cwd, kind, prompt, label, focus, agent_args @ ..] = args else { return ExitCode::from(2) };
+    let res = start(kind, agent_args, prompt, Path::new(cwd), label, focus == "1");
     let _ = writeln!(std::io::stdout(), "{}", res.as_ref().unwrap_or_else(|e| e));
     if res.is_ok() {
         ExitCode::SUCCESS
@@ -106,7 +78,7 @@ pub fn child(args: &[String]) -> ExitCode {
     }
 }
 
-fn start(kind: &str, prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<String, String> {
+fn start(kind: &str, args: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<String, String> {
     let ws = std::env::var("HERDR_WORKSPACE_ID").map_err(|_| "not in a Herdr pane (no HERDR_WORKSPACE_ID)".to_string())?;
     let cwd = cwd.to_string_lossy();
     let mut cmd = vec!["tab", "create", "--workspace", &ws, "--cwd", &cwd, if focus { "--focus" } else { "--no-focus" }];
@@ -120,7 +92,6 @@ fn start(kind: &str, prompt: &str, cwd: &Path, label: &str, focus: bool) -> Resu
     // Agent names are [a-z][a-z0-9_-]{0,31}; pane IDs are unique, and their
     // only uppercase is base-36 digits, so lowercasing keeps them unique.
     let name = format!("{kind}-{}", pane.to_ascii_lowercase().replace(':', "-"));
-    let args = args_for(kind);
     let mut cmd = vec!["agent", "start", &name, "--kind", kind, "--pane", &pane];
     if !args.is_empty() {
         cmd.push("--");

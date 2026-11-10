@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod drafts;
 mod field;
 mod probe;
@@ -20,8 +21,8 @@ use term::Inline;
 use theme::{Palette, Rgb};
 
 const HELP: &str = "\
-oc — a `>` prompt made to type into fast: ⏎ starts claude (or codex) with it in a new
-Herdr tab, and the prompt empties for the next one. Drawn in place, writing only the
+oc — a `claude(opus) >` prompt made to type into fast: ⏎ starts that agent with it in a
+new Herdr tab, and the prompt empties for the next one. Drawn in place, writing only the
 cells a key changes; each send is printed above it.
 
 usage:
@@ -29,18 +30,20 @@ usage:
   oc NOTE              start from a note: its path and contents, the tab named after it
   oc TEXT…             start from TEXT
   oc -d, --drafts      start in the drafts list
+  oc --config          the configurations, and the keys to them
   --cwd DIR            where the agents start (default: here)
   -h, --help
 
 Runs inside a Herdr pane. The keys are al's box's:
   ⏎ sends (to a new tab, in the background) · ^⏎ or ^o sends and goes to the tab
-  ⇧⏎ ⌥⏎ ^j newline · ⇧tab claude ↔ codex · ^p plan mode (sends `/plan …`)
+  ⇧⏎ ⌥⏎ ^j newline · ^p plan mode (sends `/plan …`)
+  ⇧tab the next configuration (round to the first) · ^1 … ^9 the Nth
   ^v pastes the clipboard's image (⌘V too, with only an image on it); a file dragged
   in from Finder is attached. Either is an [Image #N] tag, its file listed at the end
   of what's sent (not drawn).
   The mouse is the terminal's (its own selecting and scrolling); OC_MOUSE=1 gives it
   to oc: a click puts the cursor there, a drag selects, the wheel scrolls a long prompt.
-  `>` is claude, `›` codex; yellow is plan mode.
+  Before `>` is the configuration ⏎ starts; yellow is plan mode.
   As in a shell: ^l clears the screen (the prompt kept), ↑ on the first row goes back
   through what was sent (↓ forward again), ^a ^e the line's start / end, ^u ^k ^w ⌥d
   delete (^y puts it back), ^b ^f ^h ^d ^t, ⌥← ⌥→ by word; ⌘↑ ⌘↓ (fn↑ fn↓) the text's
@@ -52,8 +55,15 @@ Drafts (al's: one written here waits in al's list too, and al's show up here):
   esc leaves it for later, ⏎ sends it (from the folder it was written in) and it goes
   ^g goes through this space's drafts: j k move · ⏎ sends (^⏎ ^o and goes there) ·
   e (l, r) edits · x ; deletes · u brings it back · d a new one · esc back to the prompt
-The agents are `claude --dangerously-skip-permissions` and `codex --no-daemon --yolo`;
-$OC_AGENT (else $AL_AGENT) names the first one, e.g. OC_AGENT=\"codex --yolo\".
+Configurations: ~/.config/oc/config.toml lists them, in order, as [[agent]] tables:
+  kind = \"claude\"     Herdr's agent kind, and the command (claude, codex)
+  model = \"fable\"     passed as --model fable; shown as claude(fable)
+  args = [\"…\"]        the agent's own arguments
+  name = \"…\"          shown instead of kind(model)
+Without the file: claude(opus) and claude(fable) (--dangerously-skip-permissions), then
+codex (--no-daemon --yolo). oc starts on the one picked last (kept in
+~/.local/state/oc/last-agent), else the first; $OC_AGENT names one instead
+(OC_AGENT=codex).
 ";
 
 struct Cli {
@@ -62,10 +72,11 @@ struct Cli {
     snapshot: Option<(u16, u16)>,
     keys: String,
     drafts: bool,
+    config: bool,
 }
 
 fn parse_cli() -> Result<Cli, String> {
-    let mut c = Cli { cwd: None, words: Vec::new(), snapshot: None, keys: String::new(), drafts: false };
+    let mut c = Cli { cwd: None, words: Vec::new(), snapshot: None, keys: String::new(), drafts: false, config: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -74,6 +85,7 @@ fn parse_cli() -> Result<Cli, String> {
                 std::process::exit(0);
             }
             "-d" | "--drafts" => c.drafts = true,
+            "--config" => c.config = true,
             "--cwd" => c.cwd = Some(args.next().ok_or("--cwd needs a folder")?.into()),
             // Hidden: render one frame as plain text after --keys, for UI work
             // without a terminal. Nothing is sent.
@@ -133,6 +145,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let (agents, notice) = config::load();
+    if cli.config {
+        return show_config(&agents, notice.as_deref());
+    }
     let (text, label) = match start_text(&cli.words) {
         Ok(t) => t,
         Err(e) => {
@@ -146,7 +162,8 @@ fn main() -> ExitCode {
         .iter()
         .find_map(|k| std::env::var(k).ok().and_then(|s| Rgb::parse(&s)))
         .unwrap_or(Rgb(0x28, 0x2c, 0x34));
-    let mut app = App::new(Palette::new(bg), Opts { cwd, text, label });
+    let (start, _) = config::start(&agents);
+    let mut app = App::new(Palette::new(bg), Opts { cwd, text, label, agents, start, notice });
     if let Some((w, h)) = cli.snapshot {
         return snapshot(app, w, h, &cli.keys);
     }
@@ -163,6 +180,36 @@ fn main() -> ExitCode {
             eprintln!("oc: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `oc --config`: where the configurations come from, and each one's key,
+/// name and command.
+fn show_config(agents: &[config::Agent], notice: Option<&str>) -> ExitCode {
+    let path = config::shorten(&config::file());
+    match notice {
+        Some(e) => println!("{e}\n"),
+        None if config::file().is_file() => println!("{path}\n"),
+        None => println!("{path} isn't there: the defaults\n"),
+    }
+    let (start, why) = config::start(agents);
+    let why = match why {
+        config::Why::Env => " ($OC_AGENT)",
+        config::Why::Last => " (picked last)",
+        config::Why::First => "",
+    };
+    let w = agents.iter().map(|a| unicode_width::UnicodeWidthStr::width(a.name.as_str())).max().unwrap_or(0);
+    for (i, a) in agents.iter().enumerate() {
+        let key = if i < 9 { format!("^{}", i + 1) } else { "  ".into() };
+        let first = if i == start { format!(" ← oc starts here{why}") } else { String::new() };
+        let pad = w - unicode_width::UnicodeWidthStr::width(a.name.as_str());
+        println!("  {key}  {}{}  {}{first}", a.name, " ".repeat(pad), a.command());
+    }
+    println!("\n⇧tab goes to the next one.");
+    if notice.is_some() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
