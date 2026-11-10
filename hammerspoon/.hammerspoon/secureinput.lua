@@ -5,8 +5,8 @@
 --
 --   - a 🔒 menu bar item shows while it's on; its menu names the holder and
 --     can lock the screen, which is what usually makes a stuck holder let go
---   - after HOLD_SECONDS a toast says who holds it (click it to lock), and
---     another says when it's released
+--   - a toast says who holds it (click it to lock) once it looks like a leak
+--     (see LEAK_SECONDS / FRONT_SECONDS), and another says when it's released
 --   - every on/off, wake, lock and unlock goes to LOG with the holder and the
 --     frontmost app, so the pattern behind it shows up over time:
 --       tail -50 ~/.cache/hammerspoon-secure-input.log
@@ -21,8 +21,12 @@ local toast = require("toast")
 local LOG = os.getenv("HOME") .. "/.cache/hammerspoon-secure-input.log"
 local POLL = 1 -- seconds; IsSecureEventInputEnabled is a cheap call
 -- Typing a password (sudo in Ghostty, a browser field) holds it legitimately,
--- so only toast once it has outlasted that.
-local HOLD_SECONDS = 10
+-- and then the holder is the app in front. A leak is a holder that isn't in
+-- front (a Chrome tab you left, Slack, loginwindow after unlock), so toast
+-- that quickly, and a holder in front only once it has outlasted any password
+-- (a leaking background tab in the Chrome window you're using looks like that).
+local LEAK_SECONDS = 15
+local FRONT_SECONDS = 120
 local ACCENT = { red = 0.9, green = 0.35, blue = 0.3 }
 
 -- The holder's pid and process name, from the root of the IORegistry only
@@ -92,11 +96,11 @@ local function hideMenu()
   M.menu = nil
 end
 
-local function warn()
+local function warn(reason)
   lookupHolder(function(holder)
     if not state.on then return end
     state.holder = holder or state.holder
-    log("stuck", describe(state.holder) .. " for " .. (os.time() - state.since) .. "s, front: " .. frontName())
+    log("stuck", describe(state.holder) .. " for " .. (os.time() - state.since) .. "s, " .. reason .. ", front: " .. frontName())
     toast.show("Held by " .. describe(state.holder) .. ". fn shortcuts are dead. Click to lock the screen; unlocking usually clears it.", {
       title = "Secure Input",
       accent = ACCENT,
@@ -106,18 +110,38 @@ local function warn()
   end)
 end
 
+-- true / false once the holder is known, nil while it isn't.
+local function holderInFront()
+  if not state.holder then return nil end
+  local app = hs.application.frontmostApplication()
+  return app ~= nil and app:pid() == state.holder.pid
+end
+
+local function maybeWarn()
+  if state.warned then return end
+  local now, inFront = os.time(), holderInFront()
+  if inFront == false then
+    state.awaySince = state.awaySince or now
+    if now - state.awaySince < LEAK_SECONDS then return end
+    state.warned = true
+    warn("not in front for " .. (now - state.awaySince) .. "s")
+  else
+    state.awaySince = nil
+    if now - state.since < FRONT_SECONDS then return end
+    state.warned = true
+    warn(inFront and "in front" or "holder unknown")
+  end
+end
+
 local function poll()
   local on = hs.eventtap.isSecureInputEnabled()
   if on == state.on then
-    if on and not state.warned and os.time() - state.since >= HOLD_SECONDS then
-      state.warned = true
-      warn()
-    end
+    if on then maybeWarn() end
     return
   end
   state.on = on
   if on then
-    state.since, state.holder, state.warned = os.time(), nil, false
+    state.since, state.holder, state.warned, state.awaySince = os.time(), nil, false, nil
     local front = frontName()
     showMenu()
     lookupHolder(function(holder)
