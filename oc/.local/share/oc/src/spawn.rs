@@ -158,9 +158,14 @@ pub fn agent_pane(pane: &str, session: Option<&str>) -> Option<String> {
     found.and_then(|p| p["pane_id"].as_str()).map(String::from)
 }
 
-/// Focus the exact agent returned by a successful send.
+/// Focus the exact agent returned by a successful send, and bring its tab up.
+/// Herdr 0.9.0's `agent focus` only moves the server's focus: the attached
+/// client stays on its tab until a `tab focus` (as hj and jev-focus do).
 pub fn focus(target: &str) -> Result<(), String> {
-    herdr(&["agent", "focus", target]).map(|_| ())
+    let out = herdr(&["agent", "focus", target])?;
+    let info: Value = serde_json::from_str(&out).map_err(|e| format!("agent focus: {e}"))?;
+    let tab = info["result"]["agent"]["tab_id"].as_str().ok_or("agent focus returned no tab")?;
+    herdr(&["tab", "focus", tab]).map(|_| ())
 }
 
 /// Run `herdr ARGS`: stdout on success, else the error's message.
