@@ -47,6 +47,7 @@
 --   fn+shift+r    becomes ctrl+alt+shift+r in Herdr: rename space
 --   fn+n          becomes ctrl+alt+n in Herdr: new tab
 --   fn+e          opens a tab immediately to the right of the current tab
+--   fn+shift+e    opens a tab as the first tab of the current space
 --   fn+shift+n    becomes ctrl+alt+shift+n in Herdr: new space
 --   fn+arrows     become ctrl+alt+arrows in Herdr: focus the pane that way.
 --                 macOS has already turned fn+arrow into home/end/pgup/pgdn
@@ -107,9 +108,10 @@ local remapped = {
   [keys.pageup] = keys.up, [keys.pagedown] = keys.down,
 }
 -- Keys whose shifted chord is handled too: forwarded (fn+shift+n ->
--- ctrl+alt+shift+n), fn+shift+a -> agents picker, or fn+shift+y -> copy the session id.
+-- ctrl+alt+shift+n), fn+shift+a -> agents picker, fn+shift+e -> new first tab, or
+-- fn+shift+y -> copy the session id.
 local shiftable = {
-  [keys.a] = true, [keys.j] = true, [keys.k] = true,
+  [keys.a] = true, [keys.e] = true, [keys.j] = true, [keys.k] = true,
   [keys.n] = true, [keys.q] = true, [keys.r] = true, [keys.w] = true, [keys.y] = true,
   [keys[";"]] = true, -- fn+shift+; -> sessions picker
 }
@@ -331,7 +333,7 @@ end
 
 -- The app's tab.new appends; move the new tab in right after the shown one.
 local appCreatingTab = false
-local function appNewTabNext()
+local function appNewTabNext(first)
   if appCreatingTab then return end
   appCreatingTab = true
   local function failed(what)
@@ -347,7 +349,7 @@ local function appNewTabNext()
     if not index then return failed() end
     appRun({ "do", "tab.new", "--space", space.id }, function(made)
       if not made or not made.tab then return failed() end
-      appRun({ "do", "tab.move", "--id", made.tab, "--index", tostring(index + 1) }, function(moved)
+      appRun({ "do", "tab.move", "--id", made.tab, "--index", tostring(first and 1 or index + 1) }, function(moved)
         if not moved then return failed() end
         appCreatingTab = false
       end)
@@ -486,8 +488,9 @@ local function focusAgentTab(target)
 end
 
 local creatingTab = false
-local function newTabNext()
-  if frontEnd() == HERDR_APP then return appNewTabNext() end
+-- first: put the new tab at the front of the space instead of beside the current tab.
+local function newTabNext(first)
+  if frontEnd() == HERDR_APP then return appNewTabNext(first) end
   if creatingTab then return end
   creatingTab = true
   local function failed(response)
@@ -521,7 +524,7 @@ local function newTabNext()
     }, function(created)
       local tab = created.result and created.result.tab
       if not tab then return failed(created) end
-      request("tab.move", { tab_id = tab.tab_id, insert_index = insertIndex }, function(moved)
+      request("tab.move", { tab_id = tab.tab_id, insert_index = first and 0 or insertIndex }, function(moved)
         if moved.error or not moved.result then return failed(moved) end
         request("tab.focus", { tab_id = tab.tab_id }, function(focused)
           if focused.error or not focused.result then return failed(focused) end
@@ -954,7 +957,7 @@ local function handleKey(event)
     return true
   elseif code == keys.e then
     if not herdrFocused() then return false end
-    if not autorepeat then newTabNext() end
+    if not autorepeat then newTabNext(flags.shift) end
     return true
   elseif code == keys.p then
     if not herdrFocused() then return false end
