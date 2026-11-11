@@ -28,11 +28,14 @@ pub fn run(mut app: App, w: u16, h: u16, keys: &str, out: Option<&str>) -> ExitC
     app.live = false;
     let area = Rect::new(0, 0, w, h);
     app.layout_for(area);
+    // jp: each key waits for the PR it lands on, so the frame shows a diff.
+    app.settle();
     for ev in parse_keys(keys) {
         if let Act::Quit = app.handle(ev) {
             break;
         }
         app.layout_for(area);
+        app.settle();
     }
     if let Some(t) = &app.copied {
         eprintln!("{t}");

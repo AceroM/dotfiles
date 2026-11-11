@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# jp — your recent PRs on the left, the selected one's diff on the right.
+# It's jv's PR mode (`jv --prs`): same diff view, keys and viewed marks.
+#   jp                       your PRs in this repo, newest activity first
+#   jp -o                    open ones only
+#   jp -a                    every repo
+#   jp review-requested:@me  PRs waiting on your review
+# jp -h for the rest.
+set -euo pipefail
+
+script="${BASH_SOURCE[0]}"
+while [[ -L "$script" ]]; do
+  dir="$(cd -P -- "$(dirname -- "$script")" && pwd)"
+  script="$(readlink "$script")"
+  [[ "$script" = /* ]] || script="$dir/$script"
+done
+exec "$(cd -P -- "$(dirname -- "$script")" && pwd)/jv" --prs "$@"

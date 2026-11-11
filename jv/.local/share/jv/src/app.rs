@@ -26,6 +26,9 @@ use crate::tree::{self, RowKind};
 use crate::ui;
 use crate::viewed::Viewed;
 
+mod prpane;
+pub use prpane::PrPane;
+
 /// Files with more changed lines than this start folded, like GitHub's
 /// "Large diffs are not rendered by default".
 pub const LARGE: usize = 1500;
@@ -52,6 +55,15 @@ pub enum Mode {
     Help,
     /// The `c` box: a prompt for an agent in a new Herdr tab.
     Ask,
+    /// Typing jp's PR list filter (`/` with the list focused).
+    PrFilter,
+}
+
+/// What jp's left pane shows. Plain jv is always `Files`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    Prs,
+    Files,
 }
 
 pub enum Act {
@@ -64,6 +76,8 @@ pub enum Act {
 #[derive(Default, Clone, Copy)]
 pub struct Lay {
     pub top: Rect,
+    /// jp: the left pane's header row (what the list shows, or `‹ PRs`).
+    pub head: Rect,
     pub tree: Rect,
     pub sep: Rect,
     pub diff: Rect,
@@ -216,6 +230,9 @@ pub struct App {
     pub ask_cwd: PathBuf,
     bg_tx: mpsc::Sender<String>,
     bg_rx: mpsc::Receiver<String>,
+    /// jp (`--prs`): the PR list, and which of it or the file tree is on the left.
+    pub prs: Option<PrPane>,
+    pub left: Left,
 }
 
 fn digits(n: u32) -> usize {
@@ -286,6 +303,8 @@ impl App {
             ask_cwd,
             bg_tx,
             bg_rx,
+            prs: None,
+            left: Left::Files,
         };
         app.rebuild_tree();
         app.rebuild_doc();
@@ -474,21 +493,31 @@ impl App {
         let main_h = h.saturating_sub(2);
         let top = Rect::new(0, 0, w, h.min(1));
         let status = Rect::new(0, h.saturating_sub(1), w, u16::from(h >= 2));
-        let (tree, sep, diff) = if self.show_tree && w >= 70 {
-            let tw = self.tree_fixed.unwrap_or(self.tree_w.min(w * 2 / 5)).clamp(16, w * 3 / 5);
-            (Rect::new(0, 1, tw, main_h), Rect::new(tw, 1, 1, main_h), Rect::new(tw + 1, 1, w - tw - 1, main_h))
+        let (head, tree, sep, diff) = if self.show_tree && w >= 70 {
+            // jp keeps one width for the list and the file tree, so going
+            // between them doesn't re-wrap the diff.
+            let auto = if self.prs.is_some() { (w / 3).clamp(44, 64) } else { self.tree_w.min(w * 2 / 5) };
+            let tw = self.tree_fixed.unwrap_or(auto).clamp(16, w * 3 / 5);
+            let hh = u16::from(self.prs.is_some() && main_h > 2);
+            (
+                Rect::new(0, 1, tw, hh),
+                Rect::new(0, 1 + hh, tw, main_h - hh),
+                Rect::new(tw, 1, 1, main_h),
+                Rect::new(tw + 1, 1, w - tw - 1, main_h),
+            )
         } else {
-            (Rect::default(), Rect::default(), Rect::new(0, 1, w, main_h))
+            (Rect::default(), Rect::default(), Rect::default(), Rect::new(0, 1, w, main_h))
         };
         let resized = diff.width != self.doc.geo.width;
         let taller = diff.height != self.lay.diff.height || tree.height != self.lay.tree.height;
-        self.lay = Lay { top, tree, sep, diff, status };
+        self.lay = Lay { top, head, tree, sep, diff, status };
         if resized {
             self.rebuild_doc();
         }
         if resized || taller {
             self.clamp_scroll();
             self.ensure_tree_visible();
+            self.ensure_pr_visible();
         }
         self.clamp_tree_top();
     }
@@ -628,7 +657,7 @@ impl App {
     }
 
     fn tree_on(&self) -> bool {
-        self.focus == Focus::Tree && self.lay.tree.width > 0
+        self.focus == Focus::Tree && self.lay.tree.width > 0 && self.left == Left::Files
     }
 
     fn go_top(&mut self) {
@@ -774,7 +803,12 @@ impl App {
     }
 
     fn tree_left(&mut self) {
-        let Some(row) = self.tree_rows.get(self.tree_cur) else { return };
+        let Some(row) = self.tree_rows.get(self.tree_cur) else {
+            if self.prs.is_some() {
+                self.pr_back();
+            }
+            return;
+        };
         match &row.kind {
             RowKind::Dir { path, open: true, .. } => {
                 self.collapsed_dirs.insert(path.clone());
@@ -782,8 +816,11 @@ impl App {
             }
             _ => {
                 let depth = row.depth;
-                if let Some(i) = (0..self.tree_cur).rev().find(|&i| self.tree_rows[i].depth < depth) {
-                    self.tree_cur = i;
+                match (0..self.tree_cur).rev().find(|&i| self.tree_rows[i].depth < depth) {
+                    Some(i) => self.tree_cur = i,
+                    // jp: past the top of a PR's files is its list.
+                    None if self.prs.is_some() => return self.pr_back(),
+                    None => {}
                 }
             }
         }
@@ -1156,7 +1193,7 @@ impl App {
                 Some(files) => files.into_iter().for_each(|f| self.attach(f)),
                 None => self.ask.insert(&s),
             },
-            Mode::Search | Mode::Filter | Mode::GoTo => {
+            Mode::Search | Mode::Filter | Mode::GoTo | Mode::PrFilter => {
                 for c in s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control()).take(500) {
                     self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
                 }
@@ -1199,6 +1236,29 @@ impl App {
         true
     }
 
+    /// A different diff (jp switching PRs): nothing of the last one's view
+    /// carries over.
+    fn load_files(&mut self, text: &str) {
+        self.files = diff::parse(text).files;
+        self.hl_cache.clear();
+        self.fold.clear();
+        self.search = None;
+        self.filter.clear();
+        self.collapsed_dirs.clear();
+        self.doc = Doc::empty();
+        self.scroll = 0;
+        self.hscroll = 0;
+        self.tree_cur = 0;
+        self.tree_top = 0;
+        self.jumps.clear();
+        self.mark = None;
+        self.sel = None;
+        self.drag = None;
+        self.rebuild_tree();
+        self.rebuild_doc();
+        self.sync_tree();
+    }
+
     fn reload(&mut self) {
         if !self.source.reloadable() {
             self.flash("stdin can't be reloaded");
@@ -1207,6 +1267,7 @@ impl App {
         let keep = self.cur_file().map(|f| self.files[f].path.clone());
         match self.source.fetch() {
             Ok(text) => {
+                self.pr_reloaded(&text);
                 self.files = diff::parse(&text).files;
                 self.hl_cache.clear();
                 self.fold.clear();
@@ -1692,6 +1753,10 @@ impl App {
                 self.key_goto(k);
                 return Act::None;
             }
+            Mode::PrFilter => {
+                self.key_pr_filter(k);
+                return Act::None;
+            }
             Mode::Normal => {}
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -1704,6 +1769,9 @@ impl App {
         self.mark = None;
         let h = self.lay.diff.height as isize;
         let (half, page) = ((h / 2).max(1), (h - 2).max(1));
+        if let Some(act) = self.key_prs(k, n, count) {
+            return act;
+        }
         match (k.code, ctrl) {
             (KeyCode::Esc, _) if count.is_some() => {}
             (KeyCode::Char('c'), true) | (KeyCode::Char('q'), false) => return Act::Quit,
@@ -1930,6 +1998,9 @@ impl App {
             return;
         }
         let (x, y) = (m.column, m.row);
+        if self.mouse_prs(m.kind, x, y) {
+            return;
+        }
         let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
         let (tree, diff) = (self.lay.tree, self.lay.diff);
         match m.kind {

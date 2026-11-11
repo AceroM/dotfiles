@@ -6,6 +6,7 @@ mod doc;
 mod edit;
 mod fuzzy;
 mod highlight;
+mod prs;
 mod snapshot;
 mod source;
 mod theme;
@@ -41,6 +42,7 @@ usage:
                                                (jv -g --staged, jv -g main..., jv -g HEAD~3 -- src)
   jv -c 'git diff main...'                     any command that prints a diff
   git diff | jv                                a diff on stdin
+  jv --prs [search terms]                      your recent PRs beside the diff (`jp`; jp -h)
 
 options:
   -s, --split        start in split view (default: split when the pane is wide)
@@ -70,6 +72,8 @@ struct Cli {
     snapshot: Option<(u16, u16)>,
     keys: String,
     out: Option<String>,
+    /// `--prs` (jp): the PR list on the left; `gh` holds its search words.
+    prs: bool,
 }
 
 fn parse_cli() -> Result<Cli, String> {
@@ -86,14 +90,16 @@ fn parse_cli() -> Result<Cli, String> {
         snapshot: None,
         keys: String::new(),
         out: None,
+        prs: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
-                print!("{HELP}");
+                print!("{}", if c.prs { prs::HELP } else { HELP });
                 std::process::exit(0);
             }
+            "--prs" => c.prs = true,
             "--themes" => {
                 for n in highlight::theme_names() {
                     println!("{n}");
@@ -151,6 +157,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if cli.prs {
+        return run_prs(cli, hl);
+    }
 
     let mut source = if let Some(c) = &cli.cmd {
         Source::Cmd(c.clone())
@@ -232,10 +241,9 @@ fn main() -> ExitCode {
         Source::Gh(a) => Some(source::spawn_meta(a.clone())),
         _ => None,
     };
-    let bg = std::env::var("JV_BG").ok().and_then(|s| Rgb::parse(&s)).unwrap_or(Rgb(0x28, 0x2c, 0x34));
     let viewed = if cli.snapshot.is_some() { Viewed::ephemeral() } else { Viewed::load() };
     let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests, popup: cli.popup };
-    let mut app = App::new(source, &text, hl, Palette::new(bg), opts, viewed);
+    let mut app = App::new(source, &text, hl, background(), opts, viewed);
     app.meta_rx = meta_rx;
     if let Some(n) = note {
         app.flash(n);
@@ -248,6 +256,60 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("jv: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn background() -> Palette {
+    Palette::new(std::env::var("JV_BG").ok().and_then(|s| Rgb::parse(&s)).unwrap_or(Rgb(0x28, 0x2c, 0x34)))
+}
+
+/// jp: search for the PRs, then open on the first one. Its diff and the
+/// rest load in the background, so the list shows as soon as GitHub answers.
+fn run_prs(cli: Cli, hl: highlight::Hl) -> ExitCode {
+    if cli.cmd.is_some() || cli.git.is_some() || cli.local {
+        eprintln!("jp: -c, -g and -l are jv's; jp shows PRs");
+        return ExitCode::from(2);
+    }
+    let q = match prs::Query::parse(&cli.gh) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("jp: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let chatty = io::stderr().is_terminal() && cli.snapshot.is_none();
+    if chatty {
+        eprint!("jp: {}…", q.label());
+    }
+    let found = prs::list(&q, false);
+    if chatty {
+        eprint!("\r\x1b[2K");
+    }
+    let items = match found {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("jp: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if items.is_empty() {
+        eprintln!("jp: no PRs found ({})", q.search());
+        return ExitCode::SUCCESS;
+    }
+    let viewed = if cli.snapshot.is_some() { Viewed::ephemeral() } else { Viewed::load() };
+    // Like a PR in jv: test files start hidden (T shows them).
+    let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests: cli.tests.unwrap_or(false), popup: cli.popup };
+    let mut app = App::new(Source::Gh(Vec::new()), "", hl, background(), opts, viewed);
+    app.start_prs(q, items);
+    if let Some((w, h)) = cli.snapshot {
+        return snapshot::run(app, w, h, &cli.keys, cli.out.as_deref());
+    }
+    match run(app) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("jp: {e}");
             ExitCode::FAILURE
         }
     }
@@ -287,6 +349,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, kitty: bool) -> io:
     loop {
         dirty |= app.poll_meta();
         dirty |= app.poll_bg();
+        dirty |= app.poll_prs();
         dirty |= app.tick();
         dirty |= app.autoscroll();
         if dirty {
@@ -297,7 +360,14 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, kitty: bool) -> io:
             dirty = false;
         }
         // A drag held past the diff's edge sends no events, so wake up to scroll it.
-        let wait = if app.autoscrolling() { 20 } else { 250 };
+        // …and sooner while jp has diffs on the way.
+        let wait = if app.autoscrolling() {
+            20
+        } else if app.pr_fetching() {
+            50
+        } else {
+            250
+        };
         if !event::poll(Duration::from_millis(wait))? {
             continue;
         }

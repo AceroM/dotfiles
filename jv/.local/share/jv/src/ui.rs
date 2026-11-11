@@ -12,10 +12,11 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent;
-use crate::app::{App, Focus, Mode};
+use crate::app::{App, Focus, Left, Mode};
 use crate::diff::{Kind, Status};
 use crate::doc::{self, Note, Row};
 use crate::highlight::Tok;
+use crate::prs::{self, Pr};
 use crate::theme::Palette;
 use crate::tree::{self, RowKind};
 
@@ -24,7 +25,12 @@ pub fn draw(app: &App, frame: &mut Frame) {
     let buf = frame.buffer_mut();
     top_bar(app, buf);
     if app.lay.tree.width > 0 {
-        tree(app, buf);
+        left_head(app, buf);
+        if app.prs.is_some() && app.left == Left::Prs {
+            pr_list(app, buf);
+        } else {
+            tree(app, buf);
+        }
     }
     diff(app, buf);
     status(app, buf);
@@ -61,6 +67,13 @@ fn input_line(buf: &mut Buffer, x: u16, y: u16, max_x: u16, f: &agent::Field, p:
 
 fn fill(buf: &mut Buffer, r: Rect, bg: Color) {
     buf.set_style(r, Style::new().bg(bg));
+}
+
+/// GitHub's merged purple.
+const MERGED: Color = Color::Rgb(0xc6, 0x78, 0xdd);
+
+fn digits(n: usize) -> usize {
+    n.max(1).ilog10() as usize + 1
 }
 
 fn fg(c: Color) -> Style {
@@ -162,15 +175,19 @@ fn top_bar(app: &App, buf: &mut Buffer) {
     let rx = r.right().saturating_sub(rw as u16);
     let lmax = rx.saturating_sub(2);
 
-    let mut x = put(buf, r.x + 1, r.y, lmax, "jv", fg(p.accent).add_modifier(Modifier::BOLD));
+    let name = if app.prs.is_some() { "jp" } else { "jv" };
+    let mut x = put(buf, r.x + 1, r.y, lmax, name, fg(p.accent).add_modifier(Modifier::BOLD));
     x += 2;
     if let Some(m) = &app.meta {
+        if let Some(pr) = app.prs.as_ref().filter(|p| p.all_repos()).and_then(|p| p.cur_item()) {
+            x = put(buf, x, r.y, lmax, pr.repo.rsplit('/').next().unwrap_or(&pr.repo), fg(p.muted));
+        }
         x = put(buf, x, r.y, lmax, &format!("#{} ", m.number), fg(p.muted));
         let tail = format!("  {} → {}  @{}", m.head, m.base, m.author);
         let badge = if m.draft {
             Some(("draft", p.muted))
         } else if m.state == "MERGED" {
-            Some(("merged", Color::Rgb(0xc6, 0x78, 0xdd)))
+            Some(("merged", MERGED))
         } else if m.state == "CLOSED" {
             Some(("closed", p.red))
         } else {
@@ -212,6 +229,16 @@ fn status(app: &App, buf: &mut Buffer) {
         return;
     }
 
+    if app.mode == Mode::PrFilter {
+        let mut x = put(buf, r.x + 1, r.y, max, "filter PRs ", fg(p.muted));
+        x = put(buf, x, r.y, max, "❯ ", fg(p.accent).add_modifier(Modifier::BOLD));
+        input_line(buf, x, r.y, max, &app.input, p);
+        let (n, total) = app.prs.as_ref().map_or((0, 0), |p| (p.shown.len(), p.items.len()));
+        let info = format!("{n}/{total} PRs   ↑↓ move · enter keeps · esc cancels ");
+        put(buf, max.saturating_sub(info.width() as u16), r.y, max, &info, fg(p.muted));
+        return;
+    }
+
     if app.mode == Mode::Search {
         let x = put(buf, r.x + 1, r.y, max, "/", fg(p.accent).add_modifier(Modifier::BOLD));
         input_line(buf, x, r.y, max, &app.input, p);
@@ -228,6 +255,9 @@ fn status(app: &App, buf: &mut Buffer) {
     let mut segs: Vec<(String, Color)> = Vec::new();
     if let Some(c) = app.count {
         segs.push((c.to_string(), p.accent));
+    }
+    if let Some(f) = app.prs.as_ref().map(|p| &p.filter).filter(|f| !f.is_empty()) {
+        segs.push((format!("PRs: {f}"), p.accent));
     }
     if app.filter_on() {
         segs.push((format!("filter: {}", app.filter), p.accent));
@@ -349,12 +379,161 @@ fn tree(app: &App, buf: &mut Buffer) {
     }
 }
 
+// ---- PR list (jp) ----------------------------------------------------------
+
+/// The row over jp's left pane: what the list shows, or the way back to it.
+fn left_head(app: &App, buf: &mut Buffer) {
+    let r = app.lay.head;
+    let Some(pane) = app.prs.as_ref().filter(|_| r.height > 0) else { return };
+    let p = &app.pal;
+    fill(buf, r, p.panel);
+    let max = r.right().saturating_sub(1);
+    if app.left == Left::Prs {
+        let n = if pane.filter_on() { format!("{}/{}", pane.shown.len(), pane.items.len()) } else { pane.items.len().to_string() };
+        let right = if pane.refreshing() { format!("↻ {n}") } else { n };
+        let rx = max.saturating_sub(right.width() as u16);
+        let label = truncate(&pane.query.label(), rx.saturating_sub(r.x + 2) as usize);
+        put(buf, r.x + 1, r.y, rx, &label, fg(p.muted).add_modifier(Modifier::BOLD));
+        put(buf, rx, r.y, max, &right, fg(p.dim));
+        return;
+    }
+    let mut x = put(buf, r.x + 1, r.y, max, "‹ PRs", fg(p.accent).add_modifier(Modifier::BOLD));
+    if let Some(m) = &app.meta {
+        x = put(buf, x + 2, r.y, max, &format!("#{}", m.number), fg(p.muted));
+    }
+    let n = app.visible.len();
+    put(buf, x + 2, r.y, max, &format!("{n} file{}", if n == 1 { "" } else { "s" }), fg(p.dim));
+}
+
+fn pr_glyph(pr: &Pr, p: &Palette) -> (&'static str, Color) {
+    match pr.state.as_str() {
+        "MERGED" => ("●", MERGED),
+        "CLOSED" => ("●", p.red),
+        _ if pr.draft => ("○", p.muted),
+        _ => ("●", p.green),
+    }
+}
+
+/// Two rows per PR: its title, then number, state, age, checks, review,
+/// how much of it you've viewed, and its size.
+fn pr_list(app: &App, buf: &mut Buffer) {
+    let a = app.lay.tree;
+    let p = &app.pal;
+    fill(buf, a, p.panel);
+    let s = app.lay.sep;
+    for y in s.y..s.bottom() {
+        put(buf, s.x, y, s.right(), "│", fg(p.border));
+    }
+    let Some(pane) = &app.prs else { return };
+    let max = a.right().saturating_sub(1);
+    if pane.shown.is_empty() {
+        let (l1, l2) = if pane.filter_on() { ("No PRs match.", "esc clears the filter") } else { ("No PRs.", "R searches again") };
+        put(buf, a.x + 2, a.y + 1, max, l1, fg(p.muted));
+        put(buf, a.x + 2, a.y + 2, max, l2, fg(p.dim));
+        return;
+    }
+    let focused = app.focus == Focus::Tree;
+    let nw = digits(pane.shown.len()).max(2);
+    let now = prs::now();
+    let hit = fg(p.yellow).add_modifier(Modifier::BOLD);
+    let rows = (a.height as usize / 2).max(1);
+    for (i, &ix) in pane.shown.iter().enumerate().skip(pane.top).take(rows) {
+        let y = a.y + ((i - pane.top) * 2) as u16;
+        if y >= a.bottom() {
+            break;
+        }
+        let pr = &pane.items[ix];
+        let cur = i == pane.cur;
+        // Relative numbers, as in the tree: 5j lands on the row marked 5.
+        let (n, nst) = if cur {
+            fill(buf, Rect::new(a.x, y, a.width, 2.min(a.bottom() - y)), if focused { p.sel } else { p.sel_dim });
+            (i + 1, fg(if focused { p.yellow } else { p.muted }).add_modifier(Modifier::BOLD))
+        } else {
+            (i.abs_diff(pane.cur), fg(p.dim))
+        };
+        put(buf, a.x + 1, y, max, &format!("{n:>nw$}"), nst);
+        let (g, gc) = pr_glyph(pr, p);
+        let x = put(buf, a.x + nw as u16 + 2, y, max, g, fg(gc).add_modifier(Modifier::BOLD)) + 1;
+        let viewed = app.pr_viewed(pr);
+        let done = viewed.is_some_and(|(v, n)| n > 0 && v == n);
+        let st = if cur {
+            fg(p.bright).add_modifier(Modifier::BOLD)
+        } else if done {
+            fg(p.muted)
+        } else {
+            fg(p.fg)
+        };
+        let title = truncate(&pr.title, max.saturating_sub(x) as usize);
+        put(buf, x, y, max, &title, st);
+        mark_hits(buf, x, y, max, &title, &tree::hits(&pane.filter, &title), hit);
+        if y + 1 < a.bottom() {
+            pr_info(app, buf, x, y + 1, max, pr, viewed, now);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pr_info(app: &App, buf: &mut Buffer, x: u16, y: u16, max: u16, pr: &Pr, viewed: Option<(usize, usize)>, now: i64) {
+    let p = &app.pal;
+    let mut segs: Vec<(String, Color)> = Vec::new();
+    let all = app.prs.as_ref().is_some_and(|p| p.all_repos());
+    let repo = if all { pr.repo.rsplit('/').next().unwrap_or(&pr.repo) } else { "" };
+    segs.push((format!("{repo}#{}", pr.number), p.muted));
+    match pr.state.as_str() {
+        "MERGED" => segs.push(("merged".into(), MERGED)),
+        "CLOSED" => segs.push(("closed".into(), p.red)),
+        _ if pr.draft => segs.push(("draft".into(), p.muted)),
+        _ => {}
+    }
+    segs.push((prs::age(pr.updated, now), p.dim));
+    // Checks and reviews only matter until it's merged or closed.
+    if pr.open() {
+        match pr.ci.as_deref() {
+            Some("SUCCESS") => segs.push(("ci ✓".into(), p.green_dim)),
+            Some("FAILURE" | "ERROR") => segs.push(("ci ✗".into(), p.red)),
+            Some("PENDING" | "EXPECTED") => segs.push(("ci ●".into(), p.yellow)),
+            _ => {}
+        }
+        match pr.review.as_str() {
+            "APPROVED" => segs.push(("approved".into(), p.green_dim)),
+            "CHANGES_REQUESTED" => segs.push(("changes requested".into(), p.red)),
+            "REVIEW_REQUIRED" => segs.push(("needs review".into(), p.dim)),
+            _ => {}
+        }
+    }
+    if let Some((v, n)) = viewed.filter(|&(v, _)| v > 0) {
+        segs.push((if v == n { "✓ viewed".into() } else { format!("✓ {v}/{n}") }, p.green_dim));
+    }
+    let st = stats(pr.adds, pr.dels, p);
+    let sw: usize = st.iter().map(|(s, _)| s.width()).sum();
+    let lmax = max.saturating_sub(sw as u16 + 2);
+    let mut cx = x;
+    for (i, (s, c)) in segs.iter().enumerate() {
+        let gap = if i > 0 { 2 } else { 0 };
+        // A segment shows whole or not at all.
+        if cx + gap + s.width() as u16 > lmax {
+            break;
+        }
+        cx = put(buf, cx + gap, y, lmax, s, fg(*c));
+    }
+    let mut sx = max.saturating_sub(sw as u16);
+    if sx > cx {
+        for (s, c) in st {
+            sx = put(buf, sx, y, max, &s, fg(c));
+        }
+    }
+}
+
 // ---- diff ----------------------------------------------------------------
 
 fn diff(app: &App, buf: &mut Buffer) {
     let a = app.lay.diff;
     let p = &app.pal;
     if a.width < 12 || a.height == 0 {
+        return;
+    }
+    if let Some(msg) = app.pr_placeholder() {
+        put(buf, a.x + 3, a.y + 1, a.right(), &msg, fg(p.muted));
         return;
     }
     if app.visible.is_empty() {
@@ -952,6 +1131,22 @@ const HELP: [&[Section]; 2] = [
     ],
 ];
 
+/// jp's keys, first in the help when the PR list is on.
+const PR_HELP: Section = (
+    "PRs (jp)",
+    &[
+        ("j k", "list: pick a PR, its diff on the right"),
+        ("⏎ l", "list: the PR's files in the tree"),
+        ("- ⌫ h", "files: back to the PR list"),
+        ("( )", "prev / next PR from anywhere"),
+        ("/", "list: filter (title, branch, #, merged…)"),
+        ("x", "list: mark all of the PR's files viewed"),
+        ("O", "list: open the PR on GitHub"),
+        ("y Y", "list: copy the PR's URL · branch"),
+        ("R", "search again: new PRs, checks, reviews"),
+    ],
+);
+
 const KEY_W: u16 = 13;
 const COL_W: u16 = 60;
 
@@ -961,18 +1156,23 @@ fn help_height(sections: &[Section]) -> usize {
 
 fn help(app: &App, buf: &mut Buffer, area: Rect) {
     let p = &app.pal;
+    let mut first = HELP[0].to_vec();
+    if app.prs.is_some() {
+        first.insert(0, PR_HELP);
+    }
+    let both = [first, HELP[1].to_vec()];
     let two = area.width >= COL_W * 2 + 6;
     let (w, h) = if two {
-        (COL_W * 2 + 2, HELP.iter().map(|c| help_height(c)).max().unwrap_or(0))
+        (COL_W * 2 + 2, both.iter().map(|c| help_height(c)).max().unwrap_or(0))
     } else {
-        (COL_W + 2, help_height(&HELP.concat()))
+        (COL_W + 2, help_height(&both.concat()))
     };
     let r = popup(area, w, h as u16 + 3);
     if r.width < 30 || r.height < 6 {
         return;
     }
-    let inner = frame(buf, r, "jv keys", p);
-    let cols: Vec<Vec<Section>> = if two { HELP.iter().map(|c| c.to_vec()).collect() } else { vec![HELP.concat()] };
+    let inner = frame(buf, r, if app.prs.is_some() { "jp keys" } else { "jv keys" }, p);
+    let cols: Vec<Vec<Section>> = if two { both.to_vec() } else { vec![both.concat()] };
     for (ci, col) in cols.iter().enumerate() {
         let x0 = inner.x + ci as u16 * COL_W;
         let right = (x0 + COL_W).min(inner.right());
