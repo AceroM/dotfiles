@@ -5,7 +5,8 @@ import ScreenCaptureKit
 @MainActor
 final class RecordingSession: NSObject, SCStreamDelegate {
     let url: URL
-    var onStarted: (() -> Void)?
+    /// With the host-clock time (CACurrentMediaTime's clock) of the video's first frame.
+    var onStarted: ((CFTimeInterval) -> Void)?
     var onFinished: ((Result<URL, Error>) -> Void)?
     /// Frames have stopped arriving, before the MP4 is finalized: overlays can go now.
     var onCaptureStopped: (() -> Void)?
@@ -44,10 +45,10 @@ final class RecordingSession: NSObject, SCStreamDelegate {
 
         do {
             let movie = try MovieWriter(url: url, size: size, microphone: microphone, systemAudio: systemAudio)
-            movie.onStarted = { [weak self] in
+            movie.onStarted = { [weak self] firstFrameHostTime in
                 Task { @MainActor in
                     guard let self, !self.finished else { return }
-                    self.onStarted?()
+                    self.onStarted?(firstFrameHostTime)
                 }
             }
             movie.onFailure = { [weak self] error in

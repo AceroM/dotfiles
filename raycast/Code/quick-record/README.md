@@ -85,10 +85,51 @@ demo: pick a window or region the same way, and recording starts with three addi
   dictate into any open label with Wispr's own shortcut. `quickrecord://dictate` does the same
   from outside.
 - **A HAR from Chrome.** When the extension is loaded, it saves `Demo … .har` beside
-  `Demo … .mp4`. The toolbar's HAR dot turns green once Chrome confirms it is recording. The
-  saved panel's **Copy Files** puts the video and the HAR on the clipboard together.
+  `Demo … .mp4`. The toolbar's HAR dot turns green once Chrome confirms it is recording.
+- **A timeline of the drawings.** `Demo … .excalidraw` beside the video records every annotation
+  with when it appeared and when it went away, plus every laser stroke (see below). The saved
+  panel's **Copy Files** puts the video, the drawings and the HAR on the clipboard together.
 
 Stop with Fn+Option+Q again, the toolbar's stop button, or any other stop command.
+
+### The drawings timeline
+
+The point of the three files is to hand an agent a bug report it can act on: the video (with the
+narration), what was pointed at and written on it, and the network traffic, all on one clock. `t`
+everywhere is seconds from the video's first frame; HAR entries carry the same value in `_videoTime`.
+
+`Demo … .excalidraw` is a real Excalidraw file: open it in Excalidraw to see the drawing as it stood
+when the recording stopped. Its extra `quickRecord` key, which comes first, is for agents:
+
+```json
+"quickRecord": {
+  "video": "Demo 2026-11-11 15.49.15 ABC123.mp4", "har": "Demo 2026-11-11 15.49.15 ABC123.har",
+  "recordingStartedDateTime": "2026-11-11T20:49:15.112Z", "duration": 42.6, "width": 2880, "height": 1800,
+  "timeline": [
+    {"t": 12.41, "time": "…", "event": "add", "type": "ellipse", "cause": "draw", "id": "…", "color": "#e03131", "bounds": [880,410,520,140], "startedAt": 11.9},
+    {"t": 15.02, "time": "…", "event": "add", "type": "text", "cause": "label", "text": "Total should be $40", "bounds": […]},
+    {"t": 19.3, "time": "…", "event": "laser", "type": "laser", "bounds": […], "points": [[x, y, t], …], "until": 20.1},
+    {"t": 23.7, "time": "…", "event": "remove", "type": "ellipse", "cause": "erase", "id": "…"}
+  ]
+}
+```
+
+- **Coordinates are video pixels** from the frame's top-left corner, so a `bounds` box crops straight
+  out of a frame (`ffmpeg -ss 12.41 -i Demo….mp4 -frames:v 1 frame.png`). Arrows and lines also give
+  their two ends in `points`, tail first.
+- **`add` / `remove`** say when an annotation appeared and went away. `cause` says why: `draw`,
+  `label` (a new text label; dictated ones too), `edit` (a label's text changed, which removes the
+  old version and adds a new one with `-v2` on its id), `erase`, `undo`, `redo`, `clear`.
+  `startedAt` is when the pointer went down or the label opened, if that was noticeably earlier.
+- **`laser`** strokes never stay on the drawing, but they're the clearest "look here" there is, so
+  they're kept with a point per video frame.
+- **`elements`** is the Excalidraw scene. Annotations removed before the stop are kept with
+  `isDeleted: true`. Each element's `customData.shown` lists its stretches on screen in video
+  seconds (`to: null` means it stayed to the end).
+
+The file is written once the video is saved and the overlay has closed, so a label still waiting
+on Wispr's transcript at the stop makes it in. A demo with nothing drawn and no laser strokes
+writes no file.
 
 ### The HAR
 
@@ -99,8 +140,9 @@ has every request's URL, method, status, request and response headers (cookies i
 request bodies, redirects, errors and total time. Response bodies come from the pages'
 own `fetch`/`XMLHttpRequest` calls (text, JSON, XML, GraphQL; up to 1 MB each), so API
 responses are there, but documents, scripts and images have headers only. Timings are coarse:
-wait and receive only, no DNS/connect/SSL breakdown. `log._recordingStartedDateTime` is the moment
-recording began, which lines up entries with the video's timeline.
+wait and receive only, no DNS/connect/SSL breakdown. `log._recordingStartedDateTime` is the video's
+first frame, and each entry's `_videoTime` is how many seconds into the video it started, the same
+`t` as the drawings timeline.
 
 It doesn't use `chrome.debugger`, which would give full DevTools fidelity, because that puts
 Chrome's "started debugging this browser" bar on screen, and in the recording.
@@ -153,7 +195,9 @@ events use the macOS log subsystem `com.acerom.quickrecord`.
 
 Tests cover window hover ordering, click-versus-drag selection, ratio-locked drags, display clipping,
 saved-region validation, display bounds changes, Retina dimensions,
-encoder size limits, and the annotation geometry (seeded sloppiness, Shift constraints,
-arrowheads, eraser hit-testing, fills, shortcuts, persisted style). Verify the real selection/start/stop flow and the resulting
+encoder size limits, the annotation geometry (seeded sloppiness, Shift constraints,
+arrowheads, eraser hit-testing, fills, shortcuts, persisted style), and the drawings timeline
+(a canvas driven with mouse events: draw, erase, undo/redo, clear, label edits, laser, the
+Excalidraw file). Verify the real selection/start/stop flow and the resulting
 MP4 after granting screen permission; pure geometry tests cannot verify macOS
 capture or audio behavior.

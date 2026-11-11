@@ -407,14 +407,16 @@ async function buildHar(s) {
       creator: { name: "Quick Record HAR", version: chrome.runtime.getManifest().version },
       browser: { name: browserName(), version: navigator.userAgent.match(/Chrome\/([\d.]+)/)?.[1] ?? "" },
       pages: pages.sort((a, b) => a.startedDateTime.localeCompare(b.startedDateTime)),
-      entries: entries.map((e) => harEntry(e, pageref(e))),
+      entries: entries.map((e) => harEntry(e, pageref(e), s.startedAt)),
       comment: `Recorded with a Quick Record demo that started at ${iso(s.startedAt)}. Response bodies cover the pages' fetch/XHR calls only.`,
       _recordingStartedDateTime: iso(s.startedAt),
     },
   };
 }
 
-function harEntry(e, pageref) {
+// startedAt is the video's first frame (ms); _videoTime puts the request on the video's clock, the
+// same t that the demo's .excalidraw timeline uses.
+function harEntry(e, pageref, startedAt) {
   const time = Math.max(0, Math.round((e.end ?? e.start) - e.start));
   const wait = e.headersAt ? Math.min(time, Math.max(0, Math.round(e.headersAt - e.start))) : time;
   const version = httpVersion(e.statusLine);
@@ -456,6 +458,7 @@ function harEntry(e, pageref) {
     _resourceType: resourceType(e),
   };
   if (pageref) entry.pageref = pageref;
+  if (startedAt != null) entry._videoTime = Math.round(e.start - startedAt) / 1000;
   if (e.postData) {
     entry.request.postData = {
       mimeType: header(e.requestHeaders, "content-type") ?? (e.postData.params ? "application/x-www-form-urlencoded" : ""),

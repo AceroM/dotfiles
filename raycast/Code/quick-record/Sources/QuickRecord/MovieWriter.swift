@@ -7,7 +7,8 @@ import ScreenCaptureKit
 // before SCStream can submit buffers.
 final class MovieWriter: NSObject, SCStreamOutput, @unchecked Sendable {
     let queue = DispatchQueue(label: "com.acerom.quickrecord.writer", qos: .userInitiated)
-    var onStarted: (() -> Void)?
+    /// With the host-clock time of the video's first frame (its t = 0), in seconds.
+    var onStarted: ((Double) -> Void)?
     var onFailure: ((Error) -> Void)?
     private let writer: AVAssetWriter
     private let video: AVAssetWriterInput
@@ -78,7 +79,7 @@ final class MovieWriter: NSObject, SCStreamOutput, @unchecked Sendable {
         let firstFrame = lastFrame == nil
         lastFrame = frame
         lastTime = time
-        if firstFrame { onStarted?() }
+        if firstFrame, let firstHostTime { onStarted?(firstHostTime.seconds) }
     }
 
     private func fail(_ error: Error) {

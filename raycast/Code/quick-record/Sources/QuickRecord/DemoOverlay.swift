@@ -39,6 +39,8 @@ final class DemoState: ObservableObject {
 final class DemoOverlay {
     let state = DemoState()
     var onStop: (() -> Void)?
+    /// After the last label is committed, which may be a while after the stop if Wispr is still typing.
+    var onClosed: (() -> Void)?
     var canvasWindowID: CGWindowID { CGWindowID(canvasWindow.windowNumber) }
 
     private let canvasWindow: OverlayPanel
@@ -58,7 +60,7 @@ final class DemoOverlay {
     private let logger = Logger(subsystem: "com.acerom.quickrecord", category: "demo")
 
     /// `region` is display-local, top-left; the windows need AppKit's global, bottom-left frame.
-    init(region: CaptureRegion, screen: NSScreen, targetApp: NSRunningApplication?) {
+    init(region: CaptureRegion, screen: NSScreen, targetApp: NSRunningApplication?, log: AnnotationLog? = nil) {
         self.screen = screen
         self.targetApp = targetApp
         regionFrame = CGRect(x: screen.frame.minX + region.x, y: screen.frame.maxY - region.y - region.height,
@@ -70,6 +72,7 @@ final class DemoOverlay {
         canvasWindow.allowsKey = true
         canvasWindow.title = "Quick Record — Annotations"
         canvas = AnnotationCanvasView(frame: CGRect(origin: .zero, size: regionFrame.size))
+        canvas.log = log
         canvasWindow.contentView = canvas
         canvasWindow.level = level
 
@@ -273,11 +276,15 @@ final class DemoOverlay {
 
     private func teardown() {
         canvas.commitText()
+        canvas.flushLaser()
         giveFocusBack()
         canvasWindow.orderOut(nil)
         canvasWindow.close()
         toolbar.close()
         border.close()
+        let closed = onClosed
+        onClosed = nil
+        closed?()
         keepAlive = nil
     }
 

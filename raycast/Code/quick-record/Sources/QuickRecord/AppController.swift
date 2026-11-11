@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import QuartzCore
 import ScreenCaptureKit
 import SwiftUI
 import OSLog
@@ -39,6 +40,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var harEntries = 0
     private var harNote: String?
     private var harTimeout: Timer?
+    /// The demo's drawings with their times, saved beside the video as `.excalidraw`.
+    private var annotations: AnnotationLog?
+    private var annotationsFile: URL?
 
     private var recordingsDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Quick Record", isDirectory: true)
@@ -163,8 +167,15 @@ final class AppController: NSObject, NSApplicationDelegate {
                 let content: SCShareableContent
                 var includedWindows: [SCWindow] = []
                 if self.demoMode {
-                    let overlay = DemoOverlay(region: region, screen: screen, targetApp: self.demoTargetApp)
+                    let size = region.outputSize(scale: screen.backingScaleFactor)
+                    let log = AnnotationLog(canvasSize: region.rect.size, videoSize: CGSize(width: size.width, height: size.height))
+                    self.annotations = log
+                    let overlay = DemoOverlay(region: region, screen: screen, targetApp: self.demoTargetApp, log: log)
                     overlay.onStop = { [weak self] in self?.stop() }
+                    overlay.onClosed = { [weak self] in
+                        log.overlayClosed = true
+                        if self?.saveAnnotations(log) == true, self?.demoVideo != nil { self?.showDemoToast() }
+                    }
                     self.demo = overlay
                     overlay.show()
                     (content, includedWindows) = try await self.shareableContent(including: overlay.canvasWindowID)
@@ -188,14 +199,19 @@ final class AppController: NSObject, NSApplicationDelegate {
                 if self.demoMode {
                     session.onCaptureStopped = { [weak self] in self?.closeDemo() }
                 }
-                session.onStarted = { [weak self, weak session] in
+                session.onStarted = { [weak self, weak session] firstFrameHostTime in
                     guard let self, let session, self.session === session else { return }
-                    self.startedAt = Date()
+                    // The video's t = 0 on the wall clock: the HAR and the drawings count from here.
+                    let videoStart = Date(timeIntervalSinceNow: firstFrameHostTime - CACurrentMediaTime())
+                    self.startedAt = videoStart
+                    self.annotations?.videoStarted(hostTime: firstFrameHostTime, date: videoStart)
                     self.startLatencyMS = Int(Date().timeIntervalSince(self.requestedAt ?? Date()) * 1000)
                     self.logger.info("Recording started in \(self.startLatencyMS ?? 0) ms")
                     if self.phase != .stopping { self.phase = .recording }
                     // Not once a stop is queued: the HAR's stop would already have been sent.
-                    if self.demoMode && self.phase == .recording { self.startHAR(video: session.url, region: globalRegion) }
+                    if self.demoMode && self.phase == .recording {
+                        self.startHAR(video: session.url, region: globalRegion, startedAt: videoStart)
+                    }
                     let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
                         Task { @MainActor in self?.updateMenu() }
                     }
@@ -230,6 +246,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard phase == .starting || phase == .recording else { return }
         stopWhenReady = true
         phase = .stopping
+        annotations?.videoEnded()
         if demoMode, let harID {
             har.stop(id: harID)
             if harStarted { demo?.setHAR(.saving) }
@@ -253,6 +270,10 @@ final class AppController: NSObject, NSApplicationDelegate {
             logger.info("Recording finalized")
             if demoMode {
                 demoVideo = url
+                if let annotations {
+                    annotations.video = url
+                    saveAnnotations(annotations)
+                }
                 showDemoToast()
             } else {
                 showToast(title: "Recording saved", detail: url.lastPathComponent, files: [url])
@@ -270,6 +291,28 @@ final class AppController: NSObject, NSApplicationDelegate {
         demo = nil
     }
 
+    // MARK: Annotations
+
+    /// Writes `Demo ….excalidraw` beside the video once both are ready: the video saved, and the
+    /// overlay closed (a label waiting on Wispr's transcript can hold it open past the stop).
+    /// True when it wrote the file.
+    @discardableResult
+    private func saveAnnotations(_ log: AnnotationLog) -> Bool {
+        guard log.overlayClosed, let video = log.video, !log.saved else { return false }
+        log.saved = true
+        guard !log.isEmpty else { return false }
+        let url = video.deletingPathExtension().appendingPathExtension("excalidraw")
+        do {
+            try log.write(to: url)
+        } catch {
+            logger.error("Couldn’t save the annotations: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        guard annotations === log else { return false }
+        annotationsFile = url
+        return true
+    }
+
     // MARK: HAR
 
     private func resetHAR() {
@@ -281,12 +324,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         harEntries = 0
         harNote = nil
         demoVideo = nil
+        annotations = nil
+        annotationsFile = nil
     }
 
-    private func startHAR(video: URL, region: CGRect) {
+    private func startHAR(video: URL, region: CGRect, startedAt: Date) {
         let id = UUID().uuidString
         harID = id
-        har.start(id: id, path: video.deletingPathExtension().appendingPathExtension("har"), startedAt: Date(), region: region)
+        har.start(id: id, path: video.deletingPathExtension().appendingPathExtension("har"), startedAt: startedAt, region: region)
         // The extension answers within a moment when Chrome has it loaded.
         harTimeout = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -323,6 +368,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard let video = demoVideo else { return }
         var lines = [video.lastPathComponent]
         var files = [video]
+        if let annotationsFile, let annotations {
+            files.append(annotationsFile)
+            let drawn = annotations.shapes.count, pointed = annotations.laserStrokes.count
+            var parts: [String] = []
+            if drawn > 0 { parts.append("\(drawn) annotation\(drawn == 1 ? "" : "s")") }
+            if pointed > 0 { parts.append("\(pointed) laser stroke\(pointed == 1 ? "" : "s")") }
+            lines.append("Drawings: \(parts.joined(separator: ", "))")
+        }
         if let harFile {
             files.append(harFile)
             lines.append("HAR: \(harEntries) request\(harEntries == 1 ? "" : "s") from \(harBrowser)")
@@ -441,7 +494,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func showToast(title: String, detail: String, files: [URL] = []) {
         toastTimer?.invalidate()
         toast?.close()
-        let height: CGFloat = detail.contains("\n") ? 156 : 138
+        let lineCount = detail.components(separatedBy: "\n").count
+        let height: CGFloat = lineCount > 2 ? 174 : (lineCount > 1 ? 156 : 138)
         let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 370, height: height),
                             styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Quick Record"

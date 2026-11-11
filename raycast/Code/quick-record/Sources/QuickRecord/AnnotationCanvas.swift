@@ -9,6 +9,7 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
         didSet {
             guard tool != oldValue else { return }
             if oldValue == .text { requestCommit() }
+            if oldValue == .laser { flushLaser() }
             currentCursor.set()
             window?.invalidateCursorRects(for: self)
         }
@@ -24,8 +25,15 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
     /// it open, which is how a label waiting on dictation survives.
     var shouldCommit: (() -> Bool)?
     var onTextChange: (() -> Void)?
+    /// The demo's timeline of what was drawn when; saved beside the video.
+    var log: AnnotationLog?
 
-    private(set) var elements: [AnnotationElement] = [] { didSet { onChange?() } }
+    private(set) var elements: [AnnotationElement] = [] { didSet { logChange(); onChange?() } }
+    /// Why `elements` is about to change, and when that drawing began, for the log.
+    private var change: (cause: AnnotationCause, startedAt: CFTimeInterval?) = (.draw, nil)
+    private var draftStartedAt: CFTimeInterval?
+    private var editorStartedAt: CFTimeInterval?
+    private var laserStroke: [AnnotationLog.LaserPoint] = []
     private var cache: [UUID: RenderedElement] = [:]
     private var draft: AnnotationElement?
     private var undoStack: [[AnnotationElement]] = []
@@ -123,6 +131,7 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
         requestCommit()
         guard let previous = undoStack.popLast() else { return }
         redoStack.append(elements)
+        change = (.undo, nil)
         elements = previous
         needsDisplay = true
     }
@@ -131,6 +140,7 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
         requestCommit()
         guard let next = redoStack.popLast() else { return }
         undoStack.append(elements)
+        change = (.redo, nil)
         elements = next
         needsDisplay = true
     }
@@ -139,6 +149,7 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
         requestCommit()
         guard !elements.isEmpty else { return }
         pushUndo()
+        change = (.clear, nil)
         elements.removeAll()
         cache.removeAll()
         needsDisplay = true
@@ -191,11 +202,15 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
             erase(at: p)
         case .laser:
             laserDown = true
-            laser.append([LaserPoint(point: p, time: CACurrentMediaTime())])
+            let now = CACurrentMediaTime()
+            laser.append([LaserPoint(point: p, time: now)])
+            flushLaser()
+            laserStroke = [AnnotationLog.LaserPoint(point: p, time: logTime)]
             startLaserTimer()
         default:
             guard let kind = kind(for: tool) else { return }
             draft = AnnotationElement(kind: kind, points: kind == .draw ? [p] : [p, p], style: style)
+            draftStartedAt = logTime
         }
         needsDisplay = true
     }
@@ -215,8 +230,10 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
             }
             lastErasePoint = p
         case .laser:
+            let now = CACurrentMediaTime()
             if laser.isEmpty { laser.append([]) }
-            laser[laser.count - 1].append(LaserPoint(point: p, time: CACurrentMediaTime()))
+            laser[laser.count - 1].append(LaserPoint(point: p, time: now))
+            laserStroke.append(AnnotationLog.LaserPoint(point: p, time: logTime))
         default:
             guard var draft else { return }
             if draft.kind == .draw {
@@ -237,6 +254,7 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
         case .eraser:
             if !erasing.isEmpty, let snapshot = eraseSnapshot {
                 pushUndo(snapshot)
+                change = (.erase, nil)
                 elements.removeAll { erasing.contains($0.id) }
             }
             erasing.removeAll()
@@ -244,6 +262,7 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
             lastErasePoint = nil
         case .laser:
             laserDown = false
+            flushLaser()
         default:
             guard let draft else { return }
             self.draft = nil
@@ -251,8 +270,10 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
             // A plain click draws nothing, except a dot with the pen.
             if draft.kind == .draw || max(box.width, box.height) >= 3 {
                 pushUndo()
+                change = (.draw, draftStartedAt)
                 elements.append(draft)
             }
+            draftStartedAt = nil
         }
         needsDisplay = true
     }
@@ -268,6 +289,26 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
     private func point(_ event: NSEvent) -> CGPoint {
         let p = convert(event.locationInWindow, from: nil)
         return CGPoint(x: min(max(0, p.x), bounds.width), y: min(max(0, p.y), bounds.height))
+    }
+
+    // MARK: Log
+
+    private var logTime: CFTimeInterval { log?.now() ?? CACurrentMediaTime() }
+
+    /// What's on screen goes to the log: the elements, plus a label being edited (its editor shows it).
+    private func logChange() {
+        defer { change = (.draw, nil) }
+        guard let log else { return }
+        var showing = elements
+        if let editingElement, !showing.contains(where: { $0.id == editingElement.id }) { showing.append(editingElement) }
+        log.update(showing, cause: change.cause, startedAt: change.startedAt)
+    }
+
+    /// The laser never stays on the drawing, but where it pointed, and when, goes in the log.
+    func flushLaser() {
+        guard !laserStroke.isEmpty else { return }
+        log?.laser(laserStroke)
+        laserStroke = []
     }
 
     // MARK: Laser
@@ -353,6 +394,7 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
         }
         editorStyle = style
         editorOrigin = origin
+        editorStartedAt = logTime
         let view = LabelTextView(frame: CGRect(origin: origin, size: CGSize(width: 40, height: editorLineHeight)))
         view.font = style.font
         view.textColor = Palette.color(style.strokeColor)
@@ -410,17 +452,23 @@ final class AnnotationCanvasView: NSView, NSTextViewDelegate {
         editor.removeFromSuperview()
         self.editor = nil
         let before = snapshotBeforeEdit ?? elements
+        let cause: AnnotationCause = editingElement == nil ? .label : .edit
         if !text.isEmpty {
             var element = editingElement ?? AnnotationElement(kind: .text, points: [editorOrigin], style: editorStyle)
             element.text = text
             element.points = [editorOrigin]
             if element != editingElement { pushUndo(before) }
+            change = (cause, editorStartedAt)
             elements.append(element)
         } else if editingElement != nil {
             pushUndo(before)
         }
         editingElement = nil
         snapshotBeforeEdit = nil
+        editorStartedAt = nil
+        // A label emptied out is gone now that it's no longer held open.
+        change = (.edit, nil)
+        logChange()
         window?.makeFirstResponder(self)
         needsDisplay = true
     }
