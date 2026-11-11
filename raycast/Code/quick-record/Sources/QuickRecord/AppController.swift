@@ -26,6 +26,19 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var toast: NSPanel?
     private var toastTimer: Timer?
     private var lastError: String?
+    /// Demo mode (fn+⌥Q): annotation overlay, microphone narration, and a HAR from Chrome.
+    private var demoMode = false
+    private var demo: DemoOverlay?
+    private var demoTargetApp: NSRunningApplication?
+    private var demoVideo: URL?
+    private let har = HARBridge()
+    private var harID: String?
+    private var harStarted = false
+    private var harBrowser = "Chrome"
+    private var harFile: URL?
+    private var harEntries = 0
+    private var harNote: String?
+    private var harTimeout: Timer?
 
     private var recordingsDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Quick Record", isDirectory: true)
@@ -43,6 +56,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         defaults.register(defaults: ["microphone": false, "systemAudio": false])
+        har.onEvent = { [weak self] in self?.handleHAR($0) }
         updateMenu()
         writeStatus()
     }
@@ -53,6 +67,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             case "toggle": toggle()
             case "last": toggle(useLastRegion: true)
             case "toggle-audio": toggle(withAudio: true)
+            case "toggle-demo": toggle(demo: true)
+            case "annotate": demo?.toggleDrawing()
+            case "dictate": demo?.toggleDictation()
             case "stop": stop()
             case "quit": if phase == .idle { NSApp.terminate(nil) }
             default: break
@@ -77,8 +94,9 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleFromMenu() { toggle() }
     @objc private func lastFromMenu() { toggle(useLastRegion: true) }
+    @objc private func demoFromMenu() { toggle(demo: true) }
 
-    private func toggle(useLastRegion: Bool = false, withAudio: Bool = false) {
+    private func toggle(useLastRegion: Bool = false, withAudio: Bool = false, demo: Bool = false) {
         switch phase {
         case .recording, .starting: stop(); return
         case .stopping: return
@@ -91,8 +109,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         startLatencyMS = nil
         stopWhenReady = false
         forceAudio = withAudio
-        // Fetch content while the user selects, without capturing anything yet.
-        if CGPreflightScreenCaptureAccess() {
+        demoMode = demo
+        demoTargetApp = demo ? previousApp : nil
+        resetHAR()
+        // Fetch content while the user selects, without capturing anything yet. Demo mode
+        // fetches again once its canvas window exists, so it can keep that one window.
+        if CGPreflightScreenCaptureAccess(), !demo {
             contentTask = Task { try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) }
         }
         if useLastRegion, let region = lastRegion,
@@ -128,7 +150,8 @@ final class AppController: NSObject, NSApplicationDelegate {
                 return
             }
             do {
-                let microphone = self.forceAudio || self.defaults.bool(forKey: "microphone")
+                // Demo mode always records the narration.
+                let microphone = self.forceAudio || self.demoMode || self.defaults.bool(forKey: "microphone")
                 let systemAudio = self.forceAudio || self.defaults.bool(forKey: "systemAudio")
                 if microphone {
                     let granted = await AVCaptureDevice.requestAccess(for: .audio)
@@ -138,25 +161,41 @@ final class AppController: NSObject, NSApplicationDelegate {
                 guard let screen = NSScreen.screens.first(where: { $0.displayUUID == region.displayUUID }),
                       region.fits(in: screen.frame.size) else { throw RecordingError.displayChanged }
                 let content: SCShareableContent
-                if let task = self.contentTask { content = try await task.value }
+                var includedWindows: [SCWindow] = []
+                if self.demoMode {
+                    let overlay = DemoOverlay(region: region, screen: screen, targetApp: self.demoTargetApp)
+                    overlay.onStop = { [weak self] in self?.stop() }
+                    self.demo = overlay
+                    overlay.show()
+                    (content, includedWindows) = try await self.shareableContent(including: overlay.canvasWindowID)
+                    if includedWindows.isEmpty { self.logger.error("Annotation canvas missing from shareable content") }
+                } else if let task = self.contentTask { content = try await task.value }
                 else { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) }
                 self.contentTask = nil
-                guard !self.stopWhenReady else { self.phase = .idle; return }
+                guard !self.stopWhenReady else { self.closeDemo(); self.phase = .idle; return }
                 guard let display = content.displays.first(where: { $0.displayID == screen.displayID }) else {
                     throw RecordingError.displayChanged
                 }
                 try FileManager.default.createDirectory(at: self.recordingsDirectory, withIntermediateDirectories: true)
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-                let name = "Recording \(formatter.string(from: Date())) \(UUID().uuidString.prefix(6)).mp4"
+                let name = "\(self.demoMode ? "Demo" : "Recording") \(formatter.string(from: Date())) \(UUID().uuidString.prefix(6)).mp4"
                 let session = RecordingSession(url: self.recordingsDirectory.appendingPathComponent(name))
                 self.session = session
+                // Chrome reports window bounds in global display points, top-left origin.
+                let displayBounds = CGDisplayBounds(screen.displayID)
+                let globalRegion = region.rect.offsetBy(dx: displayBounds.minX, dy: displayBounds.minY)
+                if self.demoMode {
+                    session.onCaptureStopped = { [weak self] in self?.closeDemo() }
+                }
                 session.onStarted = { [weak self, weak session] in
                     guard let self, let session, self.session === session else { return }
                     self.startedAt = Date()
                     self.startLatencyMS = Int(Date().timeIntervalSince(self.requestedAt ?? Date()) * 1000)
                     self.logger.info("Recording started in \(self.startLatencyMS ?? 0) ms")
                     if self.phase != .stopping { self.phase = .recording }
+                    // Not once a stop is queued: the HAR's stop would already have been sent.
+                    if self.demoMode && self.phase == .recording { self.startHAR(video: session.url, region: globalRegion) }
                     let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
                         Task { @MainActor in self?.updateMenu() }
                     }
@@ -169,8 +208,20 @@ final class AppController: NSObject, NSApplicationDelegate {
                 }
                 await session.start(display: display, region: region, scale: screen.backingScaleFactor,
                                     applications: content.applications, microphone: microphone,
-                                    systemAudio: systemAudio)
+                                    systemAudio: systemAudio, includedWindows: includedWindows)
             } catch { self.finish(.failure(error)) }
+        }
+    }
+
+    /// Retries briefly: a window ordered in a moment ago can be missing from the first listing.
+    private func shareableContent(including windowID: CGWindowID) async throws -> (SCShareableContent, [SCWindow]) {
+        var attempt = 0
+        while true {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let windows = content.windows.filter { $0.windowID == windowID }
+            attempt += 1
+            if !windows.isEmpty || attempt >= 10 { return (content, windows) }
+            try await Task.sleep(nanoseconds: 50_000_000)
         }
     }
 
@@ -179,6 +230,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard phase == .starting || phase == .recording else { return }
         stopWhenReady = true
         phase = .stopping
+        if demoMode, let harID {
+            har.stop(id: harID)
+            if harStarted { demo?.setHAR(.saving) }
+        }
         if let session { Task { await session.stop() } }
     }
 
@@ -189,19 +244,96 @@ final class AppController: NSObject, NSApplicationDelegate {
         session = nil
         contentTask = nil
         startTask = nil
+        closeDemo()
         switch result {
         case .success(let url):
             defaults.set(url.path, forKey: "lastFile")
             lastError = nil
             phase = .idle
             logger.info("Recording finalized")
-            showToast(title: "Recording saved", detail: url.lastPathComponent, file: url)
+            if demoMode {
+                demoVideo = url
+                showDemoToast()
+            } else {
+                showToast(title: "Recording saved", detail: url.lastPathComponent, files: [url])
+            }
         case .failure(let error):
             lastError = error.localizedDescription
             phase = .idle
             logger.error("Recording failed: \(error.localizedDescription, privacy: .public)")
             showToast(title: "Recording failed", detail: error.localizedDescription)
         }
+    }
+
+    private func closeDemo() {
+        demo?.close()
+        demo = nil
+    }
+
+    // MARK: HAR
+
+    private func resetHAR() {
+        harTimeout?.invalidate()
+        harTimeout = nil
+        harID = nil
+        harStarted = false
+        harFile = nil
+        harEntries = 0
+        harNote = nil
+        demoVideo = nil
+    }
+
+    private func startHAR(video: URL, region: CGRect) {
+        let id = UUID().uuidString
+        harID = id
+        har.start(id: id, path: video.deletingPathExtension().appendingPathExtension("har"), startedAt: Date(), region: region)
+        // The extension answers within a moment when Chrome has it loaded.
+        harTimeout = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.harID == id, !self.harStarted else { return }
+                self.demo?.setHAR(.unavailable)
+            }
+        }
+    }
+
+    private func handleHAR(_ event: HAREvent) {
+        guard event.id == harID else { return }
+        switch event.kind {
+        case .started:
+            harStarted = true
+            harBrowser = event.browser
+            demo?.setHAR(.recording(event.browser))
+        case .saved:
+            guard harFile == nil, let path = event.path else { return }
+            harStarted = true
+            harBrowser = event.browser
+            harFile = URL(fileURLWithPath: path)
+            harEntries = event.entries
+            harNote = nil
+            demo?.setHAR(.saved(event.entries))
+            if demoVideo != nil { showDemoToast() }
+        case .failed:
+            guard harFile == nil else { return }
+            harNote = "HAR failed: \(event.message ?? "unknown error")"
+            if demoVideo != nil { showDemoToast() }
+        }
+    }
+
+    private func showDemoToast() {
+        guard let video = demoVideo else { return }
+        var lines = [video.lastPathComponent]
+        var files = [video]
+        if let harFile {
+            files.append(harFile)
+            lines.append("HAR: \(harEntries) request\(harEntries == 1 ? "" : "s") from \(harBrowser)")
+        } else if let harNote {
+            lines.append(harNote)
+        } else if harStarted {
+            lines.append("Saving the HAR from \(harBrowser)…")
+        } else {
+            lines.append("No HAR: the Quick Record HAR extension isn’t connected in Chrome.")
+        }
+        showToast(title: "Demo saved", detail: lines.joined(separator: "\n"), files: files)
     }
 
     private func restoreFocus() {
@@ -230,9 +362,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         button.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         let seconds = Int(Date().timeIntervalSince(startedAt ?? Date()))
         switch phase {
-        case .recording: button.title = String(format: " %02d:%02d", seconds / 60, seconds % 60)
+        case .recording:
+            button.title = String(format: " %02d:%02d", seconds / 60, seconds % 60)
+            demo?.setElapsed(String(format: "%02d:%02d", seconds / 60, seconds % 60))
         case .starting: button.title = " Starting…"
-        case .stopping: button.title = " Saving…"
+        case .stopping:
+            button.title = " Saving…"
+            demo?.setElapsed("Saving…")
         default: button.title = ""
         }
         button.toolTip = "Quick Record — \(phase.rawValue)"
@@ -247,6 +383,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         item(title, action: #selector(toggleFromMenu), in: menu, enabled: phase != .stopping)
         item("Record Last Region", action: #selector(lastFromMenu), in: menu, enabled: phase == .idle && lastRegion != nil)
+        item("Record Demo (Draw, Narrate, HAR)…", action: #selector(demoFromMenu), in: menu, enabled: phase == .idle)
         menu.addItem(.separator())
         item("Microphone", action: #selector(toggleMicrophone), in: menu, enabled: phase == .idle,
              checked: defaults.bool(forKey: "microphone"))
@@ -272,7 +409,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleMicrophone() { defaults.set(!defaults.bool(forKey: "microphone"), forKey: "microphone"); updateMenu() }
     @objc private func toggleSystemAudio() { defaults.set(!defaults.bool(forKey: "systemAudio"), forKey: "systemAudio"); updateMenu() }
-    @objc private func copyLast() { if let lastFile { copy(lastFile) } }
+    @objc private func copyLast() { if let lastFile { copy([lastFile]) } }
     @objc private func revealLast() { if let lastFile { NSWorkspace.shared.activateFileViewerSelecting([lastFile]) } }
     @objc private func openFolder() {
         do {
@@ -281,9 +418,11 @@ final class AppController: NSObject, NSApplicationDelegate {
         } catch { showToast(title: "Couldn’t open recordings", detail: error.localizedDescription) }
     }
     @objc private func quit() { NSApp.terminate(nil) }
-    private func copy(_ url: URL) {
+    /// A demo's video and HAR go together, so one paste attaches both.
+    private func copy(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([url as NSURL])
+        NSPasteboard.general.writeObjects(urls.map { $0 as NSURL })
     }
 
     @objc private func showScreenPermissionHelp() {
@@ -299,10 +438,11 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showToast(title: String, detail: String, file: URL? = nil) {
+    private func showToast(title: String, detail: String, files: [URL] = []) {
         toastTimer?.invalidate()
         toast?.close()
-        let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 370, height: 138),
+        let height: CGFloat = detail.contains("\n") ? 156 : 138
+        let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 370, height: height),
                             styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Quick Record"
         panel.isReleasedWhenClosed = false
@@ -310,9 +450,9 @@ final class AppController: NSObject, NSApplicationDelegate {
         panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.contentView = NSHostingView(rootView: SavedToast(title: title, detail: detail, file: file,
-            onCopy: { [weak self, weak panel] in if let file { self?.copy(file) }; panel?.orderOut(nil) },
-            onReveal: { [weak panel] in if let file { NSWorkspace.shared.activateFileViewerSelecting([file]) }; panel?.orderOut(nil) }))
+        panel.contentView = NSHostingView(rootView: SavedToast(title: title, detail: detail, files: files,
+            onCopy: { [weak self, weak panel] in self?.copy(files); panel?.orderOut(nil) },
+            onReveal: { [weak panel] in NSWorkspace.shared.activateFileViewerSelecting(files); panel?.orderOut(nil) }))
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
             panel.setFrameOrigin(CGPoint(x: screen.visibleFrame.maxX - panel.frame.width - 20,
                                          y: screen.visibleFrame.minY + 20))
@@ -330,6 +470,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         let values: [String: Any] = [
             "pid": ProcessInfo.processInfo.processIdentifier,
             "state": phase.rawValue,
+            "demo": demoMode && phase != .idle,
             "screenPermission": CGPreflightScreenCaptureAccess(),
             "lastFile": lastFile?.path ?? "",
             "error": lastError ?? "",
@@ -356,19 +497,19 @@ private enum RecordingError: LocalizedError {
 private struct SavedToast: View {
     let title: String
     let detail: String
-    let file: URL?
+    let files: [URL]
     let onCopy: () -> Void
     let onReveal: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: file == nil ? "exclamationmark.triangle" : "checkmark.circle")
+            Label(title, systemImage: files.isEmpty ? "exclamationmark.triangle" : "checkmark.circle")
                 .font(.system(size: 14, weight: .medium))
             Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
-                .lineLimit(3).textSelection(.enabled)
-            if file != nil {
+                .lineLimit(4).textSelection(.enabled)
+            if !files.isEmpty {
                 HStack(spacing: 10) {
-                    Button("Copy File", action: onCopy)
+                    Button(files.count > 1 ? "Copy Files" : "Copy File", action: onCopy)
                     Button("Reveal in Finder", action: onReveal)
                 }
             }

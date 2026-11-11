@@ -18,6 +18,12 @@
 --                 ~/.local/share/herdr-stash/. The space itself is left alone
 --   fn+q          toggle Quick Record's region recording (from any app)
 --   fn+shift+q    same, but also records microphone + system audio
+--   fn+alt+q      toggle a Quick Record demo: the same region picker, then an
+--                 Excalidraw-style annotation toolbar over the recording, the
+--                 microphone on for narration, Wispr Flow dictation into text
+--                 labels (M), and a HAR from Chrome saved beside the video
+--   fn+alt+a      during a demo, switch between drawing (last tool) and
+--                 clicking through to the app underneath
 --   fn+b          toggle horizontal wheel/trackpad scrolling (from any app)
 --   fn+p          put the focused pane's Claude or Codex into plan mode:
 --                 presses shift+tab until its footer says plan (Claude cycles
@@ -150,7 +156,7 @@ local function socketCandidates()
   return paths
 end
 
-local function toggleRecording(withAudio)
+local function quickRecord(command)
   local task
   task = hs.task.new("/usr/bin/open", function(exitCode, _, stderr)
     inflight[task] = nil
@@ -158,13 +164,17 @@ local function toggleRecording(withAudio)
       hs.printf("Quick Record toggle failed: %s", stderr or "")
       hs.alert.show("Couldn’t open Quick Record. Run its install.sh first.", 3)
     end
-  end, { "-g", "-a", HOME .. "/Applications/Quick Record.app", withAudio and "quickrecord://toggle-audio" or "quickrecord://toggle" })
+  end, { "-g", "-a", HOME .. "/Applications/Quick Record.app", "quickrecord://" .. command })
   if not task then return end
   inflight[task] = true
   if not task:start() then
     inflight[task] = nil
     hs.alert.show("Couldn’t start Quick Record.", 3)
   end
+end
+
+local function toggleRecording(withAudio)
+  quickRecord(withAudio and "toggle-audio" or "toggle")
 end
 
 -- One JSON request/response over the Herdr socket. cb(response, rawLine).
@@ -926,6 +936,15 @@ local function handleKey(event)
     return false
   end
 
+  -- Quick Record demo mode, from any app: fn+alt+q starts/stops it, fn+alt+a
+  -- toggles drawing (Quick Record ignores it when no demo is running).
+  if flags.fn and flags.alt and not (flags.cmd or flags.ctrl or flags.shift) and (code == keys.q or code == keys.a) then
+    if event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then
+      quickRecord(code == keys.q and "toggle-demo" or "annotate")
+    end
+    return true
+  end
+
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
   if flags.shift and not shiftable[code] then return false end
   local mode = pickers[code]
@@ -998,6 +1017,7 @@ M.focusNextAgent = focusNextAgent
 M.copySessionId = copySessionId
 M.copyPaneId = copyPaneId
 M.toggleRecording = toggleRecording
+M.toggleDemo = function() quickRecord("toggle-demo") end
 M.newTabNext = newTabNext
 M.stashSpace = stashSpace
 M.focusAgentTab = focusAgentTab

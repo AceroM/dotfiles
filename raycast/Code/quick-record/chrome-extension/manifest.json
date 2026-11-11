@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Quick Record HAR",
+  "version": "1.0.0",
+  "description": "Saves a HAR of the tabs on camera while Quick Record makes a demo recording (fn+⌥Q). Local only.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoQwNfLyjvTymSI5nruUhXPjfClmCghPx+I92Sa5Fy1Nn8WscBNfVtSYYa3kfEigYBTLmaEWcMH5d3qRsZ4DKd2PtAse6qr5VPn8jJPU02+JttAI3NLpcbLI6p+w7XhpZGlVz7wgOlIkMkGjUout7jgKgT9RL5nNagR+wMf9wbq5pFWJQ7xjAr19v8M4Tqu+VkDKmdrX4O8B5C2A+J+dGd+hKu5ThKg34wLqkXYiHeL0yDKx1wxAffpX5jA8w9HQHv0Ydw5KvtBN0twgSPQi1dcHRNJuNy3s+XtnTFoZk3BnLFJWahSmOCdjzQuiPK2OsXmQZV01RMgaDyZCmOQnguwIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": ["nativeMessaging", "webRequest", "scripting", "tabs", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Quick Record HAR" }
+}

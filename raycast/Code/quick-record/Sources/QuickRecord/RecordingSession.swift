@@ -7,6 +7,8 @@ final class RecordingSession: NSObject, SCStreamDelegate {
     let url: URL
     var onStarted: (() -> Void)?
     var onFinished: ((Result<URL, Error>) -> Void)?
+    /// Frames have stopped arriving, before the MP4 is finalized: overlays can go now.
+    var onCaptureStopped: (() -> Void)?
     private var stream: SCStream?
     private var movie: MovieWriter?
     private var starting = true
@@ -18,9 +20,11 @@ final class RecordingSession: NSObject, SCStreamDelegate {
     init(url: URL) { self.url = url }
 
     func start(display: SCDisplay, region: CaptureRegion, scale: CGFloat,
-               applications: [SCRunningApplication], microphone: Bool, systemAudio: Bool) async {
+               applications: [SCRunningApplication], microphone: Bool, systemAudio: Bool,
+               includedWindows: [SCWindow] = []) async {
         let ownApplications = applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
-        let filter = SCContentFilter(display: display, excludingApplications: ownApplications, exceptingWindows: [])
+        // Quick Record's own windows stay out, except any passed in (the demo annotation canvas).
+        let filter = SCContentFilter(display: display, excludingApplications: ownApplications, exceptingWindows: includedWindows)
         let config = SCStreamConfiguration()
         let size = region.outputSize(scale: scale)
         config.sourceRect = region.rect
@@ -71,6 +75,8 @@ final class RecordingSession: NSObject, SCStreamDelegate {
         let endTime = CMClockGetTime(CMClockGetHostTimeClock())
         do {
             try await stream.stopCapture()
+            onCaptureStopped?()
+            onCaptureStopped = nil
             try await movie.finish(at: endTime)
             if mixAudio { try await mixAudioTracks() }
             guard !finished else { return }
@@ -85,6 +91,8 @@ final class RecordingSession: NSObject, SCStreamDelegate {
         guard !finished else { return }
         finished = true
         if let stream { try? await stream.stopCapture() }
+        onCaptureStopped?()
+        onCaptureStopped = nil
         await movie?.cancel()
         onFinished?(.failure(error))
         self.stream = nil
