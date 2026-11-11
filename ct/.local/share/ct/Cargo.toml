@@ -1,0 +1,16 @@
+[package]
+name = "ct"
+version = "0.1.0"
+edition = "2021"
+description = "Chrome tabs: every tab by title and URL in a centered list; close one, a range, a site, the duplicates, or a filter's matches; u reopens"
+
+[dependencies]
+ratatui = "0.30"
+# The browser-use native host speaks newline-delimited JSON.
+serde_json = "1"
+unicode-width = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = false

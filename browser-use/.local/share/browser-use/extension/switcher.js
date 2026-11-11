@@ -183,9 +183,43 @@ export const SWITCHER = {
     return { focused: tab.id };
   },
 
+  // Tabs that are already gone count as closed, so one stale id doesn't fail the whole batch.
   async "switcher.close"(args) {
     const ids = (Array.isArray(args.tabs) ? args.tabs : [args.tab]).map(Number);
-    await chrome.tabs.remove(ids);
-    return { closed: ids };
+    const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
+    const closing = ids.filter((id) => open.has(id));
+    if (closing.length) await chrome.tabs.remove(closing);
+    return { closed: closing };
+  },
+
+  // ct's undo: open closed tabs again where they were (window, position, group, pinned), in the
+  // background. Each is a fresh tab at the same URL, so its back/forward history is gone. A window
+  // that has since closed sends its tabs to the current window, ungrouped.
+  async "switcher.reopen"(args) {
+    const want = Array.isArray(args.tabs) ? args.tabs : [];
+    const [windows, groups] = await Promise.all([chrome.windows.getAll(), chrome.tabGroups.query({})]);
+    const wins = new Set(windows.filter((w) => w.type === "normal").map((w) => w.id));
+    const grps = new Set(groups.map((g) => g.id));
+    // Left to right in each window, so every tab lands back at its old index.
+    const order = [...want].sort((a, b) => a.windowId - b.windowId || a.index - b.index);
+    const opened = [];
+    const failed = [];
+    for (const t of order) {
+      const props = { url: String(t.url), active: false, pinned: !!t.pinned };
+      if (wins.has(t.windowId)) {
+        props.windowId = t.windowId;
+        if (t.index >= 0) props.index = t.index;
+      }
+      try {
+        const tab = await chrome.tabs.create(props);
+        if (t.groupId >= 0 && grps.has(t.groupId) && tab.windowId === t.windowId && !t.pinned) {
+          await chrome.tabs.group({ groupId: t.groupId, tabIds: [tab.id] }).catch(() => {});
+        }
+        opened.push(tab.id);
+      } catch (e) {
+        failed.push({ url: t.url, error: String(e?.message ?? e) });
+      }
+    }
+    return { opened, failed };
   },
 };

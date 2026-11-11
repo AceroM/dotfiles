@@ -1,0 +1,4 @@
+# Cargo build output. Cargo.lock stays tracked: ct is a binary.
+/target/
+**/*.rs.bk
+.DS_Store
