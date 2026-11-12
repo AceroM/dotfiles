@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""Open a file location from a Rex pane in Neovim: a centered floating Neovim, or
+the Neovim already in that pane's tab.
+
+  rex-open [--float] [--block B | --label L] [--line-text T] [--dry-run] LOCATION [--or LOCATION]...
+
+LOCATION is anything that names a file or directory: path, ~/path, ./path,
+/abs/path, path:LINE, path:LINE:COL, path:L1-L2, path:LINE:text (grep output),
+path#L12, path(12,5), @path, a/ or b/ diff paths, $HOME/path, or a file:// URL.
+A line number the location leaves out is read from --line-text when it carries
+one after the path (`"x.py", line 12`, `x.ts(12,5)`, `x.go line 12`). Extra
+--or locations are tried in turn when LOCATION doesn't resolve.
+
+A relative path resolves against the source pane's directory, its git root, the
+directories of the other panes in its tab, and finally a unique match among the
+git root's files (`foo.ts` finds src/lib/foo.ts).
+
+The source pane is --block; else the pane labelled --label, narrowed to the one
+whose screen shows --line-text; else $REX_BLOCK.
+
+--float opens it in a floating Neovim centered over the tab: the one rex-open
+opened before if it's still there, else a new one. Without --float, a Neovim in
+a pane of the tab gets it (siblings first), and the float is the fallback.
+Quitting a floating Neovim closes its pane.
+
+Hammerspoon's cmd-click (--float) and ctrl-click call this with --label and
+--line-text read from the pane under the pointer: hammerspoon/.hammerspoon/rexlinks.lua.
+"""
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import glob
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+from urllib.parse import parse_qs, unquote, urlsplit
+
+TERMINAL = "com.superlogical.terminal"
+FLOAT_LABEL = "nvim"
+REX_APP_BIN = (Path.home() / "Library/Application Support/com.superlogical.rex/RexServer/Versions/Current"
+               / "Rex Server.app/Contents/MacOS/rex")
+# Hammerspoon starts this with launchd's PATH, which stops short of Homebrew.
+SEARCH_PATH = os.pathsep.join([os.environ.get("PATH", ""), str(Path.home() / ".local/bin"),
+                               "/opt/homebrew/bin", "/usr/local/bin"])
+# Centered over the tab: [x, y, w, h] as fractions of it.
+FLOAT_BOUNDS = [0.08, 0.06, 0.84, 0.88]
+
+
+def tool(name, fallback=None):
+    found = shutil.which(name, path=SEARCH_PATH)
+    if found:
+        return found
+    if fallback and Path(fallback).exists():
+        return str(fallback)
+    raise ValueError(f"{name} isn't installed")
+
+
+def run(argv, timeout=5, stdin=None):
+    return subprocess.run(argv, text=True, input=stdin, capture_output=True, check=True, timeout=timeout).stdout
+
+
+def rex(*args, stdin=None):
+    try:
+        return run([tool("rex", REX_APP_BIN), *args], stdin=stdin)
+    except subprocess.CalledProcessError as error:
+        raise ValueError(f"rex {args[0]}: {(error.stderr or error.stdout).strip()}") from error
+
+
+def rex_json(*args, stdin=None):
+    return json.loads(rex(*args, stdin=stdin) or "{}")
+
+
+# --- the location ------------------------------------------------------------
+
+def parse_location(value, line_text=""):
+    """(path, line, column) from a clicked token; line and column are None when
+    neither the token nor the text around it gives one."""
+    raw = value = value.strip().strip("`'\"<>(){},;")
+    line = column = None
+    if value.startswith("file://"):
+        uri = urlsplit(value)
+        if uri.netloc not in ("", "localhost"):
+            raise ValueError("Remote file links can't open in a local editor")
+        value = unquote(uri.path)
+        anchor = re.fullmatch(r"L?(\d+)(?:[:C](\d+))?(?:-L?\d+)?", uri.fragment)
+        query = parse_qs(uri.query)
+        if anchor:
+            line, column = int(anchor[1]), int(anchor[2] or 1)
+        elif query.get("line"):
+            line, column = int(query["line"][0]), int(query.get("column", [1])[0])
+    value = value.rstrip(".,;:")
+    match = (re.fullmatch(r"(.+?):(\d+)(?::(\d+))?(?:-\d+)?(?::.*)?", value)  # path:12:5, path:12-20, grep's path:12:text
+             or re.fullmatch(r"(.+?)#L(\d+)(?:C(\d+))?(?:-L?\d+)?", value))  # GitHub's path#L12
+    if match:
+        value, line, column = match[1], int(match[2]), int(match[3] or 1)
+    elif line_text:
+        after = re.escape(raw)
+        context = (re.search(after + r"\((\d+)(?:,\s*(\d+))?\)", line_text)  # tsc: x.ts(12,5)
+                   or re.search(after + r"\"?,?\s+line\s+(\d+)(?:,?\s+col(?:umn)?\s+(\d+))?", line_text))  # x.py", line 12
+        if context:
+            line, column = int(context[1]), int(context[2] or 1)
+    value = value.removeprefix("@")
+    if not value or "\x00" in value:
+        raise ValueError(f"Not a file location: {raw!r}")
+    return value, line, column
+
+
+def git_root(directory):
+    try:
+        return Path(run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"]).strip())
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
+def tracked_match(path, root):
+    """The one file under `root` whose path ends with `path`, from git's index."""
+    try:
+        files = run(["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard"],
+                    timeout=5).splitlines()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    wanted = path.as_posix().lstrip("./")
+    hits = [f for f in files if f == wanted or f.endswith("/" + wanted)]
+    # Several files share the name (init.lua): opening a guess is worse than nothing.
+    return root / hits[0] if len(hits) == 1 else None
+
+
+def resolve(path, directories):
+    """The file or directory `path` names, seen from the first of `directories`
+    (then the others, then their git roots) that has it."""
+    expanded = Path(os.path.expandvars(os.path.expanduser(path)))
+    if expanded.is_absolute():
+        return Path(os.path.normpath(expanded)) if expanded.exists() else None
+    variants = [expanded]
+    if len(expanded.parts) > 1 and expanded.parts[0] in ("a", "b"):
+        variants.append(Path(*expanded.parts[1:]))  # git diff's a/src/x.ts
+    bases, roots = [], []
+    for directory in directories:
+        if directory and Path(directory) not in bases:
+            bases.append(Path(directory))
+            root = git_root(directory)
+            if root and root not in roots:
+                roots.append(root)
+    for base in [*bases, *[r for r in roots if r not in bases]]:
+        for variant in variants:
+            # normpath, not resolve: ~/.zshrc stays ~/.zshrc instead of its stow target.
+            candidate = Path(os.path.normpath(base / variant))
+            if candidate.exists():
+                return candidate
+    for root in roots:
+        for variant in variants:
+            found = tracked_match(variant, root)
+            if found:
+                return found
+    return None
+
+
+# --- Rex panes ---------------------------------------------------------------
+
+def all_panes():
+    """Every terminal pane in every session: its tab, its layer, and whether
+    that tab is the one its session shows."""
+    panes = []
+    for session in rex_json("ls", "--json").get("sessions", []):
+        view = rex_json("session", "inspect", session["session_id"], "--json")
+        for window in view.get("windows", []):
+            for layer in window.get("layers", []):
+                for block in layer.get("blocks", []):
+                    if block.get("creator_name") == TERMINAL:
+                        panes.append({
+                            "session_id": view["session_id"], "window_id": window["window_id"],
+                            "block_id": block["block_id"], "label": block.get("label") or "",
+                            "layer_id": layer.get("layer_id"), "floating": layer.get("kind") != "tiled",
+                            "active": window["window_id"] == view.get("active_window_id"),
+                        })
+    return panes
+
+
+def shows(pane, text):
+    try:
+        return text in rex("capture", "-s", pane["session_id"], "-b", pane["block_id"], "--trim")
+    except (ValueError, subprocess.SubprocessError):
+        return False
+
+
+def headers(pane):
+    """What the app's pane header may read for a pane with no label of its own:
+    `<dir>  <title>`, or just `<dir>`, with the home directory as ~."""
+    if "headers" not in pane:
+        info = process(pane)
+        cwd = pane_cwd(info, pane) or ""
+        home = str(Path.home())
+        short = "~" + cwd[len(home):] if cwd == home or cwd.startswith(home + "/") else cwd
+        try:
+            title = rex_json("block", "call", "-s", pane["session_id"], "-b", pane["block_id"], "title").get("title") or ""
+        except (ValueError, subprocess.SubprocessError):
+            title = ""
+        pane["headers"] = sorted({short, f"{short}  {title}", title} - {""})
+    return pane["headers"]
+
+
+def find_source(panes, block, label, line_text):
+    if block:
+        found = [p for p in panes if p["block_id"] == block or p["block_id"].endswith(block)]
+        if len(found) == 1:
+            return found[0]
+        raise ValueError(f"No single pane matches {block}")
+    candidates = [p for p in panes if label and p["label"] == label]
+    if not candidates and label:
+        with ThreadPoolExecutor(8) as pool:
+            list(pool.map(headers, panes))
+        candidates = [p for p in panes if label in headers(p)]
+    needle = (line_text or "").strip()
+    if not candidates and needle:
+        candidates = panes
+    if len(candidates) > 1 and needle:
+        candidates = [p for p in candidates if shows(p, needle)] or candidates
+    # The server's active tab is only a tie-break: the app keeps its own selection.
+    if len(candidates) > 1:
+        candidates = [p for p in candidates if p["active"]] or candidates
+    if len(candidates) == 1:
+        return candidates[0]
+    if not label and not needle and os.environ.get("REX_BLOCK"):
+        return find_source(panes, os.environ["REX_BLOCK"], None, None)
+    raise ValueError(f"Couldn't tell which pane was clicked ({len(candidates)} match {label!r})")
+
+
+def process(pane):
+    try:
+        return rex_json("block", "call", "-s", pane["session_id"], "-b", pane["block_id"], "process")
+    except (ValueError, subprocess.SubprocessError):
+        return {}
+
+
+def pane_cwd(info, pane):
+    if (info.get("foreground") or {}).get("cwd"):
+        return info["foreground"]["cwd"]
+    for ancestor in info.get("ancestors") or []:
+        if ancestor.get("cwd"):
+            return ancestor["cwd"]
+    try:
+        reported = rex_json("block", "call", "-s", pane["session_id"], "-b", pane["block_id"], "pwd").get("pwd", "")
+    except (ValueError, subprocess.SubprocessError):
+        return None
+    return unquote(urlsplit(reported).path) or None
+
+
+def program(info):
+    foreground = info.get("foreground") or {}
+    name = foreground.get("argv0") or foreground.get("path") or ""
+    return os.path.basename(name).lstrip("-")
+
+
+def nvim_socket(pid):
+    """Neovim's default server address: $XDG_RUNTIME_DIR, else stdpath('run'),
+    which is $TMPDIR/nvim.$USER/<random> on macOS. The pane's foreground nvim is
+    the TUI; the socket is named for the `nvim --embed` server it starts."""
+    try:
+        pids = [pid, *run(["pgrep", "-P", str(pid), "-x", "nvim"]).split()]
+    except (subprocess.SubprocessError, OSError):
+        pids = [pid]
+    user = os.environ.get("USER") or Path.home().name
+    temps = {os.environ.get("TMPDIR", "")}
+    try:
+        temps.add(run(["getconf", "DARWIN_USER_TEMP_DIR"]).strip())
+    except (subprocess.SubprocessError, OSError):
+        pass
+    for candidate in pids:
+        patterns = [os.path.join(t, f"nvim.{user}", "*", f"nvim.{candidate}.0") for t in temps if t]
+        if os.environ.get("XDG_RUNTIME_DIR"):
+            patterns.append(os.path.join(os.environ["XDG_RUNTIME_DIR"], f"nvim.{candidate}.0"))
+        for pattern in patterns:
+            for match in glob.glob(pattern):
+                return match
+    return None
+
+
+def tab_panes(panes, source):
+    """The source pane's tab, siblings first and the source last, each with its
+    directory, and the Neovim RPC socket of any running nvim."""
+    tab = [p for p in panes if p["window_id"] == source["window_id"] and p["block_id"] != source["block_id"]]
+    out = []
+    for pane in [*tab, source]:
+        info = process(pane)
+        server = None
+        if program(info) == "nvim":
+            server = nvim_socket(info["foreground"]["pid"])
+        out.append({**pane, "cwd": pane_cwd(info, pane), "server": server, "is_source": pane is source})
+    return out
+
+
+# --- opening -----------------------------------------------------------------
+
+def rpc(server, expression, argument):
+    encoded = json.dumps(argument).replace("'", "''")
+    expression = f"json_encode(luaeval('{expression}', json_decode('{encoded}')))"
+    result = subprocess.run([tool("nvim"), "--headless", "--server", server, "--remote-expr", expression],
+                            text=True, capture_output=True, check=True, timeout=5)
+    try:
+        # Neovim writes remote-expr results to stderr when stdin is a terminal.
+        return json.loads(result.stdout.strip() or result.stderr.strip())
+    except ValueError as error:
+        raise ValueError(f"Neovim didn't answer: {result.stderr.strip() or result.stdout!r}") from error
+
+
+def contains(directory, target):
+    root = directory and (git_root(directory) or Path(directory))
+    return bool(root) and target.is_relative_to(root)
+
+
+def choose_editor(tab, target, float_only):
+    """A sibling beats the source pane, and one whose checkout holds the file
+    beats one that doesn't. --float takes only floating Neovims."""
+    editors = [p for p in tab if p["server"] and (p["floating"] or not float_only)]
+    if float_only:
+        editors.sort(key=lambda e: e["label"] != FLOAT_LABEL)
+    else:
+        editors.sort(key=lambda e: (e["is_source"], not contains(e["cwd"], target)))
+    return editors[0] if editors else None
+
+
+def open_in_editor(editor, target, line, column):
+    result = rpc(editor["server"], 'require("config.rex_links").open(_A)',
+                 {"path": str(target), "line": line or 1, "column": column or 1})
+    if not result.get("ok"):
+        raise ValueError(result.get("error", "Neovim couldn't open it"))
+    if editor["floating"]:
+        # Raises the float (and brings it back if it was minimized) and focuses it.
+        rex("api", "call", "-s", editor["session_id"], "session.set_layer_state",
+            json.dumps({"layer_id": editor["layer_id"], "state": "normal", "focus": True}))
+    else:
+        rex("api", "call", "-s", editor["session_id"], "session.focus_block",
+            json.dumps({"block_id": editor["block_id"]}))
+    return f"{result['path']}:{result['line']} in {editor['block_id']}"
+
+
+def open_floating(source, target, line, column):
+    directory = target if target.is_dir() else target.parent
+    root = git_root(directory) or directory
+    command = ["nvim"]
+    if line and target.is_file():
+        command += [f"+call cursor({line}, {column or 1})", "+normal! zvzz"]
+    request = {
+        "session_id": source["session_id"], "window_id": source["window_id"],
+        "bounds": FLOAT_BOUNDS, "focus": True,
+        "layout": {"block": {
+            "flavor": TERMINAL + ".shell", "label": FLOAT_LABEL,
+            "options": {"cwd": str(root), "command": [*command, "--", str(target)]},
+        }},
+    }
+    created = rex_json("api", "call", "-s", source["session_id"], "session.new_layer", "-", stdin=json.dumps(request))
+    return f"{target}:{line or 1} in a new floating pane {(created.get('block_ids') or ['?'])[0]}"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("location")
+    parser.add_argument("--or", dest="alternates", action="append", default=[],
+                        help="another reading of the click, tried when LOCATION doesn't resolve")
+    parser.add_argument("--float", action="store_true", help="open in a centered floating Neovim")
+    parser.add_argument("--block", help="the source pane's block ID")
+    parser.add_argument("--label", help="the source pane's label, as its header shows it")
+    parser.add_argument("--line-text", default="", help="the clicked line: line numbers after the path, "
+                        "and which of two same-labelled panes was clicked")
+    parser.add_argument("--dry-run", action="store_true", help="print what would open where, and stop")
+    args = parser.parse_args()
+
+    panes = all_panes()
+    source = find_source(panes, args.block, args.label, args.line_text)
+    tab = tab_panes(panes, source)
+    directories = [tab[-1]["cwd"], *[p["cwd"] for p in tab[:-1]]]
+
+    target = None
+    for location in [args.location, *args.alternates]:
+        try:
+            path, line, column = parse_location(location, args.line_text)
+        except ValueError:
+            continue
+        target = resolve(path, directories)
+        if target:
+            break
+    if target is None:
+        raise ValueError(f"Not found: {args.location} (from {directories[0] or 'unknown directory'})")
+    editor = choose_editor(tab, target, args.float)
+
+    if args.dry_run:
+        print(json.dumps({"target": str(target), "line": line, "column": column, "source": source,
+                          "directories": directories, "editor": editor and editor["block_id"],
+                          "float": args.float}, indent=2))
+        return
+    if editor:
+        print("Opened " + open_in_editor(editor, target, line, column))
+    else:
+        print("Opened " + open_floating(source, target, line, column))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)

@@ -72,6 +72,12 @@ appkeys.start()
 chromeshot = require("chromeshot")
 chromeshot.start()
 
+-- Rex: cmd-click a file path (~/x, a/b.ts:12, …) to open it in a centered
+-- floating Neovim; ctrl-click opens it in the Neovim already in the tab.
+-- A mouse tap only: Rex can't bind clicks. See rexlinks.lua and rex-open.
+rexlinks = require("rexlinks")
+rexlinks.start()
+
 -- Option-minus toggles external displays; Option-plus toggles the laptop.
 -- Both use Lunar to switch between 0% and 80%.
 -- Run asynchronously so Lunar's DDC calls don't block other global hotkeys.
