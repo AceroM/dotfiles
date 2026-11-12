@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""New Rex tab, right after the current one, running the same coding agent as the pane you're in.
+
+    rex-agent-tab                  same agent (claude/codex) and flags as this pane
+    rex-agent-tab codex            force a kind
+    rex-agent-tab -s S -b B        mirror pane B of session S, which is what a key
+                                   binding passes, since it has no REX_* of its own
+    rex-agent-tab --focus=false    open it without making it the session's active tab
+    rex-agent-tab --json           print {"window_id", "block_id", "kind", "args"}
+
+The agent comes from the pane itself, else any agent elsewhere in the same tab,
+since focus drifts to a shell pane in a split. With no agent to mirror it opens
+a plain shell tab in the pane's folder, so the chord always leaves you with a
+usable tab.
+
+The tab runs `sh -c '"$@"; exec $SHELL -l' rex-agent-tab AGENT ARGS…`, the way o
+starts agents: no waiting for a shell to be ready to type into, and when the
+agent exits the tab is left at a shell in its folder.
+
+Errors go to ~/.local/state/rex-agent-tab.log as well as stderr, since a key
+binding has nowhere to print them. Standard library only.
+"""
+
+import argparse
+import ctypes
+import ctypes.util
+import datetime
+import json
+import os
+import struct
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOG = os.path.join(HOME, ".local/state/rex-agent-tab.log")
+REX_APP_BIN = os.path.join(
+    HOME, "Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS")
+
+# A key binding runs this from Rex's own environment, which can't be counted on
+# for PATH. rex-agents (next to this file) calls rex too, so export it.
+os.environ["PATH"] = os.pathsep.join(
+    [p for p in (os.environ.get("REX_BIN_DIR"), REX_APP_BIN, HERE, os.path.join(HOME, ".local/bin"),
+                 "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin") if p]
+    + [os.environ.get("PATH", "")])
+
+# After the agent exits, the tab's login shell, in the agent's folder.
+THEN_SHELL = '"$@"; exec "${SHELL:-/bin/zsh}" -l'
+
+
+def log(message):
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a") as file:
+            file.write(f"{datetime.datetime.now():%F %T} {message}\n")
+    except OSError:
+        pass
+
+
+def die(message):
+    log(f"error: {message}")
+    print(f"rex-agent-tab: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(argv, timeout=15):
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        die(f"{argv[0]}: {error}")
+    return result
+
+
+def rex_json(*args):
+    result = run(["rex", *args])
+    if result.returncode != 0:
+        die(f"rex {' '.join(args)}: {result.stderr.strip() or result.returncode}")
+    try:
+        return json.loads(result.stdout or "{}")
+    except ValueError:
+        die(f"rex {' '.join(args)}: not JSON")
+
+
+# ── the agent process under a pane ──────────────────────────────────────
+
+
+def process_table():
+    """pid -> (ppid, argv0) for every process, from one ps call."""
+    table = {}
+    for line in run(["/bin/ps", "-A", "-o", "pid=,ppid=,args="]).stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            argv0 = parts[2].split()[0] if len(parts) > 2 and parts[2].strip() else ""
+            table[int(parts[0])] = (int(parts[1]), argv0)
+    return table
+
+
+def agent_pid(fg_pid, kind, table):
+    """The claude/codex process at or below the pane's foreground process: the
+    agent itself, or under a wrapper (o's `sh -c`, codex's launcher) — else the
+    parent of a tool the agent is running in front."""
+    if not fg_pid:
+        return None
+    children = {}
+    for pid, (ppid, _) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    queue, seen = [fg_pid], set()
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if os.path.basename(table.get(pid, (0, ""))[1]).lstrip("-") == kind:
+            return pid
+        queue.extend(sorted(children.get(pid, [])))
+    parent = table.get(fg_pid, (0, ""))[0]
+    if os.path.basename(table.get(parent, (0, ""))[1]).lstrip("-") == kind:
+        return parent
+    return None
+
+
+def proc_argv(pid):
+    """A process's exact argv (KERN_PROCARGS2): ps joins it with spaces, which
+    loses the boundaries of any argument that has one."""
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        argmax, size = ctypes.c_int(0), ctypes.c_size_t(ctypes.sizeof(ctypes.c_int))
+        if libc.sysctl((ctypes.c_int * 2)(1, 8), 2, ctypes.byref(argmax), ctypes.byref(size), None, 0) != 0:
+            return []
+        buf, size = ctypes.create_string_buffer(argmax.value), ctypes.c_size_t(argmax.value)
+        if libc.sysctl((ctypes.c_int * 3)(1, 49, pid), 3, buf, ctypes.byref(size), None, 0) != 0:
+            return []
+    except (OSError, AttributeError):
+        return []
+    data = buf.raw[:size.value]
+    argc = struct.unpack("i", data[:4])[0]
+    rest = data[4:]
+    rest = rest[rest.find(b"\0"):].lstrip(b"\0")  # the exec path and its padding come first
+    return [arg.decode("utf-8", "replace") for arg in rest.split(b"\0")[:argc]]
+
+
+def process_cwd(pid):
+    for line in run(["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "cwd", "-Fn"]).stdout.splitlines():
+        if line.startswith("n/"):
+            return line[1:]
+    return ""
+
+
+# Mirror the running agent's own flags, so a tab spawned from `claude
+# --dangerously-skip-permissions` is not silently downgraded to a bare `claude`.
+# Flag values come along (`--model sonnet`); bare positionals do not, because
+# those are one-off prompts and codex subcommands (`codex resume`), and nothing
+# after `--` does, which is where o puts the first prompt. Flags that would
+# clone the source conversation or open a tab that exits immediately are
+# dropped by name, per kind: the same short letter means different things to
+# different agents (claude's -p is --print, codex's is --profile).
+DROP = {
+    "claude": ({"--resume", "-r", "--session-id"}, {"--continue", "-c", "--fork-session", "--print", "-p"}),
+}
+
+
+def mirrored_flags(kind, argv):
+    drop_with_value, drop_flag = DROP.get(kind, (set(), set()))
+    kept, keep_next = [], "no"  # "yes": the previous token was a kept flag, so this is its value
+    for token in argv[1:]:
+        if token == "--":
+            break
+        name = token.split("=", 1)[0]
+        if name in drop_with_value:
+            keep_next = "no" if "=" in token else "drop"
+            continue
+        if name in drop_flag:
+            keep_next = "no"
+            continue
+        if token.startswith("-"):
+            kept.append(token)
+            keep_next = "no" if "=" in token else "yes"
+            continue
+        if keep_next == "yes":
+            kept.append(token)
+        keep_next = "no"
+    return kept
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="rex-agent-tab", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("kind", nargs="?", choices=["claude", "codex"], help="force this agent")
+    parser.add_argument("-s", "--session", help="the pane's session (default: $REX_SESSION)")
+    parser.add_argument("-b", "--block", help="the pane to mirror (default: $REX_BLOCK)")
+    parser.add_argument("--focus", choices=["true", "false"], default="true",
+                        help="make the new tab the session's active tab (default true)")
+    parser.add_argument("--json", action="store_true", help="print the result as JSON")
+    args = parser.parse_args()
+
+    # ── where the keypress came from ────────────────────────────────────
+    session = args.session or os.environ.get("REX_SESSION")
+    block = args.block or (None if args.session else os.environ.get("REX_BLOCK"))
+    if not session:
+        me = rex_json("whoami", "--json")
+        session, block = me.get("session_id"), block or me.get("block_id")
+    if not session:
+        die("not inside a Rex pane: pass -s SESSION -b BLOCK")
+
+    view = rex_json("session", "inspect", session, "--json")
+    session = view.get("session_id") or session  # a label works too; IDs from here on
+    windows = view.get("windows") or []
+    if not block:  # a session alone: its active tab's focused pane
+        active = next((w for w in windows if w["window_id"] == view.get("active_window_id")), None)
+        block = (active or {}).get("focused_block_id")
+    index = next((i for i, w in enumerate(windows)
+                  if any(b.get("block_id") == block for layer in w.get("layers") or [] for b in layer.get("blocks") or [])),
+                 None)
+    if index is None:
+        die(f"pane {block} not found in session {session}")
+    window = windows[index]["window_id"]
+    after = windows[index + 1]["window_id"] if index + 1 < len(windows) else None
+
+    # ── which agent ─────────────────────────────────────────────────────
+    exe = os.path.join(HERE, "rex-agents")
+    result = run([exe if os.access(exe, os.X_OK) else "rex-agents", "--all", "--json"], timeout=30)
+    try:
+        panes = [p for p in json.loads(result.stdout or "[]") if p.get("session_id") == session]
+    except ValueError:
+        die(f"rex-agents: {result.stderr.strip() or 'no JSON'}")
+    source = next((p for p in panes if p["block_id"] == block), {})
+    model = source if source.get("agent") else next(
+        (p for p in panes if p.get("window_id") == window and p.get("agent")), {})
+    kind = args.kind or model.get("agent") or ""
+
+    flags, cwd = [], ""
+    if kind and model.get("agent") == kind:
+        pid = agent_pid(model.get("pid"), kind, process_table())
+        if pid:
+            flags = mirrored_flags(kind, proc_argv(pid))
+            if model is source:
+                cwd = process_cwd(pid)
+    cwd = cwd or source.get("cwd") or model.get("cwd") or HOME
+
+    # ── the tab ─────────────────────────────────────────────────────────
+    cmd = ["window", "new", "-s", session, "-c", cwd, f"--focus={args.focus}", "--json"]
+    if kind:
+        # --interactive: ~/.zshrc too, so the agent sees what a shell tab would.
+        cmd += ["--interactive", "--", "sh", "-c", THEN_SHELL, "rex-agent-tab", kind, *flags]
+    created = rex_json(*cmd)
+    new_window = created.get("window_id")
+    new_block = (created.get("block_ids") or [None])[0]
+    if not new_window:
+        die("window new returned no window")
+
+    # New tabs go to the end; put this one right after the tab it came from.
+    if after:
+        move = run(["rex", "api", "call", "-s", session, "session.move_window",
+                    json.dumps({"window_id": new_window, "before_window_id": after})])
+        if move.returncode != 0:
+            log(f"move_window failed: {move.stderr.strip()}")
+
+    log(f"{kind or 'plain'} tab {new_window} ({new_block}) from {block} in {cwd} {' '.join(flags)}".rstrip())
+    if args.json:
+        print(json.dumps({"window_id": new_window, "block_id": new_block, "kind": kind, "args": flags}))
+    else:
+        print(f"{kind or 'shell'} → {new_window} ({new_block}){' ' + ' '.join(flags) if flags else ''}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Stash a Rex session: write its agents to a Markdown table.
+
+    rex-stash                    the session this pane is in ($REX_SESSION)
+    rex-stash --session servers  a specific session, by label, ID, or end of an ID
+
+Writes ~/.local/share/rex-stash/<date>-<time>-<session>.md (override the folder
+with REX_STASH_DIR), one row per agent, in tab order:
+
+    | session id | agent | title | cwd |
+
+cwd is there because `claude --resume <id>` only finds a session from the
+directory it ran in. Prints the file's path on stdout and a one-line summary on
+stderr. Nothing in the session is closed or changed.
+
+The agents come from rex-agents (next to this file). Rex knows each pane's
+foreground process, not the agent's own session, so the session id is read off
+the agent process under it: Claude's PID registry (~/.claude/sessions/<pid>.json),
+else whichever transcript the process holds open. Never cwd/mtime: several
+agents can share one directory. Standard library only.
+"""
+
+import argparse
+import datetime
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def fail(message):
+    print(f"rex-stash: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(argv, timeout=10):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        fail(f"{argv[0]}: {error}")
+
+
+def rex_agents():
+    exe = os.path.join(HERE, "rex-agents")
+    result = run([exe if os.access(exe, os.X_OK) else "rex-agents", "--json"], timeout=30)
+    if result.returncode != 0:
+        fail(result.stderr.strip() or "rex-agents failed")
+    try:
+        return json.loads(result.stdout or "[]")
+    except ValueError:
+        fail("rex-agents returned no JSON")
+
+
+def sessions():
+    result = run(["rex", "ls", "--json"])
+    try:
+        return json.loads(result.stdout or "{}").get("sessions") or []
+    except ValueError:
+        return []
+
+
+def resolve_session(name):
+    """A session by ID, label (case-insensitive), or the end of its ID."""
+    found = sessions()
+    for test in (lambda s: s["session_id"] == name,
+                 lambda s: (s.get("label") or "").lower() == name.lower(),
+                 lambda s: len(name) >= 6 and s["session_id"].endswith(name)):
+        hits = [s for s in found if test(s)]
+        if len(hits) == 1:
+            return hits[0]["session_id"], hits[0].get("label") or hits[0]["session_id"]
+        if len(hits) > 1:
+            fail(f"'{name}' matches {len(hits)} sessions")
+    fail(f"no Rex session '{name}' (rex ls lists them)")
+
+
+# ── the agent process under a pane ──────────────────────────────────────
+
+
+def process_table():
+    """pid -> (ppid, argv0) for every process, from one ps call."""
+    table = {}
+    for line in run(["/bin/ps", "-A", "-o", "pid=,ppid=,args="]).stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            argv0 = parts[2].split()[0] if len(parts) > 2 and parts[2].strip() else ""
+            table[int(parts[0])] = (int(parts[1]), argv0)
+    return table
+
+
+def agent_pid(fg_pid, kind, table):
+    """The claude/codex process at or below the pane's foreground process.
+
+    The foreground is the agent itself, a tool it is running (bash), or a
+    wrapper it runs under (o's `sh -c`, codex's node/bun launcher).
+    """
+    if not fg_pid:
+        return None
+    children = {}
+    for pid, (ppid, _) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    queue, seen = [fg_pid], set()
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if os.path.basename(table.get(pid, (0, ""))[1]).lstrip("-") == kind:
+            return pid
+        queue.extend(sorted(children.get(pid, [])))
+    # an agent running a tool: the tool is in front, the agent is its parent
+    parent = table.get(fg_pid, (0, ""))[0]
+    if os.path.basename(table.get(parent, (0, ""))[1]).lstrip("-") == kind:
+        return parent
+    return None
+
+
+def read_head_line(path):
+    try:
+        with open(path, "r", errors="replace") as file:
+            return json.loads(file.readline())
+    except (OSError, ValueError):
+        return None
+
+
+def read_tail(path, size=1024 * 1024):
+    try:
+        with open(path, "rb") as file:
+            file.seek(0, os.SEEK_END)
+            file.seek(max(0, file.tell() - size))
+            return file.read().decode("utf8", "replace")
+    except OSError:
+        return ""
+
+
+def session_from_path(kind, path):
+    if kind == "claude":
+        return os.path.basename(path).removesuffix(".jsonl")
+    record = read_head_line(path)
+    payload = record.get("payload") if isinstance(record, dict) else None
+    return payload.get("id") if isinstance(payload, dict) else None
+
+
+def claude_registry(pid):
+    try:
+        with open(os.path.join(HOME, ".claude/sessions", f"{pid}.json")) as file:
+            record = json.load(file)
+    except (OSError, ValueError):
+        return {}
+    return record if record.get("pid") == pid else {}
+
+
+def session_from_process(pid, kind):
+    """Claude's PID registry first, then whichever transcript the process holds open."""
+    if kind == "claude":
+        found = claude_registry(pid).get("sessionId")
+        if found:
+            return found
+    output = run(["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-Fn"]).stdout
+    pattern = r"/rollout-[^/]+\.jsonl$" if kind == "codex" else r"/\.claude/projects/[^/]+/[^/]+\.jsonl$"
+    for line in output.splitlines():
+        if line.startswith("n") and re.search(pattern, line):
+            found = session_from_path(kind, line[1:])
+            if found:
+                return found
+    return None
+
+
+def process_cwd(pid):
+    for line in run(["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "cwd", "-Fn"]).stdout.splitlines():
+        if line.startswith("n/"):
+            return line[1:]
+    return ""
+
+
+# ── titles and cells ────────────────────────────────────────────────────
+
+
+def last_json_string(text, key):
+    found = None
+    for match in re.finditer(rf'"{key}":"((?:[^"\\]|\\.)*)"', text):
+        found = match.group(1)
+    if found is None:
+        return ""
+    try:
+        return json.loads(f'"{found}"')
+    except ValueError:
+        return found
+
+
+def transcript_title(kind, session):
+    """The session's own title, for an agent whose terminal hasn't set one."""
+    if kind == "claude":
+        for path in glob.glob(os.path.join(HOME, ".claude/projects/*", f"{session}.jsonl")):
+            tail = read_tail(path)
+            title = last_json_string(tail, "customTitle") or last_json_string(tail, "aiTitle")
+            if title:
+                return title
+    elif kind == "codex":
+        title = ""
+        try:
+            with open(os.path.join(HOME, ".codex/session_index.jsonl"), errors="replace") as file:
+                for line in file:
+                    if session in line:
+                        try:
+                            record = json.loads(line)
+                        except ValueError:
+                            continue
+                        if record.get("id") == session and record.get("thread_name"):
+                            title = record["thread_name"]  # append-only: last rename wins
+        except OSError:
+            pass
+        return title
+    return ""
+
+
+def terminal_title(kind, title, cwd):
+    """The pane's title without the spinner glyph Claude leads with, or the
+    " | <folder>" Codex ends with. Bare app names and paths say nothing."""
+    title = re.sub(r"^[^0-9A-Za-z]+", "", title or "")
+    if kind == "codex" and " | " in title:
+        title = title.rsplit(" | ", 1)[0]
+    if title.lower() in ("", "claude", "claude code", "codex") or "/" in title or "~" in title:
+        return ""
+    return title
+
+
+def clean(value):
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value or "")).strip()
+
+
+def cell(value):
+    return clean(value).replace("|", "\\|") or "—"
+
+
+def tilde(path):
+    return "~" + path[len(HOME):] if path and (path == HOME or path.startswith(HOME + "/")) else path or ""
+
+
+def slug(value):
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "session"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Write a Rex session's agents to a Markdown table.")
+    parser.add_argument("--session", "-s", help="session label or ID (default: $REX_SESSION)")
+    args = parser.parse_args()
+
+    if not shutil.which("rex"):
+        fail("no rex on PATH")
+    name = args.session or os.environ.get("REX_SESSION")
+    if not name:
+        fail("not inside a Rex pane: pass --session")
+    session_id, label = resolve_session(name)
+
+    agents = [a for a in rex_agents() if a.get("session_id") == session_id and a.get("agent")]
+    if not agents:
+        fail(f"no agents in session {label}")
+
+    table = process_table()
+    rows = []
+    for agent in agents:
+        kind = agent["agent"]
+        pid = agent_pid(agent.get("pid"), kind, table)
+        session = session_from_process(pid, kind) if pid else None
+        title = terminal_title(kind, agent.get("title"), agent.get("cwd")) or (
+            session and transcript_title(kind, session)) or ""
+        cwd = (claude_registry(pid).get("cwd") if pid and kind == "claude" else "") or (
+            process_cwd(pid) if pid else "") or agent.get("cwd") or ""
+        rows.append((session or "", kind, title, cwd))
+
+    now = datetime.datetime.now()
+    out_dir = os.environ.get("REX_STASH_DIR") or os.path.join(HOME, ".local/share/rex-stash")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{now:%Y-%m-%d-%H%M%S}-{slug(label)}.md")
+
+    lines = [
+        f"# {clean(label)}",
+        "",
+        f"Stashed {now:%Y-%m-%d %H:%M} from Rex session `{session_id}`.",
+        "",
+        "| session id | agent | title | cwd |",
+        "| --- | --- | --- | --- |",
+    ]
+    lines += [f"| {cell(s)} | {cell(k)} | {cell(t)} | {cell(tilde(c))} |" for s, k, t, c in rows]
+    with open(path, "w") as file:
+        file.write("\n".join(lines) + "\n")
+
+    missing = sum(1 for s, *_ in rows if not s)
+    note = f", {missing} without a session id" if missing else ""
+    noun = "agent" if len(rows) == 1 else "agents"
+    print(f"Stashed {len(rows)} {noun} from {clean(label)}{note}", file=sys.stderr)
+    print(path)
+
+
+if __name__ == "__main__":
+    main()

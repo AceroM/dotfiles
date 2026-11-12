@@ -115,7 +115,7 @@ type Screen = "loading" | "pick" | "main" | "fatal";
 // Rebase rewrites history, merge is irreversible, and an approval or a status
 // flip goes out to the PR's author and its reviewers, so none fires on a bare
 // keypress — each stages a PendingAction that a second key has to confirm.
-// rebase spawns a Claude agent in a new Herdr pane; merge, approve, status,
+// rebase spawns a Claude agent in a new Rex pane; merge, approve, status,
 // tags and rerun run gh directly; stamp posts to Slack as you.
 type PendingAction = {
   kind: "rebase" | "merge" | "approve" | "status" | "tags" | "stamp" | "rerun";
@@ -846,20 +846,14 @@ function nthMark(
 }
 
 // ---------------------------------------------------------------------------
-// herdr: rebase agent
+// Rex: rebase agent
 // ---------------------------------------------------------------------------
 
-// herdr reports a failure as a JSON envelope, and prints it on stdout — dig the
-// message out rather than dropping a line of JSON into the footer.
-function herdrError(r: { code: number; out: string; err: string }): string {
-  const raw = (r.err || r.out).trim();
-  try {
-    const m = (JSON.parse(raw) as { error?: { message?: string } }).error?.message;
-    if (m) return m;
-  } catch {
-    // not JSON — fall through to the raw first line
-  }
-  return firstLine(raw) || `exit ${r.code}`;
+// rex reports a failure on stderr as "Error: …"; keep the first line that says
+// something rather than the whole usage dump some failures add.
+function rexError(r: { code: number; out: string; err: string }): string {
+  const line = firstLine((r.err || r.out).trim()).replace(/^Error:\s*/, "");
+  return line || `exit ${r.code}`;
 }
 
 // R doesn't run the rebase here: it splits a sibling pane on the right, starts
@@ -877,56 +871,59 @@ function rebaseTask(s: StackData): string {
   ].join(" ");
 }
 
+// The agent's pane drops to a login shell in the same folder once claude exits,
+// so the summary and the rebased checkout stay there to poke at (o's tabs do
+// the same). sh -c gets "$0" = stacks and "$@" = the claude command line.
+const THEN_SHELL = '"$@"; exec "${SHELL:-/bin/zsh}" -l';
+
 async function launchRebaseAgent(
   s: StackData,
 ): Promise<{ code: number; out: string; err: string }> {
-  if (process.env.HERDR_ENV !== "1")
-    return { code: 1, out: "", err: "not inside a Herdr pane (HERDR_ENV unset)" };
+  const session = process.env.REX_SESSION;
+  const block = process.env.REX_BLOCK;
+  if (!session || !block)
+    return { code: 1, out: "", err: "not inside a Rex pane (REX_SESSION/REX_BLOCK unset)" };
 
+  // Split stacks' own pane, claude on the right, without taking focus. The task
+  // goes in as claude's prompt argument, so it starts working right away;
+  // --interactive reads ~/.zshrc too, so claude sees what a shell tab would,
+  // and the `--` before the task keeps it from ever being read as an option.
   const split = await run([
-    "herdr",
-    "pane",
+    "rex",
     "split",
-    "--current",
-    "--direction",
-    "right",
-    "--cwd",
+    "-s",
+    session,
+    "-b",
+    block,
+    "--split=right",
+    "-c",
     process.cwd(),
-    "--no-focus",
+    "--interactive",
+    "--focus=false",
+    "--json",
+    "--",
+    "sh",
+    "-c",
+    THEN_SHELL,
+    "stacks",
+    "claude",
+    "--",
+    rebaseTask(s),
   ]);
   if (split.code !== 0)
-    return { code: 1, out: "", err: `pane split failed — ${herdrError(split)}` };
-  let paneId: string | undefined;
+    return { code: 1, out: "", err: `pane split failed — ${rexError(split)}` };
+  let blockId: string | undefined;
   try {
-    paneId = (
-      JSON.parse(split.out) as { result?: { pane?: { pane_id?: string } } }
-    ).result?.pane?.pane_id;
+    blockId = (JSON.parse(split.out) as { block_ids?: string[] }).block_ids?.[0];
   } catch {
     // fall through to the missing-id error
   }
-  if (!paneId)
-    return { code: 1, out: "", err: "pane split returned no pane_id" };
+  if (!blockId)
+    return { code: 1, out: "", err: "rex split returned no block id" };
 
-  const name = `rebase-${Date.now().toString(36)}`;
-  const start = await run([
-    "herdr",
-    "agent",
-    "start",
-    name,
-    "--kind",
-    "claude",
-    "--pane",
-    paneId,
-  ]);
-  if (start.code !== 0)
-    return { code: 1, out: "", err: `agent start failed — ${herdrError(start)}` };
-
-  const prompt = await run(["herdr", "agent", "prompt", name, rebaseTask(s)]);
-  if (prompt.code !== 0)
-    return { code: 1, out: "", err: `agent prompt failed — ${herdrError(prompt)}` };
   return {
     code: 0,
-    out: `handed to claude (${name}, pane ${paneId}) — review there, then r to refresh`,
+    out: `handed to claude (pane ${blockId.slice(-8)}) — review there, then r to refresh`,
     err: "",
   };
 }
@@ -4461,11 +4458,11 @@ a, A, s, t, S, x, R and M all stage a confirmation first and only run on "y". a 
 description dialog) and refreshes its badge; A does the same for every PR in
 the stack that is still open, in order, and reports any that GitHub refused
 (your own, for one) without stopping on them. R splits a new
-Herdr pane on the right and hands the whole rebase to a Claude agent there —
-rebase onto the trunk, resolve merge conflicts itself, force-push with
---force-with-lease — so you review a finished rebase instead of the conflicts
-(needs HERDR_ENV=1). M runs \`gh stack merge <n> --yes --squash\`, which works by
-stack number either way.`);
+Rex pane on the right and starts a Claude agent there with the whole rebase as
+its prompt — rebase onto the trunk, resolve merge conflicts itself, force-push
+with --force-with-lease — so you review a finished rebase instead of the
+conflicts (needs a Rex pane: REX_SESSION and REX_BLOCK). M runs
+\`gh stack merge <n> --yes --squash\`, which works by stack number either way.`);
   process.exit(0);
 }
 

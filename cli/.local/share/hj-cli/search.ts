@@ -5,45 +5,48 @@ export const MAX_TRANSCRIPT_CHARS_PER_AGENT = 8_000;
 export const MIN_MATCH_PROBABILITY = 0.25;
 export const MIN_TARGET_CONFIDENCE = 0.6;
 
-export type HerdrAgent = {
+// One row of `rex-agents --json` (cli/.local/bin/rex-agents). Rex calls a
+// space a session, a tab a window and a pane a block. `agent` is empty for a
+// pane that runs no agent (rex-agents --all lists those too).
+export type RexAgent = {
   agent: string;
-  agent_session?: {
-    value?: string;
-  };
-  agent_status: string;
+  block_id: string;
   cwd?: string;
   focused?: boolean;
-  name?: string;
-  pane_id: string;
-  tab_id: string;
-  terminal_title?: string;
-  terminal_title_stripped?: string;
-  workspace_id: string;
+  pane?: string;
+  pid?: number | null;
+  program?: string;
+  session?: string;
+  session_id: string;
+  state?: string;
+  tab?: string;
+  title?: string;
+  window_id: string;
 };
 
-export type Snapshot = {
+// Where each session and tab sits: sessions in `rex ls` order, each session's
+// tabs in `rex window ls` order, numbered from 1.
+export type Layout = {
+  sessions?: Array<{
+    label?: string;
+    number?: number;
+    session_id: string;
+  }>;
   tabs?: Array<{
     label?: string;
     number?: number;
-    tab_id: string;
-  }>;
-  workspaces?: Array<{
-    label?: string;
-    number?: number;
-    workspace_id: string;
+    window_id: string;
   }>;
 };
 
 export type Candidate = {
   id: string;
   kind: string;
-  name: string | null;
   status: string;
-  paneId: string;
-  sessionId: string | null;
+  blockId: string;
   title: string;
   cwd: string;
-  workspace: {
+  session: {
     id: string;
     label: string | null;
     number: number | null;
@@ -63,12 +66,11 @@ export type SearchPayload = {
     agents: Array<{
       id: string;
       kind: string;
-      name: string | null;
       status: string;
-      pane_id: string;
+      block_id: string;
       title: string;
       cwd: string;
-      workspace: Candidate["workspace"];
+      session: Candidate["session"];
       tab: Candidate["tab"];
       recent_terminal_output: string;
     }>;
@@ -118,50 +120,48 @@ export function tailText(text: string, maxChars: number): string {
   return `…\n${normalized.slice(-maxChars)}`;
 }
 
+// Rex leaves labels empty rather than absent; either way there is no label.
+function label(value: string | undefined): string | null {
+  return value ? value : null;
+}
+
 export function makeCandidates(
-  agents: HerdrAgent[],
-  snapshot: Snapshot,
+  agents: RexAgent[],
+  layout: Layout,
   transcripts: Map<string, string>,
 ): Candidate[] {
-  const workspaces = new Map(
-    (snapshot.workspaces ?? []).map((workspace) => [
-      workspace.workspace_id,
-      workspace,
-    ]),
+  const sessions = new Map(
+    (layout.sessions ?? []).map((session) => [session.session_id, session]),
   );
   const tabs = new Map(
-    (snapshot.tabs ?? []).map((tab) => [tab.tab_id, tab]),
+    (layout.tabs ?? []).map((tab) => [tab.window_id, tab]),
   );
   const charLimit = transcriptCharLimit(agents.length);
 
   return agents.map((agent, index) => {
-    const workspace = workspaces.get(agent.workspace_id);
-    const tab = tabs.get(agent.tab_id);
+    const session = sessions.get(agent.session_id);
+    const tab = tabs.get(agent.window_id);
 
     return {
       id: `agent_${index}`,
       kind: agent.agent,
-      name: agent.name ?? null,
-      status: agent.agent_status,
-      paneId: agent.pane_id,
-      sessionId: agent.agent_session?.value ?? null,
-      title:
-        agent.terminal_title_stripped ??
-        agent.terminal_title ??
-        agent.name ??
-        agent.pane_id,
+      status: agent.state || "unknown",
+      blockId: agent.block_id,
+      // The terminal title is the agent's chat title; the pane label is
+      // "<dir>  <title>" (pane-labels.lua), the next best thing without one.
+      title: agent.title || agent.pane || agent.block_id,
       cwd: agent.cwd ?? "",
-      workspace: {
-        id: agent.workspace_id,
-        label: workspace?.label ?? null,
-        number: workspace?.number ?? null,
+      session: {
+        id: agent.session_id,
+        label: label(agent.session) ?? label(session?.label),
+        number: session?.number ?? null,
       },
       tab: {
-        id: agent.tab_id,
-        label: tab?.label ?? null,
+        id: agent.window_id,
+        label: label(agent.tab) ?? label(tab?.label),
         number: tab?.number ?? null,
       },
-      transcript: tailText(transcripts.get(agent.pane_id) ?? "", charLimit),
+      transcript: tailText(transcripts.get(agent.block_id) ?? "", charLimit),
     };
   });
 }
@@ -181,12 +181,11 @@ export function buildSearchPayload(
       agents: candidates.map((candidate) => ({
         id: candidate.id,
         kind: candidate.kind,
-        name: candidate.name,
         status: candidate.status,
-        pane_id: candidate.paneId,
+        block_id: candidate.blockId,
         title: candidate.title,
         cwd: candidate.cwd,
-        workspace: candidate.workspace,
+        session: candidate.session,
         tab: candidate.tab,
         recent_terminal_output: candidate.transcript,
       })),
@@ -196,11 +195,11 @@ export function buildSearchPayload(
         type: "choice",
         instructions: {
           question:
-            "Which live Herdr agent is the user trying to find in `query`?",
+            "Which live Rex agent is the user trying to find in `query`?",
           guidance: [
             "Choose the matching agent id from `agents`.",
             "Use semantic meaning, not only exact word overlap.",
-            "Prefer an agent whose current task or recent work matches the query; title, workspace, tab, cwd, and recent terminal output are all evidence.",
+            "Prefer an agent whose current task or recent work matches the query; title, session, tab, cwd, and recent terminal output are all evidence.",
             "Treat task synonyms, feature names, files, bugs, and outcomes as useful evidence.",
           ],
         },
@@ -238,7 +237,7 @@ export function exactMatch(
   if (!needle) return null;
 
   const matches = candidates.filter((candidate) =>
-    [candidate.paneId, candidate.name, candidate.title]
+    [candidate.blockId, candidate.title]
       .filter((value): value is string => Boolean(value))
       .some((value) => normalize(value) === needle),
   );
@@ -259,8 +258,11 @@ export function metadataMatch(
   const needle = words(query);
   if (!needle) return null;
 
+  // A ticket session (prod-3083) holds one agent, so its label names that
+  // agent the way a tab label does; a shared session like `agents` matches
+  // many and so never decides on its own.
   const matches = candidates.filter((candidate) =>
-    [candidate.name, candidate.title, candidate.tab.label]
+    [candidate.title, candidate.tab.label, candidate.session.label]
       .filter((value): value is string => Boolean(value))
       .some((value) => ` ${words(value)} `.includes(` ${needle} `)),
   );

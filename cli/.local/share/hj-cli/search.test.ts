@@ -10,34 +10,30 @@ import {
   tailText,
   transcriptCharLimit,
   type Candidate,
-  type HerdrAgent,
+  type RexAgent,
 } from "./search";
 
 const candidates: Candidate[] = [
   {
     id: "agent_0",
     kind: "codex",
-    name: null,
     status: "idle",
-    paneId: "w1:p1",
-    sessionId: "session-1",
+    blockId: "block:p1",
     title: "Check Autobuilder browser steps | service.4",
     cwd: "/repo/service.4",
-    workspace: { id: "w1", label: "autobuilder", number: 1 },
-    tab: { id: "w1:t1", label: "browser", number: 1 },
+    session: { id: "session:s1", label: "agents", number: 1 },
+    tab: { id: "window:t1", label: "browser", number: 1 },
     transcript: "Investigating why autobuilder batch 126 was cancelled.",
   },
   {
     id: "agent_1",
     kind: "claude",
-    name: "credential-check",
     status: "working",
-    paneId: "w1:p2",
-    sessionId: "session-2",
+    blockId: "block:p2",
     title: "Verify credential runner",
     cwd: "/repo/service",
-    workspace: { id: "w1", label: "autobuilder", number: 1 },
-    tab: { id: "w1:t2", label: "credentials", number: 2 },
+    session: { id: "session:s1", label: "agents", number: 1 },
+    tab: { id: "window:t2", label: "credential_check", number: 2 },
     transcript: "Running the credential automation end to end.",
   },
 ];
@@ -59,9 +55,9 @@ describe("search payload", () => {
 });
 
 describe("candidate selection", () => {
-  test("uses an exact title, pane id, or assigned name without inference", () => {
-    expect(exactMatch("w1:p1", candidates)?.id).toBe("agent_0");
-    expect(exactMatch("credential-check", candidates)?.id).toBe("agent_1");
+  test("uses an exact title or block id without inference", () => {
+    expect(exactMatch("block:p1", candidates)?.id).toBe("agent_0");
+    expect(exactMatch("Verify credential runner", candidates)?.id).toBe("agent_1");
     expect(
       exactMatch("Check Autobuilder browser steps | service.4", candidates)
         ?.id,
@@ -69,15 +65,32 @@ describe("candidate selection", () => {
     expect(exactMatch("autobuilder", candidates)).toBeNull();
   });
 
-  test("finds a unique name or tab label without relying on transcript mentions", () => {
-    expect(metadataMatch("credential", candidates)?.id).toBe("agent_1");
+  test("finds a unique title, tab or session label without relying on transcript mentions", () => {
+    expect(metadataMatch("credential check", candidates)?.id).toBe("agent_1");
     expect(metadataMatch("browser", candidates)?.id).toBe("agent_0");
     expect(
       metadataMatch("nebraska", [
         ...candidates,
-        { ...candidates[0], id: "agent_2", name: "sst_nebraska" },
+        {
+          ...candidates[0],
+          id: "agent_2",
+          tab: { id: "window:t3", label: "sst_nebraska", number: 3 },
+        },
       ])?.id,
     ).toBe("agent_2");
+    // A ticket session holds one agent, so its label names it…
+    expect(
+      metadataMatch("prod-3083", [
+        ...candidates,
+        {
+          ...candidates[1],
+          id: "agent_2",
+          session: { id: "session:s2", label: "prod-3083", number: 2 },
+        },
+      ])?.id,
+    ).toBe("agent_2");
+    // …while a session every agent shares decides nothing.
+    expect(metadataMatch("agents", candidates)).toBeNull();
     expect(
       metadataMatch("browser", [
         ...candidates,
@@ -95,7 +108,7 @@ describe("candidate selection", () => {
       candidates,
     );
 
-    expect(selected?.paneId).toBe("w1:p2");
+    expect(selected?.blockId).toBe("block:p2");
   });
 
   test("does not jump when Jev says no agent matches", () => {
@@ -135,37 +148,67 @@ describe("candidate selection", () => {
   });
 });
 
-describe("Herdr context", () => {
-  test("combines agent metadata, workspace labels, and recent output", () => {
-    const agents: HerdrAgent[] = [
+describe("Rex context", () => {
+  test("combines rex-agents rows, session and tab positions, and recent output", () => {
+    const agents: RexAgent[] = [
       {
         agent: "codex",
-        agent_session: { value: "session-1" },
-        agent_status: "idle",
+        block_id: "block:p3",
         cwd: "/repo",
-        pane_id: "w2:p3",
-        tab_id: "w2:t4",
-        terminal_title_stripped: "A useful task",
-        workspace_id: "w2",
+        pane: "~/repo  A useful task",
+        session: "tax",
+        session_id: "session:s2",
+        state: "idle",
+        tab: "filing",
+        title: "A useful task",
+        window_id: "window:t4",
       },
     ];
     const result = makeCandidates(
       agents,
       {
-        workspaces: [{ workspace_id: "w2", label: "tax", number: 2 }],
-        tabs: [{ tab_id: "w2:t4", label: "filing", number: 4 }],
+        sessions: [{ session_id: "session:s2", label: "tax", number: 2 }],
+        tabs: [{ window_id: "window:t4", label: "filing", number: 4 }],
       },
-      new Map([["w2:p3", "latest terminal context"]]),
+      new Map([["block:p3", "latest terminal context"]]),
     );
 
     expect(result[0]).toMatchObject({
       id: "agent_0",
-      paneId: "w2:p3",
-      sessionId: "session-1",
+      kind: "codex",
+      status: "idle",
+      blockId: "block:p3",
       title: "A useful task",
-      workspace: { label: "tax" },
-      tab: { label: "filing" },
+      session: { id: "session:s2", label: "tax", number: 2 },
+      tab: { id: "window:t4", label: "filing", number: 4 },
       transcript: "latest terminal context",
+    });
+  });
+
+  test("falls back to the pane label and an unknown state", () => {
+    const [candidate] = makeCandidates(
+      [
+        {
+          agent: "claude",
+          block_id: "block:p5",
+          pane: "~/repo",
+          session: "",
+          session_id: "session:s3",
+          tab: "",
+          title: "",
+          window_id: "window:t6",
+        },
+      ],
+      {},
+      new Map(),
+    );
+
+    expect(candidate).toMatchObject({
+      status: "unknown",
+      title: "~/repo",
+      session: { label: null, number: null },
+      tab: { label: null, number: null },
+      transcript: "",
     });
   });
 

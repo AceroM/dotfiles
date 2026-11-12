@@ -88,9 +88,11 @@ publish() {
   prompt+=" Read the whole file first, as the Artifact tool requires, but do not change it, write any other page, or load any skills: there is no design work to do."
   prompt+=" When the publish succeeds, use the Write tool to write only the artifact's claude.ai URL to $out/url and nothing else. If it fails, write ERROR: and the reason to $out/url instead."
 
+  # Without REX_SESSION/REX_BLOCK the background session doesn't take the caller's Rex pane
+  # for its own; REX_AUTONAME=0 keeps rex-autoname off its tab even if hooks come back on.
   local started id
-  started=$(cd "$dir" && env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
-    HERDR_AUTONAME=0 claude --bg --model "$model" --name "au: $base" \
+  started=$(cd "$dir" && env -u REX_SESSION -u REX_BLOCK \
+    REX_AUTONAME=0 claude --bg --model "$model" --name "au: $base" \
     --settings '{"disableAllHooks": true}' \
     --allowedTools "Artifact,Read,Write" --add-dir "$out" -- "$prompt" 2>&1) || true
   id=$(printf '%s\n' "$started" | sed -n 's/.*backgrounded · \([0-9a-f][0-9a-f]*\).*/\1/p' | head -1)
