@@ -9,11 +9,14 @@
 #   either → the pane's terminal title (`rex block call … title`), as a fallback
 #
 # Rules (from ~/.claude/CLAUDE.md "Name the work after the work"):
-#   - a cwd listed in REX_AUTONAME_COORDINATOR_DIRS (colon-separated, exact match) is a
-#     coordinator: never rename anything. The hook's cwd, the agent process's cwd, and the
+#   - a cwd listed in REX_AUTONAME_COORDINATOR_DIRS (colon-separated, exact match; unset
+#     reads ~/.config/rex-autoname/coordinator-dirs) is a coordinator: never rename anything. The hook's cwd, the agent process's cwd, and the
 #     launching shell's cwd all count, so a coordinator that cd's into a worktree stays one.
 #   - one chat in the tab (including editor/shell splits) → rename the tab;
-#     several chats → rename this pane only.
+#     several chats → rename this pane only, and only when nothing else owns pane labels:
+#     ~/.config/rex/pane-labels.lua rewrites every pane label to "<dir>  <title>" (the chat
+#     title already), so while it runs a pane rename would just be clobbered.
+#     REX_AUTONAME_RENAME_PANES=auto (default: detect pane-labels.lua) | 1 | 0.
 #   - only overwrite a tab label that Rex generated ("Window 1a2b3c4d"), one we set
 #     ourselves, or a ticket label whose suffix is still "slot N"; leave main/coordinator
 #     and anything a human or sibling set alone. Pane labels: only Rex's default ("shell")
@@ -65,9 +68,16 @@ proc=$(rex block call -s "$S" -b "$B" process 2>/dev/null)
 cwd=$(field .cwd); cwd=${cwd:-$PWD}
 agent_cwd=$(printf '%s' "$proc" | jq -r '.foreground.cwd // empty' 2>/dev/null)
 launch_cwd=$(printf '%s' "$proc" | jq -r '.ancestors[0].cwd // empty' 2>/dev/null)
+# Unset falls back to the Herdr-era variable, then to the private list in
+# ~/.config/rex-autoname/coordinator-dirs (one directory per line, ~ allowed; kept out
+# of this public repo); set-but-empty means none.
+coordinator_file=${XDG_CONFIG_HOME:-$HOME/.config}/rex-autoname/coordinator-dirs
+coordinator_default=
+[ -r "$coordinator_file" ] && coordinator_default=$(sed -e '/^[[:space:]]*$/d' -e "s|^~|$HOME|" "$coordinator_file" | paste -sd: -)
+coordinator_dirs=${REX_AUTONAME_COORDINATOR_DIRS-${HERDR_AUTONAME_COORDINATOR_DIRS-$coordinator_default}}
 is_coordinator() {
   [ -n "$1" ] || return 1
-  case ":${REX_AUTONAME_COORDINATOR_DIRS:-}:" in
+  case ":${coordinator_dirs}:" in
     ::) return 1 ;;
     *":${1%/}:"*) return 0 ;;
   esac
@@ -118,16 +128,17 @@ pane_count=$(printf '%s\n' "$blocks" | grep -c .)
 # conservative pane-count behaviour.
 chat_count=$pane_count
 if [ "$pane_count" -gt 1 ]; then
-  count=0; mine_is_chat=0
+  count=0; mine_is_chat=0; inventory_ok=1
   while IFS= read -r b; do
     [ -n "$b" ] || continue
-    name=$(rex block call -s "$S" -b "$b" process 2>/dev/null \
+    p=$(rex block call -s "$S" -b "$b" process 2>/dev/null) && [ -n "$p" ] || { inventory_ok=0; break; }
+    name=$(printf '%s' "$p" \
       | jq -r '[.foreground.argv0, .foreground.invoked_path, .foreground.path] | map(select(. != null) | split("/") | last | ltrimstr("-")) | .[]' 2>/dev/null)
     if printf '%s\n' "$name" | grep -qxE 'claude|codex'; then
       count=$((count + 1)); [ "$b" = "$B" ] && mine_is_chat=1
     fi
   done <<<"$blocks"
-  [ "$mine_is_chat" = 1 ] && [ "$count" -ge 1 ] && chat_count=$count
+  [ "$inventory_ok" = 1 ] && [ "$mine_is_chat" = 1 ] && chat_count=$count
 fi
 
 short_name() { printf '%s' "$title" | python3 "$script_dir/tab-short-name.py"; }
@@ -151,6 +162,11 @@ if [ "$chat_count" -le 1 ]; then
   [ "$new" = "$current" ] && exit 0
   rex window rename -s "$S" "$window_id" "$new" >/dev/null 2>&1 && printf '%s' "$new" >"$state" && log "tab → $new"
 else
+  rename_panes=${REX_AUTONAME_RENAME_PANES:-auto}
+  if [ "$rename_panes" = auto ]; then
+    if pgrep -f 'rex do .*pane-labels' >/dev/null 2>&1; then rename_panes=0; else rename_panes=1; fi
+  fi
+  [ "$rename_panes" = 1 ] || { log "shared tab; pane labels are managed elsewhere (pane-labels.lua)"; exit 0; }
   case "$pane_label" in
     ""|shell|zsh|bash|claude|codex) : ;;
     *) [ "$pane_label" = "$mine" ] || { log "pane label set by someone else: $pane_label"; exit 0; } ;;

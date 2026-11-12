@@ -49,7 +49,7 @@ class AutonameTests(unittest.TestCase):
     def run_hook(self, label="ENG-7647", panes=1, chats=1, mine="", pane_label="shell",
                  title_source="claude", cwd=None, inventory_ok=True, agent_id="",
                  coordinators="", pane_cwd="", agent_cwd="", events=("Stop",),
-                 untitled_runs=0):
+                 untitled_runs=0, rename_panes="1"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copy(HOOK, root / HOOK.name)
@@ -80,7 +80,8 @@ class AutonameTests(unittest.TestCase):
                        TEST_CHATS=str(chats), TEST_INVENTORY=str(int(inventory_ok)),
                        TEST_COMMANDS=str(commands), TEST_PANE_CWD=pane_cwd,
                        TEST_AGENT_CWD=agent_cwd, TEST_PANE_LABEL=pane_label,
-                       REX_AUTONAME_COORDINATOR_DIRS=coordinators)
+                       REX_AUTONAME_COORDINATOR_DIRS=coordinators,
+                       REX_AUTONAME_RENAME_PANES=rename_panes)
             payload = {"cwd": cwd or str(root / "work/app.9")}
             if title_source == "claude":
                 payload["transcript_path"] = str(transcript)
@@ -123,6 +124,11 @@ class AutonameTests(unittest.TestCase):
 
     def test_inventory_failure_names_only_current_pane(self):
         self.assertEqual(self.run_hook(panes=2, inventory_ok=False), self.PANE)
+
+    def test_pane_labels_owned_elsewhere_are_left_alone(self):
+        # pane-labels.lua rewrites pane labels to "<dir>  <title>"; don't fight it.
+        self.assertEqual(self.run_hook(panes=2, chats=2, rename_panes="0"), [])
+        self.assertEqual(self.run_hook(panes=2, chats=1, rename_panes="0"), self.TAB)
 
     def test_named_agent_pane_is_protected(self):
         self.assertEqual(self.run_hook(panes=2, chats=2, pane_label="prod-1234"), [])
