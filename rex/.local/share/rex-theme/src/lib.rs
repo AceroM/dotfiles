@@ -1,4 +1,4 @@
-//! The colors ctab, tk, al, jv and o draw with, so they read as one tool and as part of the
+//! The colors ctab, tk, al, jv, o, ct and tg draw with, so they read as one tool and as part of the
 //! terminal they run in.
 //!
 //! Inside Rex they are Rex's own: the theme Rex's settings name for the current macOS appearance

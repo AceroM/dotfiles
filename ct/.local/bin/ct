@@ -13,7 +13,7 @@ done
 app_dir="$(cd -- "$(cd -P -- "$(dirname -- "$script")" && pwd)/../share/ct" && pwd)"
 bin="$app_dir/target/release/ct"
 
-if [[ ! -x "$bin" ]] || [[ -n "$(find "$app_dir/src" "$app_dir/Cargo.toml" "$app_dir/Cargo.lock" -newer "$bin" -print -quit 2>/dev/null)" ]]; then
+if [[ ! -x "$bin" ]] || [[ -n "$(find -L "$app_dir/src" "$app_dir/Cargo.toml" "$app_dir/Cargo.lock" -newer "$bin" -print -quit 2>/dev/null)" ]]; then
   if ! command -v cargo >/dev/null 2>&1; then
     printf '%s\n' 'ct: cargo is required to build ct (https://rustup.rs).' >&2
     exit 1
