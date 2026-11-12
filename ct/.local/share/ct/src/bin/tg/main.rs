@@ -69,9 +69,9 @@ options:
   -h, --help
 
 Closed groups exist only on Chrome's bookmarks bar, out of the extension's reach, so tg deletes
-them through Chrome's own chip menu (macOS accessibility). It opens that menu, checks it lists
-exactly the group's tabs, and only then presses Delete group. When no window shows the bar, tg
-opens a New Tab window behind the others while it works.
+them through Chrome's own chip menu (macOS accessibility, in a New Tab window it opens behind the
+others while it works). It opens the menu, checks it lists exactly the group's tabs, and only then
+presses Delete group. Groups unpinned from the bar can't be reached; tg lists them apart.
 ";
 
 /// Open groups re-read this often; the store whenever Chrome writes to it.
@@ -312,6 +312,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     let mut dirty = true;
     loop {
         dirty |= app.tick();
+        if app.quit_after && app.busy.is_none() {
+            return Ok(());
+        }
         if dirty {
             terminal.draw(|f| {
                 let area = f.area();
@@ -459,6 +462,8 @@ struct App {
     stamp: Option<SystemTime>,
     saved: Vec<store::SavedGroup>,
     live: bool,
+    /// Asked to quit during a removal.
+    quit_after: bool,
 }
 
 impl App {
@@ -493,6 +498,7 @@ impl App {
             stamp,
             saved: Vec::new(),
             live: true,
+            quit_after: false,
         };
         app.set_groups(saved, &snap, None);
         Ok(app)
@@ -664,10 +670,21 @@ impl App {
         self.set_view(keep);
     }
 
+    /// Quit now, or once a removal that's running has finished (it has a window and maybe a
+    /// Chrome menu to put away).
+    fn quit(&mut self) -> bool {
+        if self.busy.is_none() {
+            return true;
+        }
+        self.quit_after = true;
+        self.flash("quitting when the removal finishes");
+        false
+    }
+
     fn key(&mut self, k: KeyEvent) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && k.code == KeyCode::Char('c') {
-            return true;
+            return self.quit();
         }
         if self.help {
             self.help = false;
@@ -697,8 +714,12 @@ impl App {
         let half = (self.list_h as isize / 2).max(1);
         match k.code {
             KeyCode::Esc if count.is_some() => {}
-            KeyCode::Esc => return self.escape(),
-            KeyCode::Char('q') => return true,
+            KeyCode::Esc => {
+                if self.escape() {
+                    return self.quit();
+                }
+            }
+            KeyCode::Char('q') => return self.quit(),
             KeyCode::Char('d') if ctrl => self.move_by(half),
             KeyCode::Char('u') if ctrl => self.move_by(-half),
             KeyCode::Char('n') if ctrl => self.move_by(n as isize),
@@ -1149,8 +1170,8 @@ fn group_row(app: &App, buf: &mut Buffer, list: Rect, y: u16, k: usize, nw: usiz
         ("○", p.muted)
     };
     let x = put(buf, x, y, max, dot, fg(dc)) + 1;
-    // Right side: tab count, and how long ago Chrome last saved it.
-    let age = if g.is_open() { String::new() } else { age_label(g.updated, now) };
+    // Right side: tab count, and how long ago the group was made.
+    let age = age_label(g.created, now);
     let right = format!("{:>3}  {:>3}", g.tabs.len(), age);
     let rx = max.saturating_sub(right.width() as u16 + 1);
     put(buf, rx, y, max, &right, fg(if on { p.muted } else { p.dim }));

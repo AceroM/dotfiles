@@ -287,7 +287,7 @@ impl Chrome {
             return Err(Fail::Skip(format!("“{label}” isn't on the bookmarks bar, so tg can't reach it (unpinned, or past the bar's end)")));
         }
         let before = chips.len();
-        let mut want: Vec<&str> = tabs.iter().map(String::as_str).collect();
+        let mut want: Vec<String> = tabs.iter().map(|t| menu_text(t)).collect();
         want.sort_unstable();
         for chip in &chips {
             if !chip.el.actions().iter().any(|a| a == "AXShowMenu") {
@@ -305,11 +305,11 @@ impl Chrome {
                 self.cancel(&menu)?;
                 return Err(Fail::Stop(format!("the menu that opened isn't a saved group's ({}); nothing was pressed", titles.join(", "))));
             }
-            let mut listed: Vec<&str> =
-                titles.iter().skip_while(|t| *t != "Tabs in group").skip(1).map(String::as_str).filter(|t| !t.is_empty()).collect();
+            let mut listed: Vec<String> =
+                titles.iter().skip_while(|t| *t != "Tabs in group").skip(1).filter(|t| !t.is_empty()).map(|t| menu_text(t)).collect();
             listed.sort_unstable();
             if listed != want {
-                debug(|| "not this one: its tabs differ; cancelling".to_string());
+                debug(|| format!("not this one: its tabs differ; cancelling\n    menu: {listed:?}\n    want: {want:?}"));
                 self.cancel(&menu)?;
                 continue;
             }
@@ -353,6 +353,12 @@ impl Chrome {
             None => Err(Fail::Stop("a group's menu won't close: press esc in Chrome".into())),
         }
     }
+}
+
+/// A tab title as a menu item shows it, so the two compare: Chrome's menus treat `&` as a
+/// shortcut marker and drop it; whitespace runs count as one space.
+fn menu_text(s: &str) -> String {
+    s.replace('&', "").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// TG_DEBUG=1: what each step saw, on stderr (for `tg rm`).

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# tg — chrome tab groups: every tab group, open or closed, with its tabs; remove the ones you don't need (Rust).
+# Source lives in ../share/ct (tg is a second binary of the ct crate); this launcher builds it on
+# first run and again whenever a source file is newer than the binary.
+set -euo pipefail
+
+script="${BASH_SOURCE[0]}"
+while [[ -L "$script" ]]; do
+  dir="$(cd -P -- "$(dirname -- "$script")" && pwd)"
+  script="$(readlink "$script")"
+  [[ "$script" = /* ]] || script="$dir/$script"
+done
+app_dir="$(cd -- "$(cd -P -- "$(dirname -- "$script")" && pwd)/../share/ct" && pwd)"
+bin="$app_dir/target/release/tg"
+
+if [[ ! -x "$bin" ]] || [[ -n "$(find -L "$app_dir/src" "$app_dir/Cargo.toml" "$app_dir/Cargo.lock" -newer "$bin" -print -quit 2>/dev/null)" ]]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    printf '%s\n' 'tg: cargo is required to build tg (https://rustup.rs).' >&2
+    exit 1
+  fi
+  printf '%s\n' 'tg: building (first run or sources changed)…' >&2
+  cargo build --release --quiet --manifest-path "$app_dir/Cargo.toml" >&2
+fi
+
+exec "$bin" "$@"
