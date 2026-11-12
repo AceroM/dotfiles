@@ -1,5 +1,7 @@
-//! Terminal output (a Herdr pane capture) to styled runs: SGR colors and
-//! attributes are kept, every other escape is dropped.
+//! Terminal output (a Rex pane capture, `--format=vt`) to styled runs: SGR
+//! colors and attributes are kept, a cursor-forward (CSI n C, which Rex
+//! writes for runs of blank cells) becomes spaces, every other escape is
+//! dropped.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -26,6 +28,10 @@ pub fn parse(text: &str) -> Vec<Line> {
                             if ('@'..='~').contains(&d) {
                                 if d == 'm' {
                                     st = sgr(st, &params);
+                                } else if d == 'C' {
+                                    // Cursor forward over blank cells: as many spaces, unstyled.
+                                    let n = params.parse::<usize>().unwrap_or(1).clamp(1, 1000);
+                                    line.push((" ".repeat(n), Style::new()));
                                 }
                                 break;
                             }
@@ -103,4 +109,17 @@ fn sgr(mut st: Style, params: &str) -> Style {
         i += 1;
     }
     st
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_forward_is_blank_cells() {
+        let lines = parse("a\x1b[1Cb\x1b[32m\x1b[3Cc\x1b[0m\r\nd");
+        let text: Vec<String> = lines.iter().map(|l| l.iter().map(|(s, _)| s.as_str()).collect()).collect();
+        assert_eq!(text, ["a b   c", "d"]);
+        assert_eq!(lines[0].last().map(|(_, st)| st.fg), Some(Some(Color::Indexed(2))));
+    }
 }

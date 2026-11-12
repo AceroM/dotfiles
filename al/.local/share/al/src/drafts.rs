@@ -8,9 +8,9 @@
 //!   $XDG_STATE_HOME/al/drafts.json        (else ~/.local/state/al)
 //!   $XDG_STATE_HOME/al/drafts/<id>/N.png  the file behind `[Image #N]`
 //!
-//! A draft belongs to the Herdr space it was written in. Every al rereads the
+//! A draft belongs to the Rex session it was written in. Every al rereads the
 //! file when it changes and writes it whole (to a temp file, then renamed), so
-//! two als on one space see each other's drafts.
+//! two als in one session see each other's drafts.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -46,8 +46,9 @@ impl ReplyTo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
     pub id: String,
-    /// The Herdr space it was written in: its id, and its name (the id can
-    /// change when Herdr starts over; the name usually doesn't).
+    /// The Rex session it was written in: its id, and its name (the id
+    /// changes when a session is made again; the name usually doesn't).
+    /// The file keeps Herdr's keys for them, `workspace` and `space`.
     pub workspace: String,
     pub space: String,
     /// Where its agent starts.

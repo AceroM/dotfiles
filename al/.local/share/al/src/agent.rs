@@ -1,12 +1,12 @@
-//! The prompt box: `c` starts a coding agent in a new Herdr tab and hands it
+//! The prompt box: `c` starts a coding agent in a new Rex tab and hands it
 //! the prompt, `r` sends it to the selected tab's agent, `n` runs it as a
 //! shell command in a new tab. al stays where it is.
 //!
 //! The agent is `claude --dangerously-skip-permissions` (the `c` alias), or,
 //! after shift+tab in the box, `codex --no-daemon --yolo` (`cx`'s flags).
 //! `$AL_AGENT` (else jv's `$JV_AGENT`) names the first one, e.g.
-//! `AL_AGENT="codex --yolo"`: the first word is Herdr's agent kind, the rest
-//! go to the agent.
+//! `AL_AGENT="codex --yolo"`: the first word is the program, the rest go to
+//! the agent.
 //!
 //! ^p sends the prompt as `/plan …`: Claude Code and Codex both take that as
 //! "plan mode on, and here's the prompt", a new agent and a running one alike.
@@ -16,17 +16,17 @@ use std::io::Write;
 use std::ops::Range;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Output, Stdio};
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// The agents shift+tab cycles through in the `c` box: Herdr's kind and the
+use crate::rex;
+
+/// The agents shift+tab cycles through in the `c` box: the program and the
 /// agent's own arguments.
 const AGENTS: [(&str, &[&str]); 2] = [
     ("claude", &["--dangerously-skip-permissions"]),
@@ -35,17 +35,19 @@ const AGENTS: [(&str, &[&str]); 2] = [
     ("codex", &["--no-daemon", "--yolo"]),
 ];
 
-/// Internal: `al --start-agent CWD KIND PROMPT` does the Herdr calls. A separate
+/// Internal: `al --start-agent CWD KIND PROMPT` does the Rex calls. A separate
 /// process, so quitting al right after Enter still gets the agent its prompt.
 pub const CHILD_FLAG: &str = "--start-agent";
 /// Internal: `al --run-command CWD COMMAND`, the same for `n`.
 pub const RUN_FLAG: &str = "--run-command";
+/// Internal: `al --reply BLOCK PROMPT`, the same for `r`.
+pub const REPLY_FLAG: &str = "--reply";
 
-pub fn in_herdr() -> bool {
-    std::env::var("HERDR_ENV").as_deref() == Ok("1")
+pub fn in_rex() -> bool {
+    rex::session().is_some()
 }
 
-/// The agents to start, the default first: Herdr's kind and the agent's own
+/// The agents to start, the default first: the program and the agent's own
 /// arguments. $AL_AGENT (else $JV_AGENT) is the first, its arguments taking
 /// the place of that kind's own.
 pub fn agents() -> Vec<(String, Vec<String>)> {
@@ -121,6 +123,13 @@ pub fn run_child(args: &[String]) -> ExitCode {
     report(run_in_tab(command, Path::new(cwd)))
 }
 
+/// The `--reply` process, as `child`.
+pub fn reply_child(args: &[String]) -> ExitCode {
+    let [block, prompt, label] = args else { return ExitCode::from(2) };
+    let res = rex::paste_enter(block, prompt).map(|()| format!("sent to {label}")).map_err(|e| format!("couldn't reply to {label}: {e}"));
+    report(res)
+}
+
 /// A child process's ending: its outcome as the one stdout line `background`
 /// hands back.
 pub fn report(res: Result<String, String>) -> ExitCode {
@@ -132,106 +141,29 @@ pub fn report(res: Result<String, String>) -> ExitCode {
     }
 }
 
-/// A new tab in this workspace, in `cwd`, left in the background: its pane
-/// and its label.
-fn new_tab(cwd: &Path) -> Result<(String, String), String> {
-    let ws = std::env::var("HERDR_WORKSPACE_ID").map_err(|_| "not in a Herdr pane (no HERDR_WORKSPACE_ID)".to_string())?;
-    let cwd = cwd.to_string_lossy();
-    let tab = herdr(&["tab", "create", "--workspace", &ws, "--cwd", &cwd, "--no-focus"])
-        .map_err(|e| format!("couldn't open a tab: {e}"))?;
-    let tab: Value = serde_json::from_str(&tab).map_err(|e| format!("tab create: {e}"))?;
-    let pane = tab["result"]["root_pane"]["pane_id"].as_str().ok_or("tab create returned no pane")?.to_string();
-    let label = tab["result"]["tab"]["label"].as_str().unwrap_or("").to_string();
-    Ok((pane, label))
-}
-
-/// `n`: type `command` into a new tab's shell and press enter. The shell
-/// holds it until its prompt is up, so there's nothing to wait for.
+/// `n`: a new tab whose shell has `command` typed in and run (Rex's
+/// `initial_input`). The shell holds it until its prompt is up, so there's
+/// nothing to wait for.
 fn run_in_tab(command: &str, cwd: &Path) -> Result<String, String> {
-    let (pane, label) = new_tab(cwd)?;
-    herdr(&["pane", "run", &pane, command]).map_err(|e| format!("tab {label} is open, but the command didn't go: {e}"))?;
-    Ok(format!("running in tab {label}"))
+    let (window, _) = rex::new_tab(&cwd.to_string_lossy(), "", false, &format!("{command}\n"))
+        .map_err(|e| format!("couldn't open a tab: {e}"))?;
+    Ok(format!("running in tab {}", rex::window_label(&window)))
 }
 
+/// `c`: a new tab running agent `kind` with `prompt` as its first message,
+/// dropping to a shell when it exits.
 fn start(kind: &str, prompt: &str, cwd: &Path) -> Result<String, String> {
-    let args = args_for(kind);
-    let (pane, label) = new_tab(cwd)?;
-    // Agent names are [a-z][a-z0-9_-]{0,31}; pane IDs are unique, and their
-    // only uppercase is base-36 digits, so lowercasing keeps them unique.
-    let name = format!("{kind}-{}", pane.to_ascii_lowercase().replace(':', "-"));
-    let mut cmd = vec!["agent", "start", &name, "--kind", kind, "--pane", &pane];
-    if !args.is_empty() {
-        cmd.push("--");
-        cmd.extend(args.iter().map(String::as_str));
-    }
-    // The new tab's shell is still sourcing its rc files for a few hundred ms,
-    // and until it's at a prompt Herdr answers agent_pane_busy.
-    let mut tries = 0;
-    loop {
-        match herdr(&cmd) {
-            Ok(_) => break,
-            Err(e) if e.contains("agent_pane_busy") && tries < 50 => {
-                tries += 1;
-                thread::sleep(Duration::from_millis(200));
-            }
-            Err(e) => return Err(format!("{kind} didn't start in tab {label}: {e}")),
-        }
-    }
-    // No `--` here: Herdr would read a prompt starting with - as an option.
-    herdr(&["agent", "prompt", &name, prompt]).map_err(|e| format!("{kind} is up in tab {label}, but the prompt failed: {e}"))?;
-    Ok(format!("{kind} is on it in tab {label}"))
+    let window = rex::start_agent(kind, &args_for(kind), prompt, &cwd.to_string_lossy())
+        .map_err(|e| format!("couldn't open a tab: {e}"))?;
+    Ok(format!("{kind} is on it in tab {}", rex::window_label(&window)))
 }
 
-/// `r`: hand `prompt` to the agent running in `pane`. The outcome comes back
-/// on `tx`. herdr runs as its own process group, so quitting al right after
-/// Enter still gets the reply there.
+/// `r`: hand `prompt` to the agent running in block `pane` (tab `label`),
+/// pasted and entered. The outcome comes back on `tx`. It runs as its own
+/// process (`--reply`), so quitting al right after Enter still gets the
+/// reply there.
 pub fn reply(pane: String, prompt: String, label: String, tx: mpsc::Sender<String>) {
-    thread::spawn(move || {
-        // No `--`: herdr takes a prompt starting with - as the prompt, and `--` as an option.
-        let out = Command::new("herdr")
-            .args(["agent", "prompt", &pane, &prompt])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .output();
-        let msg = match out {
-            Ok(o) if o.status.success() => format!("sent to {label}"),
-            Ok(o) => format!("couldn't reply to {label}: {}", failure(&o)),
-            Err(e) => format!("couldn't reply to {label}: herdr: {e}"),
-        };
-        let _ = tx.send(msg);
-    });
-}
-
-/// Run `herdr ARGS`: stdout on success, else the error's message.
-pub fn herdr(args: &[&str]) -> Result<String, String> {
-    let out = Command::new("herdr")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("herdr: {e}"))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-    }
-    Err(failure(&out))
-}
-
-/// A failed herdr call's error message.
-fn failure(out: &Output) -> String {
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // Errors are JSON on stdout or stderr: {"error":{"code":…,"message":…}}.
-    let all = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
-    let err = all.lines().find_map(|l| serde_json::from_str::<Value>(l).ok()).map(|v| v["error"].clone());
-    let field = |k: &str| err.as_ref().and_then(|e| e[k].as_str()).unwrap_or("").to_string();
-    let (code, msg) = (field("code"), field("message"));
-    let msg = if msg.is_empty() { all.trim().lines().next().unwrap_or("").to_string() } else { msg };
-    // Keep the code in the text: callers match on it (agent_pane_busy).
-    if code.is_empty() || msg.contains(&code) {
-        msg
-    } else {
-        format!("{msg} ({code})")
-    }
+    background(vec![REPLY_FLAG.into(), pane.into(), prompt.into(), label.clone().into()], format!("the reply to {label}"), tx);
 }
 
 // ---- images ---------------------------------------------------------------
@@ -250,7 +182,7 @@ pub fn clipboard_image() -> Option<PathBuf> {
     let path = dir.join(format!("paste-{}-{stamp}.png", std::process::id()));
     let quiet = |c: &mut Command| c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     // pngpaste answers in ~60ms; AppleScript takes about a second.
-    let ok = if crate::herdr::which("pngpaste") {
+    let ok = if rex::which("pngpaste") {
         quiet(Command::new("pngpaste").arg(&path)).is_ok_and(|s| s.success())
     } else {
         let script = [

@@ -1,9 +1,9 @@
-//! `c`: a prompt box that starts a coding agent in a new Herdr tab, in the
+//! `c`: a prompt box that starts a coding agent in a new Rex tab, in the
 //! repo jv is showing, and hands it the prompt. jv stays where it is.
 //!
 //! The agent is `claude --dangerously-skip-permissions` (the `c` alias) unless
 //! `$JV_AGENT` names another, e.g. `JV_AGENT="codex --yolo"`: the first word
-//! is Herdr's agent kind, the rest go to the agent.
+//! is the program, the rest go to the agent.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
@@ -21,15 +20,15 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const DEFAULT_AGENT: &str = "claude --dangerously-skip-permissions";
 
-/// Internal: `jv --start-agent CWD PROMPT` does the Herdr calls. A separate
+/// Internal: `jv --start-agent CWD PROMPT` does the Rex call. A separate
 /// process, so quitting jv right after Enter still gets the agent its prompt.
 pub const CHILD_FLAG: &str = "--start-agent";
 
-pub fn in_herdr() -> bool {
-    std::env::var("HERDR_ENV").as_deref() == Ok("1")
+pub fn in_rex() -> bool {
+    session().is_ok()
 }
 
-/// Herdr's agent kind and the agent's own arguments.
+/// The agent's program and its own arguments.
 pub fn spec() -> (String, Vec<String>) {
     let s = std::env::var("JV_AGENT").ok().filter(|s| !s.trim().is_empty());
     let s = s.as_deref().unwrap_or(DEFAULT_AGENT);
@@ -85,67 +84,89 @@ pub fn report(res: Result<String, String>) -> ExitCode {
 
 fn start(prompt: &str, cwd: &Path) -> Result<String, String> {
     let (kind, args) = spec();
-    let ws = std::env::var("HERDR_WORKSPACE_ID").map_err(|_| "not in a Herdr pane (no HERDR_WORKSPACE_ID)".to_string())?;
+    let ses = session()?;
     let cwd = cwd.to_string_lossy();
-    let tab = herdr(&["tab", "create", "--workspace", &ws, "--cwd", &cwd, "--no-focus"])
-        .map_err(|e| format!("couldn't open a tab: {e}"))?;
-    let tab: Value = serde_json::from_str(&tab).map_err(|e| format!("tab create: {e}"))?;
-    let pane = tab["result"]["root_pane"]["pane_id"].as_str().ok_or("tab create returned no pane")?.to_string();
-    let label = tab["result"]["tab"]["label"].as_str().unwrap_or("").to_string();
-    // Agent names are [a-z][a-z0-9_-]{0,31}; pane IDs are unique, and their
-    // only uppercase is base-36 digits, so lowercasing keeps them unique.
-    let name = format!("{kind}-{}", pane.to_ascii_lowercase().replace(':', "-"));
-    let mut cmd = vec!["agent", "start", &name, "--kind", &kind, "--pane", &pane];
-    if !args.is_empty() {
-        cmd.push("--");
-        cmd.extend(args.iter().map(String::as_str));
-    }
-    // The new tab's shell is still sourcing its rc files for a few hundred ms,
-    // and until it's at a prompt Herdr answers agent_pane_busy.
-    let mut tries = 0;
-    loop {
-        match herdr(&cmd) {
-            Ok(_) => break,
-            Err(e) if e.contains("agent_pane_busy") && tries < 50 => {
-                tries += 1;
-                thread::sleep(Duration::from_millis(200));
-            }
-            Err(e) => return Err(format!("{kind} didn't start in tab {label}: {e}")),
-        }
-    }
-    // No `--` here: Herdr would read a prompt starting with - as an option.
-    herdr(&["agent", "prompt", &name, prompt]).map_err(|e| format!("{kind} is up in tab {label}, but the prompt failed: {e}"))?;
-    Ok(format!("{kind} is on it in tab {label}"))
+    // `o`'s way: the tab runs the agent with the prompt as its argument (no
+    // waiting for a shell to be ready to type into), then a login shell in
+    // its folder once it exits. --interactive: ~/.zshrc too, so the agent
+    // sees what a shell tab would.
+    let mut cmd = vec!["window", "new", "-s", &ses, "-c", &cwd, "--interactive", "--focus=false", "--json", "--", "sh", "-c", THEN_SHELL, "jv", &kind];
+    cmd.extend(args.iter().map(String::as_str));
+    // `--`: a prompt starting with - isn't read as an option (Claude Code and
+    // Codex both take it).
+    cmd.extend(["--", prompt]);
+    let out = rex(&cmd).map_err(|e| format!("couldn't open a tab: {e}"))?;
+    let out: Value = serde_json::from_str(&out).map_err(|e| format!("window new: {e}"))?;
+    let window = out["window_id"].as_str().ok_or("window new returned no window")?;
+    Ok(format!("{kind} is on it in tab {}", window_label(&ses, window)))
 }
 
-/// Run `herdr ARGS`: stdout on success, else the error's message.
-pub fn herdr(args: &[&str]) -> Result<String, String> {
-    let out = Command::new("herdr")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("herdr: {e}"))?;
+/// After the agent exits, the tab's login shell, in the agent's folder.
+const THEN_SHELL: &str = r#""$@"; exec "${SHELL:-/bin/zsh}" -l"#;
+
+/// The Rex session jv runs in: every tab it opens goes there.
+pub fn session() -> Result<String, String> {
+    std::env::var("REX_SESSION").ok().filter(|s| !s.is_empty()).ok_or_else(|| "not in a Rex pane (no REX_SESSION)".to_string())
+}
+
+/// A new tab in this session, in `cwd`, at a shell that `input` is typed
+/// into once it's up, as if you had (Rex's `initial_input`; end it with a
+/// newline to run it). `label` names it (snake_case, as Rex's tab-labels.lua
+/// would make it anyway); `focus` goes there.
+pub fn new_tab(cwd: &str, label: &str, focus: bool, input: &str) -> Result<(), String> {
+    let ses = session()?;
+    let mut call = serde_json::json!({
+        "session_id": ses,
+        "focus": focus,
+        "layout": { "block": { "flavor": "com.superlogical.terminal.shell", "options": { "cwd": cwd, "initial_input": input } } },
+    });
+    if !label.is_empty() {
+        call["window_label"] = label.into();
+    }
+    rex(&["api", "call", "-s", &ses, "session.new_window", &call.to_string()]).map(drop)
+}
+
+/// What Rex calls window `id` in session `ses`: its label, else the end of
+/// its ID, as Rex shortens it (`Window 023f56b0`).
+fn window_label(ses: &str, id: &str) -> String {
+    let label = (|| {
+        let v: Value = serde_json::from_str(&rex(&["window", "ls", "-s", ses, "--json"]).ok()?).ok()?;
+        let all = v.as_array().or_else(|| v["windows"].as_array())?;
+        let w = all.iter().find(|w| w["window_id"] == id)?;
+        w["label"].as_str().filter(|s| !s.is_empty()).map(String::from)
+    })();
+    label.unwrap_or_else(|| id.get(id.len().saturating_sub(8)..).unwrap_or(id).to_string())
+}
+
+/// `label` as Rex's tab-labels.lua writes tab labels: lowercase snake_case.
+pub fn snake(label: &str) -> String {
+    let mut out = String::new();
+    for c in label.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out.trim_end_matches('_').to_string()
+}
+
+/// Run `rex ARGS`: stdout on success, else the error's message.
+pub fn rex(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("rex").args(args).stdin(Stdio::null()).output().map_err(|e| format!("rex: {e}"))?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     Err(failure(&out))
 }
 
-/// A failed herdr call's error message.
+/// A failed rex call's error message: a JSON error's, else the first line
+/// that says something.
 fn failure(out: &Output) -> String {
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // Errors are JSON on stdout or stderr: {"error":{"code":…,"message":…}}.
-    let all = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
-    let err = all.lines().find_map(|l| serde_json::from_str::<Value>(l).ok()).map(|v| v["error"].clone());
-    let field = |k: &str| err.as_ref().and_then(|e| e[k].as_str()).unwrap_or("").to_string();
-    let (code, msg) = (field("code"), field("message"));
-    let msg = if msg.is_empty() { all.trim().lines().next().unwrap_or("").to_string() } else { msg };
-    // Keep the code in the text: callers match on it (agent_pane_busy).
-    if code.is_empty() || msg.contains(&code) {
-        msg
-    } else {
-        format!("{msg} ({code})")
-    }
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    let json = all.lines().find_map(|l| serde_json::from_str::<Value>(l).ok());
+    let msg = json.as_ref().and_then(|v| v["error"]["message"].as_str().or(v["message"].as_str())).map(String::from);
+    msg.unwrap_or_else(|| all.trim().lines().next().unwrap_or("failed").trim_start_matches("Error: ").to_string())
 }
 
 // ---- images ---------------------------------------------------------------
@@ -479,5 +500,17 @@ impl Field {
     /// ^k
     pub fn kill_end(&mut self) {
         self.text.truncate(self.cur);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_labels_are_snake_case() {
+        assert_eq!(snake("app.rs"), "app_rs");
+        assert_eq!(snake("README.md"), "readme_md");
+        assert_eq!(snake("--weird name!.tsx"), "weird_name_tsx");
     }
 }

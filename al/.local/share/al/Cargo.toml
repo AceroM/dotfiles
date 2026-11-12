@@ -2,19 +2,20 @@
 name = "al"
 version = "0.1.0"
 edition = "2021"
-description = "Herdr tab switcher: this space's tabs on the left, the selected one's pane on the right (jv's ; dialog, on its own)"
+description = "Rex tab switcher: this session's tabs on the left, the selected one's pane on the right (jv's ; dialog, on its own)"
 
 [dependencies]
 ratatui = "0.30"
 # Same crossterm ratatui uses, plus use-dev-tty (as in jv): keys come from
 # /dev/tty, which macOS kqueue (crossterm's default backend) can't poll.
 crossterm = { version = "0.29", features = ["use-dev-tty"] }
-# Herdr's socket speaks JSON.
+# Rex's CLI answers in JSON.
 serde_json = "1"
 unicode-width = "0.2"
 # Double-click words split where Codex's do: Unicode's word boundaries.
 unicode-segmentation = "1"
-# poll(2) for the terminal's answer to the Kitty graphics query (gfx.rs).
+# poll(2) for the terminal's answer to the Kitty graphics query (gfx.rs), and
+# proc_pidinfo for a Claude agent's parent (rex.rs).
 libc = "0.2"
 
 [profile.release]

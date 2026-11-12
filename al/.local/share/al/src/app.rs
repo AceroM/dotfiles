@@ -26,14 +26,18 @@ use crate::ansi::{self, Line};
 use crate::drafts::{self, Draft, Pic, ReplyTo};
 use crate::fuzzy;
 use crate::gfx::{self, Gfx};
-use crate::herdr::{self, Tab};
 use crate::links::{self, Finder, Link};
+use crate::rex::{self, Tab};
 use crate::select::{self, Sel, Spot, Wrap};
 use crate::theme::Palette;
 use crate::transcript::{self, Transcript};
 use crate::ui;
 
 use unicode_width::UnicodeWidthStr;
+
+/// A background refresh's answer: the tabs and the session's name, and the
+/// pane it read for the preview with what it read there.
+type Fetched = (Result<(String, Vec<Tab>), String>, Option<(String, Result<String, String>)>);
 
 /// The tabs and the preview are re-read this often.
 const REFRESH: Duration = Duration::from_millis(700);
@@ -172,7 +176,7 @@ pub struct App {
     pub pal: Palette,
     ws: String,
     me: String,
-    /// The Herdr space's name.
+    /// The Rex session's name.
     pub space: String,
     pub tabs: Vec<Tab>,
     /// This space's drafts, newest first: the list shows them above the tabs.
@@ -212,7 +216,7 @@ pub struct App {
     /// the corner for a moment. False draws it as a failure.
     pub toast: Option<(String, bool, Instant)>,
     pub lay: Layout,
-    /// Tabs `x` closed: hidden even if Herdr still lists them for a moment.
+    /// Tabs `x` closed: hidden even if Rex still lists them for a moment.
     closed: HashSet<String>,
     closed_tx: Sender<Closed>,
     closed_rx: Receiver<Closed>,
@@ -237,6 +241,14 @@ pub struct App {
     pub ask_cwd: PathBuf,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
+    /// The live refresh runs off the UI thread (a round of Rex calls is
+    /// ~50ms): its answers, and whether one is on its way.
+    fetch_tx: Sender<Fetched>,
+    fetch_rx: Receiver<Fetched>,
+    fetching: bool,
+    /// The pane text a refresh brought, for load_preview to use rather than
+    /// read it again.
+    prefetched: Option<(String, Result<String, String>)>,
     last_click: Option<(Instant, usize)>,
     /// Text marked in the preview: a drag, a double-click's word, a
     /// triple-click's line. While there's a mark the preview holds still, as
@@ -278,11 +290,12 @@ pub struct App {
 
 impl App {
     pub fn new(pal: Palette, opts: Opts) -> Result<App, String> {
-        let ws = std::env::var("HERDR_WORKSPACE_ID").map_err(|_| "no HERDR_WORKSPACE_ID: not in a Herdr pane".to_string())?;
-        let me = std::env::var("HERDR_TAB_ID").unwrap_or_default();
-        let (space, tabs) = herdr::tabs(&ws, &me)?;
+        let ws = rex::session().ok_or("no REX_SESSION: not in a Rex pane")?;
+        let me = std::env::var("REX_BLOCK").unwrap_or_default();
+        let (space, tabs) = rex::tabs(&ws, &me)?;
         let (bg_tx, bg_rx) = mpsc::channel();
         let (closed_tx, closed_rx) = mpsc::channel();
+        let (fetch_tx, fetch_rx) = mpsc::channel();
         let (pic_tx, pic_rx) = mpsc::channel();
         let mut app = App {
             pal,
@@ -326,6 +339,10 @@ impl App {
             ask_cwd: opts.cwd,
             bg_tx,
             bg_rx,
+            fetch_tx,
+            fetch_rx,
+            fetching: false,
+            prefetched: None,
             last_click: None,
             sel: None,
             press: None,
@@ -410,7 +427,7 @@ impl App {
             let text = fuzzy::score(&q, &d.flat());
             // A reply: the tab it goes to, as a tab's title.
             let to = d.reply.as_ref().and_then(|r| fuzzy::score(&q, &self.reply_label(r).0)).map(|(s, h)| (s - 8, h));
-            let cwd = fuzzy::score(&q, &herdr::tilde(&d.cwd.to_string_lossy())).map(|(s, _)| s - 16);
+            let cwd = fuzzy::score(&q, &rex::tilde(&d.cwd.to_string_lossy())).map(|(s, _)| s - 16);
             let Some(best) = [text.as_ref().map(|x| x.0), to.as_ref().map(|x| x.0), cwd].into_iter().flatten().max() else { continue };
             let hits = match (text, to) {
                 (Some((s, h)), _) if s == best => (h, Vec::new()),
@@ -429,7 +446,7 @@ impl App {
             // the name's and the title's hits get marked.
             let name = fuzzy::score(&q, t.name());
             let title = fuzzy::score(&q, &t.title).map(|(s, h)| (s - 8, h));
-            let cwd = fuzzy::score(&q, &herdr::tilde(&t.cwd)).map(|(s, _)| s - 16);
+            let cwd = fuzzy::score(&q, &rex::tilde(&t.cwd)).map(|(s, _)| s - 16);
             let best = [name.as_ref().map(|x| x.0), title.as_ref().map(|x| x.0), cwd].into_iter().flatten().max();
             let Some(best) = best else { continue };
             let hits = match (name, title) {
@@ -452,11 +469,27 @@ impl App {
         self.cur = at.unwrap_or(self.cur).min(self.view.len().saturating_sub(1));
     }
 
-    /// Re-read the tabs and the drafts (the cursor stays on its row), and the preview.
-    fn refresh(&mut self) {
+    /// Re-read the tabs, and the shown pane for the preview, in the
+    /// background: `apply` takes the answer.
+    fn fetch(&mut self) {
         self.fetched = Instant::now();
+        self.fetching = true;
+        let (ws, me, tx) = (self.ws.clone(), self.me.clone(), self.fetch_tx.clone());
+        let pane = if self.shows_page() { None } else { self.selected().and_then(|t| t.pane.clone()) };
+        std::thread::spawn(move || {
+            let got = std::thread::scope(|s| {
+                let read = s.spawn(|| pane.map(|p| (p.clone(), rex::read(&p))));
+                (rex::tabs(&ws, &me), read.join().unwrap_or(None))
+            });
+            let _ = tx.send(got);
+        });
+    }
+
+    /// A refresh's answer: the tabs and the drafts afresh (the cursor stays
+    /// on its row), and the preview.
+    fn apply(&mut self, (tabs, read): Fetched) {
         let keep = self.selected_key();
-        match herdr::tabs(&self.ws, &self.me) {
+        match tabs {
             Ok((space, mut list)) => {
                 let live: HashSet<&str> = list.iter().map(|t| t.id.as_str()).collect();
                 self.closed.retain(|id| live.contains(id.as_str()));
@@ -470,7 +503,9 @@ impl App {
         self.reload_drafts();
         self.set_view(keep);
         if !self.holding() {
+            self.prefetched = read;
             self.load_preview();
+            self.prefetched = None;
         }
     }
 
@@ -870,9 +905,13 @@ impl App {
             self.toast = None;
             dirty = true;
         }
-        if self.live && self.fetched.elapsed() > REFRESH {
-            self.refresh();
+        while let Ok(f) = self.fetch_rx.try_recv() {
+            self.fetching = false;
+            self.apply(f);
             dirty = true;
+        }
+        if self.live && !self.fetching && self.fetched.elapsed() > REFRESH {
+            self.fetch();
         }
         dirty
     }
@@ -958,8 +997,9 @@ impl App {
         self.pimgs.clear();
         let w = self.preview_size().1;
         let pane = self.selected().and_then(|t| t.pane.clone());
+        let read = self.prefetched.take().filter(|(p, _)| Some(p) == pane.as_ref()).map(|(_, r)| r);
         self.preview = match pane {
-            Some(p) => herdr::read(&p).map_or_else(|e| vec![vec![(e, Style::new())]], |t| ansi::parse(&t)),
+            Some(p) => read.unwrap_or_else(|| rex::read(&p)).map_or_else(|e| vec![vec![(e, Style::new())]], |t| ansi::parse(&t)),
             None => Vec::new(),
         };
         if let Some(t) = self.transcript.as_mut() {
@@ -1094,7 +1134,7 @@ impl App {
         for (n, path) in drafts::tagged(body, images) {
             lines.push(Line::new());
             let mut label: Line = vec![(format!("[Image #{n}]"), tag)];
-            let file = herdr::tilde(&path.to_string_lossy());
+            let file = rex::tilde(&path.to_string_lossy());
             let Some(g) = self.gfx else {
                 label.push((format!("  {file}"), dim));
                 lines.push(label);
@@ -1339,7 +1379,7 @@ impl App {
     }
 
     /// `y` with nothing marked: the selected tab's pane ID (its agent's pane,
-    /// else the one shown), for `herdr pane …`; on a draft, its prompt.
+    /// else the one shown), for `rex capture -b …` and the like; on a draft, its prompt.
     fn copy_pane(&mut self) {
         if let Some(d) = self.selected_draft() {
             let prompt = agent::with_images(&d.text, &d.images);
@@ -1391,9 +1431,9 @@ impl App {
         self.links.iter().find(|l| l.line == line && l.cols.contains(&col))
     }
 
-    /// Ctrl- (or ⌘-) click on a link. Herdr opens the links it sees itself
-    /// (al hands it each one's whole target: see main.rs), so this is one it
-    /// passed on.
+    /// Ctrl- (or ⌘-) click on a link the terminal handed on to al rather
+    /// than opening it itself (al gives it each one's whole target as an
+    /// OSC 8 hyperlink: see main.rs).
     fn open_link(&mut self, x: u16, y: u16) {
         let Some(t) = self.link_at(x, y).map(|l| l.target.clone()) else { return };
         if !self.live {
@@ -1619,13 +1659,13 @@ impl App {
         }
     }
 
-    /// Switch Herdr to the selected tab. al stays open behind it, so it's
+    /// Switch Rex to the selected tab. al stays open behind it, so it's
     /// still there when you come back; q or esc quits.
     fn go(&mut self) {
         let Some(t) = self.selected() else { return };
         let (id, name) = (t.id.clone(), t.name().to_string());
         if self.live {
-            if let Err(e) = herdr::focus_tab(&id) {
+            if let Err(e) = rex::focus_tab(&id) {
                 self.flash(e);
                 return;
             }
@@ -1649,7 +1689,7 @@ impl App {
         if self.live {
             let tx = self.closed_tx.clone();
             std::thread::spawn(move || {
-                let msg = match herdr::close_tab(&id) {
+                let msg = match rex::close_tab(&id) {
                     Ok(()) => (format!("closed {name}"), None),
                     Err(e) => (format!("couldn't close {name}: {e}"), Some(id)),
                 };

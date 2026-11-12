@@ -1,6 +1,6 @@
 //! A Claude Code session's transcript as preview lines, for scrolling a
 //! Claude tab past its screen: Claude Code redraws one screen in place, so
-//! Herdr holds no scrollback for it, but every turn is in
+//! the terminal holds no scrollback for it, but every turn is in
 //! ~/.claude/projects/<project>/<session>.jsonl.
 //!
 //! Read from the end a chunk at a time: a long session opens at once, and
@@ -272,7 +272,7 @@ fn parse(buf: &[u8]) -> Vec<Entry> {
 /// One line saying what a tool call was for.
 fn gist(input: &Value) -> String {
     let s = |k: &str| input[k].as_str().map(|s| s.lines().next().unwrap_or("").to_string());
-    let path = |k: &str| s(k).map(|p| crate::herdr::tilde(&p));
+    let path = |k: &str| s(k).map(|p| crate::rex::tilde(&p));
     s("description")
         .or_else(|| path("file_path"))
         .or_else(|| s("command"))

@@ -4,8 +4,8 @@ mod app;
 mod drafts;
 mod fuzzy;
 mod gfx;
-mod herdr;
 mod links;
+mod rex;
 mod select;
 mod snapshot;
 mod theme;
@@ -36,7 +36,7 @@ use app::{Act, App, Opts};
 use theme::{Palette, Rgb};
 
 const HELP: &str = "\
-al — this Herdr space's tabs: the list on the left, the selected tab's pane on the right
+al — this Rex session's tabs: the list on the left, the selected tab's pane on the right
 
 usage:
   al                   switch to, read, reply to and close tabs, and keep drafts (? inside for keys)
@@ -47,7 +47,7 @@ options:
   --path PATH          what ^i / tab puts in the agent box (jv passes the file it's on)
   -h, --help
 
-Runs inside a Herdr pane. Keys are jv's `;` dialog's: j/k (with counts), J/K scroll the
+Runs inside a Rex pane. Keys are jv's `;` dialog's: j/k (with counts), J/K scroll the
 preview, x or ; closes, c asks a new agent, r replies to the tab's agent, ⏎ goes, / finds,
 y / Y copy the tab's pane / session ID.
 d starts a draft: it's on top of the tabs at once, its page open on the right, saved as you
@@ -55,14 +55,14 @@ type (in ~/.local/state/al, images and all). ⏎ sends it to a new agent; esc ke
 later, when ⏎ on it sends it. e writes in it again, x deletes it, u undoes. D drafts a
 reply to the selected tab's agent the same way (⏎ sends it there), and ^s in the c or r
 box turns what you've written into a draft, carried on on its page.
-Its page draws its images (Kitty graphics: Ghostty, through Herdr). AL_IMAGES=0: off.
+Its page draws its images (Kitty graphics, where the terminal speaks it). AL_IMAGES=0: off.
 In a box, as in a text editor: ^a ^e the line's start / end, ^u ^k delete to them, ⌘↑ ⌘↓
 (or fn↑ fn↓) the text's start / end, shift (⌥⇧ a word) with the arrows selects, ^c copies
 the selection or else clears the input (^z brings it back; ^c on an empty box leaves), ^x cuts.
 shift+tab in the c box (or on a new agent's draft) switches it between claude and codex;
 ^p in the c or r box (or on a draft) sends it as `/plan …`, so the agent plans first.
 In the preview, as in Codex: drag (or double/triple-click) marks text and ^c copies it;
-ctrl-click opens a link, a code location in Neovim in a Herdr popup.
+ctrl-click opens a link, a code location in Neovim in a floating Rex pane.
 The agents are `claude --dangerously-skip-permissions` and `codex --no-daemon --yolo` (cx's
 flags); $AL_AGENT (else $JV_AGENT) names the first one, e.g. AL_AGENT=\"codex --yolo\".
 ";
@@ -109,6 +109,9 @@ fn main() -> ExitCode {
     if argv.get(1).map(String::as_str) == Some(agent::RUN_FLAG) {
         return agent::run_child(&argv[2..]);
     }
+    if argv.get(1).map(String::as_str) == Some(agent::REPLY_FLAG) {
+        return agent::reply_child(&argv[2..]);
+    }
     let cli = match parse_cli() {
         Ok(c) => c,
         Err(e) => {
@@ -116,8 +119,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if !agent::in_herdr() {
-        eprintln!("al: not inside a Herdr pane (HERDR_ENV isn't 1)");
+    if !agent::in_rex() {
+        eprintln!("al: not inside a Rex pane (REX_SESSION isn't set)");
         return ExitCode::FAILURE;
     }
     if cli.list {
@@ -155,13 +158,13 @@ fn repo_root() -> Option<PathBuf> {
 }
 
 fn print_list() -> ExitCode {
-    let ws = std::env::var("HERDR_WORKSPACE_ID").unwrap_or_default();
-    let me = std::env::var("HERDR_TAB_ID").unwrap_or_default();
-    match herdr::tabs(&ws, &me) {
+    let ses = rex::session().unwrap_or_default();
+    let me = std::env::var("REX_BLOCK").unwrap_or_default();
+    match rex::tabs(&ses, &me) {
         Ok((_, tabs)) => {
             let clean = |s: &str| s.replace('\t', " ");
             for t in &tabs {
-                println!("{}\t{}\t{}\t{}\t{}", t.id, t.status, clean(t.name()), clean(&t.title), herdr::tilde(&t.cwd));
+                println!("{}\t{}\t{}\t{}\t{}", t.id, t.status, clean(t.name()), clean(&t.title), rex::tilde(&t.cwd));
             }
             ExitCode::SUCCESS
         }
@@ -258,7 +261,7 @@ struct Hyperlink {
 }
 
 /// The preview's links as OSC 8 hyperlinks, each carrying its whole target
-/// (links.rs), so Herdr's ctrl-click opens a link the preview cuts off, and a
+/// (links.rs), so the terminal's ctrl-click opens a link the preview cuts off, and a
 /// path in the previewed tab's folder. Ratatui can't write them, so they go
 /// over its frame: each link's cells again, inside the hyperlink, wherever
 /// they changed since `drawn` (ratatui rewriting a cell drops its link).

@@ -5,9 +5,8 @@
 //! in the foreground color. Since the picture lives in text cells, ratatui's
 //! redraws, scrolling and the boxes over it need nothing special.
 //!
-//! Ghostty and kitty speak it, and Herdr (0.9 on) passes it through. Anywhere
-//! the terminal doesn't answer the query, a draft lists its image files
-//! instead. AL_IMAGES=0 turns it off.
+//! Ghostty and kitty speak it. Anywhere the terminal doesn't answer the
+//! query, a draft lists its image files instead. AL_IMAGES=0 turns it off.
 
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# al — Herdr tab switcher (Rust). Source lives in ../share/al; this launcher builds
+# al — Rex tab switcher (Rust). Source lives in ../share/al; this launcher builds
 # it on first run and again whenever a source file is newer than the binary.
 set -euo pipefail
 

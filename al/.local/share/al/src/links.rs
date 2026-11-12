@@ -1,11 +1,11 @@
 //! Links in the preview: web addresses, and code locations (`src/app.rs:42`,
 //! `Read(~/x/y.py)`, a bare `README.md`) naming a file that's there in the
 //! previewed tab's folder or its repo. They're underlined, and al wraps them
-//! in OSC 8 hyperlinks carrying the whole target (main.rs), so Herdr's
-//! ctrl-click opens all of one even where the preview cuts it off, and finds a
-//! relative path in the tab's folder rather than al's: a web link in the
-//! browser, a file through the nvim-links plugin, in Neovim in a centered
-//! popup at its line. A ctrl-click Herdr hands on to al opens the same way.
+//! in OSC 8 hyperlinks carrying the whole target (main.rs), so a terminal
+//! that opens hyperlinks itself opens all of one even where the preview cuts
+//! it off, and finds a relative path in the tab's folder rather than al's. A
+//! ctrl-click the terminal hands on to al opens here: a web link in the
+//! browser, a file in Neovim in a floating Rex pane at its line.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -210,18 +210,13 @@ fn percent(s: &str) -> String {
     out
 }
 
-/// Open `t` from al, for a ctrl-click Herdr handed on rather than opening it
-/// itself: a web link in the browser, a file in nvim-links' Neovim popup.
+/// Open `t` from al, for a ctrl-click the terminal handed on rather than
+/// opening it itself: a web link in the browser, a file in Neovim in a
+/// floating pane over al's tab (as Herdr's nvim-links popup did).
 pub fn open(t: &Target) -> Result<(), String> {
     let out = match t {
         Target::Web(u) => Command::new("open").arg(u).stdin(Stdio::null()).output(),
-        Target::File { path, line, col } => Command::new("herdr")
-            .args(["plugin", "pane", "open", "--plugin", "miguel.nvim-links", "--entrypoint", "float", "--focus"])
-            .arg("--env")
-            .arg(format!("NVIM_LINKS_FILE={}", path.display()))
-            .args(["--env", &format!("NVIM_LINKS_LINE={line}"), "--env", &format!("NVIM_LINKS_COL={col}")])
-            .stdin(Stdio::null())
-            .output(),
+        Target::File { path, line, col } => return crate::rex::nvim_popup(&path.to_string_lossy(), *line, *col),
     }
     .map_err(|e| e.to_string())?;
     if out.status.success() {

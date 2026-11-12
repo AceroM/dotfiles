@@ -53,7 +53,7 @@ pub enum Mode {
     Filter,
     GoTo,
     Help,
-    /// The `c` box: a prompt for an agent in a new Herdr tab.
+    /// The `c` box: a prompt for an agent in a new Rex tab.
     Ask,
     /// Typing jp's PR list filter (`/` with the list focused).
     PrFilter,
@@ -1041,8 +1041,8 @@ impl App {
     /// `c`: open the agent box. ^i in it inserts the selection's file, else
     /// the file at the top of the diff.
     fn open_ask(&mut self, sel: Option<&Sel>) {
-        if !agent::in_herdr() {
-            self.flash(format!("c starts {} in a new Herdr tab · run jv inside Herdr", self.ask_kind));
+        if !agent::in_rex() {
+            self.flash(format!("c starts {} in a new Rex tab · run jv inside Rex", self.ask_kind));
             return;
         }
         let sel_file = sel.filter(|s| s.shown).and_then(|s| self.doc.rows.get(s.anchor.min(s.head).row)?.file());
@@ -1051,10 +1051,10 @@ impl App {
         self.mode = Mode::Ask;
     }
 
-    /// `C`: commit and push everything in a new Herdr tab (commit.rs).
+    /// `C`: commit and push everything in a new Rex tab (commit.rs).
     fn commit(&mut self) {
-        if !agent::in_herdr() {
-            self.flash("C commits & pushes in a new Herdr tab · run jv inside Herdr");
+        if !agent::in_rex() {
+            self.flash("C commits & pushes in a new Rex tab · run jv inside Rex");
             return;
         }
         let Some(root) = self.repo_root.clone() else {
@@ -1069,10 +1069,10 @@ impl App {
         self.flash("committing & pushing in a new tab…");
     }
 
-    /// `E`: the selected file in nvim, in a new Herdr tab (edit.rs).
+    /// `E`: the selected file in nvim, in a new Rex tab (edit.rs).
     fn edit_in_tab(&mut self) -> Act {
-        if !agent::in_herdr() {
-            self.flash("E opens nvim in a new Herdr tab · run jv inside Herdr");
+        if !agent::in_rex() {
+            self.flash("E opens nvim in a new Rex tab · run jv inside Rex");
             return Act::None;
         }
         let Some((rel, line)) = self.selected_path() else { return Act::None };
@@ -1204,13 +1204,13 @@ impl App {
 
     // ---- `;` ---------------------------------------------------------------
 
-    /// `;`: this Herdr space's tabs, in `al` (the dialog is its own CLI).
+    /// `;`: this Rex session's tabs, in `al` (the dialog is its own CLI).
     /// jv steps aside while it runs, as for a terminal editor. ^i in al's
     /// agent box puts in the file at the top of the diff, and its agents
     /// start where jv's `c` would.
     fn open_tabs(&mut self) -> Act {
-        if !agent::in_herdr() {
-            self.flash("; lists this Herdr space's tabs · run jv inside Herdr");
+        if !agent::in_rex() {
+            self.flash("; lists this Rex session's tabs · run jv inside Rex");
             return Act::None;
         }
         if !source::which("al") {

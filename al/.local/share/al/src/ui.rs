@@ -18,7 +18,7 @@ use crate::agent::{self, Field};
 use crate::app::{App, Mode, Row, Target};
 use crate::drafts;
 use crate::gfx;
-use crate::herdr;
+use crate::rex;
 use crate::select;
 use crate::theme::Palette;
 
@@ -214,15 +214,15 @@ fn preview(app: &App, buf: &mut Buffer, r: Rect) {
     let what = |d: &drafts::Draft| {
         let plan = if d.plan { " · plan" } else { "" };
         match &d.reply {
-            Some(r) => format!("reply to {}{plan} · {}", app.reply_label(r).0, herdr::tilde(&d.cwd.to_string_lossy())),
-            None => format!("draft · {}{plan} in {}", app.draft_kind(d), herdr::tilde(&d.cwd.to_string_lossy())),
+            Some(r) => format!("reply to {}{plan} · {}", app.reply_label(r).0, rex::tilde(&d.cwd.to_string_lossy())),
+            None => format!("draft · {}{plan} in {}", app.draft_kind(d), rex::tilde(&d.cwd.to_string_lossy())),
         }
     };
     let mut title = match (app.editing_draft(), app.selected_draft()) {
         (Some(d), _) if editing => format!("{} · ⏎ sends", what(d)),
-        _ if editing => format!("draft · {} in {} · ⏎ sends", app.box_kind(), herdr::tilde(&app.box_cwd().to_string_lossy())),
+        _ if editing => format!("draft · {} in {} · ⏎ sends", app.box_kind(), rex::tilde(&app.box_cwd().to_string_lossy())),
         (_, Some(d)) => what(d),
-        _ => app.selected().map(|t| herdr::tilde(&t.cwd)).unwrap_or_default(),
+        _ => app.selected().map(|t| rex::tilde(&t.cwd)).unwrap_or_default(),
     };
     if app.in_transcript {
         title.push_str(" · transcript");
@@ -534,7 +534,7 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
             Span::raw(" "),
         ],
         (Target::Command, _) => {
-            let cwd = herdr::tilde(&app.box_cwd().to_string_lossy());
+            let cwd = rex::tilde(&app.box_cwd().to_string_lossy());
             vec![
                 Span::styled(" run ", fg(p.muted)),
                 Span::styled("$", fg(p.accent)),
@@ -547,7 +547,7 @@ fn ask(app: &App, buf: &mut Buffer, area: Rect) {
             // A draft says so (written here when there's no preview to hold its page).
             let what = if matches!(t, Target::Edit(_)) { " draft · " } else { " new " };
             let kind = app.box_kind();
-            let cwd = herdr::tilde(&app.box_cwd().to_string_lossy());
+            let cwd = rex::tilde(&app.box_cwd().to_string_lossy());
             let cwd = truncate(&cwd, room.saturating_sub(kind.width() + what.width() + 4));
             vec![
                 Span::styled(what, fg(p.muted)),
