@@ -2,10 +2,27 @@
 name = "ct"
 version = "0.1.0"
 edition = "2021"
-description = "Chrome tabs: every tab by title and URL in a centered list; close one, a range, a site, the duplicates, or a filter's matches; u reopens"
+description = "Chrome tabs (ct) and Chrome tab groups (tg): centered lists for closing tabs and removing tab groups"
+
+# What ct and tg share: the browser-use host, the colors (Rex's theme when inside Rex), text helpers.
+[lib]
+name = "tabkit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ct"
+path = "src/main.rs"
+
+[[bin]]
+name = "tg"
+path = "src/bin/tg/main.rs"
 
 [dependencies]
+# tg: macOS accessibility (Chrome's saved-group menus) and Rex's theme preference.
+core-foundation = "0.10.1"
 ratatui = "0.30"
+# tg: Chrome's sync store (saved tab groups), read from a copy.
+rusty-leveldb = "4.0.2"
 # The browser-use native host speaks newline-delimited JSON.
 serde_json = "1"
 unicode-width = "0.2"

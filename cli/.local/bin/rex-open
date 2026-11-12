@@ -342,7 +342,8 @@ def open_floating(source, target, line, column):
     root = git_root(directory) or directory
     command = ["nvim"]
     if line and target.is_file():
-        command += [f"+call cursor({line}, {column or 1})", "+normal! zvzz"]
+        # Not +LINE: LazyVim's jump to the last position would undo it.
+        command.append(f"+lua require('config.rex_links').jump({line}, {column or 1})")
     request = {
         "session_id": source["session_id"], "window_id": source["window_id"],
         "bounds": FLOAT_BOUNDS, "focus": True,

@@ -36,14 +36,34 @@ local BARE_NAMES = {
   LICENSE = true, README = true, CHANGELOG = true, Containerfile = true,
 }
 
+local function inside(frame, pos)
+  return frame and pos.x >= frame.x and pos.x < frame.x + frame.w and pos.y >= frame.y and pos.y < frame.y + frame.h
+end
+
+-- The terminal pane under `pos`. Hit-testing (systemElementAtPosition) only
+-- finds the transparent group Rex lays over its panes, so this walks the
+-- window's panes and takes the last one whose frame holds the point: later
+-- in the tree is further in front, so a floating pane beats the tiled one
+-- beneath it. About 40 ms for a tab of four panes.
 local function terminalAt(pos)
-  local el = hs.axuielement.systemElementAtPosition(pos)
-  for _ = 1, 6 do
-    if not el then return nil end
-    if el:attributeValue("AXRole") == "AXTextArea" and el:attributeValue("AXDescription") == "Terminal" then
-      return el
+  local app = hs.application.get(REX)
+  if not app then return nil end
+  local found
+  local function walk(el, depth)
+    if depth > 14 then return end
+    if el:attributeValue("AXRole") == "AXTextArea" then
+      if el:attributeValue("AXDescription") == "Terminal" and inside(el:attributeValue("AXFrame"), pos) then
+        found = el
+      end
+      return
     end
-    el = el:attributeValue("AXParent")
+    for _, child in ipairs(el:attributeValue("AXChildren") or {}) do walk(child, depth + 1) end
+  end
+  for _, window in ipairs(hs.axuielement.applicationElement(app):attributeValue("AXWindows") or {}) do
+    if inside(window:attributeValue("AXFrame"), pos) then
+      walk(window, 1)
+      return found -- windows come front to back; the first one holding the point is the one clicked
+    end
   end
 end
 
@@ -210,7 +230,11 @@ function M.start()
     local app = hs.application.frontmostApplication()
     if not app or app:bundleID() ~= REX then return false end
     local ok, hit = pcall(M.hit, event:location())
-    if not ok or not hit then return false end
+    if not ok or not hit then
+      print("rexlinks: left to Rex: " .. (ok and "no file location under the pointer" or tostring(hit)))
+      return false
+    end
+    print(string.format("rexlinks: %s %s (pane %q)", flags.cmd and "float" or "tab", hit.token, hit.label))
     swallowUp = true
     open(hit, flags.cmd == true)
     return true

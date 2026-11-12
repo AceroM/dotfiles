@@ -8,6 +8,32 @@
 -- foreground pid (Neovim's default v:servername, …/nvim.<pid>.0).
 local M = {}
 
+local function go(line, column)
+  local last = vim.api.nvim_buf_line_count(0)
+  line = math.max(1, math.min(tonumber(line) or 1, last))
+  local text = vim.api.nvim_buf_get_lines(0, line - 1, line, false)[1] or ""
+  pcall(vim.api.nvim_win_set_cursor, 0, { line, math.max(0, math.min((tonumber(column) or 1) - 1, #text)) })
+  vim.cmd("normal! zvzz")
+end
+
+-- A floating Neovim's start: nvim "+lua require('config.rex_links').jump(L, C)" -- file
+-- LazyVim jumps to the last edited position once its file plugins load, after
+-- the UI is up, which would undo a plain +L. Claim that jump for this buffer,
+-- land now, and land again once startup settles.
+function M.jump(line, column)
+  vim.b.lazyvim_last_loc = true
+  go(line, column)
+  local buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_create_autocmd("UIEnter", {
+    once = true,
+    callback = function()
+      vim.defer_fn(function()
+        if vim.api.nvim_get_current_buf() == buf then go(line, column) end
+      end, 50)
+    end,
+  })
+end
+
 function M.open(location)
   local stat = type(location.path) == "string" and vim.uv.fs_stat(location.path)
   if not stat or (stat.type ~= "file" and stat.type ~= "directory") then

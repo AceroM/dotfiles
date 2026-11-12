@@ -192,6 +192,31 @@ export const SWITCHER = {
     return { closed: closing };
   },
 
+  // tg: take tabs out of their groups. Ungrouping every tab of a saved group deletes the saved
+  // group too (Chrome's own Ungroup does the same), while the tabs stay open. Tabs that are gone
+  // or already loose are skipped.
+  async "switcher.ungroup"(args) {
+    const ids = (Array.isArray(args.tabs) ? args.tabs : [args.tab]).map(Number);
+    const grouped = new Set((await chrome.tabs.query({})).filter((t) => t.groupId >= 0).map((t) => t.id));
+    const ungrouping = ids.filter((id) => grouped.has(id));
+    if (ungrouping.length) await chrome.tabs.ungroup(ungrouping);
+    return { ungrouped: ungrouping };
+  },
+
+  // tg's undo: put tabs back into one new group with this title and color. The tabs have to be in
+  // one window; any that are gone are skipped.
+  async "switcher.group"(args) {
+    const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
+    const ids = (Array.isArray(args.tabs) ? args.tabs : [args.tab]).map(Number).filter((id) => open.has(id));
+    if (!ids.length) throw new Error("none of those tabs are open");
+    const groupId = await chrome.tabs.group({ tabIds: ids });
+    const props = { collapsed: false };
+    if (typeof args.title === "string") props.title = args.title;
+    if (args.color) props.color = String(args.color);
+    await chrome.tabGroups.update(groupId, props);
+    return { groupId, tabs: ids };
+  },
+
   // ct's undo: open closed tabs again where they were (window, position, group, pinned), in the
   // background. Each is a fresh tab at the same URL, so its back/forward history is gone. A window
   // that has since closed sends its tabs to the current window, ungrouped.
