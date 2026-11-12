@@ -10,9 +10,10 @@
 rex.bind("cmd+z", "pane.send_key", { key = "ctrl+/" })
 rex.bind("cmd+shift+z", "pane.send_key", { key = "f20" })
 
--- Tabs: cmd+j / cmd+k move to the next / previous tab, cmd+; closes it.
-rex.bind("cmd+j", "client.tab.next")
-rex.bind("cmd+k", "client.tab.previous")
+-- Tabs: cmd+h / cmd+l move to the previous / next tab (left / right in the
+-- tab bar), cmd+; closes it. cmd+h takes over macOS's Hide.
+rex.bind("cmd+h", "client.tab.previous")
+rex.bind("cmd+l", "client.tab.next")
 rex.bind("cmd+;", "client.tab.close")
 
 -- Focus history (focus.lua): the panes I've been in, newest first, for cmd+o
@@ -46,10 +47,10 @@ rex.action{
   end,
 }
 
--- Sessions: cmd+shift+j / cmd+shift+k move to the next / previous session
--- (agents <-> servers), one level up from cmd+j / cmd+k on tabs.
-rex.bind("cmd+shift+j", "remember_then", { action = "session.next" })
-rex.bind("cmd+shift+k", "remember_then", { action = "session.previous" })
+-- Sessions: cmd+j / cmd+k move to the next / previous session (down / up in
+-- the sidebar: agents <-> servers), the vertical pair to cmd+h / cmd+l on tabs.
+rex.bind("cmd+j", "remember_then", { action = "session.next" })
+rex.bind("cmd+k", "remember_then", { action = "session.previous" })
 
 -- cmd+p is the session switcher (was cmd+k; replaces Go to Anything).
 rex.bind("cmd+p", "remember_then", { action = "session.switch" })
@@ -102,55 +103,55 @@ rex.bind("cmd+9", "session_tab", { index = -1 })
 -- attached first.
 local pane_cwd = dirfocus.pane_cwd
 
--- cmd+n opens a new tab right after the current one (not at the end), in the
--- focused pane's directory, and shows it. It's an action rather than a bound
--- function because only actions can queue client actions, and the Mac app
--- keeps its own selected tab, so it has to be told to show the new one.
+local REX_BIN = "/Users/miguelacero/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
+
+-- cmd+n is cmd+t (the app's own New Tab: same tab, same shell, shown and
+-- focused the same way), except the tab lands right after the one the key was
+-- pressed in instead of at the end. The app makes the tab only after this
+-- action returns, so new-tab-here.lua, started detached, waits for it to
+-- appear and moves it into place. "The one the key was pressed in" is the tab
+-- holding ctx.block_id: the server's active_window_id doesn't follow the
+-- app's selected tab.
+-- Try it without the app: rex do new_tab_here dry_run=1 --json
 rex.action{
   name = "new_tab_here",
   title = "New Tab After Current",
   category = "Tab",
-  keywords = "new tab here cwd directory next",
+  keywords = "new tab here next after current",
   run = function(ctx, args)
     local view, err = rex.session.view{}
     if not view then error(err, 0) end
+    local windows = view.windows or {}
 
-    local active_index, after, focused = nil, nil, ctx.block_id
-    for i, w in ipairs(view.windows or {}) do
-      if w.window_id == view.active_window_id then
-        active_index = i
-        after = view.windows[i + 1]
-        focused = focused or w.focused_block_id
-        break
+    local here, active
+    for i, w in ipairs(windows) do
+      if w.window_id == view.active_window_id then active = i end
+      for _, layer in ipairs(w.layers or {}) do
+        for _, b in ipairs(layer.blocks or {}) do
+          if b.block_id == ctx.block_id then here = i end
+        end
       end
     end
+    here = here or active
+    local after = here and windows[here + 1]
 
-    local created
-    created, err = rex.session.new_window{
-      focus = true,
-      layout = rex.layout.block{
-        flavor = TERMINAL .. ".shell",
-        options = { cwd = pane_cwd(focused) },
-      },
-    }
-    if not created then error(err, 0) end
+    local result = { index = here and here + 1, before = after and after.window_id }
+    if args.dry_run then return result end
 
-    -- With no tab after the active one, the new tab already sits at the end.
+    -- Nothing after this tab: New Tab already puts it in the right place.
     if after then
-      rex.session.move_window{
-        window_id = created.window_id,
-        before_window_id = after.window_id,
-      }
+      local known = {}
+      for _, w in ipairs(windows) do known[#known + 1] = w.window_id end
+      rex.exec.start({
+        REX_BIN, "do", "-s", ctx.session_id,
+        (os.getenv("HOME") or "") .. "/.config/rex/new-tab-here.lua",
+        "--args", rex.json.encode{
+          session_id = ctx.session_id, before = after.window_id, known = known,
+        },
+      }, { detach = true })
     end
-    rex.session.focus_window{ window_id = created.window_id }
-
-    -- Ask the app to show it too. pcall: run from the CLI there may be no
-    -- client to ask.
-    pcall(rex.client.queue, "session.select", {
-      session_id = ctx.session_id,
-      window_id = created.window_id,
-    })
-    return { window_id = created.window_id, index = active_index and active_index + 1 }
+    rex.client.queue("client.tab.new", {})
+    return result
   end,
 }
 rex.bind("cmd+n", "new_tab_here")
@@ -634,7 +635,6 @@ rex.bind("ctrl+alt+\\", "stash_session")
 
 -- Pane headers show "<directory>  <title>": pane-labels.lua is a long-running
 -- script, so start it detached, once (the [r] keeps this shell from matching).
-local REX_BIN = "/Users/miguelacero/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
 rex.exec.start({
   "/bin/sh", "-c",
   "pgrep -f '[r]ex do .*pane-labels' >/dev/null || exec '" .. REX_BIN .. "' do '"

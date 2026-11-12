@@ -12,7 +12,7 @@
 
 local ax = require("hs.axuielement")
 
-local M = {}
+local M = { timers = {} }
 local BUNDLE = "com.superlogical.rex"
 local SIDEBAR = "Sidebar Tabs"
 
@@ -33,13 +33,19 @@ local function find(root, pred, maxDepth)
   end
 end
 
-local function filterField(win)
-  local sidebar = find(win, function(e)
+-- The sidebar, or nil while there's none on screen: it's hidden (View >
+-- Toggle Sidebar), or tabs are in the horizontal layout.
+local function sidebarOf(win)
+  return find(win, function(e)
     return e:attributeValue("AXRole") == "AXGroup" and e:attributeValue("AXDescription") == SIDEBAR
   end, 3)
-  return find(sidebar or win, function(e)
+end
+
+local function filterField(win)
+  local sidebar = sidebarOf(win)
+  return sidebar and find(sidebar, function(e)
     return e:attributeValue("AXRole") == "AXTextField"
-  end, sidebar and 5 or 8)
+  end, 5)
 end
 
 function M.set(q)
@@ -50,30 +56,56 @@ function M.set(q)
   local back = ax.applicationElement(app):attributeValue("AXFocusedUIElement")
   local axwin = ax.windowElement(win)
 
-  local function write(field)
-    field:setAttributeValue("AXFocused", true)
-    M.timer = hs.timer.doAfter(0.05, function()
-      field:setAttributeValue("AXValue", q)
-      M.timer = hs.timer.doAfter(0.1, function()
-        if back and back:isValid() then back:setAttributeValue("AXFocused", true) end
-      end)
+  -- Run fn after delay seconds. M.timers holds each pending timer so it isn't
+  -- garbage collected before it fires.
+  local function after(delay, fn)
+    local t
+    t = hs.timer.doAfter(delay, function()
+      M.timers[t] = nil
+      fn()
     end)
+    M.timers[t] = true
   end
 
-  local field = filterField(axwin)
-  if field then return write(field) end
-  if q == "" then return end -- no box, so nothing to clear
+  -- What the last call did, for: hs -c 'return hs.inspect(rexfilter.last)'
+  local last = { q = q, at = os.date("%H:%M:%S"), front = app:isFrontmost(), steps = {} }
+  M.last = last
+  local function note(s) table.insert(last.steps, s) end
 
-  -- The box is folded away until something focuses it.
-  app:selectMenuItem({ "View", "Focus Tab Filter" })
-  local tries = 0
-  M.timer = hs.timer.doEvery(0.05, function()
-    tries = tries + 1
-    local f = filterField(axwin)
-    if f or tries >= 20 then
-      M.timer:stop()
-      if f then write(f) end
-    end
+  -- The box is folded away until something focuses it, and it's rebuilt as it
+  -- unfolds, so it's looked up again at each step rather than held. A value
+  -- written before the focus has settled shows in accessibility but never
+  -- reaches the filter, hence the waits.
+  --
+  -- A folded box in a visible sidebar is empty. With no sidebar on screen
+  -- (hidden, or the horizontal tab layout) the box may still hold a value, so
+  -- a clear tries to open it too, unless the last value written was empty.
+  local hidden = sidebarOf(axwin) == nil
+  local folded = filterField(axwin) == nil
+  if folded then
+    if q == "" and (not hidden or M.applied == "") then note("nothing to clear") return end
+    note("unfold: " .. tostring(app:selectMenuItem({ "View", "Focus Tab Filter" })))
+  end
+  after(folded and 0.35 or 0, function()
+    local field = filterField(axwin)
+    if not field then note("no box") return end
+    field:setAttributeValue("AXFocused", true)
+    after(0.15, function()
+      field = filterField(axwin)
+      if not field then note("box gone") return end
+      if not field:attributeValue("AXFocused") then
+        note("refocus")
+        field:setAttributeValue("AXFocused", true)
+      end
+      field:setAttributeValue("AXValue", q)
+      M.applied = q
+      note("written")
+      after(0.1, function()
+        if back and back:isValid() and back:attributeValue("AXRole") ~= "AXTextField" then
+          back:setAttributeValue("AXFocused", true)
+        end
+      end)
+    end)
   end)
 end
 

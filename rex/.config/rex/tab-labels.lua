@@ -73,6 +73,15 @@ end
 rex.on("window_label_changed", function(ctx) tidy(ctx.session_id) end)
 rex.on("session_view_changed", function(ctx) tidy(ctx.session_id) end)
 
+-- While the sidebar is narrowed, a pane can land in the project without the
+-- view changing: a new tab's shell starts there after the tab was created, or
+-- a shell cds in. Both re-check its session.
+local function recheck(ctx)
+  if DF.read() then tidy(ctx.session_id) end
+end
+rex.on("terminal.process_changed", recheck)
+rex.on("terminal.pwd_changed", recheck)
+
 for _, s in ipairs(rex.call("session.list", {}).sessions or {}) do
   tidy(s.session_id)
 end
