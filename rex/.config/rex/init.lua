@@ -4,6 +4,12 @@
 -- cmd+[ / cmd+] cycle them). option+left/right stay unbound so they reach
 -- the shell as word movement.
 
+-- Undo / redo as in a text field. cmd+z sends ctrl+/ (^_), which is undo in
+-- zsh and in Claude Code's prompt. cmd+shift+z sends F20, which zsh binds to
+-- redo (zsh/.config/zsh/line-editing.zsh); other programs ignore it.
+rex.bind("cmd+z", "pane.send_key", { key = "ctrl+/" })
+rex.bind("cmd+shift+z", "pane.send_key", { key = "f20" })
+
 -- Tabs: cmd+j / cmd+k move to the next / previous tab, cmd+; closes it.
 rex.bind("cmd+j", "client.tab.next")
 rex.bind("cmd+k", "client.tab.previous")

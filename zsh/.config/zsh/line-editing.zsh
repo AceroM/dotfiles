@@ -13,8 +13,19 @@
 # Bound in the emacs keymap explicitly, since variables.zsh (sourced after
 # this file) is what makes emacs the main keymap.
 
+#
+# Rex's default option+left/right are pane.send_key bindings, which may arrive
+# as ESC b / ESC f rather than the CSI form, so both forms are bound. Forward
+# moves stop at the end of the word, as on macOS (zsh's forward-word stops at
+# the start of the next one).
+#
+# Undo and redo: Rex's init.lua makes cmd+z send ctrl+/ (^_, zsh's undo) and
+# cmd+shift+z send F20 (ESC [ 34 ~), bound to redo here.
+
 bindkey -M emacs '^[[1;3D' backward-word
-bindkey -M emacs '^[[1;3C' emacs-forward-word  # to the word's end, as on macOS
+bindkey -M emacs '^[[1;3C' emacs-forward-word
+bindkey -M emacs '^[f' emacs-forward-word
+bindkey -M emacs '^[[34~' redo
 
 # Start a selection if there isn't one, then run the movement the widget is
 # named after (shift-select::backward-word runs backward-word).
