@@ -4,7 +4,7 @@ alias rw="railway"
 alias wr="wrangler"
 alias wd="wrangler deploy"
 alias b="bun"
-alias o="open"
+unalias o 2>/dev/null # `o` is the Rex agent prompt (~/.local/bin/o, stowed from o/)
 alias n="nvim"
 alias nl="NVIM_NO_LSP=1 nvim" # open without any LSP (see nvim options.lua)
 alias c="claude --dangerously-skip-permissions"

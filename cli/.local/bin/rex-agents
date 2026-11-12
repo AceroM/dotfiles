@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Find, read and prompt the coding agents (Claude Code, Codex) running in Rex panes.
+
+Rex has no agent registry like `herdr agent list`. This builds one from what Rex does expose:
+every session's windows and blocks (`rex session inspect`), each terminal's foreground process
+(`rex block call … process` → argv0 + cwd), and the status agents report with OSC 7501
+(`rex block call … program_status` → idle | working | done | blocked | error).
+
+  rex-agents                      table of agents: session, tab, pane, agent, state, cwd
+  rex-agents --json               same, as JSON (one object per agent)
+  rex-agents --all                every terminal pane, not only agents
+  rex-agents --cwd PREFIX         only panes whose cwd is PREFIX or below it
+  rex-agents find NAME            JSON for the one agent NAME resolves to
+  rex-agents read NAME [-n 120]   the agent's recent screen + scrollback
+  rex-agents prompt NAME TEXT…    type TEXT into the agent and press Enter
+
+NAME matches, in order: a pane label, a session label, a tab label (prefix, e.g. PROD-1234),
+then a full block ID or any 6+ character piece of one. It must resolve to exactly one agent pane.
+States are what the agent reported; "unknown" means an agent with no report yet, which is
+not proof of anything (same rule as herdr's `unknown`).
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+AGENT_APPS = {"claude": "claude", "claude-code": "claude", "codex": "codex"}
+
+
+def rex(*args, check=True):
+    result = subprocess.run(["rex", *args], capture_output=True, text=True)
+    if check and result.returncode != 0:
+        sys.exit(f"rex-agents: rex {' '.join(args)}: {result.stderr.strip() or result.returncode}")
+    return result.stdout
+
+
+def rex_json(*args):
+    out = rex(*args, check=False)
+    try:
+        return json.loads(out) if out.strip() else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def agent_kind(proc, status):
+    fg = proc.get("foreground") or {}
+    for key in ("argv0", "invoked_path", "path", "name"):
+        base = os.path.basename(str(fg.get(key) or "")).lower()
+        if base in AGENT_APPS:
+            return AGENT_APPS[base]
+    fg_pid = fg.get("pid")
+    for rec in status.get("records") or []:
+        app = str(rec.get("effective_app") or rec.get("app") or "").lower()
+        owner = (rec.get("owner") or {}).get("pid")
+        if app in AGENT_APPS and (owner is None or owner == fg_pid):
+            return AGENT_APPS[app]
+    return ""
+
+
+def agent_state(proc, status):
+    fg_pid = ((proc.get("foreground") or {}).get("pid"))
+    records = [r for r in status.get("records") or []
+               if (r.get("owner") or {}).get("pid") in (None, fg_pid)]
+    root = next((r for r in records if not r.get("id")), records[0] if records else None)
+    return (root or {}).get("state") or "unknown"
+
+
+def collect():
+    sessions = rex_json("ls", "--json").get("sessions") or []
+    panes = []
+    for s in sessions:
+        sid, slabel = s["session_id"], s.get("label") or ""
+        info = rex_json("session", "inspect", sid, "--json")
+        for w in info.get("windows") or []:
+            for layer in w.get("layers") or []:
+                for b in layer.get("blocks") or []:
+                    if "terminal" not in str(b.get("flavor") or b.get("creator_name") or ""):
+                        continue
+                    panes.append({
+                        "session_id": sid, "session": slabel,
+                        "window_id": w["window_id"], "tab": w.get("label") or "",
+                        "block_id": b["block_id"], "pane": b.get("label") or "",
+                        "focused": w.get("focused_block_id") == b["block_id"],
+                    })
+
+    def enrich(p):
+        sid, bid = p["session_id"], p["block_id"]
+        proc = rex_json("block", "call", "-s", sid, "-b", bid, "process")
+        status = rex_json("block", "call", "-s", sid, "-b", bid, "program_status")
+        title = rex_json("block", "call", "-s", sid, "-b", bid, "title").get("title") or ""
+        fg = proc.get("foreground") or {}
+        kind = agent_kind(proc, status)
+        p.update({
+            "agent": kind,
+            "state": agent_state(proc, status) if kind else "",
+            "cwd": fg.get("cwd") or "",
+            "program": os.path.basename(str(fg.get("argv0") or fg.get("name") or "")).lstrip("-"),
+            "pid": fg.get("pid"),
+            "title": title,
+        })
+        return p
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(enrich, panes))
+
+
+def under(cwd, prefix):
+    prefix = os.path.abspath(os.path.expanduser(prefix)).rstrip("/")
+    return cwd == prefix or cwd.startswith(prefix + "/")
+
+
+def resolve(name, panes):
+    agents = [p for p in panes if p["agent"]]
+    low = name.lower()
+    tiers = [
+        [p for p in agents if p["pane"].lower() == low],
+        [p for p in agents if p["session"].lower() == low],
+        [p for p in agents if p["tab"].lower().startswith(low)],
+        [p for p in agents if p["block_id"] == name or (len(name) >= 6 and name in p["block_id"])],
+    ]
+    for hits in tiers:
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            where = ", ".join(f"{h['session']}/{h['tab']}/{h['block_id']}" for h in hits)
+            sys.exit(f"rex-agents: '{name}' matches {len(hits)} agents ({where}); pass a block ID")
+    sys.exit(f"rex-agents: no agent pane matches '{name}' (rex-agents lists them)")
+
+
+def table(rows):
+    cols = ["session", "tab", "pane", "agent", "state", "cwd", "block_id"]
+    home = os.path.expanduser("~")
+    data = [[(r.get(c) or "-") if c != "cwd" else (r["cwd"].replace(home, "~", 1) or "-")
+             for c in cols] for r in rows]
+    widths = [max(len(c), *(len(str(d[i])) for d in data)) if data else len(c) for i, c in enumerate(cols)]
+    print("  ".join(c.upper().ljust(widths[i]) for i, c in enumerate(cols)).rstrip())
+    for d in data:
+        print("  ".join(str(v).ljust(widths[i]) for i, v in enumerate(d)).rstrip())
+
+
+def main():
+    argv = sys.argv[1:]
+    cmd = argv[0] if argv and argv[0] in {"ls", "list", "find", "read", "prompt"} else "ls"
+    if argv and argv[0] == cmd:
+        argv = argv[1:]
+
+    if cmd in {"ls", "list"}:
+        ap = argparse.ArgumentParser(prog="rex-agents", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+        ap.add_argument("--json", action="store_true")
+        ap.add_argument("--all", action="store_true", help="every terminal pane, not only agents")
+        ap.add_argument("--cwd", help="only panes at or below this directory")
+        a = ap.parse_args(argv)
+        rows = [p for p in collect() if a.all or p["agent"]]
+        if a.cwd:
+            rows = [p for p in rows if under(p["cwd"], a.cwd)]
+        if a.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            table(rows)
+        return
+
+    ap = argparse.ArgumentParser(prog=f"rex-agents {cmd}")
+    ap.add_argument("name")
+    if cmd == "read":
+        ap.add_argument("-n", "--lines", type=int, default=120)
+    if cmd == "prompt":
+        ap.add_argument("text", nargs="+")
+    a = ap.parse_args(argv)
+    p = resolve(a.name, collect())
+
+    if cmd == "find":
+        print(json.dumps(p, indent=2))
+    elif cmd == "read":
+        out = rex("capture", "-s", p["session_id"], "-b", p["block_id"], "--trim", "--unwrap")
+        print("\n".join(out.splitlines()[-a.lines:]))
+    elif cmd == "prompt":
+        if p["block_id"] == os.environ.get("REX_BLOCK"):
+            sys.exit("rex-agents: refusing to type into your own pane")
+        text = " ".join(a.text)
+        if "\n" in text:  # bracketed paste: newlines land in the prompt instead of submitting it
+            text = f"\x1b[200~{text}\x1b[201~"
+        rex("send", "-s", p["session_id"], "-b", p["block_id"], text)
+        rex("send-key", "-s", p["session_id"], "-b", p["block_id"], "enter")
+        print(f"sent to {p['session']}/{p['tab']} ({p['block_id']}, {p['agent']}, was {p['state']})")
+
+
+if __name__ == "__main__":
+    main()

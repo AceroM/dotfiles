@@ -1,0 +1,25 @@
+# o's configurations: the agents ⏎ can start in a new Rex tab. The prompt
+# shows the one it's on (`claude(opus) >`); ⇧tab goes to the next, ^1 … ^9
+# straight to the Nth, in the order they're listed here. o starts on the one
+# picked last (kept in ~/.local/state/o/last-agent), else the first; $O_AGENT
+# names one instead (O_AGENT=codex). `o --config` shows what o read.
+#
+#   kind   the command: claude, codex
+#   model  passed as --model MODEL, and shown: claude(fable)
+#   args   the agent's own arguments
+#   name   shown instead of kind(model)
+
+[[agent]]
+kind = "claude"
+model = "opus"
+args = ["--dangerously-skip-permissions"]
+
+[[agent]]
+kind = "claude"
+model = "fable"
+args = ["--dangerously-skip-permissions"]
+
+# As `cx` runs it: in this process, not on Codex's background server.
+[[agent]]
+kind = "codex"
+args = ["--no-daemon", "--yolo"]

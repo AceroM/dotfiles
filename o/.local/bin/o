@@ -1,0 +1,31 @@
+#!/bin/bash
+# o — a fast `>` prompt (Rust) that starts agents in new Rex tabs; oc is the
+# same for Herdr. Source lives in ~/.local/share/o (stowed from
+# o/.local/share/o); this launcher builds it on first run and again whenever a
+# source file is newer than the binary. It runs on every launch, so it uses
+# builtins only: no find, dirname, readlink or subshells.
+app_dir="${O_HOME:-$HOME/.local/share/o}"
+bin="$app_dir/target/release/o"
+
+stale=
+if [[ ! -x "$bin" ]]; then
+  stale=1
+else
+  for f in "$app_dir"/src/*.rs "$app_dir/Cargo.toml" "$app_dir/Cargo.lock"; do
+    if [[ "$f" -nt "$bin" ]]; then
+      stale=1
+      break
+    fi
+  done
+fi
+
+if [[ -n "$stale" ]]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    printf '%s\n' 'o: cargo is required to build o (https://rustup.rs).' >&2
+    exit 1
+  fi
+  printf '%s\n' 'o: building (first run or sources changed)…' >&2
+  cargo build --release --quiet --manifest-path "$app_dir/Cargo.toml" >&2 || exit 1
+fi
+
+exec "$bin" "$@"
