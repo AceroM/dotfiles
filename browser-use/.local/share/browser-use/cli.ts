@@ -48,7 +48,7 @@ Global flags
   --json                raw JSON output
   --browser <name>      pick a connected browser when several are (also BROWSER_USE_BROWSER)
 
-Your "current tab" is tracked per owner: $BROWSER_USE_OWNER, else the herdr pane ($HERDR_PANE_ID).
+Your "current tab" is tracked per owner: $BROWSER_USE_OWNER, else the Rex pane ($REX_BLOCK).
 
 For the human: ⌘⇧S in the browser copies the visible page (no tab strip / URL bar / side panel)
 to the clipboard as a PNG; the latest one is also at ~/.local/state/browser-use/viewport.png.
@@ -105,7 +105,10 @@ function num(v: unknown, name: string) {
 function owner() {
   if (process.env.BROWSER_USE_OWNER) return process.env.BROWSER_USE_OWNER;
   const kind = process.env.CLAUDECODE ? "claude" : Object.keys(process.env).some((k) => k.startsWith("CODEX_")) ? "codex" : "shell";
-  return process.env.HERDR_PANE_ID ? `${kind}@${process.env.HERDR_PANE_ID}` : kind;
+  // One owner per terminal pane, so parallel agents don't steal each other's current tab.
+  // Rex sets REX_BLOCK in every pane; HERDR_PANE_ID is the pre-Rex equivalent.
+  const pane = process.env.REX_BLOCK || process.env.HERDR_PANE_ID;
+  return pane ? `${kind}@${pane}` : kind;
 }
 
 type HostMeta = { pid: number; socket: string; browser: string; version: string; started: number };

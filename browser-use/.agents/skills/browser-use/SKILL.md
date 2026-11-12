@@ -1,6 +1,6 @@
 ---
 name: browser-use
-description: Drive the user's own, already-running browser (their Chrome window, with their logins) through the shared "Agents" tab group via the local `browser-use` CLI — open tabs, snapshot elements, click/type/fill, screenshot, read console + network, run JS. TRIGGER on phrasing that names the user's browser - "use my browser", "open the browser", "in my browser", "open it in the browser", "pull it up in the browser", "show me in the browser", "check it in the browser", "browser-use". Works the same from Claude Code and Codex, and every agent session (any herdr pane) sees the same Agents tabs, so agents can hand tabs to each other. The default for all browser work; /chrome (claude-in-chrome) and /cd (chrome-devtools MCP) only when the user names them. agent-browser is uninstalled: never use it.
+description: Drive the user's own, already-running browser (their Chrome window, with their logins) through the shared "Agents" tab group via the local `browser-use` CLI — open tabs, snapshot elements, click/type/fill, screenshot, read console + network, run JS. TRIGGER on phrasing that names the user's browser - "use my browser", "open the browser", "in my browser", "open it in the browser", "pull it up in the browser", "show me in the browser", "check it in the browser", "browser-use". Works the same from Claude Code and Codex, and every agent session (any Rex pane) sees the same Agents tabs, so agents can hand tabs to each other. The default for all browser work; /chrome (claude-in-chrome) and /cd (chrome-devtools MCP) only when the user names them. agent-browser is uninstalled: never use it.
 argument-hint: "[url | what to do] — optional"
 allowed-tools: Bash, Read
 ---
@@ -50,8 +50,8 @@ browser-use shot                                   # prints a PNG path → Read 
   `shot` when layout/visuals matter or to show the user. Screenshot pixels = CSS pixels, so
   `click 640,312` hits exactly what you see in the image.
 - Commands act on **your current tab** (the last one you opened/used). Pass `-t <id>` to act on
-  another; `browser-use use -t <id>` switches. "Your" is keyed by herdr pane
-  (`$HERDR_PANE_ID`), so parallel agents don't steal each other's current tab.
+  another; `browser-use use -t <id>` switches. "Your" is keyed by Rex pane
+  (`$REX_BLOCK`), so parallel agents don't steal each other's current tab.
 
 ## Commands
 
