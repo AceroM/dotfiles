@@ -41,7 +41,7 @@ function x() {
   fi
 
   local msg="${1:-changes}"
-  git add . && git commit -m "$msg" --no-verify && git push
+  git add . && git commit -m "$msg" && git push
 }
 function xd() {
   x "$@" && bun run deploy
@@ -208,7 +208,7 @@ function cb() { git checkout -b "$@"; }
 alias c-='git checkout -'
 function rb() { git rebase "$@"; }
 function sc() { git branch --show-current; }
-function cm() { git commit -m "$@" --no-verify; }
+function cm() { git commit -m "$@"; }
 # wl (worktree list) lives in worktrees.zsh now
 function gc() {
   local current_branch=$(git branch --show-current)

@@ -133,7 +133,7 @@ impl Tab {
     }
 
     /// The URL without `https://`, `www.` or a bare trailing slash:
-    /// `github.com/numeral/app/pull/12`.
+    /// `github.com/owner/repo/pull/12`.
     pub fn short_url(&self) -> &str {
         let u = self.url.as_str();
         let u = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or(u);

@@ -85,7 +85,7 @@ impl Query {
         s.join(" ")
     }
 
-    /// What the list's header says it shows: `Your PRs · tax-holiday · open`.
+    /// What the list's header says it shows: `Your PRs · repo · open`.
     pub fn label(&self) -> String {
         let mut parts = Vec::new();
         if !self.names_who() {
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn remotes() {
-        assert_eq!(parse_remote("git@github.com:NumeralHQ/tax-holiday.git").as_deref(), Some("NumeralHQ/tax-holiday"));
+        assert_eq!(parse_remote("git@github.com:acme/widgets.git").as_deref(), Some("acme/widgets"));
         assert_eq!(parse_remote("https://github.com/AceroM/dotfiles").as_deref(), Some("AceroM/dotfiles"));
         assert_eq!(parse_remote("ssh://git@github.com/o/r.git/").as_deref(), Some("o/r"));
         assert_eq!(parse_remote("https://gitlab.com/o/r"), None);
