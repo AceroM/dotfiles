@@ -148,6 +148,8 @@ pub struct App {
     pub toast: Option<(String, bool, Instant)>,
     pub sent: Vec<Sent>,
     pub sent_at: Option<usize>,
+    /// ⏎ on a send still starting: focus its tab the moment it exists.
+    focus_next: Option<usize>,
     /// Sends that finished, to print above the prompt.
     done: Vec<usize>,
     sent_tx: Sender<(usize, Outcome)>,
@@ -205,6 +207,7 @@ impl App {
             toast,
             sent: Vec::new(),
             sent_at: None,
+            focus_next: None,
             done: Vec::new(),
             sent_tx,
             sent_rx,
@@ -360,6 +363,9 @@ impl App {
             if let Some(s) = self.sent.get_mut(n) {
                 s.outcome = Some(out);
                 self.done.push(n);
+            }
+            if self.focus_next == Some(n) {
+                self.focus_sent(n);
             }
             changed = true;
         }
@@ -644,11 +650,17 @@ impl App {
         self.agent_of(d).map(|i| self.agents[i].name.as_str())
     }
 
+    /// ⏎ on a send: go to its agent's tab. One still starting is gone to as
+    /// soon as its tab exists (tick); the latest ⏎ wins.
     fn focus_sent(&mut self, index: usize) {
+        self.focus_next = None;
         let Some(sent) = self.sent.get(index) else { return };
         // The target is a block ID; the toast names it as the send did (`tab …`).
         let (target, shown) = match &sent.outcome {
-            None => return self.toast("agent is still starting · try Enter again shortly", false),
+            None => {
+                self.focus_next = Some(index);
+                return self.toast("focusing its tab as soon as it opens…", true);
+            }
             Some((msg, true, Some(target))) => (target.clone(), msg.trim_start_matches("→ ").to_string()),
             _ => return self.toast("this send has no agent to focus", false),
         };
@@ -1351,13 +1363,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_and_failed_sessions_cannot_be_focused() {
+    fn pending_sessions_focus_once_started_and_failed_ones_cannot() {
         let mut a = app("first");
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         press(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        // ⏎ before its tab exists: kept, and done the moment it does.
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(a.toast.as_ref().unwrap().0.contains("still starting"));
+        assert!(a.toast.as_ref().unwrap().0.contains("as soon as it opens"));
         a.tick();
+        assert_eq!(a.toast.as_ref().unwrap().0, "focused tab snapshot");
+        assert_eq!(a.focus_next, None);
         a.sent[0].outcome = Some(("failed".into(), false, None));
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert!(a.toast.as_ref().unwrap().0.contains("no agent"));
