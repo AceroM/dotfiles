@@ -23,6 +23,9 @@ opened before if it's still there, else a new one. Without --float, a Neovim in
 a pane of the tab gets it (siblings first), and the float is the fallback.
 Quitting a floating Neovim closes its pane.
 
+--float on a web page (.html, .htm) opens it in the default browser instead;
+without --float it goes to Neovim like any other file, so it stays editable.
+
 Hammerspoon's cmd-click (--float) and ctrl-click call this with --label and
 --line-text read from the pane under the pointer: hammerspoon/.hammerspoon/rexlinks.lua.
 """
@@ -32,6 +35,7 @@ import glob
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import subprocess
@@ -47,6 +51,9 @@ SEARCH_PATH = os.pathsep.join([os.environ.get("PATH", ""), str(Path.home() / ".l
                                "/opt/homebrew/bin", "/usr/local/bin"])
 # Centered over the tab: [x, y, w, h] as fractions of it.
 FLOAT_BOUNDS = [0.08, 0.06, 0.84, 0.88]
+# What cmd-click (--float) hands to the browser rather than Neovim.
+WEB_PAGES = {".html", ".htm"}
+LAUNCH_SERVICES = Path.home() / "Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist"
 
 
 def tool(name, fallback=None):
@@ -337,6 +344,25 @@ def open_in_editor(editor, target, line, column):
     return f"{result['path']}:{result['line']} in {editor['block_id']}"
 
 
+def default_browser():
+    """The bundle ID of the app that opens https links, or None. Asked of the
+    https handler rather than the .html one, which an editor can claim."""
+    try:
+        handlers = plistlib.loads(LAUNCH_SERVICES.read_bytes()).get("LSHandlers", [])
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+    for handler in handlers:
+        if handler.get("LSHandlerURLScheme") == "https" and handler.get("LSHandlerRoleAll"):
+            return handler["LSHandlerRoleAll"]
+    return None
+
+
+def open_in_browser(target):
+    browser = default_browser()
+    run(["/usr/bin/open", *(["-b", browser] if browser else []), str(target)])
+    return f"{target} in {browser or 'the default app'}"
+
+
 def open_floating(source, target, line, column):
     directory = target if target.is_dir() else target.parent
     root = git_root(directory) or directory
@@ -385,6 +411,13 @@ def main():
             break
     if target is None:
         raise ValueError(f"Not found: {args.location} (from {directories[0] or 'unknown directory'})")
+    if args.float and target.is_file() and target.suffix.lower() in WEB_PAGES:
+        if args.dry_run:
+            print(json.dumps({"target": str(target), "source": source, "directories": directories,
+                              "browser": default_browser() or "default app"}, indent=2))
+        else:
+            print("Opened " + open_in_browser(target))
+        return
     editor = choose_editor(tab, target, args.float)
 
     if args.dry_run:

@@ -1,6 +1,7 @@
 -- Click a file location in Rex to open it in Neovim.
 --
---   cmd-click   a centered floating Neovim over the tab (reused while it's open)
+--   cmd-click   a centered floating Neovim over the tab (reused while it's open);
+--               .html/.htm open in the default browser instead
 --   ctrl-click  the Neovim already in the tab, else that floating Neovim
 --
 -- Rex can't bind mouse clicks or hook the links it opens, so this is a mouse
