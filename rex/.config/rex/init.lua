@@ -103,7 +103,7 @@ rex.bind("cmd+9", "session_tab", { index = -1 })
 -- attached first.
 local pane_cwd = dirfocus.pane_cwd
 
-local REX_BIN = "/Users/miguelacero/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
+local REX_BIN = (os.getenv("HOME") or "") .. "/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
 
 -- cmd+n is cmd+t (the app's own New Tab: same tab, same shell, shown and
 -- focused the same way), except the tab lands right after the one the key was
@@ -632,6 +632,13 @@ rex.action{
   end,
 }
 rex.bind("ctrl+alt+\\", "stash_session")
+
+-- The fn layer: actions.lua has the herdr moves the keys above don't cover (jumps
+-- by position and initial, walking agents, starting one, the diff popup), which API
+-- clients call by name too, and keys.lua binds the ctrl+alt chords a Hammerspoon fn
+-- layer sends. Neither rebinds a key set above.
+require("actions")
+require("keys")
 
 -- Pane headers show "<directory>  <title>": pane-labels.lua is a long-running
 -- script, so start it detached, once (the [r] keeps this shell from matching).
