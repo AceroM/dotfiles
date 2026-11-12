@@ -5,6 +5,7 @@ mod field;
 mod probe;
 mod spawn;
 mod term;
+mod rex_theme;
 mod theme;
 mod ui;
 
@@ -18,7 +19,7 @@ use ratatui::crossterm::terminal;
 
 use app::{Act, App, Opts};
 use term::Inline;
-use theme::{Palette, Rgb};
+use theme::Palette;
 
 const HELP: &str = "\
 o — a `claude(opus) >` prompt made to type into fast: ⏎ starts that agent with it in a
@@ -160,12 +161,9 @@ fn main() -> ExitCode {
     };
     let cwd = cli.cwd.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ".".into());
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-    let bg = ["O_BG", "AL_BG", "JV_BG"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok().and_then(|s| Rgb::parse(&s)))
-        .unwrap_or(Rgb(0x28, 0x2c, 0x34));
+    let theme = rex_theme::theme(&["O_BG", "AL_BG", "JV_BG"]);
     let (start, _) = config::start(&agents);
-    let mut app = App::new(Palette::new(bg), Opts { cwd, text, label, agents, start, notice });
+    let mut app = App::new(Palette::new(&theme), Opts { cwd, text, label, agents, start, notice });
     if let Some((w, h)) = cli.snapshot {
         return snapshot(app, w, h, &cli.keys);
     }

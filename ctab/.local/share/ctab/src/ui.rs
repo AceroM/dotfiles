@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Mode, Row, Sort};
 use crate::gfx;
-use crate::theme::{group_color, Palette};
+use crate::theme::Palette;
 
 pub fn draw(app: &App, frame: &mut Frame) {
     let area = frame.area();
@@ -136,7 +136,7 @@ fn tab_row(app: &App, buf: &mut Buffer, inner: Rect, y: u16, k: usize, nw: usize
     }
     // A stripe in the group's color down the edge of a group's tabs.
     if let Some(g) = app.snap.groups.get(&t.group) {
-        put(buf, inner.x, y, max, "▎", fg(group_color(&g.color)));
+        put(buf, inner.x, y, max, "▎", fg(app.pal.group(&g.color)));
     }
     // Relative numbers, as in jv: the cursor row its own number, the rest
     // their distance (5j gets there).

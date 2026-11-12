@@ -1,31 +1,10 @@
-//! Colors. Chrome follows Zed's One Dark (the terminal theme in ghostty/), and
-//! the diff tints are GitHub's green/red blended into the background, so they
-//! read as tints rather than the solid blocks delta paints by default.
+//! Colors. Chrome comes from the shared Rex palette (rex/.local/share/rex-theme): Rex's current
+//! theme inside Rex, on the terminal's own background; Zed's One Dark elsewhere. The diff tints
+//! are GitHub's green/red blended into the background, so they read as tints rather than the
+//! solid blocks delta paints by default.
 
 use ratatui::style::Color;
-
-#[derive(Clone, Copy, Debug)]
-pub struct Rgb(pub u8, pub u8, pub u8);
-
-impl Rgb {
-    pub fn parse(s: &str) -> Option<Rgb> {
-        let s = s.trim().trim_start_matches('#');
-        if s.len() != 6 {
-            return None;
-        }
-        let v = u32::from_str_radix(s, 16).ok()?;
-        Some(Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
-    }
-
-    pub fn mix(self, o: Rgb, t: f32) -> Rgb {
-        let f = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8;
-        Rgb(f(self.0, o.0), f(self.1, o.1), f(self.2, o.2))
-    }
-
-    pub fn c(self) -> Color {
-        Color::Rgb(self.0, self.1, self.2)
-    }
-}
+pub use crate::rex_theme::{Rgb, Theme};
 
 pub struct Palette {
     pub bg: Rgb,
@@ -66,24 +45,20 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn new(bg: Rgb) -> Self {
-        let fg = Rgb(0xab, 0xb2, 0xbf);
+    pub fn new(t: &Theme) -> Self {
+        let (bg, fg) = (t.bg, t.fg);
         let add = Rgb(0x2e, 0xa0, 0x43);
         let del = Rgb(0xf8, 0x51, 0x49);
-        let green = Rgb(0x98, 0xc3, 0x79);
-        let red = Rgb(0xe0, 0x6c, 0x75);
-        let yellow = Rgb(0xe5, 0xc0, 0x7b);
-        let blue = Rgb(0x61, 0xaf, 0xef);
-        let accent = Rgb(0x74, 0xad, 0xe8);
+        let (green, red, yellow, blue, accent) = (t.green, t.red, t.yellow, t.blue, t.accent);
         Palette {
             bg,
             fg: fg.c(),
-            bright: Rgb(0xdc, 0xe0, 0xe5).c(),
-            muted: bg.mix(fg, 0.62).c(),
-            dim: bg.mix(fg, 0.40).c(),
-            border: bg.mix(fg, 0.16).c(),
-            panel: bg.mix(fg, 0.055).c(),
-            sel: bg.mix(accent, 0.24).c(),
+            bright: t.bright.c(),
+            muted: t.muted.c(),
+            dim: t.dim.c(),
+            border: t.border.c(),
+            panel: t.panel,
+            sel: t.sel.c(),
             sel_dim: bg.mix(fg, 0.13).c(),
             sel_text: bg.mix(accent, 0.40).c(),
             accent: accent.c(),

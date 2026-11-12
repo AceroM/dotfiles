@@ -9,6 +9,7 @@ mod highlight;
 mod prs;
 mod snapshot;
 mod source;
+mod rex_theme;
 mod theme;
 mod tree;
 mod ui;
@@ -29,7 +30,7 @@ use ratatui::DefaultTerminal;
 
 use app::{Act, App, Opts};
 use source::Source;
-use theme::{Palette, Rgb};
+use theme::Palette;
 use viewed::Viewed;
 
 const HELP: &str = "\
@@ -64,7 +65,7 @@ struct Cli {
     split: Option<bool>,
     wrap: bool,
     tests: Option<bool>,
-    theme: String,
+    theme: Option<String>,
     cmd: Option<String>,
     local: bool,
     git: Option<Vec<String>>,
@@ -82,7 +83,7 @@ fn parse_cli() -> Result<Cli, String> {
         split: None,
         wrap: true,
         tests: None,
-        theme: std::env::var("JV_THEME").unwrap_or_else(|_| highlight::DEFAULT_THEME.to_string()),
+        theme: std::env::var("JV_THEME").ok(),
         cmd: None,
         local: false,
         git: None,
@@ -112,7 +113,7 @@ fn parse_cli() -> Result<Cli, String> {
             "--tests" => c.tests = Some(true),
             "--no-tests" => c.tests = Some(false),
             "--popup" => c.popup = true,
-            "--theme" => c.theme = args.next().ok_or("--theme needs a name")?,
+            "--theme" => c.theme = Some(args.next().ok_or("--theme needs a name")?),
             "-c" | "--cmd" => c.cmd = Some(args.next().ok_or("--cmd needs a command")?),
             "-l" | "--local" | "." => c.local = true,
             // git diff's own flags clash with jv's (-s is --no-patch there), so
@@ -128,7 +129,7 @@ fn parse_cli() -> Result<Cli, String> {
             "--out" => c.out = Some(args.next().ok_or("--out needs a path")?),
             "--" => c.gh.extend(args.by_ref()),
             _ => match a.strip_prefix("--theme=") {
-                Some(t) => c.theme = t.to_string(),
+                Some(t) => c.theme = Some(t.to_string()),
                 None => c.gh.push(a),
             },
         }
@@ -150,7 +151,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let hl = match highlight::Hl::new(&cli.theme) {
+    // On a light background (Rex in a light theme) the default syntax theme is GitHub's.
+    let light = base().light;
+    let syntax = cli.theme.clone().unwrap_or_else(|| if light { "GitHub" } else { highlight::DEFAULT_THEME }.to_string());
+    let hl = match highlight::Hl::new(&syntax) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("jv: {e}");
@@ -261,8 +265,14 @@ fn main() -> ExitCode {
     }
 }
 
+/// The base colors: Rex's theme inside Rex, One Dark on $JV_BG elsewhere. Read once.
+fn base() -> &'static rex_theme::Theme {
+    static BASE: std::sync::OnceLock<rex_theme::Theme> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| rex_theme::theme(&["JV_BG"]))
+}
+
 fn background() -> Palette {
-    Palette::new(std::env::var("JV_BG").ok().and_then(|s| Rgb::parse(&s)).unwrap_or(Rgb(0x28, 0x2c, 0x34)))
+    Palette::new(base())
 }
 
 /// jp: search for the PRs, then open on the first one. Its diff and the

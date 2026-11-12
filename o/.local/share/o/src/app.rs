@@ -1304,11 +1304,11 @@ fn append_history(text: &str, images: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Rgb;
+    use crate::rex_theme::{one_dark, Rgb};
 
     fn app(text: &str) -> App {
         let opts = Opts { cwd: "/tmp".into(), text: text.into(), label: String::new(), agents: crate::config::defaults(), start: 0, notice: None };
-        let mut a = App::new(Palette::new(Rgb(0x28, 0x2c, 0x34)), opts);
+        let mut a = App::new(Palette::new(&one_dark(Rgb(0x28, 0x2c, 0x34))), opts);
         a.live = false;
         a
     }

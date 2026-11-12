@@ -8,6 +8,7 @@ mod links;
 mod rex;
 mod select;
 mod snapshot;
+mod rex_theme;
 mod theme;
 mod transcript;
 mod ui;
@@ -33,7 +34,7 @@ use ratatui::DefaultTerminal;
 use unicode_width::UnicodeWidthStr;
 
 use app::{Act, App, Opts};
-use theme::{Palette, Rgb};
+use theme::Palette;
 
 const HELP: &str = "\
 al — this Rex session's tabs: the list on the left, the selected tab's pane on the right
@@ -127,11 +128,8 @@ fn main() -> ExitCode {
         return print_list();
     }
     let cwd = cli.cwd.or_else(repo_root).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ".".into());
-    let bg = ["AL_BG", "JV_BG"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok().and_then(|s| Rgb::parse(&s)))
-        .unwrap_or(Rgb(0x28, 0x2c, 0x34));
-    let mut app = match App::new(Palette::new(bg), Opts { cwd, path: cli.path }) {
+    let theme = rex_theme::theme(&["AL_BG", "JV_BG"]);
+    let mut app = match App::new(Palette::new(&theme), Opts { cwd, path: cli.path }) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("al: {e}");

@@ -1,0 +1,5 @@
+# Cargo build output. The tools build this file as their own src/rex_theme.rs; this crate is
+# only for its tests and `cargo run --example show`.
+/target/
+**/*.rs.bk
+.DS_Store

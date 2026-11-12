@@ -3,6 +3,7 @@
 //! those); it is for clearing out tabs you don't need.
 
 mod bridge;
+mod rex_theme;
 
 use std::collections::HashSet;
 use std::io;
@@ -83,8 +84,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let bg = ["TK_BG", "JV_BG"].iter().find_map(|k| std::env::var(k).ok().and_then(|s| Rgb::parse(&s))).unwrap_or(Rgb(0x28, 0x2c, 0x34));
-    let mut app = match App::new(host, Palette::new(bg)) {
+    let theme = rex_theme::theme(&["TK_BG", "JV_BG"]);
+    let mut app = match App::new(host, Palette::new(&theme)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("tk: {e}");
@@ -360,7 +361,7 @@ impl App {
             if t.group != -1 && (new_window || prev.is_none_or(|(_, g)| g != t.group)) {
                 let g = self.snap.groups.get(&t.group);
                 let title = g.map(|g| g.title.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "group".to_string());
-                let color = g.map_or(self.pal.muted, |g| group_color(&g.color));
+                let color = g.map_or(self.pal.muted, |g| self.pal.group(&g.color));
                 self.rows.push(Row::Header(title, color));
             }
             prev = Some((t.window, t.group));
@@ -452,7 +453,7 @@ fn tab_row(app: &App, buf: &mut Buffer, inner: Rect, y: u16, k: usize, nw: usize
     }
     // A stripe in the group's color down the edge of a group's tabs.
     if let Some(g) = app.snap.groups.get(&t.group) {
-        put(buf, inner.x, y, max, "▎", fg(group_color(&g.color)));
+        put(buf, inner.x, y, max, "▎", fg(app.pal.group(&g.color)));
     }
     // Relative numbers, as in jv: the cursor row its own number, the rest
     // their distance (5j gets there).
@@ -534,30 +535,8 @@ fn truncate_left(s: &str, w: usize) -> String {
 }
 
 // ---- colors ------------------------------------------------------------------
-// jv's and ctab's (Zed's One Dark); tab groups in Chrome's dark-mode colors.
-
-#[derive(Clone, Copy)]
-struct Rgb(u8, u8, u8);
-
-impl Rgb {
-    fn parse(s: &str) -> Option<Rgb> {
-        let s = s.trim().trim_start_matches('#');
-        if s.len() != 6 {
-            return None;
-        }
-        let v = u32::from_str_radix(s, 16).ok()?;
-        Some(Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
-    }
-
-    fn mix(self, o: Rgb, t: f32) -> Rgb {
-        let f = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8;
-        Rgb(f(self.0, o.0), f(self.1, o.1), f(self.2, o.2))
-    }
-
-    fn c(self) -> Color {
-        Color::Rgb(self.0, self.1, self.2)
-    }
-}
+// The shared Rex palette (rex/.local/share/rex-theme): Rex's theme inside Rex, on the terminal's
+// own background; jv's and ctab's One Dark elsewhere. Tab groups in Chrome's own colors.
 
 struct Palette {
     fg: Color,
@@ -569,38 +548,27 @@ struct Palette {
     accent: Color,
     green: Color,
     yellow: Color,
+    theme: rex_theme::Theme,
 }
 
 impl Palette {
-    fn new(bg: Rgb) -> Self {
-        let fg = Rgb(0xab, 0xb2, 0xbf);
-        let accent = Rgb(0x74, 0xad, 0xe8);
+    fn new(t: &rex_theme::Theme) -> Self {
         Palette {
-            fg: fg.c(),
-            bright: Rgb(0xdc, 0xe0, 0xe5).c(),
-            muted: bg.mix(fg, 0.62).c(),
-            dim: bg.mix(fg, 0.40).c(),
-            panel: bg.mix(fg, 0.055).c(),
-            sel: bg.mix(accent, 0.24).c(),
-            accent: accent.c(),
-            green: Rgb(0x98, 0xc3, 0x79).c(),
-            yellow: Rgb(0xe5, 0xc0, 0x7b).c(),
+            fg: t.fg.c(),
+            bright: t.bright.c(),
+            muted: t.muted.c(),
+            dim: t.dim.c(),
+            panel: t.panel,
+            sel: t.sel.c(),
+            accent: t.accent.c(),
+            green: t.green.c(),
+            yellow: t.yellow.c(),
+            theme: t.clone(),
         }
     }
-}
 
-fn group_color(name: &str) -> Color {
-    let (r, g, b) = match name {
-        "grey" => (0xbd, 0xc1, 0xc6),
-        "blue" => (0x8a, 0xb4, 0xf8),
-        "red" => (0xf2, 0x8b, 0x82),
-        "yellow" => (0xfd, 0xd6, 0x63),
-        "green" => (0x81, 0xc9, 0x95),
-        "pink" => (0xff, 0x8b, 0xcb),
-        "purple" => (0xc5, 0x8a, 0xf9),
-        "cyan" => (0x78, 0xd9, 0xec),
-        "orange" => (0xfc, 0xad, 0x70),
-        _ => (0xab, 0xb2, 0xbf),
-    };
-    Color::Rgb(r, g, b)
+    /// A Chrome tab group's color by its API name, in Chrome's shade for this background.
+    fn group(&self, name: &str) -> Color {
+        self.theme.group(name)
+    }
 }

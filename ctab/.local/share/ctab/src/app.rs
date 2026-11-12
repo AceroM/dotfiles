@@ -17,7 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::bridge::{self, Host, Peek, PeekReq, Pixels, Snap, Tab, Thumb};
 use crate::fuzzy;
 use crate::gfx::{self, Gfx};
-use crate::theme::{group_color, Palette};
+use crate::theme::Palette;
 
 /// The tab list is re-read this often, so tabs opened or closed in Chrome show up.
 const LIST_REFRESH: Duration = Duration::from_millis(1000);
@@ -444,7 +444,7 @@ impl App {
                 if t.group != -1 && (new_window || prev.is_none_or(|(_, g)| g != t.group)) {
                     let g = self.snap.groups.get(&t.group);
                     let title = g.map(|g| g.title.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "group".to_string());
-                    let color = g.map_or(self.pal.muted, |g| group_color(&g.color));
+                    let color = g.map_or(self.pal.muted, |g| self.pal.group(&g.color));
                     self.rows.push(Row::Header(title, color));
                 }
             }

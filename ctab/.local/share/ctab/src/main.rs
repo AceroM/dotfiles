@@ -2,6 +2,7 @@ mod app;
 mod bridge;
 mod fuzzy;
 mod gfx;
+mod rex_theme;
 mod theme;
 mod ui;
 
@@ -16,7 +17,7 @@ use ratatui::layout::Rect;
 use ratatui::{DefaultTerminal, Terminal};
 
 use app::{Act, App};
-use theme::{Palette, Rgb};
+use theme::Palette;
 
 const HELP: &str = "\
 ctab — your browser's tabs: the list on the left, the selected tab's screenshot on the right
@@ -73,11 +74,8 @@ fn main() -> ExitCode {
     if list {
         return print_list(&host);
     }
-    let bg = ["CTAB_BG", "JV_BG"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok().and_then(|s| Rgb::parse(&s)))
-        .unwrap_or(Rgb(0x28, 0x2c, 0x34));
-    let mut app = match App::new(host, Palette::new(bg)) {
+    let theme = rex_theme::theme(&["CTAB_BG", "JV_BG"]);
+    let mut app = match App::new(host, Palette::new(&theme)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("ctab: {e}");
