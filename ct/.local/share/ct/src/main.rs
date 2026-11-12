@@ -5,15 +5,13 @@
 //! a `/` filter shows). `u` reopens what was closed. No preview and no
 //! switching (ctab does those).
 
-mod bridge;
-
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::ops::RangeInclusive;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -23,9 +21,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::{DefaultTerminal, Terminal};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use bridge::{Gone, Host, Snap, Tab};
+use tabkit::bridge::{self, Gone, Host, Snap, Tab};
+use tabkit::text::{age_label, fg, now_ms, put, truncate, truncate_left};
+use tabkit::theme::{self, Palette};
 
 const HELP: &str = "\
 ct — chrome tabs: every browser tab by title and URL; close what you don't need
@@ -114,8 +114,7 @@ fn main() -> ExitCode {
     if ls {
         return print_list(&host);
     }
-    let bg = ["CT_BG", "JV_BG"].iter().find_map(|k| std::env::var(k).ok().and_then(|s| Rgb::parse(&s))).unwrap_or(Rgb(0x28, 0x2c, 0x34));
-    let mut app = match App::new(host, Palette::new(bg)) {
+    let mut app = match App::new(host, theme::palette()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("ct: {e}");
@@ -799,7 +798,7 @@ impl App {
                     if t.group != -1 && (new_window || prev.is_none_or(|(_, g)| g != t.group)) {
                         let g = self.snap.groups.get(&t.group);
                         let title = g.map(|g| g.title.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "group".to_string());
-                        let color = g.map_or(self.pal.muted, |g| group_color(&g.color));
+                        let color = g.map_or(self.pal.muted, |g| self.pal.group(&g.color));
                         self.rows.push(Row::Header(title, color));
                     }
                     prev = Some((t.window, t.group));
@@ -898,26 +897,6 @@ fn help_lines() -> impl Iterator<Item = &'static str> {
     HELP.lines().skip_while(|l| !l.starts_with("move:")).take_while(|l| !l.starts_with("options:"))
 }
 
-fn now_ms() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64)
-}
-
-/// `now`, `12m`, `3h`, `5d`, `2w`, `4mo` since the tab was last in front.
-fn age_label(last: f64, now: f64) -> String {
-    if last <= 0.0 {
-        return String::new();
-    }
-    let s = ((now - last) / 1000.0).max(0.0) as u64;
-    match s {
-        0..=59 => "now".to_string(),
-        60..=3599 => format!("{}m", s / 60),
-        3600..=86_399 => format!("{}h", s / 3600),
-        86_400..=604_799 => format!("{}d", s / 86_400),
-        604_800..=5_183_999 => format!("{}w", s / 604_800),
-        _ => format!("{}mo", s / 2_592_000),
-    }
-}
-
 // ---- drawing -----------------------------------------------------------------
 
 fn draw(app: &mut App, area: Rect, buf: &mut Buffer) {
@@ -993,7 +972,7 @@ fn draw(app: &mut App, area: Rect, buf: &mut Buffer) {
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(fg(p.accent))
+        .border_style(fg(p.border))
         .style(Style::new().bg(p.panel))
         .title(title)
         .title_bottom(foot);
@@ -1050,7 +1029,7 @@ fn tab_row(app: &App, buf: &mut Buffer, inner: Rect, y: u16, k: usize, nw: usize
     }
     // A stripe in the group's color down the edge of a group's tabs.
     if let Some(g) = app.snap.groups.get(&t.group) {
-        put(buf, inner.x, y, max, "▎", fg(group_color(&g.color)));
+        put(buf, inner.x, y, max, "▎", fg(p.group(&g.color)));
     }
     // Relative numbers, as in jv: the cursor row its own number, the rest
     // their distance (5j gets there, 5x closes that many).
@@ -1102,133 +1081,4 @@ fn tab_row(app: &App, buf: &mut Buffer, inner: Rect, y: u16, k: usize, nw: usize
     if !age.is_empty() {
         put(buf, max - age.width() as u16, y, max, &age, fg(if on { p.muted } else { p.dim }));
     }
-}
-
-fn put(buf: &mut Buffer, x: u16, y: u16, max_x: u16, s: &str, st: Style) -> u16 {
-    if x >= max_x || s.is_empty() {
-        return x;
-    }
-    buf.set_stringn(x, y, s, (max_x - x) as usize, st).0
-}
-
-fn fg(c: Color) -> Style {
-    Style::new().fg(c)
-}
-
-fn truncate(s: &str, w: usize) -> String {
-    if s.width() <= w {
-        return s.to_string();
-    }
-    if w == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut cw = 0;
-    for c in s.chars() {
-        let x = c.width().unwrap_or(0);
-        if cw + x + 1 > w {
-            break;
-        }
-        out.push(c);
-        cw += x;
-    }
-    out.push('…');
-    out
-}
-
-/// Keep the end: `…acme-4289.chatgpt.site`.
-fn truncate_left(s: &str, w: usize) -> String {
-    if s.width() <= w {
-        return s.to_string();
-    }
-    let mut out: Vec<char> = Vec::new();
-    let mut cw = 1;
-    for c in s.chars().rev() {
-        let x = c.width().unwrap_or(0);
-        if cw + x > w {
-            break;
-        }
-        out.push(c);
-        cw += x;
-    }
-    out.push('…');
-    out.into_iter().rev().collect()
-}
-
-// ---- colors ------------------------------------------------------------------
-// jv's, ctab's and tk's (Zed's One Dark); tab groups in Chrome's dark-mode colors.
-
-#[derive(Clone, Copy)]
-struct Rgb(u8, u8, u8);
-
-impl Rgb {
-    fn parse(s: &str) -> Option<Rgb> {
-        let s = s.trim().trim_start_matches('#');
-        if s.len() != 6 {
-            return None;
-        }
-        let v = u32::from_str_radix(s, 16).ok()?;
-        Some(Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
-    }
-
-    fn mix(self, o: Rgb, t: f32) -> Rgb {
-        let f = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8;
-        Rgb(f(self.0, o.0), f(self.1, o.1), f(self.2, o.2))
-    }
-
-    fn c(self) -> Color {
-        Color::Rgb(self.0, self.1, self.2)
-    }
-}
-
-struct Palette {
-    fg: Color,
-    bright: Color,
-    muted: Color,
-    dim: Color,
-    panel: Color,
-    sel: Color,
-    /// Behind a marked tab.
-    doomed: Color,
-    accent: Color,
-    green: Color,
-    yellow: Color,
-    red: Color,
-}
-
-impl Palette {
-    fn new(bg: Rgb) -> Self {
-        let fg = Rgb(0xab, 0xb2, 0xbf);
-        let accent = Rgb(0x74, 0xad, 0xe8);
-        let red = Rgb(0xe0, 0x6c, 0x75);
-        Palette {
-            fg: fg.c(),
-            bright: Rgb(0xdc, 0xe0, 0xe5).c(),
-            muted: bg.mix(fg, 0.62).c(),
-            dim: bg.mix(fg, 0.40).c(),
-            panel: bg.mix(fg, 0.055).c(),
-            sel: bg.mix(accent, 0.24).c(),
-            doomed: bg.mix(red, 0.14).c(),
-            accent: accent.c(),
-            green: Rgb(0x98, 0xc3, 0x79).c(),
-            yellow: Rgb(0xe5, 0xc0, 0x7b).c(),
-            red: red.c(),
-        }
-    }
-}
-
-fn group_color(name: &str) -> Color {
-    let (r, g, b) = match name {
-        "grey" => (0xbd, 0xc1, 0xc6),
-        "blue" => (0x8a, 0xb4, 0xf8),
-        "red" => (0xf2, 0x8b, 0x82),
-        "yellow" => (0xfd, 0xd6, 0x63),
-        "green" => (0x81, 0xc9, 0x95),
-        "pink" => (0xff, 0x8b, 0xcb),
-        "purple" => (0xc5, 0x8a, 0xf9),
-        "cyan" => (0x78, 0xd9, 0xec),
-        "orange" => (0xfc, 0xad, 0x70),
-        _ => (0xab, 0xb2, 0xbf),
-    };
-    Color::Rgb(r, g, b)
 }

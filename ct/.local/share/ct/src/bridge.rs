@@ -1,7 +1,8 @@
 //! The browser-use native host, straight over its unix socket: one JSON request
 //! per connection. The host relays to the browser-use extension, whose
 //! `switcher.*` commands (extension/switcher.js, shared with ctab and tk) work on
-//! any tab and never attach the debugger. ct lists, closes and reopens.
+//! any tab and never attach the debugger. ct lists, closes and reopens; tg
+//! ungroups, regroups and opens a scratch window.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -16,6 +17,8 @@ pub struct Host {
     socket: PathBuf,
     /// "Google Chrome", "Helium", … as the extension reports it.
     pub browser: String,
+    /// The native host's process. The browser started it, so its parent is the browser.
+    pub pid: Option<i32>,
 }
 
 fn hosts_dir() -> PathBuf {
@@ -36,7 +39,11 @@ pub fn pick(want: Option<&str>) -> Result<Host, String> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| {
             let v: Value = serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?;
-            let host = Host { socket: v["socket"].as_str()?.into(), browser: v["browser"].as_str().unwrap_or("browser").to_string() };
+            let host = Host {
+                socket: v["socket"].as_str()?.into(),
+                browser: v["browser"].as_str().unwrap_or("browser").to_string(),
+                pid: v["pid"].as_i64().map(|p| p as i32),
+            };
             Some((v["started"].as_f64().unwrap_or(0.0), host))
         })
         .collect();
@@ -58,13 +65,14 @@ impl Host {
     pub fn call(&self, cmd: &str, args: Value, timeout: Duration) -> Result<Value, String> {
         let mut s = UnixStream::connect(&self.socket).map_err(|e| format!("browser-use host: {e}"))?;
         let _ = s.set_read_timeout(Some(timeout));
-        writeln!(s, "{}", json!({ "cmd": cmd, "args": args, "owner": "ct" })).map_err(|e| format!("browser-use host: {e}"))?;
+        let owner = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "ct".into());
+        writeln!(s, "{}", json!({ "cmd": cmd, "args": args, "owner": owner })).map_err(|e| format!("browser-use host: {e}"))?;
         let mut line = String::new();
         BufReader::new(s).read_line(&mut line).map_err(|e| format!("{cmd}: {e}"))?;
         let mut v: Value = serde_json::from_str(&line).map_err(|e| format!("{cmd}: {e}"))?;
         match v.get("error").and_then(Value::as_str) {
             Some(e) if e.starts_with("unknown command: switcher.") => {
-                Err("the browser-use extension is older than ct: run `browser-use reload`".to_string())
+                Err("the browser-use extension is older than this tool: run `browser-use reload`".to_string())
             }
             Some(e) => Err(e.to_string()),
             None => Ok(v["result"].take()),
@@ -74,6 +82,28 @@ impl Host {
     /// All of them in one call. Tabs that are already gone count as closed.
     pub fn close(&self, ids: &[i64]) -> Result<(), String> {
         self.call("switcher.close", json!({ "tabs": ids }), Duration::from_secs(5)).map(|_| ())
+    }
+
+    /// Take tabs out of their groups (tg). Ungrouping all of a saved group's tabs deletes the
+    /// saved group; the tabs stay open.
+    pub fn ungroup(&self, ids: &[i64]) -> Result<(), String> {
+        self.call("switcher.ungroup", json!({ "tabs": ids }), Duration::from_secs(5)).map(|_| ())
+    }
+
+    /// Put tabs back into one new group (tg's undo). The new group's id.
+    pub fn group(&self, ids: &[i64], title: &str, color: &str) -> Result<i64, String> {
+        let v = self.call("switcher.group", json!({ "tabs": ids, "title": title, "color": color }), Duration::from_secs(5))?;
+        v["groupId"].as_i64().ok_or_else(|| "switcher.group: no group id".to_string())
+    }
+
+    /// A New Tab window behind the others, so Chrome draws its bookmarks bar (tg). Its id.
+    pub fn scratch_open(&self) -> Result<i64, String> {
+        let v = self.call("switcher.scratch", json!({}), Duration::from_secs(5))?;
+        v["windowId"].as_i64().ok_or_else(|| "switcher.scratch: no window id".to_string())
+    }
+
+    pub fn scratch_close(&self, window: i64) -> Result<(), String> {
+        self.call("switcher.scratch", json!({ "close": window }), Duration::from_secs(5)).map(|_| ())
     }
 
     /// Open closed tabs again where they were. The new tabs' ids, and how many
@@ -176,6 +206,7 @@ pub struct Gone {
 pub struct Group {
     pub title: String,
     pub color: String,
+    pub window: i64,
 }
 
 pub struct Window {
@@ -200,7 +231,8 @@ pub fn list(host: &Host) -> Result<Snap, String> {
     let mut windows: Vec<Window> =
         arr("windows").iter().map(|w| Window { id: i(w, "id"), focused: b(w, "focused"), incognito: b(w, "incognito") }).collect();
     windows.sort_by_key(|w| w.id);
-    let groups = arr("groups").iter().map(|g| (i(g, "id"), Group { title: s(g, "title"), color: s(g, "color") })).collect();
+    let groups =
+        arr("groups").iter().map(|g| (i(g, "id"), Group { title: s(g, "title"), color: s(g, "color"), window: i(g, "windowId") })).collect();
     let mut tabs: Vec<Tab> = arr("tabs")
         .iter()
         .map(|t| Tab {

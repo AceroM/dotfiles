@@ -206,15 +206,42 @@ export const SWITCHER = {
   // tg's undo: put tabs back into one new group with this title and color. The tabs have to be in
   // one window; any that are gone are skipped.
   async "switcher.group"(args) {
-    const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
+    const open = new Map((await chrome.tabs.query({})).map((t) => [t.id, t]));
     const ids = (Array.isArray(args.tabs) ? args.tabs : [args.tab]).map(Number).filter((id) => open.has(id));
     if (!ids.length) throw new Error("none of those tabs are open");
-    const groupId = await chrome.tabs.group({ tabIds: ids });
+    // Without a window, Chrome makes the group in the window in front and moves the tabs there.
+    const windowId = open.get(ids[0]).windowId;
+    const groupId = await chrome.tabs.group({ tabIds: ids, createProperties: { windowId } });
     const props = { collapsed: false };
     if (typeof args.title === "string") props.title = args.title;
     if (args.color) props.color = String(args.color);
     await chrome.tabGroups.update(groupId, props);
     return { groupId, tabs: ids };
+  },
+
+  // tg: a New Tab window of its own, so the bookmarks bar (where Chrome keeps saved tab groups)
+  // shows: Chrome draws that bar only for a New Tab page. It opens behind, unfocused, as wide as
+  // the window you used last, and `close` takes it away again. Only a window this command opened
+  // can be closed with it.
+  async "switcher.scratch"(args) {
+    if (args.close != null) {
+      const { scratch = [] } = await chrome.storage.session.get("scratch");
+      const id = Number(args.close);
+      if (!scratch.includes(id)) throw new Error(`window ${id} isn't a scratch window`);
+      await chrome.windows.remove(id).catch(() => {});
+      await chrome.storage.session.set({ scratch: scratch.filter((w) => w !== id) });
+      return { closed: id };
+    }
+    let near;
+    try {
+      near = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+    } catch {}
+    const props = { url: "chrome://newtab/", focused: false, type: "normal" };
+    if (near?.state === "normal") Object.assign(props, { left: near.left, top: near.top, width: Math.max(near.width, 1200), height: Math.max(Math.min(near.height, 600), 300) });
+    const win = await chrome.windows.create(props);
+    const { scratch = [] } = await chrome.storage.session.get("scratch");
+    await chrome.storage.session.set({ scratch: [...scratch, win.id] });
+    return { windowId: win.id, tabId: win.tabs?.[0]?.id ?? null };
   },
 
   // ct's undo: open closed tabs again where they were (window, position, group, pinned), in the
