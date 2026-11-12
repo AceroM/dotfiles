@@ -7,6 +7,10 @@ export VISUAL="nvim"
 # at startup, so any shell that inherits the export above (every Herdr pane,
 # once the server was started from a shell) loses alt+backspace, ctrl+a/e, etc.
 bindkey -e
+# option+left/right move by word. Rex's terminal sends them as CSI 1;3D/C
+# (Ghostty's esc-b/esc-f form is already covered by emacs mode).
+bindkey '^[[1;3D' backward-word
+bindkey '^[[1;3C' forward-word
 DROP_TABLES_SQL="DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
 # Shared adjective/noun pools for tmux/Claude session names.
