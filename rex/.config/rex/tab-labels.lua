@@ -8,8 +8,15 @@
 -- hook (~/.claude/hooks/rex-autoname.sh) turns both into the chat's topic,
 -- already snake_case.
 --
+-- It also keeps cmd+shift+f's invisible mark (dir-focus.lua). While the sidebar
+-- is narrowed to a project, a tab that has the mark keeps it through the
+-- rewrite, and a tab with a pane in the project gets it, so a tab opened there
+-- shows up in the narrowed sidebar. Once it's off, any mark left is removed.
+--
 -- Run as a long-lived script that hears every session, including new ones:
 --   rex do --all ~/.config/rex/tab-labels.lua
+
+local DF = dofile((os.getenv("HOME") or "") .. "/.config/rex/dir-focus.lua")
 
 local function placeholder(label)
   return label == ""
@@ -42,15 +49,21 @@ end
 local function tidy(session_id)
   local view = view_of(session_id)
   if not view then return end
+  local focus = DF.read()
   for _, w in ipairs(view.windows or {}) do
     local label = w.label or ""
-    if not placeholder(label) then
-      local want = snake(label)
-      if want ~= "" and want ~= label then
-        rex.call("session.set_window_label", {
-          session_id = session_id, window_id = w.window_id, label = want,
-        })
-      end
+    local base = DF.strip(label)
+    if not placeholder(base) then
+      local s = snake(base)
+      if s ~= "" then base = s end
+    end
+    local mark = focus ~= nil
+      and (DF.marked(label) or DF.in_project(session_id, w, focus.root))
+    local want = DF.label({ window_id = w.window_id, label = base }, mark)
+    if want ~= label then
+      rex.call("session.set_window_label", {
+        session_id = session_id, window_id = w.window_id, label = want,
+      })
     end
   end
 end

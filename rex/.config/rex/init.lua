@@ -20,6 +20,11 @@ rex.bind("cmd+;", "client.tab.close")
 -- the server sees; the actions here record the rest.
 local focus = require("focus")
 
+-- cmd+shift+f's mark, state, and project test (dir-focus.lua), shared with
+-- tab-labels.lua. While it's on, tabs in the project end in an invisible mark,
+-- so anything matching a tab label exactly strips it first.
+local dirfocus = require("dir-focus")
+
 -- Record a move: from the pane the key was pressed in, to the pane being
 -- shown when it's known.
 local function remember(ctx, session_id, block_id)
@@ -92,32 +97,10 @@ for n = 1, 8 do
 end
 rex.bind("cmd+9", "session_tab", { index = -1 })
 
--- The directory a pane is in: its foreground program's, else its shell's,
--- else the last one it reported with OSC 7. Without session_id the pane is in
--- the session the action runs in; a pane in another session needs its
--- session_id, and that session attached first.
-local function pane_cwd(block_id, session_id)
-  if not block_id then return nil end
-  local function call(method)
-    if not session_id then return rex.block.call(TERMINAL, method, { block_id = block_id }) end
-    local ok, r = pcall(rex.call, "block.method",
-      { session_id = session_id, block_id = block_id, method = method })
-    return ok and r or nil
-  end
-  local p = call("process")
-  if p then
-    if p.foreground and p.foreground.cwd then return p.foreground.cwd end
-    for _, a in ipairs(p.ancestors or {}) do
-      if a.cwd then return a.cwd end
-    end
-  end
-  local r = call("pwd")
-  if r and r.pwd and r.pwd ~= "" then
-    local path = r.pwd:gsub("^file://[^/]*", "")
-    return (path:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
-  end
-  return nil
-end
+-- The directory a pane is in (dir-focus.lua): pane_cwd(block_id) in the
+-- session the action runs in, pane_cwd(block_id, session_id) in another one,
+-- attached first.
+local pane_cwd = dirfocus.pane_cwd
 
 -- cmd+n opens a new tab right after the current one (not at the end), in the
 -- focused pane's directory, and shows it. It's an action rather than a bound
@@ -242,7 +225,7 @@ rex.action{
     -- shells and o.
     local tab, panes
     for _, w in ipairs(windows) do
-      if w.label == ORCH.tab then tab = w break end
+      if dirfocus.strip(w.label) == ORCH.tab then tab = w break end
     end
     if not tab and windows[1] then
       local ps = terminal_panes(sid, windows[1])
@@ -471,117 +454,106 @@ rex.action{
 }
 rex.bind("ctrl+alt+a", "next_agent_waiting")
 
--- cmd+shift+f folds the sidebar down to the project you're in, and pressing it
--- again unfolds it. The project is the focused pane's git root (a worktree
--- slot is its own project), else its directory. Every session with no pane in
--- that project collapses; sessions with one stay as they are.
+-- cmd+shift+f narrows the sidebar to the project you're in, and pressing it
+-- again shows every tab. The project is the focused pane's git root (a
+-- worktree slot is its own project), else its directory. A tab stays when any
+-- of its panes is in the project; every other tab, and every session left
+-- empty, drops out of the sidebar.
 --
--- It works per session because that's all the sidebar allows: Rex can't hide
--- a single tab, and the sidebar's own filter matches only tab titles and
--- session names, never a pane's directory. So it's sharpest when a project has
--- its own session, as a ticket's does.
---
--- The sessions it folded are kept in a state file, so the second press
--- unfolds exactly those, even across a config reload.
--- Try it without folding: rex do dir_focus dry_run=1 --json
-local DIR_FOCUS_STATE = (os.getenv("HOME") or "") .. "/.local/state/rex/dir-focus.json"
+-- Rex can't hide a tab, and the sidebar's Filter box matches only tab titles
+-- and session names. So the action ends the label of each tab in the project
+-- with an invisible mark (dir-focus.lua) and has Hammerspoon put that mark in
+-- the Filter box (~/.hammerspoon/rexfilter.lua), since nothing in Rex can
+-- write to it. While it's on, tab-labels.lua keeps the mark through its
+-- snake_case rewrite and marks tabs that join the project, such as a new tab
+-- opened in it. The state file holds the project, so the second press finds
+-- it even across a config reload.
+-- Try it without changing anything: rex do dir_focus dry_run=1 --json
 
-local function read_dir_focus()
-  local f = io.open(DIR_FOCUS_STATE, "r")
-  if not f then return nil end
-  local text = f:read("*a")
-  f:close()
-  local ok, state = pcall(rex.json.decode, text)
-  return ok and type(state) == "table" and state or nil
+-- Set the sidebar's Filter box to text, or clear it with "".
+local function sidebar_filter(text)
+  local q = text:gsub("[^%w]", function(c) return string.format("%%%02X", c:byte()) end)
+  rex.exec{ "/usr/bin/open", "-g", "hammerspoon://rex-filter?q=" .. q }
 end
 
-local function write_dir_focus(state)
-  if not state then os.remove(DIR_FOCUS_STATE) return end
-  rex.exec{ "mkdir", "-p", DIR_FOCUS_STATE:match("^(.*)/") }
-  local f = assert(io.open(DIR_FOCUS_STATE, "w"))
-  f:write(rex.json.encode(state))
-  f:close()
-end
-
--- The nearest directory at or above dir holding a .git (a directory in a
--- repo, a file in a worktree), else dir itself.
-local function project_root(dir)
-  local d = dir
-  while d and d:match("^/.") do
-    local f = io.open(d .. "/.git", "r")
-    if f then f:close() return d end
-    d = d:match("^(.*)/[^/]*$")
+-- Every tab, as { session_id, session (label), window } with the window's
+-- layers, so its panes can be read.
+local function all_tabs()
+  local tabs = {}
+  for _, s in ipairs(rex.call("session.list", {}).sessions or {}) do
+    -- Reading a session's view, and its panes, takes an attach first.
+    local view = (rex.call("session.attach", { session_id = s.session_id }) or {}).view or {}
+    for _, w in ipairs(view.windows or {}) do
+      table.insert(tabs, { session_id = s.session_id, session = s.label or s.session_id, window = w })
+    end
   end
-  return dir
+  return tabs
 end
 
-local function inside(path, root)
-  return path == root or path:sub(1, #root + 1) == root .. "/"
+local function tab_name(t)
+  return t.session .. "/" .. dirfocus.strip(t.window.label)
 end
 
 rex.action{
   name = "dir_focus",
   title = "Focus Sidebar on This Project",
-  category = "Session",
-  keywords = "filter sidebar directory folder project cwd collapse fold sessions toggle",
+  category = "Tab",
+  keywords = "filter sidebar directory folder project cwd hide tabs toggle",
   run = function(ctx, args)
-    -- Only the app can fold a session, and a run from the CLI (origin "api")
-    -- has no app to ask: the folds would go nowhere while the state file
-    -- recorded them.
     local live = not args.dry_run
-    if live and ctx.origin == "api" then
-      error("press the key in Rex: from the CLI there's no app to fold sessions in (try dry_run=1)", 0)
-    end
+    local state = dirfocus.read()
 
-    local state = read_dir_focus()
     if state then
-      local result = { verdict = "off", root = state.root, expanded = state.labels }
-      if not live then return result end
-      for _, sid in ipairs(state.collapsed or {}) do
-        pcall(rex.client.queue, "session.expand", { session_id = sid })
+      local marked = {}
+      for _, t in ipairs(all_tabs()) do
+        if dirfocus.marked(t.window.label) then table.insert(marked, t) end
       end
-      write_dir_focus(nil)
+      local names = {}
+      for _, t in ipairs(marked) do table.insert(names, tab_name(t)) end
+      local result = { verdict = "off", root = state.root, unmarked = names }
+      if not live then return result end
+      -- State first, so tab-labels.lua stops marking tabs; the filter next,
+      -- so the marks come off a sidebar that's already showing every tab.
+      dirfocus.write(nil)
+      sidebar_filter("")
+      pcall(rex.sleep, 0.3)
+      for _, t in ipairs(marked) do
+        pcall(rex.call, "session.set_window_label", {
+          session_id = t.session_id, window_id = t.window.window_id,
+          label = dirfocus.label(t.window, false),
+        })
+      end
       return result
     end
 
     local cwd = pane_cwd(ctx.block_id)
     if not cwd then error("can't tell which directory the focused pane is in", 0) end
-    local root = project_root(cwd)
-    local keep, fold, fold_labels = {}, {}, {}
-    for _, s in ipairs(rex.call("session.list", {}).sessions or {}) do
-      local sid = s.session_id
-      -- The focused pane's own session is in the project by definition.
-      local hit = sid == ctx.session_id
-      if not hit then
-        -- Reading another session's view takes an attach first.
-        local view = (rex.call("session.attach", { session_id = sid }) or {}).view or {}
-        for _, w in ipairs(view.windows or {}) do
-          for _, layer in ipairs(w.layers or {}) do
-            for _, b in ipairs(layer.blocks or {}) do
-              if not hit and b.creator_name == TERMINAL then
-                local dir = pane_cwd(b.block_id, sid)
-                hit = dir ~= nil and inside(dir, root)
-              end
-            end
-          end
-        end
-      end
-      if hit then
-        table.insert(keep, s.label or sid)
+    local root = dirfocus.project_root(cwd)
+    local keep, hide, shown = {}, {}, {}
+    for _, t in ipairs(all_tabs()) do
+      if dirfocus.in_project(t.session_id, t.window, root) then
+        table.insert(keep, t)
+        table.insert(shown, tab_name(t))
       else
-        table.insert(fold, sid)
-        table.insert(fold_labels, s.label or sid)
+        table.insert(hide, tab_name(t))
       end
     end
 
-    local result = { verdict = "on", root = root, keep = keep, collapsed = fold_labels }
-    if #fold == 0 then result.verdict = "nothing" return result end
+    local result = { verdict = "on", root = root, shown = shown, hidden = hide }
+    if #hide == 0 then result.verdict = "nothing" return result end
     if not live then return result end
 
-    for _, sid in ipairs(fold) do
-      rex.client.queue("session.collapse", { session_id = sid })
+    -- State first, so tab-labels.lua keeps the marks instead of tidying them away.
+    dirfocus.write({ root = root })
+    for _, t in ipairs(keep) do
+      local want = dirfocus.label(t.window, true)
+      if want ~= t.window.label then
+        pcall(rex.call, "session.set_window_label", {
+          session_id = t.session_id, window_id = t.window.window_id, label = want,
+        })
+      end
     end
-    write_dir_focus({ root = root, collapsed = fold, labels = fold_labels })
+    sidebar_filter(dirfocus.MARK)
     return result
   end,
 }

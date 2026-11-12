@@ -78,6 +78,11 @@ chromeshot.start()
 rexlinks = require("rexlinks")
 rexlinks.start()
 
+-- Rex: hammerspoon://rex-filter?q=… writes the sidebar's tab Filter box, which
+-- Rex has no API for. Rex's cmd+shift+f (dir_focus) uses it to narrow the
+-- sidebar to the focused pane's project. Not a key binding; see rexfilter.lua.
+rexfilter = require("rexfilter")
+
 -- Option-minus toggles external displays; Option-plus toggles the laptop.
 -- Both use Lunar to switch between 0% and 80%.
 -- Run asynchronously so Lunar's DDC calls don't block other global hotkeys.

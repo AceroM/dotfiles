@@ -117,7 +117,9 @@ mine=$(cat "$state" 2>/dev/null)
 window_id=$(rex block inspect -s "$S" "$B" --json 2>/dev/null | jq -r '.block.window_id // empty')
 [ -n "$window_id" ] || exit 0
 window=$(rex window inspect -s "$S" "$window_id" --json 2>/dev/null) || exit 0
-current=$(printf '%s' "$window" | jq -r '.label // empty')
+# cmd+shift+f's invisible mark (U+2063, ~/.config/rex/dir-focus.lua) isn't part of the name;
+# tab-labels.lua puts it back on the new label while the sidebar is narrowed.
+current=$(printf '%s' "$window" | jq -r '.label // empty | gsub("\u2063"; "")')
 pane_label=$(printf '%s' "$window" | jq -r --arg b "$B" '[.layers[]?.blocks[]? | select(.block_id == $b) | .label][0] // empty')
 blocks=$(printf '%s' "$window" | jq -r '.layers[]?.blocks[]?.block_id')
 pane_count=$(printf '%s\n' "$blocks" | grep -c .)

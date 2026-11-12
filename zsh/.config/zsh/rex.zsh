@@ -645,7 +645,7 @@ function ce() {
     ($a | group_by(.window_id) | map({key: .[0].window_id, value: ([.[].state] | map(select(. == "working" or . == "blocked")) | first // "")}) | from_entries) as $busy
     | $v.windows[]
     | select(any(.layers[]?.blocks[]?; .block_id == $self) | not)
-    | select(.label != "orchestrators")
+    | select((.label // "" | gsub("\u2063"; "")) != "orchestrators")
     | [.window_id, (.label // "-"), ($busy[.window_id] // "")] | @tsv')}")
   rows=(${rows:#})
   (( $#rows )) || { print -r -- "no other tabs"; return 0 }
