@@ -7,7 +7,8 @@ These are my dotfiles.
 With `stow hammerspoon` and Hammerspoon running:
 
 - **Fn+E** opens and focuses a Herdr tab immediately to the right of the current
-  tab, using the current pane’s directory (while Ghostty is focused).
+  tab, using the current pane’s directory (while Ghostty is focused). Herdr is retired;
+  in Rex, **Cmd+N** does the same (`rex/.config/rex/init.lua`).
 - **Fn+Q** toggles Quick Record.
 - **Option+T** toggles ExcalidrawZ. Option+A types å (agent pages moved to `af`), and
   **Option+Shift+A** is left to Lid Awake.
@@ -29,7 +30,7 @@ channel history. Authentication reuses the signed-in macOS Slack desktop session
 Developer mode → **Load unpacked** → `~/.dotfiles/browser-use/.local/share/browser-use/extension`
 (stable id `aneibjcaiaipkjajpalppgijoekiedko`). Claude Code and Codex both drive the browser through
 the `browser-use` CLI and the shared skill in `~/.agents/skills/browser-use`; their tabs live in one
-**Agents** tab group, so every herdr pane sees the same tabs. That is the only tab group it ever
+**Agents** tab group, so every Rex pane sees the same tabs. That is the only tab group it ever
 makes: tabs it opens join that group, as do new tabs and popups opened by pages already in the
 group (including links with `target="_blank"` or `rel="noopener"`). A second Agents group gets
 merged back into it. If a window won't accept groups, the group gets its own window. `install`

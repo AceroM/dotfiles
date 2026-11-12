@@ -81,10 +81,15 @@
     "option_as_meta": true,
     "minimum_contrast": 0,
     "dock": "bottom",
-    // Zed inherits HERDR_* when it is launched from a Herdr pane, which would
-    // make this plain shell think it is inside one. Blank the identity vars so
-    // the Zed terminal stays separate from Herdr.
+    // Zed inherits the multiplexer's pane identity when it is launched from a
+    // Rex (or, before it, Herdr) pane, which would make this plain shell think
+    // it is that pane: rex commands, rex-autoname and browser-use would all act
+    // on it. Blank the identity vars so the Zed terminal stays separate.
+    // REX_SERVER stays: it only says which Rex server to talk to, not which
+    // pane this is, and empty means the default local server anyway.
     "env": {
+      "REX_SESSION": "",
+      "REX_BLOCK": "",
       "HERDR_ENV": "",
       "HERDR_PANE_ID": "",
       "HERDR_TAB_ID": "",
