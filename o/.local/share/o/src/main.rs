@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod drafts;
 mod field;
+mod gfx;
 mod probe;
 mod spawn;
 mod term;
@@ -57,7 +58,12 @@ Drafts (o's own, per Rex session, in ~/.local/state/o/drafts.json):
   ^s keeps the prompt as a draft, saved as you type from then on (the prompt reads ◇);
   esc leaves it for later, ⏎ sends it (from the folder it was written in) and it goes
   ^g goes through this session's drafts: j k move · ⏎ sends (^⏎ ^o and goes there) ·
-  e (l, r) edits · x ; deletes · u brings it back · d a new one · esc back to the prompt
+  e (l, r) edits · x ; deletes · u brings it back · d a new one · esc back to the prompt.
+  The selected draft's images show over the list, small (Kitty graphics; O_IMAGES=0 off).
+  ⇧↑ ⇧↓ (J K) mark drafts as they go, space marks one, a all (again: none); with some
+  marked, ⏎ sends them as ONE prompt to one new agent: a preamble, then each draft as
+  a task (images numbered across them), from the first one's folder on its configuration
+  (plan mode if any is); x deletes them all (u brings them back); esc unmarks.
 Configurations: ~/.config/o/config.toml lists them, in order, as [[agent]] tables:
   kind = \"claude\"     the command (claude, codex)
   model = \"fable\"     passed as --model fable; shown as claude(fable)
@@ -73,13 +79,15 @@ struct Cli {
     cwd: Option<PathBuf>,
     words: Vec<String>,
     snapshot: Option<(u16, u16)>,
+    /// --snapshot as if the terminal drew images, cells this many pixels.
+    cell: Option<(u16, u16)>,
     keys: String,
     drafts: bool,
     config: bool,
 }
 
 fn parse_cli() -> Result<Cli, String> {
-    let mut c = Cli { cwd: None, words: Vec::new(), snapshot: None, keys: String::new(), drafts: false, config: false };
+    let mut c = Cli { cwd: None, words: Vec::new(), snapshot: None, cell: None, keys: String::new(), drafts: false, config: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -98,6 +106,11 @@ fn parse_cli() -> Result<Cli, String> {
                 c.snapshot = Some((w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?));
             }
             "--keys" => c.keys = args.next().ok_or("--keys needs keys")?,
+            "--cell" => {
+                let v = args.next().ok_or("--cell needs WxH")?;
+                let (w, h) = v.split_once('x').ok_or("--cell needs WxH")?;
+                c.cell = Some((w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?));
+            }
             "--" => c.words.extend(args.by_ref()),
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s} (o -h)")),
             _ => c.words.push(a),
@@ -165,6 +178,7 @@ fn main() -> ExitCode {
     let (start, _) = config::start(&agents);
     let mut app = App::new(Palette::new(&theme), Opts { cwd, text, label, agents, start, notice });
     if let Some((w, h)) = cli.snapshot {
+        app.gfx = cli.cell.map(|(cell_w, cell_h)| gfx::Gfx { cell_w, cell_h });
         return snapshot(app, w, h, &cli.keys);
     }
     if !spawn::in_rex() {
@@ -219,6 +233,7 @@ fn run(app: &mut App) -> io::Result<()> {
     restore_on_panic();
     // Before anything else reads input: the answers come back on stdin.
     let probe = probe::probe();
+    app.gfx = probe.gfx;
     let mouse = std::env::var("O_MOUSE").is_ok_and(|v| matches!(v.as_str(), "1" | "on" | "yes" | "true"));
     modes(true, probe.kitty_keys, mouse);
     let (w, h) = terminal::size().unwrap_or((80, 24));
@@ -228,6 +243,7 @@ fn run(app: &mut App) -> io::Result<()> {
     app.flush();
     let mut s = Vec::new();
     term.clear(&mut s);
+    s.extend(app.clear_images());
     let mut out = io::stdout();
     let _ = out.write_all(&s);
     let _ = out.flush();
@@ -298,6 +314,8 @@ fn event_loop(app: &mut App, term: &mut Inline) -> io::Result<()> {
                 term.print_above(&mut s, &b);
             }
             app.layout(term.width, term.rows);
+            // Images the frame draws go to the terminal first.
+            s.extend(app.take_gfx());
             term.draw(&mut s, &ui::draw(app), app.cursor_cell());
             if printed {
                 s.extend_from_slice(b"\x1b[?2026l");

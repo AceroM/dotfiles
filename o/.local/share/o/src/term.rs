@@ -255,9 +255,9 @@ fn starts(buf: &Buffer, y: u16, end: u16) -> Vec<u16> {
     out
 }
 
-/// Row `y` of `buf` as plain text (--snapshot).
+/// Row `y` of `buf` as plain text (--snapshot), an image's cells `▒`.
 pub fn plain(buf: &Buffer, y: u16) -> String {
-    let s: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+    let s: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).map(|c| if crate::gfx::is_placeholder(c) { "▒" } else { c }).collect();
     s.trim_end().to_string()
 }
 

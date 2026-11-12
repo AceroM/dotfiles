@@ -10,7 +10,11 @@
 //! written from then on (esc leaves it for later, ⏎ sends it and it goes);
 //! ^g goes through this session's drafts, a list in the prompt's place with
 //! al's keys: j k, ⏎ sends, e edits, x deletes, u brings it back, d a new one.
+//! The selected draft's images are drawn over the list, small (gfx.rs).
+//! ⇧↑ ⇧↓ mark drafts (space one, a all): ⏎ then sends the marked ones as
+//! one prompt, a preamble over them as tasks (drafts::combine); x deletes them.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -23,6 +27,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::Agent;
 use crate::drafts::{self, Draft};
 use crate::field::{self, Field};
+use crate::gfx::{self, Gfx, Pic};
 use crate::spawn::{self, Outcome};
 use crate::theme::Palette;
 
@@ -38,6 +43,11 @@ const SAVE_AFTER: Duration = Duration::from_millis(300);
 /// selected one under them.
 const LIST_ROWS: usize = 8;
 const PREVIEW_ROWS: usize = 10;
+/// The selected draft's images, over the list: at most this many rows tall
+/// (a label under each takes one more).
+const IMG_ROWS: usize = 8;
+/// Images kept in the terminal for going back to; older ones are freed.
+const KEEP_IMAGES: usize = 16;
 
 pub enum Act {
     None,
@@ -86,7 +96,58 @@ pub struct ListView {
     pub rows: Vec<Range<usize>>,
     pub preview: usize,
     pub more: usize,
+    /// The rows over the list kept for the selected draft's images (their
+    /// labels included); 0: none, when no draft has any.
+    pub strip: usize,
+    pub thumbs: Vec<Thumb>,
+    /// Said where there's no picture: "no images", "loading…", "+2 more".
+    pub note: Option<String>,
 }
+
+/// One of the selected draft's images over the list: Kitty image `id`,
+/// `cols`×`rows` cells from column `x` of the list's text, `[Image #n]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Thumb {
+    pub x: u16,
+    pub id: u32,
+    pub cols: u16,
+    pub rows: u16,
+    pub n: usize,
+}
+
+/// The images o has sent the terminal, newest first (one per file and
+/// size), and the bytes not written yet.
+#[derive(Default)]
+struct Images {
+    sent: Vec<((PathBuf, u16, u16), u32)>,
+    out: Vec<u8>,
+    next: u32,
+}
+
+impl Images {
+    /// The id of `key`'s image, sending the PNG when the terminal hasn't got it.
+    fn id_for(&mut self, key: (PathBuf, u16, u16), png: &str) -> u32 {
+        if let Some(i) = self.sent.iter().position(|(k, _)| *k == key) {
+            let e = self.sent.remove(i);
+            let id = e.1;
+            self.sent.insert(0, e);
+            return id;
+        }
+        self.next += 1;
+        let id = gfx::image_id(self.next);
+        self.out.extend(gfx::transmit(id, png, key.1, key.2));
+        self.sent.insert(0, (key, id));
+        while self.sent.len() > KEEP_IMAGES {
+            if let Some((_, old)) = self.sent.pop() {
+                self.out.extend(gfx::delete(old));
+            }
+        }
+        id
+    }
+}
+
+/// An image file readied for the terminal; None while it loads.
+type PicState = Option<Result<Pic, String>>;
 
 pub struct Opts {
     /// Where the agents start.
@@ -142,8 +203,20 @@ pub struct App {
     /// The prompt that was being written when a draft took its place: its
     /// text, images, configuration and plan mode. Back when the draft is left.
     aside: Option<(Field, Vec<PathBuf>, usize, bool)>,
-    /// The draft `x` deleted last: `u` brings it back.
-    undo: Option<Draft>,
+    /// The drafts `x` deleted last: `u` brings them back.
+    undo: Vec<Draft>,
+    /// Drafts marked in the list (⇧↑ ⇧↓, space, a), by id: ⏎ sends them as
+    /// one prompt, x deletes them.
+    pub marked: Vec<String>,
+    /// A run of ⇧↑ ⇧↓: the draft it started on, and what was marked before.
+    mark_from: Option<(usize, Vec<String>)>,
+    /// Kitty images, when the terminal draws them (probe.rs): the files
+    /// readied for it, and what it has been sent.
+    pub gfx: Option<Gfx>,
+    pics: HashMap<PathBuf, PicState>,
+    pic_tx: Sender<(PathBuf, Result<Pic, String>)>,
+    pic_rx: Receiver<(PathBuf, Result<Pic, String>)>,
+    imgs: Images,
     last_key: Instant,
     pub toast: Option<(String, bool, Instant)>,
     pub sent: Vec<Sent>,
@@ -174,6 +247,7 @@ pub struct App {
 impl App {
     pub fn new(pal: Palette, opts: Opts) -> App {
         let (sent_tx, sent_rx) = mpsc::channel();
+        let (pic_tx, pic_rx) = mpsc::channel();
         let mut field = Field { text: opts.text, ..Default::default() };
         field.end();
         let toast = opts.notice.map(|m| (m, false, Instant::now()));
@@ -202,7 +276,14 @@ impl App {
             view: ListView::default(),
             from_list: false,
             aside: None,
-            undo: None,
+            undo: Vec::new(),
+            marked: Vec::new(),
+            mark_from: None,
+            gfx: None,
+            pics: HashMap::new(),
+            pic_tx,
+            pic_rx,
+            imgs: Images::default(),
             last_key: Instant::now(),
             toast,
             sent: Vec::new(),
@@ -276,6 +357,16 @@ impl App {
         if let Some(sel) = self.list {
             let sel = sel.min(self.drafts.len() - 1);
             self.list = Some(sel);
+            self.marked.retain(|id| self.drafts.iter().any(|d| &d.id == id));
+            // The list has no name on the left: its text is as wide as `> `'s.
+            let tw = (width as usize).saturating_sub(4).max(4);
+            // The selected draft's images on top. The room is kept while
+            // any draft has one, so the list stays put as the selection
+            // moves; it's the first thing to go on a short screen.
+            let strip = (IMG_ROWS + 1).min(room.saturating_sub(self.drafts.len().min(LIST_ROWS) + 2));
+            let pictures = self.gfx.is_some() && self.drafts.iter().any(|d| !drafts::tagged(&d.text, &d.images).is_empty());
+            let strip = if pictures && strip >= 4 { strip } else { 0 };
+            let room = room - strip;
             // The drafts, the selected one's text under them, and the keys.
             let shown = self.drafts.len().min(LIST_ROWS).min(room.saturating_sub(2).max(1));
             let mut top = self.view.top.min(self.drafts.len() - shown);
@@ -284,16 +375,15 @@ impl App {
             } else if sel >= top + shown {
                 top = sel + 1 - shown;
             }
-            // The list has no name on the left: its text is as wide as `> `'s.
-            let tw = (width as usize).saturating_sub(4).max(4);
             let text = &self.drafts[sel].text;
             let rows = if text.trim().is_empty() { Vec::new() } else { field::word_rows(text, tw.saturating_sub(2).max(4)) };
             let fits = room.saturating_sub(shown + 1).min(PREVIEW_ROWS);
             // Too long: its last row here says how many more there are.
             let preview = if rows.len() > fits { fits.saturating_sub(1) } else { rows.len() };
             let more = rows.len() - preview;
-            let body = shown + preview + usize::from(more > 0 && fits > 0) + 1;
-            self.view = ListView { top, shown, rows, preview, more };
+            let (thumbs, note) = if strip > 0 { self.thumbs(sel, tw, strip - 1) } else { (Vec::new(), None) };
+            let body = strip + shown + preview + usize::from(more > 0 && fits > 0) + 1;
+            self.view = ListView { top, shown, rows, preview, more, strip, thumbs, note };
             self.rows.clear();
             self.lay = Lay { width, screen_h, text: Rect::new(2, 0, tw as u16, body as u16), height: (body + extra) as u16 };
             return;
@@ -315,7 +405,7 @@ impl App {
     /// Something will change without a key: a send starting, a toast to
     /// take down. The loop wakes more often then.
     pub fn busy(&self) -> bool {
-        self.toast.is_some() || self.sent.iter().any(|s| s.outcome.is_none())
+        self.toast.is_some() || self.sent.iter().any(|s| s.outcome.is_none()) || self.pics.values().any(Option::is_none)
     }
 
     /// The row the cursor is on.
@@ -354,6 +444,88 @@ impl App {
         self.scroll = self.scroll.min(self.rows.len().saturating_sub(view));
     }
 
+    // ---- images ------------------------------------------------------------
+
+    /// Draft `sel`'s images, side by side in `width` columns, each at most
+    /// `rows` tall (its label under it), and what to say where there's no
+    /// picture. The ones not readied yet start loading.
+    fn thumbs(&mut self, sel: usize, width: usize, rows: usize) -> (Vec<Thumb>, Option<String>) {
+        let Some(g) = self.gfx else { return (Vec::new(), None) };
+        let d = &self.drafts[sel];
+        let tagged = drafts::tagged(&d.text, &d.images);
+        if tagged.is_empty() {
+            return (Vec::new(), Some("no images".into()));
+        }
+        for (_, path) in &tagged {
+            if !self.pics.contains_key(path) {
+                self.load_pic(path.clone());
+            }
+        }
+        let (mut out, mut x) = (Vec::new(), 0usize);
+        let (mut loading, mut more, mut failed) = (0, 0, Vec::new());
+        for (n, path) in tagged {
+            let label = format!("[Image #{n}]").len();
+            let state = self.pics.get(&path).map(|s| s.as_ref().map(|r| r.as_ref().map(|p| (p.w, p.h)).map_err(|_| ())));
+            match state {
+                None | Some(None) => loading += 1,
+                Some(Some(Err(()))) => failed.push(n),
+                Some(Some(Ok((w, h)))) => {
+                    let left = width.saturating_sub(x);
+                    if left < 6 {
+                        more += 1;
+                        continue;
+                    }
+                    let (cols, r) = gfx::fit(w, h, g, left, rows);
+                    let Some(Some(Ok(pic))) = self.pics.get(&path) else { continue };
+                    let id = self.imgs.id_for((path.clone(), cols, r), &pic.b64);
+                    out.push(Thumb { x: x as u16, id, cols, rows: r, n });
+                    x += (cols as usize).max(label) + 2;
+                }
+            }
+        }
+        let mut note = Vec::new();
+        if loading > 0 {
+            note.push("loading…".to_string());
+        }
+        if more > 0 {
+            note.push(format!("+{more} more"));
+        }
+        if !failed.is_empty() {
+            let tags: Vec<String> = failed.iter().map(|n| format!("[Image #{n}]")).collect();
+            note.push(format!("couldn't show {}", tags.join(" ")));
+        }
+        (out, (!note.is_empty()).then(|| note.join(" · ")))
+    }
+
+    /// Ready `path` for the terminal, off the UI thread (tick picks it up);
+    /// --snapshot waits for it.
+    fn load_pic(&mut self, path: PathBuf) {
+        if !self.live {
+            let pic = gfx::load_pic(&path);
+            self.pics.insert(path, Some(pic));
+            return;
+        }
+        self.pics.insert(path.clone(), None);
+        let tx = self.pic_tx.clone();
+        std::thread::spawn(move || {
+            let pic = gfx::load_pic(&path);
+            let _ = tx.send((path, pic));
+        });
+    }
+
+    /// Bytes for the terminal (images to send or free), to write before the frame.
+    pub fn take_gfx(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.imgs.out)
+    }
+
+    /// Free every image o sent, for quitting.
+    pub fn clear_images(&mut self) -> Vec<u8> {
+        for (_, id) in self.imgs.sent.drain(..) {
+            self.imgs.out.extend(gfx::delete(id));
+        }
+        self.take_gfx()
+    }
+
     // ---- the loop's hooks --------------------------------------------------
 
     /// Sends finished, a toast gone: true when the screen changed.
@@ -367,6 +539,10 @@ impl App {
             if self.focus_next == Some(n) {
                 self.focus_sent(n);
             }
+            changed = true;
+        }
+        while let Ok((path, pic)) = self.pic_rx.try_recv() {
+            self.pics.insert(path, Some(pic));
             changed = true;
         }
         if self.toast.as_ref().is_some_and(|t| t.2.elapsed() > TOAST) {
@@ -753,13 +929,18 @@ impl App {
 
     /// Take draft `id` out, from the file too unless --snapshot.
     fn drop_draft(&mut self, id: &str) -> bool {
+        self.drop_drafts(&[id])
+    }
+
+    /// Take drafts `ids` out, in one write.
+    fn drop_drafts(&mut self, ids: &[&str]) -> bool {
         if self.live {
-            if let Err(e) = drafts::remove(id) {
+            if let Err(e) = drafts::remove(ids) {
                 self.toast(format!("couldn't delete the draft: {e}"), false);
                 return false;
             }
         }
-        self.drafts.retain(|d| d.id != id);
+        self.drafts.retain(|d| !ids.contains(&d.id.as_str()));
         true
     }
 
@@ -852,6 +1033,7 @@ impl App {
     /// Out of the list, back to the prompt as it was.
     fn close_list(&mut self) {
         self.list = None;
+        (self.marked, self.mark_from) = (Vec::new(), None);
         if self.editing.is_none() {
             self.restore_aside();
         }
@@ -974,9 +1156,12 @@ impl App {
         true
     }
 
-    /// A key in the drafts list: al's.
+    /// A key in the drafts list: al's, and marks: ⇧↑ ⇧↓ (J K) mark as they
+    /// go, space one, a all; with some marked, ⏎ sends them as one prompt
+    /// and x deletes them.
     fn list_key(&mut self, k: KeyEvent) -> Act {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let Some(sel) = self.list else { return Act::None };
         let last = self.drafts.len().saturating_sub(1);
         let Some(d) = self.drafts.get(sel.min(last)).cloned() else {
@@ -985,8 +1170,34 @@ impl App {
         };
         // The one being written is as the prompt has it, saved or not yet.
         let d = self.current().filter(|c| c.id == d.id).unwrap_or(d);
+        let run = match k.code {
+            KeyCode::Down if shift => Some((sel + 1).min(last)),
+            KeyCode::Up if shift => Some(sel.saturating_sub(1)),
+            KeyCode::Char('J') => Some((sel + 1).min(last)),
+            KeyCode::Char('K') => Some(sel.saturating_sub(1)),
+            _ => None,
+        };
+        if let Some(to) = run {
+            self.mark_run(sel, to);
+            return Act::None;
+        }
+        // Any other key ends a run: what it marked stays marked.
+        self.mark_from = None;
+        let marked = !self.marked.is_empty();
         match k.code {
+            // Esc unmarks first, then leaves.
+            KeyCode::Esc if marked => self.marked.clear(),
             KeyCode::Esc | KeyCode::Char('q') => self.close_list(),
+            KeyCode::Char(' ') => match self.marked.iter().position(|m| *m == d.id) {
+                Some(i) => {
+                    self.marked.remove(i);
+                }
+                None => self.marked.push(d.id.clone()),
+            },
+            KeyCode::Char('a') if self.marked.len() == self.drafts.len() => self.marked.clear(),
+            KeyCode::Char('a') => self.marked = self.drafts.iter().map(|d| d.id.clone()).collect(),
+            KeyCode::Enter | KeyCode::Char('o') if marked => self.send_marked(ctrl),
+            KeyCode::Char('x' | ';') if marked => self.delete_marked(),
             KeyCode::Char('c' | 'g' | 'd') if ctrl => self.close_list(),
             KeyCode::Char('l') if ctrl => return Act::ClearScreen,
             KeyCode::Char('n') if ctrl => self.list = Some((sel + 1).min(last)),
@@ -1007,20 +1218,11 @@ impl App {
             KeyCode::Char('x' | ';') => {
                 if self.drop_draft(&d.id) {
                     self.forget(&d.id);
-                    self.undo = Some(d);
+                    self.undo = vec![d];
                     self.toast("deleted the draft · u brings it back", true);
                 }
             }
-            KeyCode::Char('u') => match self.undo.take() {
-                Some(d) => {
-                    let id = d.id.clone();
-                    if self.store_draft(d) {
-                        self.select_draft(Some(&id));
-                        self.toast("the draft is back", true);
-                    }
-                }
-                None => self.toast("no deleted draft to bring back", false),
-            },
+            KeyCode::Char('u') => self.undelete(),
             // A new one, empty, to write, on the configuration the prompt is on.
             KeyCode::Char('d') => {
                 let (workspace, space) = self.scope();
@@ -1045,6 +1247,117 @@ impl App {
             _ => {}
         }
         Act::None
+    }
+
+    /// ⇧↑ ⇧↓ from draft `sel` to `to`: the drafts from where the run
+    /// started to `to` marked, on top of what was marked before it (so
+    /// going back over the run unmarks what it marked).
+    fn mark_run(&mut self, sel: usize, to: usize) {
+        let (from, mut marked) = self.mark_from.get_or_insert_with(|| (sel, self.marked.clone())).clone();
+        let (a, b) = (from.min(to), from.max(to));
+        for d in self.drafts.get(a..=b).unwrap_or_default() {
+            if !marked.contains(&d.id) {
+                marked.push(d.id.clone());
+            }
+        }
+        self.marked = marked;
+        self.list = Some(to);
+    }
+
+    /// The marked drafts, in the list's order (the one being written as the
+    /// prompt has it).
+    fn marked_drafts(&self) -> Vec<Draft> {
+        let cur = self.current();
+        let pick = |d: &Draft| cur.clone().filter(|c| c.id == d.id).unwrap_or_else(|| d.clone());
+        self.drafts.iter().filter(|d| self.marked.contains(&d.id)).map(pick).collect()
+    }
+
+    /// ⏎ with drafts marked: one alone goes as itself, more as one prompt
+    /// (`send_all`). Empty ones are left out (and left).
+    fn send_marked(&mut self, focus: bool) {
+        let ds: Vec<Draft> = self.marked_drafts().into_iter().filter(|d| !d.text.trim().is_empty()).collect();
+        match ds.as_slice() {
+            [] => self.toast("the marked drafts are empty", false),
+            [d] => {
+                if self.dispatch(d, d.text.trim(), &d.images, focus) {
+                    self.marked.clear();
+                    self.forget(&d.id);
+                }
+            }
+            _ if ds.iter().any(|d| d.reply.is_some()) => {
+                self.toast("a reply goes to its own agent, not with others · space unmarks it", false);
+            }
+            _ => self.send_all(&ds, focus),
+        }
+    }
+
+    /// Drafts `ds` as one prompt (drafts::combine) to one new agent, in the
+    /// first one's folder and on its configuration, in plan mode when any
+    /// of them is; and they all go.
+    fn send_all(&mut self, ds: &[Draft], focus: bool) {
+        let first = &ds[0];
+        let agent = self.agents[self.agent_of(first).unwrap_or(0)].clone();
+        let plan = ds.iter().any(|d| d.plan);
+        let (text, images) = drafts::combine(ds);
+        let ids: Vec<&str> = ds.iter().map(|d| d.id.as_str()).collect();
+        if !self.drop_drafts(&ids) {
+            return;
+        }
+        let body = field::with_images(&text, &images);
+        let prompt = if plan { format!("/plan {body}") } else { body };
+        // ↑ brings back the whole of it, to send again.
+        self.remember(&text, &images);
+        let n = self.sent.len();
+        self.sent.push(Sent { name: agent.name.clone(), text: drafts::summary(ds), plan, outcome: None });
+        if self.live {
+            spawn::send(n, &agent, &prompt, &first.cwd, "", focus, self.sent_tx.clone());
+        } else {
+            self.would_send = Some(prompt);
+            let to = if focus { "→ tab snapshot (went there)" } else { "→ tab snapshot" };
+            let _ = self.sent_tx.send((n, (to.to_string(), true, Some(format!("snapshot-{n}")))));
+        }
+        self.marked.clear();
+        for d in ds {
+            self.forget(&d.id);
+        }
+        self.toast(format!("sent {} drafts as one prompt to {}", ds.len(), agent.name), true);
+    }
+
+    /// x with drafts marked: they all go (u brings them back).
+    fn delete_marked(&mut self) {
+        let ds = self.marked_drafts();
+        let ids: Vec<&str> = ds.iter().map(|d| d.id.as_str()).collect();
+        if !self.drop_drafts(&ids) {
+            return;
+        }
+        self.marked.clear();
+        for d in &ds {
+            self.forget(&d.id);
+        }
+        let n = ds.len();
+        self.undo = ds;
+        if n == 1 {
+            self.toast("deleted the draft · u brings it back", true);
+        } else {
+            self.toast(format!("deleted {n} drafts · u brings them back"), true);
+        }
+    }
+
+    /// u: the drafts x deleted last, back where they were in the list.
+    fn undelete(&mut self) {
+        let back = std::mem::take(&mut self.undo);
+        let Some(id) = back.first().map(|d| d.id.clone()) else {
+            return self.toast("no deleted draft to bring back", false);
+        };
+        let n = back.len();
+        // Each goes on top: in reverse, they're back in their order.
+        for d in back.into_iter().rev() {
+            if !self.store_draft(d) {
+                return;
+            }
+        }
+        self.select_draft(Some(&id));
+        self.toast(if n == 1 { "the draft is back".to_string() } else { format!("the {n} drafts are back") }, true);
     }
 
     /// Draft `id` left the list (sent, deleted): the prompt lets go of it
@@ -1472,7 +1785,7 @@ mod tests {
         // Nothing to go through: ^g stays on the prompt.
         press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
         assert_eq!(a.list, None);
-        a.drafts.push(a.undo.clone().unwrap());
+        a.drafts.push(a.undo[0].clone());
         press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!((a.would_send.as_deref(), a.drafts.len(), a.list), (Some("/plan one"), 0, None));
@@ -1604,6 +1917,125 @@ mod tests {
         a.drafts[0].config = None;
         a.drafts[0].kind = Some("codex".into());
         assert_eq!(a.agent_of(&a.drafts[0].clone()), Some(2));
+    }
+
+    /// Drafts written in this order (so the list has them newest first).
+    fn with_drafts(texts: &[&str]) -> App {
+        let mut a = app("");
+        for t in texts {
+            type_in(&mut a, t);
+            press(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+            press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        }
+        a
+    }
+
+    #[test]
+    fn shift_arrows_mark_and_enter_sends_the_marked_as_one_prompt() {
+        let mut a = with_drafts(&["third", "second", "first"]);
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+        press(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!((a.list, a.marked.len()), (Some(2), 3));
+        // Back over the run unmarks what it marked.
+        press(&mut a, KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!((a.list, a.marked.len()), (Some(1), 2));
+        a.layout(100, 30);
+        let keys = crate::term::plain(&crate::ui::draw(&a), a.lay.text.bottom() - 1);
+        assert!(keys.starts_with("  2 marked · "), "{keys}");
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let sent = a.would_send.clone().unwrap();
+        assert!(sent.starts_with("Here are 2 tasks"), "{sent}");
+        assert!(sent.ends_with("## Task 1 of 2\n\nfirst\n\n## Task 2 of 2\n\nsecond"), "{sent}");
+        assert_eq!(a.sent[0].text, "2 drafts as one prompt\n1. first\n2. second");
+        // They went; the one left is still in the list, unmarked.
+        assert_eq!((a.drafts.len(), a.drafts[0].text.as_str(), a.list, a.marked.len()), (1, "third", Some(0), 0));
+    }
+
+    #[test]
+    fn space_marks_one_x_deletes_the_marked_and_u_brings_them_back() {
+        let mut a = with_drafts(&["c", "b", "a"]);
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(a.drafts.iter().map(|d| d.text.as_str()).collect::<Vec<_>>(), ["b"]);
+        press(&mut a, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(a.drafts.iter().map(|d| d.text.as_str()).collect::<Vec<_>>(), ["a", "c", "b"]);
+        // a marks all, again none; esc unmarks before it leaves.
+        press(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(a.marked.len(), 3);
+        press(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(a.marked.is_empty());
+        press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!((a.marked.len(), a.list.is_some()), (0, true));
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(a.list, None);
+    }
+
+    #[test]
+    fn one_marked_goes_as_itself_and_replies_dont_go_with_others() {
+        let mut a = with_drafts(&["two", "one"]);
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('k'), KeyModifiers::NONE);
+        // The cursor's on "one", but ⏎ sends what's marked.
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!((a.would_send.as_deref(), a.drafts[0].text.as_str()), (Some("two"), "one"));
+        let mut a = with_drafts(&["two", "one"]);
+        a.drafts[0].reply = Some(crate::drafts::ReplyTo { pane: "block:1".into(), tab: String::new(), label: "auth".into(), session: None });
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!((a.would_send, a.drafts.len()), (None, 2));
+        assert!(a.toast.as_ref().unwrap().0.contains("its own agent"));
+    }
+
+    #[test]
+    fn the_selected_drafts_images_go_over_the_list() {
+        let mut a = with_drafts(&["no pictures"]);
+        type_in(&mut a, "look ");
+        a.attach("/wide.png".into());
+        a.attach("/square.png".into());
+        press(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        a.gfx = Some(Gfx { cell_w: 10, cell_h: 20 });
+        let pic = |w, h| Some(Ok(Pic { w, h, b64: "AAAA".into() }));
+        a.pics.insert("/wide.png".into(), pic(900, 450));
+        a.pics.insert("/square.png".into(), pic(90, 90));
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        a.layout(100, 40);
+        // 8 rows tall at most, its shape kept; the small one its own size.
+        let v = a.view.clone();
+        assert_eq!(v.strip, 9);
+        assert_eq!(v.thumbs.iter().map(|t| (t.x, t.cols, t.rows, t.n)).collect::<Vec<_>>(), [(0, 32, 8, 1), (34, 9, 5, 2)]);
+        let b = crate::ui::draw(&a);
+        let row = |y| crate::term::plain(&b, y);
+        assert!(row(0).starts_with(&format!("  {}  {}", "▒".repeat(32), "▒".repeat(9))), "{}", row(0));
+        assert!(row(5).contains("[Image #2]") && row(8).starts_with("  [Image #1]"));
+        assert!(row(9).starts_with("▸ ◇ look [Image #1] [Image #2]"));
+        // Sent to the terminal once, then drawn from what it has.
+        assert_eq!(a.take_gfx().windows(4).filter(|w| w == b"\x1b_Ga").count(), 2);
+        a.layout(100, 40);
+        assert!(a.take_gfx().is_empty());
+        // A draft without any keeps the room, so the list stays put.
+        press(&mut a, KeyCode::Char('j'), KeyModifiers::NONE);
+        a.layout(100, 40);
+        assert_eq!((a.view.strip, a.view.thumbs.len(), a.view.note.as_deref()), (9, 0, Some("no images")));
+        // A short screen shrinks it, then has no room for it.
+        a.layout(100, 12);
+        assert_eq!(a.view.strip, 7);
+        a.layout(100, 8);
+        assert_eq!(a.view.strip, 0);
+        // Images not drawn: none of it.
+        a.gfx = None;
+        a.layout(100, 40);
+        assert_eq!(a.view.strip, 0);
+        assert!(a.clear_images().windows(5).any(|w| w == b"a=d,d"));
     }
 
     #[test]

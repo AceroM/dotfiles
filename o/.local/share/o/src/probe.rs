@@ -1,33 +1,47 @@
 //! What o asks the terminal at startup, in one round trip: whether it
 //! speaks the kitty keyboard protocol (so shift+Enter and ^⏎ arrive as
-//! themselves), and where the cursor is (the prompt starts there). The
-//! primary device attributes go last: every terminal answers them, so they
-//! end the wait.
+//! themselves), where the cursor is (the prompt starts there), and whether
+//! it draws Kitty images, with a cell's size in pixels (the drafts list's
+//! pictures, gfx.rs). The primary device attributes go last: every terminal
+//! answers them, so they end the wait.
 
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use crate::gfx::{self, Gfx};
+
 pub struct Probe {
     pub kitty_keys: bool,
     /// The cursor, (column, row), 0-based.
     pub cursor: Option<(u16, u16)>,
+    /// Kitty images, and the cell they're measured in; None where the
+    /// terminal doesn't draw them (or O_IMAGES=0).
+    pub gfx: Option<Gfx>,
 }
 
 /// Ask. Call it in raw mode, before anything else reads input: the answers
 /// come back on stdin.
 pub fn probe() -> Probe {
-    let none = Probe { kitty_keys: false, cursor: None };
+    let none = Probe { kitty_keys: false, cursor: None, gfx: None };
     let fd = io::stdin().as_raw_fd();
     if unsafe { libc::isatty(fd) } != 1 {
         return none;
     }
+    let mut ask = b"\x1b[?u\x1b[6n".to_vec();
+    let images = gfx::wanted();
+    if images {
+        ask.extend_from_slice(gfx::QUERY);
+        ask.extend_from_slice(b"\x1b[16t");
+    }
+    ask.extend_from_slice(b"\x1b[c");
     let mut out = io::stdout();
-    if out.write_all(b"\x1b[?u\x1b[6n\x1b[c").and_then(|()| out.flush()).is_err() {
+    if out.write_all(&ask).and_then(|()| out.flush()).is_err() {
         return none;
     }
     let reply = read_replies(fd, Duration::from_millis(500));
-    Probe { kitty_keys: csi_reply(&reply, "\x1b[?", 'u').is_some(), cursor: cursor_from_reply(&reply) }
+    let gfx = (images && gfx::supported(&reply)).then(|| gfx::cell_from_reply(&reply).or_else(gfx::cell_from_ioctl)).flatten();
+    Probe { kitty_keys: csi_reply(&reply, "\x1b[?", 'u').is_some(), cursor: cursor_from_reply(&reply), gfx }
 }
 
 fn read_replies(fd: i32, timeout: Duration) -> String {

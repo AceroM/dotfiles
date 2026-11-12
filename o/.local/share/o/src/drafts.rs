@@ -151,16 +151,108 @@ pub fn put(d: &Draft) -> Result<(), String> {
     store(&all)
 }
 
-/// Take draft `id` out. Its images stay a while (`sweep` takes the folders
-/// after three days): `u` brings a deleted draft back, and a draft's agent reads
-/// them after it runs.
-pub fn remove(id: &str) -> Result<(), String> {
+/// Take drafts `ids` out, in one write. Their images stay a while (`sweep`
+/// takes the folders after three days): `u` brings a deleted draft back,
+/// and a draft's agent reads them after it runs.
+pub fn remove(ids: &[&str]) -> Result<(), String> {
     let mut all = load();
-    all.retain(|d| d.id != id);
+    all.retain(|d| !ids.contains(&d.id.as_str()));
     store(&all)?;
-    // Folder written to now: a sweep would count its days from here.
-    let _ = std::fs::write(image_dir(id).join(".left"), "");
+    // Folders written to now: a sweep would count their days from here.
+    for id in ids {
+        let _ = std::fs::write(image_dir(id).join(".left"), "");
+    }
     Ok(())
+}
+
+/// The images `text` still tags, by number: `(N, file)` for `[Image #N]`.
+pub fn tagged(text: &str, images: &[PathBuf]) -> Vec<(usize, PathBuf)> {
+    let mut nums: Vec<usize> = crate::field::image_tags(text).into_iter().map(|(_, n)| n).collect();
+    nums.sort_unstable();
+    nums.dedup();
+    nums.into_iter().filter_map(|n| Some((n, images.get(n.checked_sub(1)?)?.clone()))).collect()
+}
+
+// ---- several as one ----------------------------------------------------------
+
+/// What goes before the tasks when marked drafts go as one prompt ({n}: how
+/// many there are).
+const PREAMBLE: &str = "\
+Here are {n} tasks, drafted one at a time and sent together. Do all of them in this session.
+
+- Read every task before starting. Where two touch the same code, or one depends on another, plan them together and pick the order; otherwise go in the order given.
+- Treat each as its own piece of work: finish it and check it before moving to the next.
+- Don't stop between tasks to ask. If one is blocked or unclear, make the reasonable call (or skip it and say why) and keep going.
+- Finish with a short report, a few lines per task: what changed and where, how you checked it, and anything left open.";
+
+/// Said too when a task was written in another folder than the first's,
+/// where the agent starts.
+const ELSEWHERE: &str = "- A task written in another folder names it in its heading: do that one there.";
+
+/// Drafts `ds` as one prompt, for one agent started in the first one's
+/// folder: the preamble, then each as `## Task i of n`. Their `[Image #N]`
+/// tags are numbered again across all of them; the files come back in that
+/// order (a tag with no file reads `[missing image]`).
+pub fn combine(ds: &[Draft]) -> (String, Vec<PathBuf>) {
+    let Some(first) = ds.first() else { return (String::new(), Vec::new()) };
+    let mut images = Vec::new();
+    let mut out = PREAMBLE.replace("{n}", &ds.len().to_string());
+    if ds.iter().any(|d| d.cwd != first.cwd) {
+        out.push('\n');
+        out.push_str(ELSEWHERE);
+    }
+    for (i, d) in ds.iter().enumerate() {
+        out.push_str(&format!("\n\n## Task {} of {}", i + 1, ds.len()));
+        if d.cwd != first.cwd {
+            out.push_str(&format!(" (in {})", tilde(&d.cwd)));
+        }
+        out.push_str("\n\n");
+        out.push_str(&renumber(d.text.trim(), &d.images, &mut images));
+    }
+    (out, images)
+}
+
+/// `text` with each `[Image #N]` (the Nth of `own`) numbered as it lands in
+/// `all`, which it's added to.
+fn renumber(text: &str, own: &[PathBuf], all: &mut Vec<PathBuf>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0;
+    for (r, n) in crate::field::image_tags(text) {
+        out.push_str(&text[at..r.start]);
+        let to = seen.iter().find(|(from, _)| *from == n).map(|&(_, to)| to).or_else(|| {
+            let file = own.get(n.checked_sub(1)?)?;
+            all.push(file.clone());
+            seen.push((n, all.len()));
+            Some(all.len())
+        });
+        match to {
+            Some(m) => out.push_str(&format!("[Image #{m}]")),
+            None => out.push_str("[missing image]"),
+        }
+        at = r.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// How a combined send is echoed: how many, then each one's first line.
+pub fn summary(ds: &[Draft]) -> String {
+    let mut s = format!("{} drafts as one prompt", ds.len());
+    for (i, d) in ds.iter().enumerate() {
+        s.push_str(&format!("\n{}. {}", i + 1, crate::field::first_line(&d.text)));
+    }
+    s
+}
+
+/// `path` with the home folder as `~`.
+fn tilde(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
 }
 
 /// A new draft's id: the time and this o's count, in base 36.
@@ -243,5 +335,42 @@ mod tests {
         d.reply = Some(ReplyTo { pane: "w1:p3".into(), tab: "w1:t2".into(), label: "auth_tests".into(), session: None });
         assert_eq!(Draft::from_json(&d.to_json()), Some(d.clone()));
         assert!(d.belongs("w1", "") && d.belongs("w9", "dots") && !d.belongs("w9", ""));
+    }
+
+    fn draft(cwd: &str, text: &str, images: &[&str]) -> Draft {
+        Draft {
+            id: text.into(),
+            workspace: "w1".into(),
+            space: String::new(),
+            cwd: cwd.into(),
+            text: text.into(),
+            images: images.iter().map(PathBuf::from).collect(),
+            created: 1,
+            reply: None,
+            kind: None,
+            config: None,
+            plan: false,
+        }
+    }
+
+    #[test]
+    fn combines_drafts_numbering_their_images_across_them() {
+        let a = draft("/r", "fix [Image #2] and [Image #1]\n", &["/a1.png", "/a2.png"]);
+        let b = draft("/r", "see [Image #1], again [Image #1], and [Image #3]", &["/b1.png"]);
+        let (text, images) = combine(&[a.clone(), b]);
+        assert!(text.starts_with("Here are 2 tasks"));
+        assert!(!text.contains(ELSEWHERE));
+        assert!(text.ends_with("## Task 1 of 2\n\nfix [Image #1] and [Image #2]\n\n## Task 2 of 2\n\nsee [Image #3], again [Image #3], and [missing image]"));
+        assert_eq!(images, [PathBuf::from("/a2.png"), "/a1.png".into(), "/b1.png".into()]);
+        // Another folder: said in the task's heading.
+        let c = draft("/elsewhere", "and this", &[]);
+        let (text, _) = combine(&[a, c]);
+        assert!(text.contains(ELSEWHERE) && text.contains("## Task 2 of 2 (in /elsewhere)\n\nand this"));
+    }
+
+    #[test]
+    fn tagged_lists_the_images_still_in_the_text() {
+        let imgs = [PathBuf::from("/1.png"), "/2.png".into(), "/3.png".into()];
+        assert_eq!(tagged("[Image #3] then [Image #1] [Image #3] [Image #9]", &imgs), [(1, PathBuf::from("/1.png")), (3, "/3.png".into())]);
     }
 }

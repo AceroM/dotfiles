@@ -1,7 +1,9 @@
 //! What o draws: the configuration ⏎ starts and `>` (`claude(opus) >`,
 //! yellow in plan mode), then the text in the terminal's own color,
 //! `[Image #N]` tags in blue; under it a
-//! toast and what's starting, only when there are. Nothing else, so a key
+//! toast and what's starting, only when there are. The drafts list (^g)
+//! draws the selected draft's images over it, as Kitty placeholders
+//! (gfx.rs). Nothing else, so a key
 //! changes as few cells as it can (term.rs writes only those). Each send,
 //! once started, is printed above in the scrollback: the prompt as it went,
 //! and the tab it went to.
@@ -13,6 +15,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Sent};
 use crate::field;
+use crate::gfx;
 
 /// A sent prompt's echo shows at most this many rows.
 const ECHO_ROWS: usize = 4;
@@ -151,16 +154,22 @@ fn lines(app: &App, buf: &mut Buffer) {
     }
 }
 
-/// The drafts list (^g), in the prompt's place: a draft a row (`▸` the
-/// selected one, a reply's agent before its first line, its folder at the
-/// right), the selected one's text under them, then the keys.
+/// The drafts list (^g), in the prompt's place: the selected draft's
+/// images on top, then a draft a row (`▸` the selected one, `◆` a marked
+/// one, a reply's agent before its first line, its folder at the right),
+/// the selected one's text under them, then the keys.
 fn list(app: &App, buf: &mut Buffer, sel: usize) {
     let p = &app.pal;
     let max = buf.area.width;
     let v = &app.view;
     let mut y = 0;
+    if v.strip > 0 {
+        strip(app, buf);
+        y = v.strip as u16;
+    }
     for (i, d) in app.drafts.iter().enumerate().skip(v.top).take(v.shown) {
         let on = i == sel;
+        let marked = app.marked.contains(&d.id);
         if on {
             put(buf, 0, y, max, "▸", fg(p.accent));
         }
@@ -173,7 +182,8 @@ fn list(app: &App, buf: &mut Buffer, sel: usize) {
         };
         let side_w = side.width() as u16;
         let text_max = if max > side_w + 24 { max - side_w - 2 } else { max };
-        let mut x = put(buf, 2, y, text_max, "◇ ", fg(if d.plan { p.yellow } else { p.dim }));
+        let glyph = if marked { "◆ " } else { "◇ " };
+        let mut x = put(buf, 2, y, text_max, glyph, fg(if d.plan { p.yellow } else if marked { p.accent } else { p.dim }));
         if let Some(r) = &d.reply {
             x = put(buf, x, y, text_max, &format!("↳{} ", r.label), fg(p.accent));
         }
@@ -182,10 +192,15 @@ fn list(app: &App, buf: &mut Buffer, sel: usize) {
         if first.is_empty() {
             put(buf, x, y, text_max, "(empty)", fg(p.dim));
         } else {
-            put(buf, x, y, text_max, &truncate(&first, room), if on { Style::new() } else { fg(p.muted) });
+            put(buf, x, y, text_max, &truncate(&first, room), if on || marked { Style::new() } else { fg(p.muted) });
         }
         if text_max < max {
             put(buf, max - side_w, y, max, &side, fg(p.dim));
+        }
+        if marked {
+            for cx in 2..max {
+                buf[(cx, y)].set_bg(p.sel);
+            }
         }
         y += 1;
     }
@@ -199,8 +214,37 @@ fn list(app: &App, buf: &mut Buffer, sel: usize) {
         put(buf, 2, y, max, &format!("│ … +{} line{}", v.more, if v.more == 1 { "" } else { "s" }), fg(p.dim));
         y += 1;
     }
-    let keys = format!("{}/{} · j k · ⏎ send · e edit · x delete · u undo · d new · esc back", sel + 1, app.drafts.len());
+    let keys = match app.marked.len() {
+        0 => format!("{}/{} · j k · ⇧↑↓ mark · ⏎ send · e edit · x delete · u undo · d new · esc back", sel + 1, app.drafts.len()),
+        1 => "1 marked · ⇧↑↓ space a mark · ⏎ send it · x delete · esc unmark".to_string(),
+        n => format!("{n} marked · ⇧↑↓ space a mark · ⏎ send as one prompt · x delete · esc unmark"),
+    };
     put(buf, 2, y, max, &truncate(&keys, max.saturating_sub(2) as usize), fg(p.dim));
+}
+
+/// The selected draft's images, side by side over the list, each with its
+/// `[Image #N]` under it; or what's said instead (no images, loading…).
+fn strip(app: &App, buf: &mut Buffer) {
+    let p = &app.pal;
+    let max = buf.area.width;
+    let v = &app.view;
+    let mut end = 2;
+    for t in &v.thumbs {
+        let x0 = 2 + t.x;
+        for r in 0..t.rows {
+            for c in 0..t.cols {
+                if let Some(cell) = buf.cell_mut((x0 + c, r)) {
+                    gfx::placeholder(cell, t.id, r, c);
+                }
+            }
+        }
+        let label = put(buf, x0, t.rows, max, &format!("[Image #{}]", t.n), fg(p.accent));
+        end = end.max(x0 + t.cols).max(label);
+    }
+    if let Some(note) = &v.note {
+        let x = if v.thumbs.is_empty() { 2 } else { end + 2 };
+        put(buf, x, 0, max, note, fg(p.dim));
+    }
 }
 
 /// A toast, under the text for a moment: green when it worked, red when
