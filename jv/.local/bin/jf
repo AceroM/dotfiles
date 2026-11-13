@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# jf — jv without the file tree: the PR's diff alone, one continuous
+# delta-style view. Same arguments, keys and viewed marks as jv (`jv --flat`).
+#   jf                 the current branch's PR (local changes when there's none)
+#   jf 1234 | URL      that PR
+#   jf -g --staged     git diff instead of gh pr diff
+# J K ] [ next / prev file, t go to file, e brings the tree back. jv -h for the rest.
+set -euo pipefail
+
+script="${BASH_SOURCE[0]}"
+while [[ -L "$script" ]]; do
+  dir="$(cd -P -- "$(dirname -- "$script")" && pwd)"
+  script="$(readlink "$script")"
+  [[ "$script" = /* ]] || script="$dir/$script"
+done
+exec "$(cd -P -- "$(dirname -- "$script")" && pwd)/jv" --flat "$@"

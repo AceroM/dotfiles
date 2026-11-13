@@ -148,6 +148,8 @@ pub struct Opts {
     pub wrap: bool,
     pub show_tests: bool,
     pub popup: bool,
+    /// `--flat` (jf): open on the diff alone, no file tree (`e` still shows it).
+    pub flat: bool,
 }
 
 pub struct App {
@@ -173,6 +175,8 @@ pub struct App {
     /// Digits in the tree's relative line numbers.
     pub tree_nw: usize,
     pub show_tree: bool,
+    /// `--flat` (jf): started without the tree; names the bar and help `jf`.
+    pub flat: bool,
     pub focus: Focus,
     pub mode: Mode,
     split_pref: Option<bool>,
@@ -264,8 +268,9 @@ impl App {
             tree_w: 30,
             tree_fixed: None,
             tree_nw: 2,
-            show_tree: true,
-            focus: Focus::Tree,
+            show_tree: !opts.flat,
+            flat: opts.flat,
+            focus: if opts.flat { Focus::Diff } else { Focus::Tree },
             mode: Mode::Normal,
             split_pref: opts.split,
             wrap: opts.wrap,

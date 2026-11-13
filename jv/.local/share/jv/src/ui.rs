@@ -175,7 +175,7 @@ fn top_bar(app: &App, buf: &mut Buffer) {
     let rx = r.right().saturating_sub(rw as u16);
     let lmax = rx.saturating_sub(2);
 
-    let name = if app.prs.is_some() { "jp" } else { "jv" };
+    let name = if app.prs.is_some() { "jp" } else if app.flat { "jf" } else { "jv" };
     let mut x = put(buf, r.x + 1, r.y, lmax, name, fg(p.accent).add_modifier(Modifier::BOLD));
     x += 2;
     if let Some(m) = &app.meta {
@@ -1171,7 +1171,14 @@ fn help(app: &App, buf: &mut Buffer, area: Rect) {
     if r.width < 30 || r.height < 6 {
         return;
     }
-    let inner = frame(buf, r, if app.prs.is_some() { "jp keys" } else { "jv keys" }, p);
+    let title = if app.prs.is_some() {
+        "jp keys"
+    } else if app.flat {
+        "jf keys"
+    } else {
+        "jv keys"
+    };
+    let inner = frame(buf, r, title, p);
     let cols: Vec<Vec<Section>> = if two { both.to_vec() } else { vec![both.concat()] };
     for (ci, col) in cols.iter().enumerate() {
         let x0 = inner.x + ci as u16 * COL_W;

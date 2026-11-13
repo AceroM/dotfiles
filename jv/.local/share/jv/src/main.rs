@@ -44,6 +44,7 @@ usage:
   jv -c 'git diff main...'                     any command that prints a diff
   git diff | jv                                a diff on stdin
   jv --prs [search terms]                      your recent PRs beside the diff (`jp`; jp -h)
+  jv --flat [PR | …]                           the diff alone, no file tree (`jf`)
 
 options:
   -s, --split        start in split view (default: split when the pane is wide)
@@ -53,6 +54,7 @@ options:
       --no-tests     hide test files (__tests__/, *.test.*, *.spec.*)
       --theme NAME   syntax theme (default TwoDark; also $JV_THEME)
       --themes       list syntax themes
+      --flat         no file tree: one continuous diff (e brings the tree back)
       --popup        Esc quits once it has nothing left to clear; E leaves for its tab
   -h, --help
 
@@ -75,6 +77,8 @@ struct Cli {
     out: Option<String>,
     /// `--prs` (jp): the PR list on the left; `gh` holds its search words.
     prs: bool,
+    /// `--flat` (jf): no file tree.
+    flat: bool,
 }
 
 fn parse_cli() -> Result<Cli, String> {
@@ -92,6 +96,7 @@ fn parse_cli() -> Result<Cli, String> {
         keys: String::new(),
         out: None,
         prs: false,
+        flat: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -101,6 +106,7 @@ fn parse_cli() -> Result<Cli, String> {
                 std::process::exit(0);
             }
             "--prs" => c.prs = true,
+            "--flat" | "--no-tree" => c.flat = true,
             "--themes" => {
                 for n in highlight::theme_names() {
                     println!("{n}");
@@ -246,7 +252,7 @@ fn main() -> ExitCode {
         _ => None,
     };
     let viewed = if cli.snapshot.is_some() { Viewed::ephemeral() } else { Viewed::load() };
-    let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests, popup: cli.popup };
+    let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests, popup: cli.popup, flat: cli.flat };
     let mut app = App::new(source, &text, hl, background(), opts, viewed);
     app.meta_rx = meta_rx;
     if let Some(n) = note {
@@ -310,7 +316,14 @@ fn run_prs(cli: Cli, hl: highlight::Hl) -> ExitCode {
     }
     let viewed = if cli.snapshot.is_some() { Viewed::ephemeral() } else { Viewed::load() };
     // Like a PR in jv: test files start hidden (T shows them).
-    let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests: cli.tests.unwrap_or(false), popup: cli.popup };
+    // The PR list lives where the tree does, so jp ignores --flat.
+    let opts = Opts {
+        split: cli.split,
+        wrap: cli.wrap,
+        show_tests: cli.tests.unwrap_or(false),
+        popup: cli.popup,
+        flat: false,
+    };
     let mut app = App::new(Source::Gh(Vec::new()), "", hl, background(), opts, viewed);
     app.start_prs(q, items);
     if let Some((w, h)) = cli.snapshot {
