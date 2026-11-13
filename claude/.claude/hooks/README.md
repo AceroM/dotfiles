@@ -53,6 +53,3 @@ Run verification from the dotfiles root:
 ```sh
 python3 -m unittest discover -s tests -p 'test_rex_autoname.py' -v
 ```
-
-The Herdr-era `herdr-autoname.sh`, `herdr-short-name.py` and
-`tests/test_herdr_autoname.py` are no longer registered anywhere.

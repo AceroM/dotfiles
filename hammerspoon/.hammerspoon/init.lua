@@ -50,12 +50,10 @@ end)
 wispr = require("wispr")
 wispr.start({ hotkey = { { "ctrl", "alt", "cmd" }, "h" } })
 
--- fn+a focuses the next agent needing attention; fn+shift+a / fn+s toggle
--- Herdr's quick agent / space pickers; see herdrkeys.lua.
--- fn+m opens the matching spaces picker to move the current tab.
+-- In Rex.app, fn chords become the ctrl+alt chords Rex's keys.lua binds; see
+-- herdrkeys.lua (named for herdr, whose fn layer it was).
 -- fn+q toggles Quick Record from any app through the same Fn-key handler.
 -- fn+b toggles vertical wheel/trackpad movement into horizontal scrolling.
--- fn+p puts the focused pane's Claude or Codex into plan mode.
 herdrkeys = require("herdrkeys")
 herdrkeys.start()
 
