@@ -3,7 +3,8 @@
 //! `[Image #N]` tags in blue; under it a
 //! toast and what's starting, only when there are. The drafts list (^g)
 //! draws the selected draft's images over it, as Kitty placeholders
-//! (gfx.rs). Nothing else, so a key
+//! (gfx.rs); a draft being written, its images over its text, in a row.
+//! Nothing else, so a key
 //! changes as few cells as it can (term.rs writes only those). Each send,
 //! once started, is printed above in the scrollback: the prompt as it went,
 //! and the tab it went to.
@@ -13,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Sent};
+use crate::app::{App, Sent, Thumb};
 use crate::field;
 use crate::gfx;
 
@@ -121,6 +122,10 @@ fn lines(app: &App, buf: &mut Buffer) {
     let p = &app.pal;
     let t = app.lay.text;
     let max = buf.area.width;
+    // A draft's images, over its text and lined up with it.
+    if app.pictures.height > 0 {
+        strip(app, buf, t.x, &app.pictures.thumbs, app.pictures.note.as_deref());
+    }
     let f = &app.field;
     let text = &f.text;
     let sel = f.selection();
@@ -164,7 +169,7 @@ fn list(app: &App, buf: &mut Buffer, sel: usize) {
     let v = &app.view;
     let mut y = 0;
     if v.strip > 0 {
-        strip(app, buf);
+        strip(app, buf, 2, &v.thumbs, v.note.as_deref());
         y = v.strip as u16;
     }
     for (i, d) in app.drafts.iter().enumerate().skip(v.top).take(v.shown) {
@@ -222,15 +227,16 @@ fn list(app: &App, buf: &mut Buffer, sel: usize) {
     put(buf, 2, y, max, &truncate(&keys, max.saturating_sub(2) as usize), fg(p.dim));
 }
 
-/// The selected draft's images, side by side over the list, each with its
-/// `[Image #N]` under it; or what's said instead (no images, loading…).
-fn strip(app: &App, buf: &mut Buffer) {
+/// Images side by side from column `left` of the top row (the selected
+/// draft's over the list, or the draft being written's over its text), each
+/// with its `[Image #N]` under it; or what's said instead (no images,
+/// loading…).
+fn strip(app: &App, buf: &mut Buffer, left: u16, thumbs: &[Thumb], note: Option<&str>) {
     let p = &app.pal;
     let max = buf.area.width;
-    let v = &app.view;
-    let mut end = 2;
-    for t in &v.thumbs {
-        let x0 = 2 + t.x;
+    let mut end = left;
+    for t in thumbs {
+        let x0 = left + t.x;
         for r in 0..t.rows {
             for c in 0..t.cols {
                 if let Some(cell) = buf.cell_mut((x0 + c, r)) {
@@ -241,8 +247,8 @@ fn strip(app: &App, buf: &mut Buffer) {
         let label = put(buf, x0, t.rows, max, &format!("[Image #{}]", t.n), fg(p.accent));
         end = end.max(x0 + t.cols).max(label);
     }
-    if let Some(note) = &v.note {
-        let x = if v.thumbs.is_empty() { 2 } else { end + 2 };
+    if let Some(note) = note {
+        let x = if thumbs.is_empty() { left } else { end + 2 };
         put(buf, x, 0, max, note, fg(p.dim));
     }
 }

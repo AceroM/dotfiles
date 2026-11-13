@@ -590,6 +590,101 @@ rex.bind("cmd+shift+n", "session.new")
 -- cmd+y copies the ID of the focused pane (instead of Quick Look).
 rex.bind("cmd+y", "pane.copy_id")
 
+-- cmd+alt+n opens a shell in a floating pane centred over the tab, in the
+-- directory of the pane the key was pressed in, and focuses it. Rex's own
+-- floating keys still work on it: cmd+alt+m minimizes it to the taskbar (and
+-- brings it back), cmd+alt+enter docks it into the layout, cmd+w closes it.
+-- The app's New Floating Pane has no default key and picks its own spot; this
+-- one always lands in the middle. The tab is the one holding ctx.block_id,
+-- since the server's active window doesn't follow the app's selected tab.
+--
+-- Over o with images pasted into its prompt (the selected draft's, in its
+-- list), or over a tab o started an agent in with images, the float shows
+-- those images instead: `o --images BLOCK` (o/.local/share/o/src/viewer.rs),
+-- big, each with its [Image #N] under it, following the prompt as images come
+-- and go. o keeps them in ~/.local/state/o/panes/<block>.json (panes.rs).
+-- cmd+alt+n in the viewer closes it (as esc, q or Enter do), and the pane it
+-- was opened over gets the focus back.
+-- Try it without opening anything: rex do float_here dry_run=1 --json
+local FLOAT_BOUNDS = { 0.15, 0.15, 0.7, 0.7 } -- x, y, w, h as fractions of the tab
+local O_BIN = (os.getenv("HOME") or "") .. "/.local/bin/o"
+local O_PANES = (os.getenv("HOME") or "") .. "/.local/state/o/panes/"
+local O_VIEWER = "o images" -- the viewer's title, so its pane label
+
+-- The images o keeps for a pane, { kind = "prompt" | "sent", images = {…} },
+-- or nil when it has none.
+local function o_images(block_id)
+  local id = block_id:gsub("^block:", ""):gsub("[^%w%-]", "")
+  local f = io.open(O_PANES .. id .. ".json", "r")
+  if not f then return nil end
+  local text = f:read("*a")
+  f:close()
+  local ok, rec = pcall(rex.json.decode, text or "")
+  if not ok or type(rec) ~= "table" or type(rec.images) ~= "table" or #rec.images == 0 then return nil end
+  return rec
+end
+
+rex.action{
+  name = "float_here",
+  title = "New Centered Floating Pane",
+  category = "Pane",
+  keywords = "float floating pane new center centred scratch popup overlay shell images pasted o",
+  run = function(ctx, args)
+    local view, err = rex.session.view{}
+    if not view then error(err, 0) end
+
+    local window_id, layer_kind, label = view.active_window_id, nil, nil
+    for _, w in ipairs(view.windows or {}) do
+      for _, layer in ipairs(w.layers or {}) do
+        for _, b in ipairs(layer.blocks or {}) do
+          if b.block_id == ctx.block_id then
+            window_id, layer_kind, label = w.window_id, layer.kind, b.label
+          end
+        end
+      end
+    end
+    local cwd = (ctx.block_id and pane_cwd(ctx.block_id)) or os.getenv("HOME")
+
+    local program = ctx.block_id and foreground(ctx.session_id, ctx.block_id) or ""
+    local viewer = program == "o" and layer_kind ~= "tiled"
+      and (label or ""):find(O_VIEWER, 1, true) ~= nil
+    local rec = not viewer and ctx.block_id and o_images(ctx.block_id) or nil
+    -- A prompt's images count only while o still runs there.
+    if rec and rec.kind ~= "sent" and program ~= "o" then rec = nil end
+
+    local result = {
+      window_id = window_id, cwd = cwd, bounds = FLOAT_BOUNDS,
+      shows = viewer and "close_viewer" or rec and "images" or "shell",
+      images = rec and #rec.images or 0,
+    }
+    if args.dry_run then return result end
+
+    if viewer then
+      rex.call("block.method", {
+        session_id = ctx.session_id, block_id = ctx.block_id, method = "write", args = { data = "q" },
+      })
+      return result
+    end
+
+    local options = { cwd = cwd }
+    if rec then options.command = { O_BIN, "--images", ctx.block_id } end
+    local created = rex.call("session.new_layer", {
+      session_id = ctx.session_id,
+      window_id = window_id,
+      bounds = FLOAT_BOUNDS,
+      focus = true,
+      layout = rex.layout.block{
+        flavor = TERMINAL .. ".shell", label = rec and O_VIEWER or nil, options = options,
+      },
+    })
+    result.layer_id = created.layer_id
+    result.block_id = (created.block_ids or {})[1]
+    if ctx.block_id then remember(ctx, ctx.session_id, result.block_id) end
+    return result
+  end,
+}
+rex.bind("cmd+alt+n", "float_here")
+
 -- ctrl+alt+; and ctrl+alt+\ keep Herdr's chords for two dotfiles scripts:
 --   ctrl+alt+;  ~/.local/bin/rex-agent-tab: a new tab right after this one
 --               running the same agent (claude or codex, same flags) as the

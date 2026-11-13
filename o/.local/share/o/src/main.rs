@@ -3,12 +3,14 @@ mod config;
 mod drafts;
 mod field;
 mod gfx;
+mod panes;
 mod probe;
 mod spawn;
 mod term;
 mod rex_theme;
 mod theme;
 mod ui;
+mod viewer;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -33,6 +35,7 @@ usage:
   o TEXT…              start from TEXT
   o -d, --drafts       start in the drafts list
   o --config           the configurations, and the keys to them
+  o --images BLOCK     the images behind Rex pane BLOCK's [Image #N] tags, big (⌥⌘N)
   --cwd DIR            where the agents start (default: here)
   -h, --help
 
@@ -44,6 +47,10 @@ Runs inside a Rex terminal (oc is the same prompt for Herdr). The keys:
   ^v pastes the clipboard's image (⌘V too, with only an image on it); a file dragged
   in from Finder is attached. Either is an [Image #N] tag, its file listed at the end
   of what's sent (not drawn).
+  ⌥⌘N (Rex) shows them big, each over its tag, in a floating pane in the middle of the
+  tab, following the prompt as images come and go (the selected draft's, in the
+  list); in a tab o started an agent in, the images it was sent. 1…9 one alone, ← →
+  through them, esc closes. o keeps them in ~/.local/state/o/panes, one file a pane.
   The mouse is the terminal's (its own selecting and scrolling); O_MOUSE=1 gives it
   to o: a click puts the cursor there, a drag selects, the wheel scrolls a long prompt.
   Before `>` is the configuration ⏎ starts; yellow is plan mode.
@@ -59,7 +66,8 @@ Drafts (o's own, per Rex session, in ~/.local/state/o/drafts.json):
   esc leaves it for later, ⏎ sends it (from the folder it was written in) and it goes
   ^g goes through this session's drafts: j k move · ⏎ sends (^⏎ ^o and goes there) ·
   e (l, r) edits · x ; deletes · u brings it back · d a new one · esc back to the prompt.
-  The selected draft's images show over the list, small (Kitty graphics; O_IMAGES=0 off).
+  The selected draft's images show over the list, small (Kitty graphics; O_IMAGES=0 off);
+  a draft being written shows its images over its text, all in one row, 8 rows tall.
   ⇧↑ ⇧↓ (J K) mark drafts as they go, space marks one, a all (again: none); with some
   marked, ⏎ sends them as ONE prompt to one new agent: a preamble, then each draft as
   a task (images numbered across them), from the first one's folder on its configuration
@@ -84,10 +92,12 @@ struct Cli {
     keys: String,
     drafts: bool,
     config: bool,
+    /// --images BLOCK: show that pane's images.
+    images: Option<String>,
 }
 
 fn parse_cli() -> Result<Cli, String> {
-    let mut c = Cli { cwd: None, words: Vec::new(), snapshot: None, cell: None, keys: String::new(), drafts: false, config: false };
+    let mut c = Cli { cwd: None, words: Vec::new(), snapshot: None, cell: None, keys: String::new(), drafts: false, config: false, images: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -97,6 +107,7 @@ fn parse_cli() -> Result<Cli, String> {
             }
             "-d" | "--drafts" => c.drafts = true,
             "--config" => c.config = true,
+            "--images" => c.images = Some(args.next().ok_or("--images needs a Rex block (block:…)")?),
             "--cwd" => c.cwd = Some(args.next().ok_or("--cwd needs a folder")?.into()),
             // Hidden: render one frame as plain text after --keys, for UI work
             // without a terminal. Nothing is sent.
@@ -161,6 +172,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Some(block) = &cli.images {
+        let theme = rex_theme::theme(&["O_BG", "AL_BG", "JV_BG"]);
+        return viewer::run(block, Palette::new(&theme));
+    }
     let (agents, notice) = config::load();
     if cli.config {
         return show_config(&agents, notice.as_deref());
@@ -185,7 +200,11 @@ fn main() -> ExitCode {
         eprintln!("o: not inside a Rex terminal (REX_SESSION isn't set)");
         return ExitCode::FAILURE;
     }
-    std::thread::spawn(drafts::sweep);
+    std::thread::spawn(|| {
+        drafts::sweep();
+        panes::sweep();
+    });
+    app.block = std::env::var("REX_BLOCK").ok().filter(|b| !b.is_empty());
     if cli.drafts {
         app.start_in_list();
     }
@@ -241,6 +260,7 @@ fn run(app: &mut App) -> io::Result<()> {
     let mut term = Inline::new(w, h, cursor);
     let res = event_loop(app, &mut term);
     app.flush();
+    app.unpublish();
     let mut s = Vec::new();
     term.clear(&mut s);
     s.extend(app.clear_images());
@@ -299,6 +319,8 @@ fn event_loop(app: &mut App, term: &mut Inline) -> io::Result<()> {
     let mut dirty = true;
     loop {
         dirty |= app.tick();
+        // ⌥⌘N's images: the prompt's as they are now.
+        app.publish();
         let done = app.take_done();
         if dirty || !done.is_empty() {
             // What started printed above (the prompt drawn again under it,

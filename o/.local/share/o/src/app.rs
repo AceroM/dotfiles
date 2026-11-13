@@ -10,9 +10,14 @@
 //! written from then on (esc leaves it for later, ⏎ sends it and it goes);
 //! ^g goes through this session's drafts, a list in the prompt's place with
 //! al's keys: j k, ⏎ sends, e edits, x deletes, u brings it back, d a new one.
-//! The selected draft's images are drawn over the list, small (gfx.rs).
+//! The selected draft's images are drawn over the list, small (gfx.rs);
+//! a draft being written has its own over its text, all in one row.
 //! ⇧↑ ⇧↓ mark drafts (space one, a all): ⏎ then sends the marked ones as
 //! one prompt, a preamble over them as tasks (drafts::combine); x deletes them.
+//!
+//! ⌥⌘N (Rex) shows the images big, in a floating pane (viewer.rs): o keeps
+//! the ones the prompt tags now as this pane's, and the ones each send took
+//! as its agent's pane's (panes.rs).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -27,7 +32,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::Agent;
 use crate::drafts::{self, Draft};
 use crate::field::{self, Field};
-use crate::gfx::{self, Gfx, Pic};
+use crate::gfx::{self, Gfx, Images, Pic};
+use crate::panes::{self, Tagged};
 use crate::spawn::{self, Outcome};
 use crate::theme::Palette;
 
@@ -46,8 +52,11 @@ const PREVIEW_ROWS: usize = 10;
 /// The selected draft's images, over the list: at most this many rows tall
 /// (a label under each takes one more).
 const IMG_ROWS: usize = 8;
-/// Images kept in the terminal for going back to; older ones are freed.
-const KEEP_IMAGES: usize = 16;
+/// The draft being written's images, over its text: all in a row and all
+/// as tall, this many rows (a label under each takes one more) or as tall
+/// as they can all be side by side, down to EDIT_IMG_MIN.
+const EDIT_IMG_ROWS: usize = 8;
+const EDIT_IMG_MIN: usize = 2;
 
 pub enum Act {
     None,
@@ -70,6 +79,8 @@ pub struct Sent {
     pub text: String,
     pub plan: bool,
     pub outcome: Option<Outcome>,
+    /// The images it took: its agent's pane's, once it's there (panes.rs).
+    pub images: Tagged,
 }
 
 /// Where things are, in lines from the prompt's first.
@@ -104,6 +115,16 @@ pub struct ListView {
     pub note: Option<String>,
 }
 
+/// The draft being written's images, over its text: `height` rows, their
+/// labels included (0: none).
+#[derive(Clone, Default)]
+pub struct Strip {
+    pub height: usize,
+    pub thumbs: Vec<Thumb>,
+    /// Said where there's no picture: "loading…", "+2 more".
+    pub note: Option<String>,
+}
+
 /// One of the selected draft's images over the list: Kitty image `id`,
 /// `cols`×`rows` cells from column `x` of the list's text, `[Image #n]`.
 #[derive(Clone, Debug, PartialEq)]
@@ -113,37 +134,6 @@ pub struct Thumb {
     pub cols: u16,
     pub rows: u16,
     pub n: usize,
-}
-
-/// The images o has sent the terminal, newest first (one per file and
-/// size), and the bytes not written yet.
-#[derive(Default)]
-struct Images {
-    sent: Vec<((PathBuf, u16, u16), u32)>,
-    out: Vec<u8>,
-    next: u32,
-}
-
-impl Images {
-    /// The id of `key`'s image, sending the PNG when the terminal hasn't got it.
-    fn id_for(&mut self, key: (PathBuf, u16, u16), png: &str) -> u32 {
-        if let Some(i) = self.sent.iter().position(|(k, _)| *k == key) {
-            let e = self.sent.remove(i);
-            let id = e.1;
-            self.sent.insert(0, e);
-            return id;
-        }
-        self.next += 1;
-        let id = gfx::image_id(self.next);
-        self.out.extend(gfx::transmit(id, png, key.1, key.2));
-        self.sent.insert(0, (key, id));
-        while self.sent.len() > KEEP_IMAGES {
-            if let Some((_, old)) = self.sent.pop() {
-                self.out.extend(gfx::delete(old));
-            }
-        }
-        id
-    }
 }
 
 /// An image file readied for the terminal; None while it loads.
@@ -198,6 +188,8 @@ pub struct App {
     /// Going through the drafts (^g): the one selected.
     pub list: Option<usize>,
     pub view: ListView,
+    /// The draft being written's images, over its text.
+    pub pictures: Strip,
     /// The draft being written was opened from the list: esc goes back there.
     from_list: bool,
     /// The prompt that was being written when a draft took its place: its
@@ -238,6 +230,12 @@ pub struct App {
     /// A press in the text: the span it took, and how many presses in a row.
     press: Option<(Range<usize>, u8)>,
     last_press: Option<(Instant, u16, u16, u8)>,
+    /// This pane (REX_BLOCK), whose images ⌥⌘N shows (panes.rs); None:
+    /// --snapshot, tests.
+    pub block: Option<String>,
+    /// What was last kept as its images; None: nothing yet (the first time
+    /// clears what an o before this one left).
+    published: Option<Tagged>,
     /// False for --snapshot: nothing is sent or copied, only noted.
     pub live: bool,
     pub would_send: Option<String>,
@@ -274,6 +272,7 @@ impl App {
             editing: None,
             list: None,
             view: ListView::default(),
+            pictures: Strip::default(),
             from_list: false,
             aside: None,
             undo: Vec::new(),
@@ -298,6 +297,8 @@ impl App {
             followed: None,
             press: None,
             last_press: None,
+            block: None,
+            published: None,
             live: true,
             would_send: None,
             would_copy: None,
@@ -354,6 +355,7 @@ impl App {
         if self.drafts.is_empty() {
             self.list = None;
         }
+        self.pictures = Strip::default();
         if let Some(sel) = self.list {
             let sel = sel.min(self.drafts.len() - 1);
             self.list = Some(sel);
@@ -395,10 +397,13 @@ impl App {
             return;
         }
         self.rows = field::word_rows(&self.field.text, tw);
-        let view = self.rows.len().clamp(1, room);
+        // A draft's images over its text, staying there as it scrolls.
+        self.pictures = self.draft_pictures(tw, room);
+        let top = self.pictures.height;
+        let view = self.rows.len().clamp(1, room - top);
         let gutter = self.prefix_at(width).width() as u16 + 1;
-        let text = Rect::new(gutter, 0, tw as u16, view as u16);
-        self.lay = Lay { width, screen_h, text, height: (view + extra) as u16 };
+        let text = Rect::new(gutter, top as u16, tw as u16, view as u16);
+        self.lay = Lay { width, screen_h, text, height: (top + view + extra) as u16 };
         self.follow(view, tw);
     }
 
@@ -456,30 +461,82 @@ impl App {
         if tagged.is_empty() {
             return (Vec::new(), Some("no images".into()));
         }
+        self.row_of_thumbs(g, tagged, width, rows..=rows, false)
+    }
+
+    /// The draft being written's images, over its text in `width` columns:
+    /// all of them in a row, all EDIT_IMG_ROWS tall, or shorter when that's
+    /// what it takes to fit them all across. The text keeps a few rows of
+    /// `room` (its own, when it has fewer); none when there's no room for them.
+    fn draft_pictures(&mut self, width: usize, room: usize) -> Strip {
+        let Some(g) = self.gfx else { return Strip::default() };
+        if self.editing.is_none() {
+            return Strip::default();
+        }
+        let tagged = drafts::tagged(&self.field.text, &self.images);
+        if tagged.is_empty() {
+            return Strip::default();
+        }
+        let keep = self.rows.len().clamp(1, 4);
+        let rows = EDIT_IMG_ROWS.min(room.saturating_sub(keep + 1));
+        if rows < EDIT_IMG_MIN {
+            return Strip::default();
+        }
+        let (thumbs, note) = self.row_of_thumbs(g, tagged, width, EDIT_IMG_MIN..=rows, true);
+        let tallest = thumbs.iter().map(|t| t.rows as usize + 1).max().unwrap_or(0);
+        Strip { height: tallest.max(usize::from(note.is_some())), thumbs, note }
+    }
+
+    /// `tagged`'s images side by side in `width` columns, a label under
+    /// each: as tall as `rows` allows with every one of them in the row (the
+    /// shortest, with as many as fit and `+N more`, when none does). Each
+    /// keeps its shape: no bigger than itself, the last one squeezed into
+    /// what's left; or, `even`, all exactly as tall. What to say where
+    /// there's no picture comes too; the ones not readied yet start loading.
+    fn row_of_thumbs(&mut self, g: Gfx, tagged: Vec<(usize, PathBuf)>, width: usize, rows: std::ops::RangeInclusive<usize>, even: bool) -> (Vec<Thumb>, Option<String>) {
         for (_, path) in &tagged {
             if !self.pics.contains_key(path) {
                 self.load_pic(path.clone());
             }
         }
-        let (mut out, mut x) = (Vec::new(), 0usize);
+        let size = |p: &PathBuf| match self.pics.get(p) {
+            Some(Some(Ok(pic))) => Some((pic.w, pic.h)),
+            _ => None,
+        };
+        let label = |n: usize| format!("[Image #{n}]").len();
+        // A picture's cells at `r` rows with `left` columns left; None when it doesn't fit.
+        let cells = |w: u32, h: u32, left: usize, r: usize| -> Option<(u16, u16)> {
+            if even {
+                let c = gfx::cols_at(w, h, g, r);
+                (usize::from(c) <= left).then_some((c, r as u16))
+            } else {
+                (left >= 6).then(|| gfx::fit(w, h, g, left, r))
+            }
+        };
+        // The tallest that fits them all: the columns they take, the gaps between included.
+        let across = |r: usize| -> usize {
+            let slots = tagged.iter().filter_map(|(n, p)| size(p).map(|(w, h)| cells(w, h, usize::MAX, r).map_or(0, |c| usize::from(c.0)).max(label(*n))));
+            slots.map(|c| c + 2).sum::<usize>().saturating_sub(2)
+        };
+        let rows = rows.clone().rev().find(|&r| across(r) <= width).unwrap_or(*rows.start());
+        let (mut out, mut x, mut full) = (Vec::new(), 0usize, false);
         let (mut loading, mut more, mut failed) = (0, 0, Vec::new());
         for (n, path) in tagged {
-            let label = format!("[Image #{n}]").len();
             let state = self.pics.get(&path).map(|s| s.as_ref().map(|r| r.as_ref().map(|p| (p.w, p.h)).map_err(|_| ())));
             match state {
                 None | Some(None) => loading += 1,
                 Some(Some(Err(()))) => failed.push(n),
                 Some(Some(Ok((w, h)))) => {
-                    let left = width.saturating_sub(x);
-                    if left < 6 {
-                        more += 1;
+                    // The first that doesn't fit, and the ones after it, are `+N more`.
+                    let fits = if full { None } else { cells(w, h, width.saturating_sub(x), rows) };
+                    let Some((cols, r)) = fits else {
+                        (full, more) = (true, more + 1);
                         continue;
-                    }
-                    let (cols, r) = gfx::fit(w, h, g, left, rows);
+                    };
                     let Some(Some(Ok(pic))) = self.pics.get(&path) else { continue };
                     let id = self.imgs.id_for((path.clone(), cols, r), &pic.b64);
                     out.push(Thumb { x: x as u16, id, cols, rows: r, n });
-                    x += (cols as usize).max(label) + 2;
+                    x += (cols as usize).max(label(n)) + 2;
                 }
             }
         }
@@ -495,6 +552,20 @@ impl App {
             note.push(format!("couldn't show {}", tags.join(" ")));
         }
         (out, (!note.is_empty()).then(|| note.join(" · ")))
+    }
+
+    /// The draft's images were copied beside it (drafts::keep_images): what
+    /// was readied for the terminal, and what it was sent, go under the
+    /// copies' names, so the pictures stay put rather than load again.
+    fn images_moved(&mut self, from: &[PathBuf], to: &[PathBuf]) {
+        for (a, b) in from.iter().zip(to).filter(|(a, b)| a != b) {
+            if let Some(pic) = self.pics.get(a).cloned() {
+                self.pics.insert(b.clone(), pic);
+            }
+            for (key, _) in self.imgs.sent.iter_mut().filter(|(k, _)| &k.0 == a) {
+                key.0 = b.clone();
+            }
+        }
     }
 
     /// Ready `path` for the terminal, off the UI thread (tick picks it up);
@@ -515,15 +586,12 @@ impl App {
 
     /// Bytes for the terminal (images to send or free), to write before the frame.
     pub fn take_gfx(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.imgs.out)
+        self.imgs.take()
     }
 
     /// Free every image o sent, for quitting.
     pub fn clear_images(&mut self) -> Vec<u8> {
-        for (_, id) in self.imgs.sent.drain(..) {
-            self.imgs.out.extend(gfx::delete(id));
-        }
-        self.take_gfx()
+        self.imgs.clear()
     }
 
     // ---- the loop's hooks --------------------------------------------------
@@ -533,6 +601,12 @@ impl App {
         let mut changed = false;
         while let Ok((n, out)) = self.sent_rx.try_recv() {
             if let Some(s) = self.sent.get_mut(n) {
+                // ⌥⌘N in the agent's pane shows the images it was sent.
+                if let (true, true, Some(block)) = (self.live, out.1, &out.2) {
+                    if !s.images.is_empty() {
+                        panes::write(block, panes::SENT, &s.images);
+                    }
+                }
                 s.outcome = Some(out);
                 self.done.push(n);
             }
@@ -582,6 +656,33 @@ impl App {
             SAVE_AFTER
         } else {
             Duration::from_secs(1)
+        }
+    }
+
+    /// The images ⌥⌘N shows over this pane now: the selected draft's in
+    /// the list, else the ones the prompt tags.
+    pub fn showing(&self) -> Tagged {
+        match self.list.and_then(|i| self.drafts.get(i)) {
+            Some(d) => drafts::tagged(&d.text, &d.images),
+            None => drafts::tagged(&self.field.text, &self.images),
+        }
+    }
+
+    /// Keep this pane's images (panes.rs) as `showing` has them, when they
+    /// changed. main.rs calls it each time round.
+    pub fn publish(&mut self) {
+        let Some(block) = self.block.clone() else { return };
+        let now = self.showing();
+        if self.published.as_ref() != Some(&now) {
+            panes::write(&block, panes::PROMPT, &now);
+            self.published = Some(now);
+        }
+    }
+
+    /// Quitting: none here any more.
+    pub fn unpublish(&mut self) {
+        if let Some(block) = &self.block {
+            panes::write(block, panes::PROMPT, &[]);
         }
     }
 
@@ -870,7 +971,8 @@ impl App {
         self.remember(&text, &images);
         let agent = self.agent().clone();
         let n = self.sent.len();
-        self.sent.push(Sent { name: agent.name.clone(), text: text.clone(), plan: self.plan, outcome: None });
+        let tagged = drafts::tagged(&text, &images);
+        self.sent.push(Sent { name: agent.name.clone(), text: text.clone(), plan: self.plan, outcome: None, images: tagged });
         if self.live {
             spawn::send(n, &agent, &prompt, &self.cwd, &self.label, focus, self.sent_tx.clone());
         } else {
@@ -981,7 +1083,8 @@ impl App {
         }
         if self.live {
             d.images = drafts::keep_images(&d.id, &d.text, &d.images);
-            self.images = d.images.clone();
+            let before = std::mem::replace(&mut self.images, d.images.clone());
+            self.images_moved(&before, &d.images);
         }
         // Saved or not, don't try again until it changes again.
         self.editing = Some(d.clone());
@@ -1008,7 +1111,8 @@ impl App {
         if !self.store_draft(d.clone()) {
             return;
         }
-        self.images = images;
+        let before = std::mem::replace(&mut self.images, images);
+        self.images_moved(&before, &self.images.clone());
         self.editing = Some(d);
         self.from_list = false;
         self.hist_at = None;
@@ -1134,7 +1238,7 @@ impl App {
         let done = |m: &str| (format!("→ {m}"), true, Some(format!("snapshot-{n}")));
         match to {
             Some((pane, label)) => {
-                self.sent.push(Sent { name: format!("↳{label}"), text: text.to_string(), plan: d.plan, outcome: None });
+                self.sent.push(Sent { name: format!("↳{label}"), text: text.to_string(), plan: d.plan, outcome: None, images: drafts::tagged(text, images) });
                 if self.live {
                     spawn::reply(n, &pane, &prompt, self.sent_tx.clone());
                 } else {
@@ -1144,7 +1248,7 @@ impl App {
             }
             None => {
                 let agent = self.agents[self.agent_of(d).unwrap_or(0)].clone();
-                self.sent.push(Sent { name: agent.name.clone(), text: text.to_string(), plan: d.plan, outcome: None });
+                self.sent.push(Sent { name: agent.name.clone(), text: text.to_string(), plan: d.plan, outcome: None, images: drafts::tagged(text, images) });
                 if self.live {
                     spawn::send(n, &agent, &prompt, &d.cwd, "", focus, self.sent_tx.clone());
                 } else {
@@ -1308,7 +1412,7 @@ impl App {
         // ↑ brings back the whole of it, to send again.
         self.remember(&text, &images);
         let n = self.sent.len();
-        self.sent.push(Sent { name: agent.name.clone(), text: drafts::summary(ds), plan, outcome: None });
+        self.sent.push(Sent { name: agent.name.clone(), text: drafts::summary(ds), plan, outcome: None, images: drafts::tagged(&text, &images) });
         if self.live {
             spawn::send(n, &agent, &prompt, &first.cwd, "", focus, self.sent_tx.clone());
         } else {
@@ -1492,7 +1596,8 @@ impl App {
                 let max = self.rows.len().saturating_sub(t.height as usize);
                 self.scroll = (self.scroll + 3).min(max);
             }
-            MouseEventKind::Down(MouseButton::Left) if on_prompt => {
+            // (The pictures over a draft's text take no presses.)
+            MouseEventKind::Down(MouseButton::Left) if on_prompt && m.row >= t.y => {
                 let shift = m.modifiers.contains(KeyModifiers::SHIFT);
                 self.press_text(m.column, m.row, shift);
             }
@@ -2036,6 +2141,93 @@ mod tests {
         a.layout(100, 40);
         assert_eq!(a.view.strip, 0);
         assert!(a.clear_images().windows(5).any(|w| w == b"a=d,d"));
+    }
+
+    #[test]
+    fn a_drafts_images_go_over_its_text_in_one_row() {
+        let mut a = app("");
+        a.gfx = Some(Gfx { cell_w: 10, cell_h: 20 });
+        let pic = |w, h| Some(Ok(Pic { w, h, b64: "AAAA".into() }));
+        for p in ["/wide.png", "/w2.png", "/w3.png"] {
+            a.pics.insert(p.into(), pic(900, 450));
+        }
+        a.pics.insert("/square.png".into(), pic(90, 90));
+        type_in(&mut a, "look ");
+        a.attach("/wide.png".into());
+        a.attach("/square.png".into());
+        // Not a draft: no pictures.
+        a.layout(100, 40);
+        assert_eq!((a.pictures.height, a.lay.text.y), (0, 0));
+        press(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        a.toast = None;
+        a.layout(100, 40);
+        // All 8 rows tall (the small one too), each its shape, labels under
+        // them; the text under that, lined up with them.
+        let row_of = |a: &App| a.pictures.thumbs.iter().map(|t| (t.x, t.cols, t.rows, t.n)).collect::<Vec<_>>();
+        assert_eq!(a.pictures.height, 9);
+        assert_eq!(row_of(&a), [(0, 32, 8, 1), (34, 16, 8, 2)]);
+        assert_eq!((a.lay.text, a.lay.height), (Rect::new(15, 9, 83, 1), 10));
+        let b = crate::ui::draw(&a);
+        let row = |y| crate::term::plain(&b, y);
+        let pad = " ".repeat(15);
+        assert_eq!(row(0), format!("{pad}{}  {}", "▒".repeat(32), "▒".repeat(16)));
+        assert_eq!(row(8), format!("{pad}[Image #1]{}[Image #2]", " ".repeat(24)));
+        assert!(row(9).starts_with("claude(opus) ◇ look [Image #1] [Image #2]"), "{}", row(9));
+        assert_eq!(a.cursor_cell().map(|c| c.1), Some(9));
+        // A press on them leaves the cursor be.
+        let cur = a.field.cur;
+        a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 20, row: 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(a.field.cur, cur);
+        // More than fit at 8 rows: all of them, shorter.
+        a.field.end();
+        a.attach("/w2.png".into());
+        a.attach("/w3.png".into());
+        a.layout(100, 40);
+        assert_eq!(row_of(&a), [(0, 20, 5, 1), (22, 10, 5, 2), (34, 20, 5, 3), (56, 20, 5, 4)]);
+        assert_eq!((a.pictures.height, a.pictures.note.as_deref(), a.lay.text.y), (6, None, 6));
+        // Copied beside the draft: drawn from what the terminal has.
+        a.take_gfx();
+        let kept: Vec<PathBuf> = a.images.iter().map(|p| PathBuf::from("/kept").join(p.file_name().unwrap())).collect();
+        let before = std::mem::replace(&mut a.images, kept.clone());
+        a.images_moved(&before, &kept);
+        a.layout(100, 40);
+        assert_eq!(a.pictures.thumbs.len(), 4);
+        assert!(a.take_gfx().is_empty());
+        // Too narrow for them all even small: as many as fit, then a count.
+        a.layout(40, 40);
+        assert_eq!(row_of(&a), [(0, 8, 2, 1), (12, 4, 2, 2)]);
+        assert_eq!(a.pictures.note.as_deref(), Some("+2 more"));
+        // A short screen shrinks them, then has no room for them.
+        a.layout(100, 5);
+        assert_eq!((a.pictures.height, a.pictures.thumbs[0].rows), (3, 2));
+        a.layout(100, 4);
+        assert_eq!((a.pictures.height, a.lay.text.y), (0, 0));
+        // Images not drawn: none of it.
+        a.gfx = None;
+        a.layout(100, 40);
+        assert_eq!(a.pictures.height, 0);
+        // Out of the draft: gone.
+        a.gfx = Some(Gfx { cell_w: 10, cell_h: 20 });
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        a.layout(100, 40);
+        assert_eq!(a.pictures.height, 0);
+    }
+
+    #[test]
+    fn option_cmd_n_shows_the_prompts_images_and_a_send_keeps_them() {
+        let mut a = app("");
+        type_in(&mut a, "see ");
+        a.attach("/one.png".into());
+        a.attach("/two.png".into());
+        assert_eq!(a.showing(), [(1, PathBuf::from("/one.png")), (2, PathBuf::from("/two.png"))]);
+        // A tag deleted: its image isn't shown.
+        a.field.text = "see [Image #2]".into();
+        a.field.end();
+        assert_eq!(a.showing(), [(2, PathBuf::from("/two.png"))]);
+        // Sent: the agent's pane gets them; the prompt has none left.
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.sent[0].images, [(2, PathBuf::from("/two.png"))]);
+        assert!(a.showing().is_empty());
     }
 
     #[test]

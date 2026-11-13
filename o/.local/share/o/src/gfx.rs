@@ -1,5 +1,5 @@
-//! The drafts list's images, with the Kitty graphics protocol's unicode
-//! placeholders (al's gfx.rs, which is ctab's). A PNG goes to the terminal
+//! The drafts list's images (and `o --images`'s, viewer.rs), with the Kitty
+//! graphics protocol's unicode placeholders (al's gfx.rs, which is ctab's). A PNG goes to the terminal
 //! once (`a=T,U=1`, a virtual placement `cols`×`rows` cells big), then
 //! ordinary cells draw it: U+10EEEE with the cell's row and column in two
 //! diacritics and the image's id in the foreground color. So the picture is
@@ -9,7 +9,7 @@
 //! do) in its one round trip at startup. O_IMAGES=0 turns them off.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ratatui::buffer::Cell;
@@ -73,18 +73,27 @@ pub struct Pic {
     pub b64: String,
 }
 
-/// Biggest side sent to the terminal. The list draws thumbnails, a few
-/// hundred pixels tall (8 rows), so a 5K screenshot goes shrunk, not through the
-/// pty whole.
-const MAX_SIDE: u32 = 640;
-const MAX_BYTES: usize = 400_000;
+/// Biggest side sent to the terminal, and the biggest PNG sent as it is.
+/// The list draws thumbnails, a few hundred pixels tall (8 rows), so a 5K
+/// screenshot goes shrunk, not through the pty whole.
+pub const THUMB: (u32, usize) = (640, 400_000);
+/// `o --images` draws them as big as a floating pane: about a screen's
+/// worth of pixels, a few MB at most.
+pub const BIG: (u32, usize) = (2000, 4_000_000);
 
-/// `path` as a PNG no bigger than MAX_SIDE. A small PNG goes as it is; sips
-/// (macOS) turns anything else into one. Slow-ish: call it off the UI thread.
+/// `path` as a PNG no bigger than THUMB.
 pub fn load_pic(path: &Path) -> Result<Pic, String> {
+    load_pic_at(path, THUMB)
+}
+
+/// `path` as a PNG whose longer side is `max.0` at most. A PNG that small
+/// (and no more than `max.1` bytes) goes as it is; sips (macOS) turns
+/// anything else into one. Slow-ish: call it off the UI thread.
+pub fn load_pic_at(path: &Path, max: (u32, usize)) -> Result<Pic, String> {
+    let (max_side, max_bytes) = max;
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     if let Some((w, h)) = png_size(&bytes) {
-        if w <= MAX_SIDE && h <= MAX_SIDE && bytes.len() <= MAX_BYTES {
+        if w <= max_side && h <= max_side && bytes.len() <= max_bytes {
             return Ok(Pic { w, h, b64: base64(&bytes) });
         }
     }
@@ -92,9 +101,9 @@ pub fn load_pic(path: &Path) -> Result<Pic, String> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let out = dir.join(format!("thumb-{}-{}.png", std::process::id(), crate::drafts::new_id()));
     // -Z scales up as well as down: given only when it's bigger.
-    let side = MAX_SIDE.to_string();
+    let side = max_side.to_string();
     let mut args = vec!["-s", "format", "png"];
-    if image_side(path).is_none_or(|s| s > MAX_SIDE) {
+    if image_side(path).is_none_or(|s| s > max_side) {
         args.extend(["-Z", side.as_str()]);
     }
     let ok = Command::new("sips")
@@ -117,10 +126,15 @@ pub fn load_pic(path: &Path) -> Result<Pic, String> {
 /// The longer side of a PNG, read from its header; None for anything else
 /// (sips is told to shrink it, which is a no-op when it's small).
 fn image_side(path: &Path) -> Option<u32> {
+    png_file_size(path).map(|(w, h)| w.max(h))
+}
+
+/// A PNG file's width and height, from its header alone; None for anything else.
+pub fn png_file_size(path: &Path) -> Option<(u32, u32)> {
     use std::io::Read;
     let mut head = [0u8; 24];
     std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).ok()?;
-    png_size(&head).map(|(w, h)| w.max(h))
+    png_size(&head)
 }
 
 /// A PNG's width and height, from its IHDR chunk.
@@ -148,12 +162,25 @@ pub fn base64(b: &[u8]) -> String {
 /// The cells a `w`×`h` pixel image fills: its own size at most, else as big
 /// as `cols`×`rows` cells allow, its shape kept (al's).
 pub fn fit(w: u32, h: u32, g: Gfx, cols: usize, rows: usize) -> (u16, u16) {
+    fit_upto(w, h, g, cols, rows, 1.0)
+}
+
+/// `fit`, drawn up to `up` times its own size (a shrunk copy of a bigger
+/// file, as big as the file is).
+pub fn fit_upto(w: u32, h: u32, g: Gfx, cols: usize, rows: usize, up: f64) -> (u16, u16) {
     let (w, h) = (f64::from(w.max(1)), f64::from(h.max(1)));
     let (cw, ch) = (f64::from(g.cell_w.max(1)), f64::from(g.cell_h.max(1)));
-    let s = 1f64.min(cols.max(1) as f64 * cw / w).min(rows.max(1) as f64 * ch / h);
+    let s = up.max(1.0).min(cols.max(1) as f64 * cw / w).min(rows.max(1) as f64 * ch / h);
     let c = ((w * s / cw).round() as usize).clamp(1, cols.max(1));
     let r = ((h * s / ch).round() as usize).clamp(1, rows.max(1));
     (c.min(MAX_CELLS as usize) as u16, r.min(MAX_CELLS as usize) as u16)
+}
+
+/// The columns a `w`×`h` pixel image takes drawn exactly `rows` cells tall,
+/// its shape kept: bigger than itself too (the terminal scales it).
+pub fn cols_at(w: u32, h: u32, g: Gfx, rows: usize) -> u16 {
+    let px = rows as f64 * f64::from(g.cell_h.max(1)) * f64::from(w.max(1)) / f64::from(h.max(1));
+    ((px / f64::from(g.cell_w.max(1))).round() as usize).clamp(1, MAX_CELLS as usize) as u16
 }
 
 // ---- writing images ----------------------------------------------------------
@@ -187,6 +214,53 @@ pub fn transmit(id: u32, png_b64: &str, cols: u16, rows: u16) -> Vec<u8> {
 /// Free an image and its placements.
 pub fn delete(id: u32) -> Vec<u8> {
     format!("\x1b_Ga=d,d=I,i={id},q=2;\x1b\\").into_bytes()
+}
+
+/// Images kept in the terminal for going back to; older ones are freed.
+const KEEP_IMAGES: usize = 16;
+
+/// The images o has sent the terminal, newest first (one per file and
+/// size), and the bytes not written yet.
+#[derive(Default)]
+pub struct Images {
+    pub sent: Vec<((PathBuf, u16, u16), u32)>,
+    pub out: Vec<u8>,
+    next: u32,
+}
+
+impl Images {
+    /// The id of `key`'s image, sending the PNG when the terminal hasn't got it.
+    pub fn id_for(&mut self, key: (PathBuf, u16, u16), png: &str) -> u32 {
+        if let Some(i) = self.sent.iter().position(|(k, _)| *k == key) {
+            let e = self.sent.remove(i);
+            let id = e.1;
+            self.sent.insert(0, e);
+            return id;
+        }
+        self.next += 1;
+        let id = image_id(self.next);
+        self.out.extend(transmit(id, png, key.1, key.2));
+        self.sent.insert(0, (key, id));
+        while self.sent.len() > KEEP_IMAGES {
+            if let Some((_, old)) = self.sent.pop() {
+                self.out.extend(delete(old));
+            }
+        }
+        id
+    }
+
+    /// Bytes for the terminal (images to send or free), to write before the frame.
+    pub fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.out)
+    }
+
+    /// Free every image sent, for quitting.
+    pub fn clear(&mut self) -> Vec<u8> {
+        for (_, id) in self.sent.drain(..) {
+            self.out.extend(delete(id));
+        }
+        self.take()
+    }
 }
 
 /// The largest row or column a placeholder can name.
@@ -268,6 +342,13 @@ mod tests {
         assert_eq!(fit(1600, 400, g, 80, 30), (80, 10));
         assert_eq!(fit(400, 1600, g, 80, 30), (15, 30));
         assert_eq!(fit(1, 1, g, 80, 0), (1, 1));
+        // Up to twice its size, as far as the room goes.
+        assert_eq!(fit_upto(100, 100, g, 80, 30, 2.0), (20, 10));
+        assert_eq!(fit_upto(100, 100, g, 15, 30, 2.0), (15, 8));
+        assert_eq!(fit_upto(100, 100, g, 80, 30, 0.5), (10, 5));
+        // Exactly so many rows, smaller or bigger than itself.
+        assert_eq!(cols_at(100, 100, g, 8), 16);
+        assert_eq!(cols_at(1600, 400, g, 2), 16);
     }
 
     #[test]
