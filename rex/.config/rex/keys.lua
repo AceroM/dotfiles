@@ -50,7 +50,7 @@ end
 bind("ctrl+alt+shift+j", "agent_next")
 bind("ctrl+alt+shift+k", "agent_next", { direction = "previous" })
 bind("ctrl+alt+shift+[Digit9]", "agent_goto", { index = -1 })
-bind("ctrl+alt+shift+a", "pane.view_activity") -- fn+shift+a: herdr's agents picker
+bind("ctrl+alt+shift+a", "remember_then", { action = "session.switch" }) -- was View Activity, now cmd+p
 bind("ctrl+alt+o", "last_pane")
 bind("ctrl+alt+i", "last_pane")
 

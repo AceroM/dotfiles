@@ -52,8 +52,9 @@ rex.action{
 rex.bind("cmd+j", "remember_then", { action = "session.next" })
 rex.bind("cmd+k", "remember_then", { action = "session.previous" })
 
--- cmd+p is the session switcher (was cmd+k; replaces Go to Anything).
-rex.bind("cmd+p", "remember_then", { action = "session.switch" })
+-- cmd+p is View Activity, the agents picker (was the session switcher, now
+-- ctrl+alt+shift+a in keys.lua; replaces Go to Anything).
+rex.bind("cmd+p", "remember_then", { action = "pane.view_activity" })
 
 -- cmd+b shows the sessions. With tabs above (horizontal) there's no sidebar, so
 -- it opens the toolbar's session menu (Change Session…); with tabs at the side
