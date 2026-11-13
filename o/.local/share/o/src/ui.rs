@@ -285,7 +285,7 @@ fn starting(app: &App, buf: &mut Buffer, y0: u16) {
 /// it went (its first rows), then where it went, then a blank line.
 pub fn entry(app: &App, s: &Sent, width: u16) -> Buffer {
     let p = &app.pal;
-    let w = width.saturating_sub(1).max(1);
+    let w = app.cap(width).saturating_sub(1).max(1);
     let tw = (w as usize).saturating_sub(3).max(4);
     let rows = field::word_rows(&s.text, tw);
     let shown = rows.len().min(ECHO_ROWS);

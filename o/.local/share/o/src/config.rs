@@ -14,11 +14,38 @@
 //! $O_AGENT, when set, names the one to start on instead. Without the
 //! config file, `defaults()`.
 //!
+//! `max_width`, at the top, is the most columns o draws in (the
+//! `claude(opus) > ` included), so a wide pane doesn't stretch the text
+//! across it: DEFAULT_MAX_WIDTH when it's left out, 0 for the pane's whole
+//! width.
+//!
 //! Apart from them, the Claude profile (Profile): which Claude Code config
 //! folder, so which account, the claude configurations start on. o finds
 //! this computer's own; with only ~/.claude there's nothing to pick.
 
 use std::path::PathBuf;
+
+/// Columns o draws in at most, without `max_width`: the text wraps at about
+/// 80, after `claude(opus) > `.
+pub const DEFAULT_MAX_WIDTH: u16 = 100;
+
+/// A `max_width` under this (but not 0) is refused: the prompt's name and
+/// the list's keys need the room.
+const MIN_MAX_WIDTH: u16 = 40;
+
+/// What the config file says.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Config {
+    pub agents: Vec<Agent>,
+    /// The most columns o draws in; 0: the terminal's width.
+    pub max_width: u16,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config { agents: defaults(), max_width: DEFAULT_MAX_WIDTH }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Agent {
@@ -198,17 +225,17 @@ pub fn file() -> PathBuf {
     base.unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")).join("o/config.toml")
 }
 
-/// The configurations, and what was wrong with the file when it couldn't be
-/// used (the defaults are used then).
-pub fn load() -> (Vec<Agent>, Option<String>) {
+/// The config, and what was wrong with the file when it couldn't be used
+/// (the defaults are used then).
+pub fn load() -> (Config, Option<String>) {
     let path = file();
     let shown = shorten(&path);
     match std::fs::read_to_string(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (defaults(), None),
-        Err(e) => (defaults(), Some(format!("{shown}: {e} · using the defaults"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), None),
+        Err(e) => (Config::default(), Some(format!("{shown}: {e} · using the defaults"))),
         Ok(s) => match parse(&s) {
-            Ok(a) => (a, None),
-            Err(e) => (defaults(), Some(format!("{shown}: {e} · using the defaults"))),
+            Ok(c) => (c, None),
+            Err(e) => (Config::default(), Some(format!("{shown}: {e} · using the defaults"))),
         },
     }
 }
@@ -222,12 +249,20 @@ pub fn shorten(path: &std::path::Path) -> String {
     }
 }
 
-/// A config file's `[[agent]]` tables, in order.
-pub fn parse(s: &str) -> Result<Vec<Agent>, String> {
+/// A config file: its `max_width`, and its `[[agent]]` tables, in order.
+pub fn parse(s: &str) -> Result<Config, String> {
     let t: toml::Table = s.parse().map_err(|e: toml::de::Error| e.message().trim().to_string())?;
-    if let Some(k) = t.keys().find(|k| *k != "agent") {
-        return Err(format!("unknown key `{k}` (only [[agent]] tables go here)"));
+    if let Some(k) = t.keys().find(|k| !matches!(k.as_str(), "agent" | "max_width")) {
+        return Err(format!("unknown key `{k}` (max_width, then [[agent]] tables)"));
     }
+    let max_width = match t.get("max_width") {
+        None => DEFAULT_MAX_WIDTH,
+        Some(v) => match v.as_integer() {
+            Some(0) => 0,
+            Some(n) if (MIN_MAX_WIDTH as i64..=u16::MAX as i64).contains(&n) => n as u16,
+            _ => return Err(format!("`max_width` is a number of columns, {MIN_MAX_WIDTH} or more (0: the pane's width)")),
+        },
+    };
     let list = t.get("agent").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or("no [[agent]] in it")?;
     let mut out: Vec<Agent> = Vec::new();
     for (i, a) in list.iter().enumerate() {
@@ -259,7 +294,7 @@ pub fn parse(s: &str) -> Result<Vec<Agent>, String> {
         }
         out.push(agent);
     }
-    Ok(out)
+    Ok(Config { agents: out, max_width })
 }
 
 /// Why o starts on the configuration it does.
@@ -343,7 +378,8 @@ mod tests {
             name = "fable"
             "#,
         )
-        .unwrap();
+        .unwrap()
+        .agents;
         let names: Vec<_> = all.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["claude(opus)", "codex", "fable"]);
         assert_eq!(all[0].command(), "claude --dangerously-skip-permissions --model opus");
@@ -360,6 +396,16 @@ mod tests {
         assert!(err("[[agent]]\nkind = \"codex\"\nargs = \"--yolo\"").contains("isn't a list"));
         assert!(err("[[agent]]\nkind = \"codex\"\n[[agent]]\nkind = \"codex\"").contains("two agents are named codex"));
         assert!(!err("[[agent]\n").is_empty());
+        assert!(err("max_width = 20\n[[agent]]\nkind = \"codex\"").contains("40 or more"));
+        assert!(err("max_width = \"wide\"\n[[agent]]\nkind = \"codex\"").contains("number of columns"));
+    }
+
+    #[test]
+    fn max_width_defaults_to_100_and_0_turns_it_off() {
+        let width = |s: &str| parse(&format!("{s}\n[[agent]]\nkind = \"codex\"")).unwrap().max_width;
+        assert_eq!(width(""), DEFAULT_MAX_WIDTH);
+        assert_eq!(width("max_width = 120"), 120);
+        assert_eq!(width("max_width = 0"), 0);
     }
 
     #[test]

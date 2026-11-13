@@ -14,6 +14,11 @@
 # CLAUDE_CONFIG_DIR=~/.claude-2), and ^n picks the one the claude entries
 # start on: `claude(opus)·2 >`. `o --config` lists them with their limits.
 
+# The most columns o draws in, `claude(opus) > ` included, from the pane's
+# left edge: a wide pane doesn't stretch the text across it. 100 wraps the
+# text at about 80. Left out: 100; 0: the pane's whole width.
+max_width = 100
+
 [[agent]]
 kind = "claude"
 model = "opus"

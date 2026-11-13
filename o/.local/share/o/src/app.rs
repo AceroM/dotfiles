@@ -155,6 +155,8 @@ pub struct Opts {
     pub profile: usize,
     /// Said in a toast at the start: what was wrong with the config file.
     pub notice: Option<String>,
+    /// The most columns o draws in (config.rs); 0: the terminal's width.
+    pub max_width: u16,
 }
 
 pub struct App {
@@ -227,6 +229,8 @@ pub struct App {
     done: Vec<usize>,
     sent_tx: Sender<(usize, Outcome)>,
     sent_rx: Receiver<(usize, Outcome)>,
+    /// The most columns o draws in (config.rs); 0: the terminal's width.
+    max_width: u16,
     pub lay: Lay,
     /// The text's rows, as `lay.text` wraps them.
     pub rows: Vec<Range<usize>>,
@@ -303,6 +307,7 @@ impl App {
             done: Vec::new(),
             sent_tx,
             sent_rx,
+            max_width: opts.max_width,
             lay: Lay::default(),
             rows: Vec::new(),
             scroll: 0,
@@ -352,6 +357,16 @@ impl App {
 
     // ---- layout ------------------------------------------------------------
 
+    /// The columns o draws in on a terminal `w` wide: at most `max_width`,
+    /// from the left, so a wide pane doesn't stretch the text across it.
+    pub fn cap(&self, w: u16) -> u16 {
+        if self.max_width == 0 {
+            w
+        } else {
+            w.min(self.max_width)
+        }
+    }
+
     /// The columns the text wraps to on a terminal `w` wide: less the
     /// `claude(opus) > ` gutter, a column for the cursor past a full row, and
     /// the last column, left alone (writing there leaves the terminal
@@ -363,8 +378,10 @@ impl App {
 
     /// Lay the prompt out for a `width`×`screen_h` terminal: its text's rows,
     /// as many as there are up to the screen, scrolled to keep the cursor in
-    /// view; under them a toast and what's starting, when there are.
+    /// view; under them a toast and what's starting, when there are. All of
+    /// it in the terminal's first `cap(width)` columns.
     pub fn layout(&mut self, width: u16, screen_h: u16) {
+        let width = self.cap(width);
         let tw = self.text_width(width);
         let starting = self.sent.iter().filter(|s| s.outcome.is_none()).count();
         let extra = usize::from(self.toast.is_some()) + starting;
@@ -1767,7 +1784,7 @@ mod tests {
     use crate::rex_theme::{one_dark, Rgb};
 
     fn app(text: &str) -> App {
-        let opts = Opts { cwd: "/tmp".into(), text: text.into(), label: String::new(), agents: crate::config::defaults(), start: 0, profiles: Vec::new(), profile: 0, notice: None };
+        let opts = Opts { cwd: "/tmp".into(), text: text.into(), label: String::new(), agents: crate::config::defaults(), start: 0, profiles: Vec::new(), profile: 0, notice: None, max_width: 0 };
         let mut a = App::new(Palette::new(&one_dark(Rgb(0x28, 0x2c, 0x34))), opts);
         a.live = false;
         a
@@ -2004,6 +2021,25 @@ mod tests {
         a.toast("hi", true);
         a.layout(60, 30);
         assert_eq!(a.lay.height, 3);
+    }
+
+    #[test]
+    fn max_width_keeps_a_wide_pane_from_stretching_the_text() {
+        let mut a = app(&"word ".repeat(60));
+        a.max_width = 100;
+        // 300 wide draws in 100: 83 columns of text after `claude(opus) > `,
+        // and the frame is 99 (the last column left alone, as on any pane).
+        a.layout(300, 30);
+        assert_eq!((a.lay.width, a.lay.text.width), (100, 83));
+        assert_eq!(crate::ui::draw(&a).area.width, 99);
+        assert!(a.rows.iter().all(|r| a.field.text[r.clone()].trim_end().len() <= 83));
+        // Narrower than the cap: the pane's width, as before.
+        a.layout(60, 30);
+        assert_eq!(a.lay.text.width, 43);
+        // 0: no cap.
+        a.max_width = 0;
+        a.layout(300, 30);
+        assert_eq!(a.lay.width, 300);
     }
 
     #[test]

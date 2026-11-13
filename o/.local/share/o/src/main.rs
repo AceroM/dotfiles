@@ -81,7 +81,8 @@ Configurations: ~/.config/o/config.toml lists them, in order, as [[agent]] table
 Without the file: claude(opus) and claude(fable) (--dangerously-skip-permissions), then
 codex (--no-daemon --yolo). o starts on the one picked last (kept in
 ~/.local/state/o/last-agent), else the first; $O_AGENT names one instead
-(O_AGENT=codex).
+(O_AGENT=codex). Above the tables, max_width = 100 (the default) keeps o in the pane's
+first 100 columns, so the text wraps at about 80 on a wide pane; 0 uses the whole width.
 Claude profiles: ~/.claude, then each ~/.claude-NAME Claude Code has run in (a
 .claude.json in it), as `CLAUDE_CONFIG_DIR=~/.claude-2 claude` makes one for a second
 account. ^n picks the one the claude configurations start on, shown after the name
@@ -183,11 +184,12 @@ fn main() -> ExitCode {
         let theme = rex_theme::theme(&["O_BG", "AL_BG", "JV_BG"]);
         return viewer::run(block, Palette::new(&theme));
     }
-    let (agents, notice) = config::load();
+    let (config, notice) = config::load();
     let profiles = config::profiles();
     if cli.config {
-        return show_config(&agents, &profiles, notice.as_deref());
+        return show_config(&config, &profiles, notice.as_deref());
     }
+    let config::Config { agents, max_width } = config;
     let (text, label) = match start_text(&cli.words) {
         Ok(t) => t,
         Err(e) => {
@@ -200,7 +202,7 @@ fn main() -> ExitCode {
     let theme = rex_theme::theme(&["O_BG", "AL_BG", "JV_BG"]);
     let (start, _) = config::start(&agents);
     let (profile, _) = config::start_profile(&profiles);
-    let mut app = App::new(Palette::new(&theme), Opts { cwd, text, label, agents, start, profiles, profile, notice });
+    let mut app = App::new(Palette::new(&theme), Opts { cwd, text, label, agents, start, profiles, profile, notice, max_width });
     if let Some((w, h)) = cli.snapshot {
         app.gfx = cli.cell.map(|(cell_w, cell_h)| gfx::Gfx { cell_w, cell_h });
         return snapshot(app, w, h, &cli.keys);
@@ -228,7 +230,8 @@ fn main() -> ExitCode {
 
 /// `o --config`: where the configurations come from, and each one's key,
 /// name and command; then the Claude profiles.
-fn show_config(agents: &[config::Agent], profiles: &[config::Profile], notice: Option<&str>) -> ExitCode {
+fn show_config(config: &config::Config, profiles: &[config::Profile], notice: Option<&str>) -> ExitCode {
+    let agents = &config.agents;
     let path = config::shorten(&config::file());
     match notice {
         Some(e) => println!("{e}\n"),
@@ -249,6 +252,10 @@ fn show_config(agents: &[config::Agent], profiles: &[config::Profile], notice: O
         println!("  {key}  {}{}  {}{first}", a.name, " ".repeat(pad), a.command());
     }
     println!("\n⇧tab goes to the next one.");
+    match config.max_width {
+        0 => println!("o draws across the whole pane (max_width = 0)."),
+        n => println!("o draws in at most {n} columns (max_width)."),
+    }
     show_profiles(profiles);
     if notice.is_some() {
         ExitCode::FAILURE
