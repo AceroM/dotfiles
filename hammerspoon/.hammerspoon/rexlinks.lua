@@ -13,7 +13,9 @@
 --
 -- Taken: ~/x, ./x, ../x, /abs, a/b/c, name.ext, .dotfile, Makefile and kin,
 -- with :line:col, #L12, (12,5) or `", line 12` after them, @path, file:// URLs,
--- and paths the terminal wrapped onto the next line. Anything else, web URLs
+-- and paths the terminal wrapped onto the next line. Web addresses written
+-- without a scheme (app.example.site/booking) are taken too, and rex-open sends
+-- them to the browser when they name no file. Anything else, https:// URLs
 -- included, reaches Rex as usual (cmd-click still opens links in the browser).
 --
 --   rexlinks.hit({ x = 400, y = 300 })  -- what a click there would open

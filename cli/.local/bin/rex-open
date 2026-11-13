@@ -26,6 +26,10 @@ Quitting a floating Neovim closes its pane.
 --float on a web page (.html, .htm) opens it in the default browser instead;
 without --float it goes to Neovim like any other file, so it stays editable.
 
+A location that names no file but reads as a web address without its scheme
+(app.example.site/booking, example.com, localhost:3000/x) opens in the default
+browser, with or without --float.
+
 Hammerspoon's cmd-click (--float) and ctrl-click call this with --label and
 --line-text read from the pane under the pointer: hammerspoon/.hammerspoon/rexlinks.lua.
 """
@@ -53,6 +57,18 @@ SEARCH_PATH = os.pathsep.join([os.environ.get("PATH", ""), str(Path.home() / ".l
 FLOAT_BOUNDS = [0.08, 0.06, 0.84, 0.88]
 # What cmd-click (--float) hands to the browser rather than Neovim.
 WEB_PAGES = {".html", ".htm"}
+# A web address with no scheme: example.com, app.example.site/booking,
+# example.com:8443, localhost:3000/x. Lowercase only, so Foo.app/Contents stays a path.
+WEB_ADDRESS = re.compile(
+    r"(?P<host>localhost|\d{1,3}(?:\.\d{1,3}){3}|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?P<tld>[a-z]{2,63}))"
+    r"(?P<port>:\d{1,5})?(?P<rest>[/?#].*)?")
+# The top-level domains taken without a path after them. Most of the rest are
+# file extensions as well: README.md:12, install.sh, main.rs, libz.so, x.cc.
+WEB_TLDS = {
+    "com", "org", "net", "edu", "gov", "io", "dev", "app", "ai", "co", "site", "page", "xyz",
+    "me", "gg", "tv", "fm", "ly", "to", "us", "uk", "ca", "de", "fr", "eu", "info", "biz",
+    "cloud", "tech", "link", "live", "online", "store", "shop", "blog", "news", "design",
+}
 LAUNCH_SERVICES = Path.home() / "Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist"
 
 
@@ -113,6 +129,23 @@ def parse_location(value, line_text=""):
     if not value or "\x00" in value:
         raise ValueError(f"Not a file location: {raw!r}")
     return value, line, column
+
+
+def web_address(value):
+    """The URL a clicked web address with no scheme names: https, or http for
+    localhost and IPs. None unless it has a path after the host or ends in one
+    of WEB_TLDS (localhost and IPs need a port or a path)."""
+    value = value.strip().strip("`'\"<>(){},;").rstrip(".,;:")
+    match = WEB_ADDRESS.fullmatch(value)
+    if not match:
+        return None
+    local = match["tld"] is None
+    if local:
+        if not (match["port"] or match["rest"]):
+            return None
+    elif not (match["rest"] or "").startswith("/") and match["tld"] not in WEB_TLDS:
+        return None
+    return ("http://" if local else "https://") + value
 
 
 def git_root(directory):
@@ -400,8 +433,9 @@ def main():
     tab = tab_panes(panes, source)
     directories = [tab[-1]["cwd"], *[p["cwd"] for p in tab[:-1]]]
 
+    locations = [args.location, *args.alternates]
     target = None
-    for location in [args.location, *args.alternates]:
+    for location in locations:
         try:
             path, line, column = parse_location(location, args.line_text)
         except ValueError:
@@ -410,7 +444,17 @@ def main():
         if target:
             break
     if target is None:
-        raise ValueError(f"Not found: {args.location} (from {directories[0] or 'unknown directory'})")
+        # Files first, so a path never goes to the browser: only now is
+        # app.example.site/booking a web address.
+        url = next(filter(None, map(web_address, locations)), None)
+        if url is None:
+            raise ValueError(f"Not found: {args.location} (from {directories[0] or 'unknown directory'})")
+        if args.dry_run:
+            print(json.dumps({"url": url, "source": source, "directories": directories,
+                              "browser": default_browser() or "default app"}, indent=2))
+        else:
+            print("Opened " + open_in_browser(url))
+        return
     if args.float and target.is_file() and target.suffix.lower() in WEB_PAGES:
         if args.dry_run:
             print(json.dumps({"target": str(target), "source": source, "directories": directories,
