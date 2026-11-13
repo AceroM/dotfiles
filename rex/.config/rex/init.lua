@@ -55,6 +55,30 @@ rex.bind("cmd+k", "remember_then", { action = "session.previous" })
 -- cmd+p is the session switcher (was cmd+k; replaces Go to Anything).
 rex.bind("cmd+p", "remember_then", { action = "session.switch" })
 
+-- cmd+b shows the sessions. With tabs above (horizontal) there's no sidebar, so
+-- it opens the toolbar's session menu (Change Session…); with tabs at the side
+-- it folds the sidebar. The app keeps its layout in its own defaults, unset
+-- until it's changed from the default, horizontal.
+-- Try it without the app: rex do sessions_toggle dry_run=1 --json
+rex.action{
+  name = "sessions_toggle",
+  title = "Show Sessions",
+  category = "Session",
+  keywords = "session menu sidebar toggle horizontal vertical tabs toolbar",
+  run = function(ctx, args)
+    local r = rex.exec({ "defaults", "read", "com.superlogical.rex", "Workspace.tabStyle" }, { timeout = 2 })
+    local style = r and r.ok and r.stdout:match("%S+") or "horizontal"
+    local action = style == "vertical" and "client.sidebar.toggle" or "session.switch"
+    local result = { tab_style = style, action = action }
+    if args.dry_run then return result end
+
+    if action == "session.switch" then remember(ctx) end
+    rex.client.queue(action)
+    return result
+  end,
+}
+rex.bind("cmd+b", "sessions_toggle")
+
 local TERMINAL = "com.superlogical.terminal"
 
 -- cmd+1 … cmd+8 show that tab of the session you're in, and cmd+9 its last
@@ -632,6 +656,27 @@ rex.action{
   end,
 }
 rex.bind("ctrl+alt+\\", "stash_session")
+
+-- cmd+shift+y copies the session ID of the agent in the focused pane, the one
+-- `claude --resume` / `codex resume` take (cmd+y copies the pane's own ID).
+-- ~/.local/bin/rex-agent-id reads it off the agent's process, and falls back
+-- to the tab's only agent when focus is on a shell in a split.
+-- Try it without the key: rex do copy_agent_session_id --json
+rex.action{
+  name = "copy_agent_session_id",
+  title = "Copy Agent Session ID",
+  category = "Pane",
+  keywords = "agent claude codex session id copy resume uuid clipboard",
+  run = function(ctx)
+    local argv = { "-s", ctx.session_id, "--copy", "--json" }
+    if ctx.block_id then
+      table.insert(argv, 3, "-b")
+      table.insert(argv, 4, ctx.block_id)
+    end
+    return rex.json.decode(run_script("rex-agent-id", argv))
+  end,
+}
+rex.bind("cmd+shift+y", "copy_agent_session_id")
 
 -- The fn layer: actions.lua has the herdr moves the keys above don't cover (jumps
 -- by position and initial, walking agents, starting one, the diff popup), which API

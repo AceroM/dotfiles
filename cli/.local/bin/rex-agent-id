@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Print the session ID of the coding agent (Claude Code, Codex) in a Rex pane.
+
+    rex-agent-id                 the agent in this pane ($REX_SESSION, $REX_BLOCK)
+    rex-agent-id -s S -b B       pane B of session S, which is what a key binding
+                                 passes, since it has no REX_* of its own
+    rex-agent-id -s S            session S's active tab's focused pane
+    rex-agent-id --copy          put it on the clipboard too
+    rex-agent-id --json          {"session_id", "agent", "cwd", "block_id"}
+
+It's the ID `claude --resume` and `codex resume` take. When the pane isn't an
+agent (focus drifted to a shell in a split) it's the tab's agent, if the tab has
+only one. The ID is read off the agent process the way rex-stash reads it
+(Claude's PID registry, else the transcript the process holds open), never by
+cwd or mtime, so it's right when several agents share a folder.
+
+Errors go to ~/.local/state/rex-agent-id.log as well as stderr, since a key
+binding has nowhere to print them. Standard library only.
+"""
+
+import argparse
+import datetime
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from importlib.machinery import SourceFileLoader
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOG = os.path.join(HOME, ".local/state/rex-agent-id.log")
+
+
+def log(message):
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a") as file:
+            file.write(f"{datetime.datetime.now():%F %T} {message}\n")
+    except OSError:
+        pass
+
+
+def fail(message):
+    log(f"error: {message}")
+    print(f"rex-agent-id: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def load_stash():
+    """rex-stash (next to this file), for its agent-process and session-ID readers."""
+    path = os.path.join(HERE, "rex-stash")
+    loader = SourceFileLoader("rex_stash", path)
+    spec = importlib.util.spec_from_loader("rex_stash", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.fail = fail  # its errors under this script's name, and logged
+    return module
+
+
+def rex_json(stash, *args, timeout=30):
+    result = stash.run(list(args), timeout=timeout)
+    if result.returncode != 0:
+        fail(f"{os.path.basename(args[0])} {' '.join(args[1:])}: {result.stderr.strip() or result.returncode}")
+    try:
+        return json.loads(result.stdout or "null")
+    except ValueError:
+        fail(f"{os.path.basename(args[0])}: not JSON")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="rex-agent-id", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("-s", "--session", help="the pane's session (default: $REX_SESSION)")
+    parser.add_argument("-b", "--block", help="the pane (default: $REX_BLOCK)")
+    parser.add_argument("--copy", action="store_true", help="put the ID on the clipboard")
+    parser.add_argument("--json", action="store_true", help="print the result as JSON")
+    args = parser.parse_args()
+
+    stash = load_stash()
+    session = args.session or os.environ.get("REX_SESSION")
+    block = args.block or (None if args.session else os.environ.get("REX_BLOCK"))
+    if not session:
+        fail("not inside a Rex pane: pass -s SESSION -b BLOCK")
+    if not block:
+        view = rex_json(stash, "rex", "session", "inspect", session, "--json") or {}
+        session = view.get("session_id") or session
+        active = next((w for w in view.get("windows") or []
+                       if w.get("window_id") == view.get("active_window_id")), {})
+        block = active.get("focused_block_id")
+        if not block:
+            fail(f"session {session} has no focused pane")
+
+    exe = os.path.join(HERE, "rex-agents")
+    panes = rex_json(stash, exe if os.access(exe, os.X_OK) else "rex-agents", "--all", "--json") or []
+    source = next((p for p in panes if p.get("block_id") == block), None)
+    if source is None:
+        fail(f"pane {block} not found in Rex")
+    agent = source
+    if not source.get("agent"):
+        tab = [p for p in panes if p.get("window_id") == source.get("window_id") and p.get("agent")]
+        if len(tab) != 1:
+            fail(f"no agent in pane {block}" + (f" and {len(tab)} in its tab" if tab else " or its tab"))
+        agent = tab[0]
+
+    kind = agent["agent"]
+    pid = stash.agent_pid(agent.get("pid"), kind, stash.process_table())
+    found = stash.session_from_process(pid, kind) if pid else None
+    if not found:
+        fail(f"no session ID for the {kind} in pane {agent['block_id']}"
+             + ("" if pid else f" (no {kind} process under pid {agent.get('pid')})"))
+    cwd = (stash.claude_registry(pid).get("cwd") if kind == "claude" else "") or (
+        stash.process_cwd(pid)) or agent.get("cwd") or ""
+
+    if args.copy:
+        try:
+            subprocess.run(["/usr/bin/pbcopy"], input=found, text=True, check=True, timeout=5)
+        except (OSError, subprocess.SubprocessError) as error:
+            fail(f"pbcopy: {error}")
+    if args.json:
+        print(json.dumps({"session_id": found, "agent": kind, "cwd": cwd, "block_id": agent["block_id"]}))
+    else:
+        print(found)
+
+
+if __name__ == "__main__":
+    main()
