@@ -44,6 +44,7 @@ Runs inside a Rex terminal (oc is the same prompt for Herdr). The keys:
   ⇧⏎ ⌥⏎ ^j newline · ^p plan mode (sends `/plan …`)
   ↑ on an empty prompt selects a created session · ↑ ↓ choose · ⏎ focus · esc compose
   ⇧tab the next configuration (round to the first) · ^1 … ^9 the Nth
+  ^n the next Claude profile (account), when there's more than ~/.claude: see below
   ^v pastes the clipboard's image (⌘V too, with only an image on it); a file dragged
   in from Finder is attached. Either is an [Image #N] tag, its file listed at the end
   of what's sent (not drawn).
@@ -81,6 +82,12 @@ Without the file: claude(opus) and claude(fable) (--dangerously-skip-permissions
 codex (--no-daemon --yolo). o starts on the one picked last (kept in
 ~/.local/state/o/last-agent), else the first; $O_AGENT names one instead
 (O_AGENT=codex).
+Claude profiles: ~/.claude, then each ~/.claude-NAME Claude Code has run in (a
+.claude.json in it), as `CLAUDE_CONFIG_DIR=~/.claude-2 claude` makes one for a second
+account. ^n picks the one the claude configurations start on, shown after the name
+(claude(opus)·2) and run with its CLAUDE_CONFIG_DIR; the toast says its limits as its
+status line last saw them. Kept in ~/.local/state/o/last-profile; $O_PROFILE names one
+instead (O_PROFILE=2, O_PROFILE=main). With ~/.claude alone there's nothing to pick.
 ";
 
 struct Cli {
@@ -177,8 +184,9 @@ fn main() -> ExitCode {
         return viewer::run(block, Palette::new(&theme));
     }
     let (agents, notice) = config::load();
+    let profiles = config::profiles();
     if cli.config {
-        return show_config(&agents, notice.as_deref());
+        return show_config(&agents, &profiles, notice.as_deref());
     }
     let (text, label) = match start_text(&cli.words) {
         Ok(t) => t,
@@ -191,7 +199,8 @@ fn main() -> ExitCode {
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let theme = rex_theme::theme(&["O_BG", "AL_BG", "JV_BG"]);
     let (start, _) = config::start(&agents);
-    let mut app = App::new(Palette::new(&theme), Opts { cwd, text, label, agents, start, notice });
+    let (profile, _) = config::start_profile(&profiles);
+    let mut app = App::new(Palette::new(&theme), Opts { cwd, text, label, agents, start, profiles, profile, notice });
     if let Some((w, h)) = cli.snapshot {
         app.gfx = cli.cell.map(|(cell_w, cell_h)| gfx::Gfx { cell_w, cell_h });
         return snapshot(app, w, h, &cli.keys);
@@ -218,8 +227,8 @@ fn main() -> ExitCode {
 }
 
 /// `o --config`: where the configurations come from, and each one's key,
-/// name and command.
-fn show_config(agents: &[config::Agent], notice: Option<&str>) -> ExitCode {
+/// name and command; then the Claude profiles.
+fn show_config(agents: &[config::Agent], profiles: &[config::Profile], notice: Option<&str>) -> ExitCode {
     let path = config::shorten(&config::file());
     match notice {
         Some(e) => println!("{e}\n"),
@@ -240,11 +249,40 @@ fn show_config(agents: &[config::Agent], notice: Option<&str>) -> ExitCode {
         println!("  {key}  {}{}  {}{first}", a.name, " ".repeat(pad), a.command());
     }
     println!("\n⇧tab goes to the next one.");
+    show_profiles(profiles);
     if notice.is_some() {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `o --config`'s Claude profiles: each one's folder and limits, and the
+/// one o starts on.
+fn show_profiles(profiles: &[config::Profile]) {
+    if profiles.len() < 2 {
+        println!("\nOne Claude profile here, ~/.claude. A ~/.claude-NAME folder Claude Code has run in");
+        println!("(CLAUDE_CONFIG_DIR=~/.claude-NAME claude) is another, for ^n.");
+        return;
+    }
+    println!("\nClaude profiles, for the claude configurations (CLAUDE_CONFIG_DIR):\n");
+    let (start, why) = config::start_profile(profiles);
+    let why = match why {
+        config::Why::Env => " ($O_PROFILE)",
+        config::Why::Last => " (picked last)",
+        config::Why::First => "",
+    };
+    let shown: Vec<(String, String)> = profiles.iter().map(|p| (p.name.clone(), config::shorten(&p.dir))).collect();
+    let w = shown.iter().map(|(n, _)| unicode_width::UnicodeWidthStr::width(n.as_str())).max().unwrap_or(0);
+    let wd = shown.iter().map(|(_, d)| unicode_width::UnicodeWidthStr::width(d.as_str())).max().unwrap_or(0);
+    for (i, (p, (name, dir))) in profiles.iter().zip(&shown).enumerate() {
+        let first = if i == start { format!("  ← o starts here{why}") } else { String::new() };
+        let usage = p.usage().unwrap_or_default();
+        let pad = w - unicode_width::UnicodeWidthStr::width(name.as_str());
+        let padd = wd - unicode_width::UnicodeWidthStr::width(dir.as_str());
+        println!("  {name}{}  {dir}{}  {usage}{first}", " ".repeat(pad), " ".repeat(padd));
+    }
+    println!("\n^n goes to the next one.");
 }
 
 fn run(app: &mut App) -> io::Result<()> {

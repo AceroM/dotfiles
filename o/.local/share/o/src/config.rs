@@ -13,6 +13,10 @@
 //!
 //! $O_AGENT, when set, names the one to start on instead. Without the
 //! config file, `defaults()`.
+//!
+//! Apart from them, the Claude profile (Profile): which Claude Code config
+//! folder, so which account, the claude configurations start on. o finds
+//! this computer's own; with only ~/.claude there's nothing to pick.
 
 use std::path::PathBuf;
 
@@ -24,6 +28,9 @@ pub struct Agent {
     pub kind: String,
     /// The agent's own arguments, `--model MODEL` last when there's a model.
     pub args: Vec<String>,
+    /// Set for its process alone: a Claude profile's CLAUDE_CONFIG_DIR
+    /// (Agent::on).
+    pub env: Vec<(String, String)>,
 }
 
 impl Agent {
@@ -37,13 +44,141 @@ impl Agent {
             (None, Some(m)) => format!("{kind}({m})"),
             (None, None) => kind.to_string(),
         };
-        Agent { name, kind: kind.to_string(), args }
+        Agent { name, kind: kind.to_string(), args, env: Vec::new() }
     }
 
-    /// The command it runs, as a shell would read it.
-    pub fn command(&self) -> String {
-        std::iter::once(self.kind.as_str()).chain(self.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ")
+    /// This configuration on Claude profile `p`: a claude one gets the
+    /// profile's CLAUDE_CONFIG_DIR, and its name after its own
+    /// (`claude(opus)·2`). On the main profile, and for other kinds, it's
+    /// as it is.
+    pub fn on(&self, p: Option<&Profile>) -> Agent {
+        let mut a = self.clone();
+        if let Some(p) = p.filter(|p| !p.is_main() && self.kind == "claude") {
+            a.name = format!("{}·{}", self.name, p.name);
+            a.env.push(("CLAUDE_CONFIG_DIR".into(), p.dir.to_string_lossy().into_owned()));
+        }
+        a
     }
+
+    /// What runs: `env K=V… kind args…`, or `kind args…` with no env.
+    pub fn argv(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if !self.env.is_empty() {
+            v.push("env".to_string());
+            v.extend(self.env.iter().map(|(k, val)| format!("{k}={val}")));
+        }
+        v.push(self.kind.clone());
+        v.extend(self.args.iter().cloned());
+        v
+    }
+
+    /// The command it runs, as a shell would read it (paths under $HOME
+    /// as `~`).
+    pub fn command(&self) -> String {
+        let env = self.env.iter().map(|(k, v)| format!("{k}={}", shorten(std::path::Path::new(v))));
+        env.chain(std::iter::once(self.kind.clone())).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
+    }
+}
+
+/// A Claude Code profile: a config folder with its own sign-in (so its own
+/// subscription and limits), as `c2` runs Claude Code with
+/// CLAUDE_CONFIG_DIR=~/.claude-2. o finds them (profiles()): ~/.claude,
+/// the main one, then each ~/.claude-NAME that Claude Code has run in (a
+/// .claude.json in it). ^n goes to the next; the claude configurations
+/// start on the one o is on. Like the configuration, o remembers the one
+/// picked last ($XDG_STATE_HOME/o/last-profile), and $O_PROFILE names one
+/// instead (O_PROFILE=2, O_PROFILE=main).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Profile {
+    /// `main` for ~/.claude; NAME for ~/.claude-NAME.
+    pub name: String,
+    /// Its folder: CLAUDE_CONFIG_DIR, for all but the main one.
+    pub dir: PathBuf,
+}
+
+pub const MAIN: &str = "main";
+
+impl Profile {
+    pub fn is_main(&self) -> bool {
+        self.name == MAIN
+    }
+
+    /// Its limits as its status line last saw them (rate-limits.json in its
+    /// folder): `5h 12% · 7d 67%`. A window past its reset is left out
+    /// (what it said is over). None without the file, or with nothing in it.
+    pub fn usage(&self) -> Option<String> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        usage(&std::fs::read_to_string(self.dir.join("rate-limits.json")).ok()?, now)
+    }
+}
+
+fn usage(json: &str, now: f64) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let parts: Vec<String> = [("five_hour", "5h"), ("seven_day", "7d")]
+        .iter()
+        .filter_map(|(key, short)| {
+            let pct = v[key]["used_percentage"].as_f64()?;
+            let resets = v[key]["resets_at"].as_f64().unwrap_or(f64::MAX);
+            (resets > now).then(|| format!("{short} {pct:.0}%"))
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+/// This computer's Claude profiles: the main one first, then the others by
+/// name.
+pub fn profiles() -> Vec<Profile> {
+    find_profiles(&home())
+}
+
+/// The main profile alone (~/.claude), without looking for others.
+pub fn find_main() -> Vec<Profile> {
+    vec![Profile { name: MAIN.into(), dir: home().join(".claude") }]
+}
+
+fn find_profiles(home: &std::path::Path) -> Vec<Profile> {
+    let mut more: Vec<Profile> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.strip_prefix(".claude-")?.to_string();
+            let dir = e.path();
+            let ok = !name.is_empty() && name != MAIN && !name.contains(char::is_whitespace) && dir.join(".claude.json").is_file();
+            ok.then_some(Profile { name, dir })
+        })
+        .collect();
+    more.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut all = vec![Profile { name: MAIN.into(), dir: home.join(".claude") }];
+    all.extend(more);
+    all
+}
+
+/// The profile o starts on: the one $O_PROFILE names, else the one picked
+/// last, else the main one.
+pub fn start_profile(profiles: &[Profile]) -> (usize, Why) {
+    let env = std::env::var("O_PROFILE").ok();
+    pick_profile(profiles, env.as_deref(), read_state("last-profile").as_deref())
+}
+
+fn pick_profile(profiles: &[Profile], env: Option<&str>, last: Option<&str>) -> (usize, Why) {
+    let at = |n: &str| profiles.iter().position(|p| p.name == n.trim());
+    if let Some(i) = env.map(str::trim).filter(|s| !s.is_empty()).and_then(at) {
+        return (i, Why::Env);
+    }
+    match last.and_then(at) {
+        Some(i) => (i, Why::Last),
+        None => (0, Why::First),
+    }
+}
+
+/// Remember profile `name` as the one picked last (^n).
+pub fn remember_profile(name: &str) {
+    write_state("last-profile", name);
 }
 
 /// Without a config file: Claude Code on Opus, on Fable, then Codex (as the
@@ -139,7 +274,7 @@ pub enum Why {
 /// last, else the first.
 pub fn start(agents: &[Agent]) -> (usize, Why) {
     let env = std::env::var("O_AGENT").ok();
-    pick_start(agents, env.as_deref(), last().as_deref())
+    pick_start(agents, env.as_deref(), read_state("last-agent").as_deref())
 }
 
 /// `env` by name, else the first of that kind; `last` by name only (a
@@ -157,22 +292,28 @@ fn pick_start(agents: &[Agent], env: Option<&str>, last: Option<&str>) -> (usize
     }
 }
 
-fn last_file() -> PathBuf {
+/// $XDG_STATE_HOME/o/FILE (else ~/.local/state/o/FILE).
+fn state_file(file: &str) -> PathBuf {
     let base = std::env::var_os("XDG_STATE_HOME").filter(|s| !s.is_empty()).map(PathBuf::from);
-    base.unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")).join("o/last-agent")
+    base.unwrap_or_else(|| home().join(".local/state")).join("o").join(file)
 }
 
-/// The configuration picked last, by name.
-fn last() -> Option<String> {
-    std::fs::read_to_string(last_file()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+/// What was picked last (last-agent, last-profile), by name.
+fn read_state(file: &str) -> Option<String> {
+    std::fs::read_to_string(state_file(file)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Remember `name` as the one picked last (⇧tab, ^1…^9). Written whole to a
-/// temp file, then renamed, so another o starting never reads half of it.
+/// Remember `name` as the configuration picked last (⇧tab, ^1…^9).
 pub fn remember(name: &str) {
-    let path = last_file();
+    write_state("last-agent", name);
+}
+
+/// Written whole to a temp file, then renamed, so another o starting never
+/// reads half of it.
+fn write_state(file: &str, name: &str) {
+    let path = state_file(file);
     let Some(dir) = path.parent() else { return };
-    let tmp = dir.join(format!(".last-agent.{}", std::process::id()));
+    let tmp = dir.join(format!(".{file}.{}", std::process::id()));
     let ok = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&tmp, format!("{name}\n")));
     if ok.and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -232,6 +373,61 @@ mod tests {
         assert_eq!(pick_start(&all, Some("codex"), Some("claude(fable)")), (2, Why::Env));
         assert_eq!(pick_start(&all, Some("claude"), Some("codex")), (0, Why::Env));
         assert_eq!(pick_start(&all, Some("gemini"), Some("codex")), (2, Why::Last));
+    }
+
+    #[test]
+    fn profiles_are_the_main_folder_then_each_claude_dash_name_claude_ran_in() {
+        let home = std::env::temp_dir().join(format!("o-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for (dir, used) in [(".claude", true), (".claude-work", true), (".claude-2", true), (".claude-empty", false), (".claude-main", true)] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+            if used {
+                std::fs::write(home.join(dir).join(".claude.json"), "{}").unwrap();
+            }
+        }
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+        let names: Vec<_> = find_profiles(&home).into_iter().map(|p| p.name).collect();
+        let _ = std::fs::remove_dir_all(&home);
+        // ~/.claude-empty never ran Claude Code; ~/.claude-main would be
+        // taken for the main one.
+        assert_eq!(names, ["main", "2", "work"]);
+        // No home folder at all: the main one, as o was before profiles.
+        assert_eq!(find_profiles(std::path::Path::new("/nonexistent")).len(), 1);
+    }
+
+    #[test]
+    fn a_claude_configuration_runs_on_the_profile() {
+        let all = defaults();
+        let main = Profile { name: MAIN.into(), dir: "/h/.claude".into() };
+        let two = Profile { name: "2".into(), dir: "/h/.claude-2".into() };
+        assert_eq!(all[0].on(Some(&main)), all[0]);
+        assert_eq!(all[0].on(None), all[0]);
+        let on2 = all[0].on(Some(&two));
+        assert_eq!(on2.name, "claude(opus)·2");
+        assert_eq!(on2.argv(), ["env", "CLAUDE_CONFIG_DIR=/h/.claude-2", "claude", "--dangerously-skip-permissions", "--model", "opus"]);
+        assert_eq!(all[0].argv(), ["claude", "--dangerously-skip-permissions", "--model", "opus"]);
+        // Codex has no Claude profile.
+        assert_eq!(all[2].on(Some(&two)), all[2]);
+    }
+
+    #[test]
+    fn starts_on_o_profile_else_the_last_else_main() {
+        let ps = vec![Profile { name: MAIN.into(), dir: "/a".into() }, Profile { name: "2".into(), dir: "/b".into() }];
+        assert_eq!(pick_profile(&ps, None, None), (0, Why::First));
+        assert_eq!(pick_profile(&ps, None, Some("2\n")), (1, Why::Last));
+        assert_eq!(pick_profile(&ps, Some("main"), Some("2")), (0, Why::Env));
+        // Gone since (another computer, or the folder removed): main.
+        assert_eq!(pick_profile(&ps, Some("work"), Some("3")), (0, Why::First));
+    }
+
+    #[test]
+    fn usage_leaves_out_windows_past_their_reset() {
+        let json = r#"{"five_hour":{"used_percentage":12.4,"resets_at":100},"seven_day":{"used_percentage":67,"resets_at":900},"updated_at":50}"#;
+        assert_eq!(usage(json, 60.0).as_deref(), Some("5h 12% · 7d 67%"));
+        assert_eq!(usage(json, 200.0).as_deref(), Some("7d 67%"));
+        assert_eq!(usage(json, 1000.0), None);
+        assert_eq!(usage(r#"{"five_hour":null,"seven_day":{"used_percentage":3,"resets_at":900}}"#, 0.0).as_deref(), Some("7d 3%"));
+        assert_eq!(usage("not json", 0.0), None);
     }
 
     #[test]

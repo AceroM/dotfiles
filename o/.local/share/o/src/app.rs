@@ -29,7 +29,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::Agent;
+use crate::config::{Agent, Profile};
 use crate::drafts::{self, Draft};
 use crate::field::{self, Field};
 use crate::gfx::{self, Gfx, Images, Pic};
@@ -149,6 +149,10 @@ pub struct Opts {
     /// The configurations (config.rs), and the one to start on.
     pub agents: Vec<Agent>,
     pub start: usize,
+    /// This computer's Claude profiles (config.rs), and the one to start
+    /// on. Empty: the main one only.
+    pub profiles: Vec<Profile>,
+    pub profile: usize,
     /// Said in a toast at the start: what was wrong with the config file.
     pub notice: Option<String>,
 }
@@ -163,6 +167,10 @@ pub struct App {
     pub agents: Vec<Agent>,
     /// Which of `agents` ⏎ starts (⇧tab the next, ^1…^9 the Nth).
     pub agent: usize,
+    /// The Claude profiles, the main one first; and the one the claude
+    /// configurations start on (^n the next).
+    pub profiles: Vec<Profile>,
+    pub profile: usize,
     /// ^p: it goes as `/plan …`.
     pub plan: bool,
     /// What ^c or esc esc cleared, or ⏎ sent: ^z brings it back.
@@ -251,6 +259,8 @@ impl App {
         let toast = opts.notice.map(|m| (m, false, Instant::now()));
         let agents = if opts.agents.is_empty() { crate::config::defaults() } else { opts.agents };
         let agent = opts.start.min(agents.len() - 1);
+        let profiles = if opts.profiles.is_empty() { crate::config::find_main() } else { opts.profiles };
+        let profile = opts.profile.min(profiles.len() - 1);
         App {
             pal,
             field,
@@ -259,6 +269,8 @@ impl App {
             label: opts.label,
             agents,
             agent,
+            profiles,
+            profile,
             plan: false,
             cleared: None,
             killed: String::new(),
@@ -310,6 +322,12 @@ impl App {
         &self.agents[self.agent]
     }
 
+    /// `a` as it starts: on the Claude profile o is on (`claude(opus)·2`,
+    /// with its CLAUDE_CONFIG_DIR).
+    fn launch(&self, a: &Agent) -> Agent {
+        a.on(self.profiles.get(self.profile))
+    }
+
     /// What's left of the text on its first row: the configuration ⏎
     /// starts, then `>` (`◇` in a draft): `claude(opus) >`. A reply, which
     /// goes to an agent already running, is `◇` only; so is a terminal
@@ -320,7 +338,7 @@ impl App {
 
     fn prefix_at(&self, width: u16) -> String {
         let glyph = if self.editing.is_some() { "◇" } else { ">" };
-        let name = &self.agent().name;
+        let name = &self.launch(self.agent()).name;
         let reply = self.editing.as_ref().is_some_and(|d| d.reply.is_some());
         if reply || (width as usize) < name.width() + 4 + NAMED_MIN_TEXT {
             return glyph.to_string();
@@ -791,6 +809,8 @@ impl App {
                     self.toast(format!("there's no configuration {} · o --config lists them", n + 1), false);
                 }
             }
+            // ^n: the next Claude profile (account), round to the main one.
+            KeyCode::Char('n') if ctrl => self.next_profile(),
             KeyCode::Char('p') if ctrl => {
                 self.plan = !self.plan;
                 self.toast(if self.plan { "plan mode: sends `/plan …`" } else { "plan mode off" }, true);
@@ -915,6 +935,28 @@ impl App {
         self.agent = n;
     }
 
+    /// ^n: the next Claude profile (round to the main one) is the one the
+    /// claude configurations start on, and where o starts next time. The
+    /// toast says which, and its limits as its status line last saw them.
+    fn next_profile(&mut self) {
+        if self.editing.as_ref().is_some_and(|d| d.reply.is_some()) {
+            return self.toast("a reply goes to the agent it answers", false);
+        }
+        if self.profiles.len() < 2 {
+            return self.toast("one Claude profile here (~/.claude) · a ~/.claude-NAME folder Claude Code ran in is another", false);
+        }
+        self.profile = (self.profile + 1) % self.profiles.len();
+        let p = &self.profiles[self.profile];
+        if self.live {
+            crate::config::remember_profile(&p.name);
+        }
+        let usage = if self.live { p.usage() } else { None };
+        let usage = usage.map(|u| format!(" · {u}")).unwrap_or_default();
+        let only = if self.agent().kind == "claude" { "" } else { " · for the claude configurations" };
+        let msg = format!("Claude profile {} ({}){usage}{only}", p.name, crate::config::shorten(&p.dir));
+        self.toast(msg, true);
+    }
+
     /// Which configuration draft `d` starts: the one it names, else the
     /// first of its kind. None when neither is configured.
     fn agent_of(&self, d: &Draft) -> Option<usize> {
@@ -969,7 +1011,7 @@ impl App {
         let prompt = if self.plan { format!("/plan {body}") } else { body };
         let images = self.images.clone();
         self.remember(&text, &images);
-        let agent = self.agent().clone();
+        let agent = self.launch(self.agent());
         let n = self.sent.len();
         let tagged = drafts::tagged(&text, &images);
         self.sent.push(Sent { name: agent.name.clone(), text: text.clone(), plan: self.plan, outcome: None, images: tagged });
@@ -1247,7 +1289,7 @@ impl App {
                 }
             }
             None => {
-                let agent = self.agents[self.agent_of(d).unwrap_or(0)].clone();
+                let agent = self.launch(&self.agents[self.agent_of(d).unwrap_or(0)]);
                 self.sent.push(Sent { name: agent.name.clone(), text: text.to_string(), plan: d.plan, outcome: None, images: drafts::tagged(text, images) });
                 if self.live {
                     spawn::send(n, &agent, &prompt, &d.cwd, "", focus, self.sent_tx.clone());
@@ -1400,7 +1442,7 @@ impl App {
     /// of them is; and they all go.
     fn send_all(&mut self, ds: &[Draft], focus: bool) {
         let first = &ds[0];
-        let agent = self.agents[self.agent_of(first).unwrap_or(0)].clone();
+        let agent = self.launch(&self.agents[self.agent_of(first).unwrap_or(0)]);
         let plan = ds.iter().any(|d| d.plan);
         let (text, images) = drafts::combine(ds);
         let ids: Vec<&str> = ds.iter().map(|d| d.id.as_str()).collect();
@@ -1725,7 +1767,7 @@ mod tests {
     use crate::rex_theme::{one_dark, Rgb};
 
     fn app(text: &str) -> App {
-        let opts = Opts { cwd: "/tmp".into(), text: text.into(), label: String::new(), agents: crate::config::defaults(), start: 0, notice: None };
+        let opts = Opts { cwd: "/tmp".into(), text: text.into(), label: String::new(), agents: crate::config::defaults(), start: 0, profiles: Vec::new(), profile: 0, notice: None };
         let mut a = App::new(Palette::new(&one_dark(Rgb(0x28, 0x2c, 0x34))), opts);
         a.live = false;
         a
@@ -1997,6 +2039,40 @@ mod tests {
         assert!(a.toast.as_ref().is_some_and(|t| !t.1));
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(a.sent[0].name, "claude(fable)");
+    }
+
+    #[test]
+    fn ctrl_n_goes_through_the_claude_profiles() {
+        let mut a = app("fix it");
+        // The main profile alone: nothing to pick, and the prompt as before.
+        press(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert!(a.toast.as_ref().is_some_and(|t| !t.1));
+        a.layout(80, 30);
+        assert_eq!(a.prefix(), "claude(opus) >");
+        a.profiles = vec![
+            Profile { name: crate::config::MAIN.into(), dir: "/h/.claude".into() },
+            Profile { name: "2".into(), dir: "/h/.claude-2".into() },
+        ];
+        press(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        a.layout(80, 30);
+        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("claude(opus)·2 >", 17));
+        assert!(a.toast.as_ref().is_some_and(|t| t.1 && t.0.starts_with("Claude profile 2 (/h/.claude-2)")));
+        // Codex has none: shown as it is, and sent as it is.
+        press(&mut a, KeyCode::Char('3'), KeyModifiers::CONTROL);
+        a.layout(80, 30);
+        assert_eq!(a.prefix(), "codex >");
+        press(&mut a, KeyCode::Char('1'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.sent[0].name, "claude(opus)·2");
+        // A draft keeps its configuration by its own name, not the profile's.
+        type_in(&mut a, "later");
+        press(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(a.drafts[0].config.as_deref(), Some("claude(opus)"));
+        // Round to the main one.
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        a.layout(80, 30);
+        assert_eq!(a.prefix(), "claude(opus) >");
     }
 
     #[test]

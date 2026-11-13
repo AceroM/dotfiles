@@ -9,7 +9,8 @@
 //! folder, as a tab that had the agent typed into it would be.
 //!
 //! Which agent, and its arguments, is the configuration the prompt is on
-//! (config.rs).
+//! (config.rs); on a Claude profile other than the main one, it runs as
+//! `env CLAUDE_CONFIG_DIR=… claude …`.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -23,8 +24,8 @@ use serde_json::{json, Value};
 
 use crate::config::Agent;
 
-/// Internal: `o --start-agent CWD KIND PROMPT LABEL FOCUS [ARGS…]` does the
-/// Rex call; ARGS go to the agent.
+/// Internal: `o --start-agent CWD PROMPT LABEL FOCUS COMMAND…` does the
+/// Rex call; COMMAND is the agent's (Agent::argv).
 pub const CHILD_FLAG: &str = "--start-agent";
 
 /// The Rex session o runs in: every tab it opens goes there.
@@ -47,12 +48,11 @@ pub fn send(n: usize, agent: &Agent, prompt: &str, cwd: &Path, label: &str, focu
     let mut args: Vec<OsString> = vec![
         CHILD_FLAG.into(),
         cwd.into(),
-        agent.kind.as_str().into(),
         prompt.into(),
         label.into(),
         if focus { "1" } else { "0" }.into(),
     ];
-    args.extend(agent.args.iter().map(OsString::from));
+    args.extend(agent.argv().into_iter().map(OsString::from));
     let kind = agent.name.clone();
     thread::spawn(move || {
         let child = std::env::current_exe().and_then(|exe| {
@@ -82,8 +82,11 @@ pub fn send(n: usize, agent: &Agent, prompt: &str, cwd: &Path, label: &str, focu
 
 /// The `--start-agent` process: one line on stdout says how it went.
 pub fn child(args: &[String]) -> ExitCode {
-    let [cwd, kind, prompt, label, focus, agent_args @ ..] = args else { return ExitCode::from(2) };
-    let res = start(kind, agent_args, prompt, Path::new(cwd), label, focus == "1");
+    let [cwd, prompt, label, focus, command @ ..] = args else { return ExitCode::from(2) };
+    if command.is_empty() {
+        return ExitCode::from(2);
+    }
+    let res = start(command, prompt, Path::new(cwd), label, focus == "1");
     let output = match &res {
         Ok(out) => serde_json::to_string(out).expect("serializable outcome"),
         Err(e) => e.clone(),
@@ -99,10 +102,11 @@ pub fn child(args: &[String]) -> ExitCode {
 /// After the agent exits, the tab's login shell, in the agent's folder.
 const THEN_SHELL: &str = r#""$@"; exec "${SHELL:-/bin/zsh}" -l"#;
 /// The same, run by an interactive shell: `command` skips its functions, so
-/// `codex` is the binary and not ~/.config/zsh/codex.zsh's wrapper.
+/// `codex` is the binary and not ~/.config/zsh/codex.zsh's wrapper. (`env`
+/// runs the binary too.)
 const THEN_SHELL_RC: &str = r#"command "$@"; exec "${SHELL:-/bin/zsh}" -l"#;
 
-fn start(kind: &str, args: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<Outcome, String> {
+fn start(command: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<Outcome, String> {
     let ses = session().ok_or("not in a Rex terminal (no REX_SESSION)")?;
     let cwd = cwd.to_string_lossy();
     let focus = if focus { "--focus=true" } else { "--focus=false" };
@@ -111,8 +115,8 @@ fn start(kind: &str, args: &[String], prompt: &str, cwd: &Path, label: &str, foc
         head.push(label);
     }
     head.extend(["-c", &cwd, focus, "--json"]);
-    let mut agent = vec!["o", kind];
-    agent.extend(args.iter().map(String::as_str));
+    let mut agent = vec!["o"];
+    agent.extend(command.iter().map(String::as_str));
     // `--`: a prompt starting with - isn't read as an option (Claude Code and
     // Codex both take it).
     agent.extend(["--", prompt]);

@@ -8,6 +8,11 @@
 #   model  passed as --model MODEL, and shown: claude(fable)
 #   args   the agent's own arguments
 #   name   shown instead of kind(model)
+#
+# Claude profiles (accounts) aren't listed here: o finds this computer's own,
+# ~/.claude and each ~/.claude-NAME Claude Code has run in (as c2's
+# CLAUDE_CONFIG_DIR=~/.claude-2), and ^n picks the one the claude entries
+# start on: `claude(opus)·2 >`. `o --config` lists them with their limits.
 
 [[agent]]
 kind = "claude"
