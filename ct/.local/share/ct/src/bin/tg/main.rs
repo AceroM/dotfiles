@@ -69,9 +69,11 @@ options:
   -h, --help
 
 Closed groups exist only on Chrome's bookmarks bar, out of the extension's reach, so tg deletes
-them through Chrome's own chip menu (macOS accessibility, in a New Tab window it opens behind the
-others while it works). It opens the menu, checks it lists exactly the group's tabs, and only then
-presses Delete group. Groups unpinned from the bar can't be reached; tg lists them apart.
+them through Chrome's own chip menu (macOS accessibility, in a New Tab window it brings to the
+front while it works, with the bookmarks bar shown for the run if Chrome hides it there). It
+opens the menu, checks it lists exactly the group's tabs, and only then presses Delete group (and
+Delete Group when Chrome asks first). Groups unpinned from the bar can't be reached; tg lists
+them apart.
 ";
 
 /// Open groups re-read this often; the store whenever Chrome writes to it.
@@ -288,6 +290,10 @@ fn remove_cli(src: &Source, keys: &[String]) -> ExitCode {
                 for k in left {
                     eprintln!("  left alone: {}", name(&k));
                 }
+            }
+            remove::Event::Warn { why } => {
+                failed = true;
+                eprintln!("{why}");
             }
             remove::Event::Finished => break,
         }
@@ -644,6 +650,7 @@ impl App {
                 }
                 b.stopped = Some(why);
             }
+            remove::Event::Warn { why } => b.failed.push(why),
             remove::Event::Finished => {
                 let b = self.busy.take().unwrap();
                 let mut parts = Vec::new();

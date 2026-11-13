@@ -1,7 +1,9 @@
 //! Removing groups, one after another, off the UI thread. Open groups are ungrouped through the
 //! extension (their tabs stay open, and Chrome drops the saved group). Closed groups are deleted
-//! through Chrome's bookmarks-bar menu (ax.rs), in a scratch New Tab window that opens behind the
-//! others for as long as it takes (Chrome draws the bar only on a New Tab page).
+//! through Chrome's bookmarks-bar menu (ax.rs), in a scratch New Tab window that comes to the front
+//! for as long as it takes (then the app that was in front gets it back). Chrome draws the bar on
+//! its own New Tab page only, so when an extension's page is there instead, Always Show Bookmarks
+//! Bar is on for the run (then off again).
 
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -34,6 +36,8 @@ pub enum Event {
     Failed { key: String, why: String },
     /// Chrome did something unexpected: the jobs after this one were left alone.
     Stopped { why: String, left: Vec<String> },
+    /// Something went wrong outside any one group, after the run (the bar left showing).
+    Warn { why: String },
     Finished,
 }
 
@@ -64,20 +68,28 @@ fn delete_all(host: &Host, pid: Option<i32>, jobs: Vec<Job>, mut n: usize, of: u
     let Some(pid) = pid else {
         return stop("couldn't find the browser's process".into(), keys(&jobs));
     };
-    let chrome = match ax::Chrome::connect(pid) {
+    let mut chrome = match ax::Chrome::connect(pid) {
         Ok(c) => c,
         Err(e) => return stop(e, keys(&jobs)),
     };
     // Always a window of tg's own: wide enough for the whole bar, and closing it takes any menu
-    // left over with it.
+    // left over with it. Only its bar counts.
+    let before = chrome.windows();
     let scratch = match host.scratch_open() {
-        Ok(w) => Some(w),
+        Ok(w) => w,
         Err(e) => return stop(format!("couldn't open a window to reach the bookmarks bar: {e}"), keys(&jobs)),
     };
-    if !chrome.bar_ready(Duration::from_secs(5)) {
-        let _ = host.scratch_close(scratch.unwrap_or_default());
-        return stop("Chrome's bookmarks bar shows no tab groups (Chrome setting: Show tab groups in bookmarks bar)".into(), keys(&jobs));
-    }
+    chrome.watch_new(&before, Duration::from_secs(3));
+    let away = chrome.come_forward();
+    let shown = match chrome.show_bar() {
+        Ok(shown) => shown,
+        Err(why) => {
+            chrome.go_back(away);
+            let _ = host.scratch_close(scratch);
+            return stop(why, keys(&jobs));
+        }
+    };
+    let mut stopped = None;
     let mut rest = jobs.into_iter();
     while let Some(job) = rest.next() {
         n += 1;
@@ -93,12 +105,21 @@ fn delete_all(host: &Host, pid: Option<i32>, jobs: Vec<Job>, mut n: usize, of: u
             Err(Fail::Stop(why)) => {
                 let mut left = vec![key];
                 left.extend(rest.map(|j| j.key().to_string()));
-                stop(why, left);
+                stopped = Some((why, left));
                 break;
             }
         }
     }
-    if let Some(w) = scratch {
-        let _ = host.scratch_close(w);
+    // The bar goes back the way it was before the run counts as over.
+    let hidden = if shown { chrome.hide_bar() } else { Ok(()) };
+    chrome.go_back(away);
+    let _ = host.scratch_close(scratch);
+    match (stopped, hidden) {
+        (Some((why, left)), Err(e)) => stop(format!("{why}; {e}"), left),
+        (Some((why, left)), Ok(())) => stop(why, left),
+        (None, Err(why)) => {
+            let _ = tx.send(Event::Warn { why });
+        }
+        (None, Ok(())) => {}
     }
 }

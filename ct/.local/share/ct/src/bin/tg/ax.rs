@@ -8,7 +8,8 @@
 //!   3. the menu must be a saved group's (Open group, Delete group, Tabs in group), and the tabs
 //!      it lists must be exactly the group's tabs: otherwise cancel it and try the next chip of
 //!      that name;
-//!   4. press "Delete group", then check that one chip of that name is gone.
+//!   4. press "Delete group" (and "Delete Group" on the "Delete Tab Group?" sheet Chrome puts on
+//!      the window to ask first), then check that one chip of that name is gone.
 //!
 //! Anything unexpected (no menu, a menu of another kind, a menu that won't close) stops the whole
 //! run without pressing anything else.
@@ -151,7 +152,21 @@ pub enum Fail {
 pub struct Chrome {
     app: El,
     pid: i32,
+    /// The one window whose bar counts (tg's own, see `watch_new`); none: every window's.
+    window: Option<El>,
 }
+
+/// What had the front before tg's window took it: the app, and Chrome's own main window.
+pub struct Away {
+    app: Option<i32>,
+    main: Option<El>,
+}
+
+/// Chrome's browser windows at one moment, to tell which window opens after it.
+pub struct Windows(Vec<El>);
+
+/// View → "Always Show Bookmarks Bar", for the profile of Chrome's key window.
+const ALWAYS_SHOW_BAR: &str = "Always Show Bookmarks Bar";
 
 /// A chip on the bookmarks bar's "Saved Tab Groups".
 struct Chip {
@@ -196,7 +211,24 @@ impl Chrome {
             AXUIElementSetAttributeValue(app.raw(), attr.as_concrete_TypeRef(), CFBoolean::true_value().as_CFTypeRef());
             AXUIElementSetMessagingTimeout(app.raw(), 2.0);
         }
-        Ok(Chrome { app, pid })
+        Ok(Chrome { app, pid, window: None })
+    }
+
+    fn standard_windows(&self) -> Vec<El> {
+        self.app.children().into_iter().filter(|c| c.role() == "AXWindow" && c.subrole() == "AXStandardWindow").collect()
+    }
+
+    pub fn windows(&self) -> Windows {
+        Windows(self.standard_windows())
+    }
+
+    /// Look only at the first browser window that isn't in `before` (tg's own) from now on:
+    /// windows of other profiles draw bars of their own. Whether one turned up within `wait`; if
+    /// none did, every window still counts.
+    pub fn watch_new(&mut self, before: &Windows, wait: Duration) -> bool {
+        self.window = wait_for(wait, || self.standard_windows().into_iter().find(|w| !before.0.iter().any(|b| same(b, w))));
+        debug(|| format!("tg's window {}", if self.window.is_some() { "found" } else { "not found: watching every window" }));
+        self.window.is_some()
     }
 
     /// A menu Chrome has open: a context menu (an app-level AXMenu), or one of Chrome's own menus
@@ -227,11 +259,15 @@ impl Chrome {
         }
     }
 
-    /// The chips of the fullest "Saved Tab Groups" bar in any browser window. Chrome draws the
-    /// bar only on a New Tab page, and a narrow window moves chips into its overflow menu.
+    /// The chips of the fullest "Saved Tab Groups" bar in the watched window (or in any browser
+    /// window). A narrow window moves chips into its overflow menu.
     fn chips(&self) -> Vec<Chip> {
         let mut best: Vec<Chip> = Vec::new();
-        for w in self.app.children().into_iter().filter(|c| c.role() == "AXWindow" && c.subrole() == "AXStandardWindow") {
+        let windows = match &self.window {
+            Some(w) => vec![w.clone()],
+            None => self.standard_windows(),
+        };
+        for w in windows {
             let Some(bar) = w.find(10, &|e| e.role() == "AXToolbar" && e.title() == "Saved Tab Groups") else { continue };
             let chips: Vec<Chip> = bar
                 .children()
@@ -267,6 +303,125 @@ impl Chrome {
             }
             sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Make the bar with chips show. Chrome draws the bookmarks bar on its own New Tab page, but
+    /// not on one an extension puts there (New Tab Right's), so when it isn't up, turn on "Always
+    /// Show Bookmarks Bar" for the run. Whether tg turned it on: then `hide_bar` when done.
+    pub fn show_bar(&self) -> Result<bool, String> {
+        if self.bar_ready(Duration::from_secs(2)) {
+            return Ok(false);
+        }
+        debug(|| format!("no bar; turning on {ALWAYS_SHOW_BAR}"));
+        if !self.set_always_show(true)? {
+            return Err("Chrome's bookmarks bar shows no tab groups (Chrome setting: Show tab groups in bookmarks bar)".into());
+        }
+        if self.bar_ready(Duration::from_secs(5)) {
+            return Ok(true);
+        }
+        let undo = self.hide_bar().err().map(|e| format!("; {e}")).unwrap_or_default();
+        Err(format!(
+            "Chrome's bookmarks bar shows no tab groups, even with {ALWAYS_SHOW_BAR} on (Chrome setting: Show tab groups in bookmarks bar){undo}"
+        ))
+    }
+
+    /// Turn "Always Show Bookmarks Bar" off again, after `show_bar` turned it on.
+    pub fn hide_bar(&self) -> Result<(), String> {
+        debug(|| format!("turning {ALWAYS_SHOW_BAR} off again"));
+        let left_on = "Chrome may still show the bookmarks bar on every page (⌘⇧B in Chrome hides it)";
+        self.set_always_show(false).map_err(|e| format!("{e}: {left_on}"))?;
+        // With the item off, tg's window (an extension's New Tab page) has no bar.
+        if self.window.is_some() && wait_for(Duration::from_secs(3), || self.chips().is_empty().then_some(())).is_none() {
+            return Err(left_on.to_string());
+        }
+        Ok(())
+    }
+
+    /// Set View → "Always Show Bookmarks Bar" (for the profile of Chrome's key window) to `on`.
+    /// Chrome greys the item out while it's in the background: call `come_forward` first. Whether
+    /// it pressed (false: the item was `on` already).
+    fn set_always_show(&self, on: bool) -> Result<bool, String> {
+        let item = self.menu_item(ALWAYS_SHOW_BAR).ok_or_else(|| format!("tg can't find Chrome's View → {ALWAYS_SHOW_BAR}"))?;
+        if wait_for(Duration::from_secs(2), || (item.flag("AXEnabled") == Some(true)).then_some(())).is_none() {
+            return Err(format!("Chrome kept View → {ALWAYS_SHOW_BAR} greyed out"));
+        }
+        let was = checked(&item);
+        debug(|| format!("{ALWAYS_SHOW_BAR} is {}; want {}", if was { "on" } else { "off" }, if on { "on" } else { "off" }));
+        if was == on {
+            return Ok(false);
+        }
+        item.perform("AXPress")?;
+        Ok(true)
+    }
+
+    /// Bring tg's window (Chrome) to the front: Chrome greys out its menu items while it's in the
+    /// background, and ignores presses on a "Delete Tab Group?" sheet that's out of sight. What
+    /// was in front, for `go_back`.
+    pub fn come_forward(&self) -> Away {
+        let away = Away { app: frontmost(), main: self.app.attr("AXMainWindow").map(El) };
+        if let Some(w) = &self.window {
+            set_flag(w, "AXMain", true);
+            let _ = w.perform("AXRaise");
+        }
+        let came = bring_front(&self.app);
+        debug(|| format!("to the front (from {:?}): {came}", away.app));
+        debug(|| {
+            let t = |a: &str| self.app.attr(a).map(|w| El(w).title()).unwrap_or_default();
+            format!("  main “{}”, focused “{}”", t("AXMainWindow"), t("AXFocusedWindow"))
+        });
+        away
+    }
+
+    /// Give the front back to the app that had it before `come_forward`.
+    pub fn go_back(&self, away: Away) {
+        let back = match away.app {
+            Some(pid) if pid != self.pid => bring_front(&app_of(pid)),
+            // Chrome was in front: its own window goes back on top.
+            _ => away.main.is_some_and(|m| set_flag(&m, "AXMain", true)),
+        };
+        debug(|| format!("front back to {:?}: {back}", away.app));
+    }
+
+    /// The "Delete Group" button of the "Delete Tab Group?" sheet Chrome puts on a window before it
+    /// deletes a saved group.
+    fn delete_sheet(&self) -> Option<El> {
+        let windows = match &self.window {
+            Some(w) => vec![w.clone()],
+            None => self.standard_windows(),
+        };
+        windows.iter().find_map(|w| {
+            let sheet = w.find(2, &|e| e.role() == "AXSheet" && e.title() == "Delete Tab Group?")?;
+            sheet.find(12, &|e| e.role() == "AXButton" && e.title() == "Delete Group")
+        })
+    }
+
+    /// For TG_DEBUG, when a delete doesn't take: Chrome's windows other than browser windows
+    /// (menus, dialogs) and tg's own window, with what's named in them.
+    fn describe(&self) -> String {
+        fn lines(e: &El, depth: usize, indent: usize, out: &mut Vec<String>) {
+            let (role, title, desc) = (e.role(), e.title(), e.string("AXDescription"));
+            if !title.is_empty() || !desc.is_empty() || indent == 0 {
+                out.push(format!("{}{role} {} “{title}” {desc}", "  ".repeat(indent + 1), e.subrole()));
+            }
+            if depth > 0 && role != "AXWebArea" {
+                e.children().iter().for_each(|c| lines(c, depth - 1, indent + 1, out));
+            }
+        }
+        let mut out = vec!["Chrome's other windows:".to_string()];
+        for c in self.app.children().into_iter().filter(|c| c.role() != "AXMenuBar" && c.subrole() != "AXStandardWindow") {
+            lines(&c, 8, 0, &mut out);
+        }
+        if let Some(w) = &self.window {
+            out.push("tg's window:".to_string());
+            lines(w, 12, 0, &mut out);
+        }
+        out.join("\n")
+    }
+
+    /// An item of Chrome's main menu (one level down), by its title.
+    fn menu_item(&self, title: &str) -> Option<El> {
+        let bar = El(self.app.attr("AXMenuBar")?);
+        bar.children().into_iter().flat_map(|top| top.children()).flat_map(|menu| menu.children()).find(|i| i.title() == title)
     }
 
     /// Closed chips that could be this group.
@@ -324,8 +479,31 @@ impl Chrome {
             }
             debug(|| "tabs match; pressing Delete group".to_string());
             delete.perform("AXPress").map_err(Fail::Stop)?;
-            let gone = wait_for(Duration::from_secs(3), || (self.closed_chips(title, tabs.len()).len() < before).then_some(()));
+            let deleted = || (self.closed_chips(title, tabs.len()).len() < before).then_some(());
+            // Gone, or Chrome asks first (unless it was told not to ask again).
+            let asked = wait_for(Duration::from_secs(3), || deleted().map(|()| None).or_else(|| self.delete_sheet().map(Some)));
+            let gone = match asked {
+                Some(Some(confirm)) => {
+                    // Chrome ignores a press on a dialog that comes within a double-click's time
+                    // (half a second) of the dialog coming up or of the last press, so wait
+                    // that out before each one.
+                    debug(|| "Chrome asks first; pressing its Delete Group".to_string());
+                    let mut gone = None;
+                    for _ in 0..3 {
+                        sleep(Duration::from_millis(700));
+                        let pressed = confirm.perform("AXPress").is_ok();
+                        gone = wait_for(Duration::from_millis(if pressed { 800 } else { 1500 }), deleted);
+                        if gone.is_some() || !pressed {
+                            break;
+                        }
+                    }
+                    gone
+                }
+                Some(None) => Some(()),
+                None => None,
+            };
             if gone.is_none() {
+                debug(|| self.describe());
                 return Err(Fail::Stop(format!("pressed Delete group, but “{label}” is still on the bar")));
             }
             if self.open_menu().is_some() {
@@ -395,5 +573,51 @@ pub fn exe_of(pid: i32) -> Option<std::path::PathBuf> {
 }
 
 fn menu_is_native(app: &El, menu: &El) -> bool {
-    app.children().iter().any(|c| c.role() == "AXMenu" && unsafe { core_foundation::base::CFEqual(c.raw(), menu.raw()) } != 0)
+    app.children().iter().any(|c| c.role() == "AXMenu" && same(c, menu))
+}
+
+/// An app's element, by its process.
+fn app_of(pid: i32) -> El {
+    El(unsafe { CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid)) })
+}
+
+/// The process of the app in front, from LaunchServices: accessibility's own answer (the
+/// system-wide AXFocusedApplication) fails when the app in front doesn't answer it, as Rex doesn't.
+fn frontmost() -> Option<i32> {
+    let lsappinfo = |args: &[&str]| {
+        let out = std::process::Command::new("/usr/bin/lsappinfo").args(args).output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let asn = lsappinfo(&["front"]).filter(|a| a.starts_with("ASN:"))?;
+    // "pid"=91613
+    lsappinfo(&["info", "-only", "pid", &asn])?.rsplit('=').next()?.trim().parse().ok().filter(|&p: &i32| p > 0)
+}
+
+/// Bring an app to the front, and wait until it's there (asking again if it doesn't come).
+/// Whether it came.
+fn bring_front(app: &El) -> bool {
+    for _ in 0..3 {
+        set_flag(app, "AXFrontmost", true);
+        if wait_for(Duration::from_millis(500), || (app.flag("AXFrontmost") == Some(true)).then_some(())).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Set a yes/no attribute; whether the element took it.
+fn set_flag(e: &El, attr: &str, value: bool) -> bool {
+    let a = CFString::new(attr);
+    let v = if value { CFBoolean::true_value() } else { CFBoolean::false_value() };
+    unsafe { AXUIElementSetAttributeValue(e.raw(), a.as_concrete_TypeRef(), v.as_CFTypeRef()) == 0 }
+}
+
+/// Whether two elements are the same one.
+fn same(a: &El, b: &El) -> bool {
+    unsafe { core_foundation::base::CFEqual(a.raw(), b.raw()) != 0 }
+}
+
+/// Whether a menu item has its check mark.
+fn checked(item: &El) -> bool {
+    !item.string("AXMenuItemMarkChar").is_empty()
 }
