@@ -14,7 +14,11 @@
 --   fn+option/cmd+j/k/9  become ctrl+alt+shift+j/k/9 (the agent axis)
 -- fn+a, fn+e and fn+n act once per press, not on key repeat.
 --
--- fn+q toggles Quick Record's region recording from any app.
+-- Quick Record, from any app (Rex included):
+--   fn+q               toggle region recording
+--   fn+shift+q         the same, with microphone and system audio
+--   fn+option+q        toggle a demo (annotations, narration, a HAR from Chrome)
+--   fn+option+a        switch the demo between interact and draw
 --
 -- Outside Rex, the fn chords that used to drive Herdr from any app (fn+a, s, m,
 -- t, ;, /, y) do nothing, and stay consumed so macOS's own Globe shortcuts (fn+a
@@ -57,21 +61,38 @@ local formerlyGlobal = {
 local tap
 local inflight = {} -- keeps background tasks alive until they answer
 
-local function toggleRecording()
+local function quickRecord(command)
   local task
   task = hs.task.new("/usr/bin/open", function(exitCode, _, stderr)
     inflight[task] = nil
     if exitCode ~= 0 then
-      hs.printf("Quick Record toggle failed: %s", stderr or "")
+      hs.printf("Quick Record %s failed: %s", command, stderr or "")
       hs.alert.show("Couldn’t open Quick Record. Run its install.sh first.", 3)
     end
-  end, { "-g", "-a", HOME .. "/Applications/Quick Record.app", "quickrecord://toggle" })
+  end, { "-g", "-a", HOME .. "/Applications/Quick Record.app", "quickrecord://" .. command })
   if not task then return end
   inflight[task] = true
   if not task:start() then
     inflight[task] = nil
     hs.alert.show("Couldn’t start Quick Record.", 3)
   end
+end
+
+local function toggleRecording(withAudio)
+  quickRecord(withAudio and "toggle-audio" or "toggle")
+end
+
+-- The Quick Record command an fn chord sends, or nil if it isn't one.
+local function quickRecordCommand(code, flags)
+  if not flags.fn or flags.cmd or flags.ctrl then return nil end
+  if flags.alt then
+    if flags.shift then return nil end
+    if code == keys.q then return "toggle-demo" end
+    if code == keys.a then return "annotate" end
+    return nil
+  end
+  if code == keys.q then return flags.shift and "toggle-audio" or "toggle" end
+  return nil
 end
 
 local function rexFocused()
@@ -110,17 +131,19 @@ local function handleKey(event)
   local code = event:getKeyCode()
   local flags = event:getFlags()
 
-  if flags.fn and not flags.ctrl and code ~= keys.q and rexFocused() then
+  local command = quickRecordCommand(code, flags)
+  if command then
+    if event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then
+      quickRecord(command)
+    end
+    return true
+  end
+
+  if flags.fn and not flags.ctrl and rexFocused() then
     return forwardToRex(event, code, flags)
   end
 
   if not flags.fn or flags.cmd or flags.alt or flags.ctrl then return false end
-  if code == keys.q then
-    if not flags.shift and event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then
-      toggleRecording()
-    end
-    return not flags.shift
-  end
   -- fn+shift reached Herdr only on a and y.
   if flags.shift then return code == keys.a or code == keys.y end
   return formerlyGlobal[code] == true
@@ -134,5 +157,6 @@ function M.start()
 end
 
 M.toggleRecording = toggleRecording
+M.toggleDemo = function() quickRecord("toggle-demo") end
 
 return M
