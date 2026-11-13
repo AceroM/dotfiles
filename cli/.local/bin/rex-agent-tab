@@ -46,6 +46,9 @@ os.environ["PATH"] = os.pathsep.join(
 
 # After the agent exits, the tab's login shell, in the agent's folder.
 THEN_SHELL = '"$@"; exec "${SHELL:-/bin/zsh}" -l'
+# The same, run by an interactive shell: `command` skips its functions, so
+# `codex` is the binary and not ~/.config/zsh/codex.zsh's wrapper.
+THEN_SHELL_RC = 'command "$@"; exec "${SHELL:-/bin/zsh}" -l'
 
 
 def log(message):
@@ -71,8 +74,12 @@ def run(argv, timeout=15):
     return result
 
 
-def rex_json(*args):
+def rex_json(*args, older=None):
+    """`rex ARGS`'s JSON. OLDER: the arguments to retry with when this server
+    predates --interactive."""
     result = run(["rex", *args])
+    if result.returncode != 0 and older and "unknown flag: --interactive" in result.stderr:
+        args, result = older, run(["rex", *older])
     if result.returncode != 0:
         die(f"rex {' '.join(args)}: {result.stderr.strip() or result.returncode}")
     try:
@@ -239,10 +246,15 @@ def main():
 
     # ── the tab ─────────────────────────────────────────────────────────
     cmd = ["window", "new", "-s", session, "-c", cwd, f"--focus={args.focus}", "--json"]
+    older = None
     if kind:
+        agent = ["rex-agent-tab", kind, *flags]
+        # Servers older than --interactive (the Oct 29 build): the shell reads
+        # ~/.zshrc itself, as `zsh -i`.
+        older = [*cmd, "--", os.environ.get("SHELL") or "/bin/zsh", "-ic", THEN_SHELL_RC, *agent]
         # --interactive: ~/.zshrc too, so the agent sees what a shell tab would.
-        cmd += ["--interactive", "--", "sh", "-c", THEN_SHELL, "rex-agent-tab", kind, *flags]
-    created = rex_json(*cmd)
+        cmd += ["--interactive", "--", "sh", "-c", THEN_SHELL, *agent]
+    created = rex_json(*cmd, older=older)
     new_window = created.get("window_id")
     new_block = (created.get("block_ids") or [None])[0]
     if not new_window:

@@ -98,22 +98,36 @@ pub fn child(args: &[String]) -> ExitCode {
 
 /// After the agent exits, the tab's login shell, in the agent's folder.
 const THEN_SHELL: &str = r#""$@"; exec "${SHELL:-/bin/zsh}" -l"#;
+/// The same, run by an interactive shell: `command` skips its functions, so
+/// `codex` is the binary and not ~/.config/zsh/codex.zsh's wrapper.
+const THEN_SHELL_RC: &str = r#"command "$@"; exec "${SHELL:-/bin/zsh}" -l"#;
 
 fn start(kind: &str, args: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<Outcome, String> {
     let ses = session().ok_or("not in a Rex terminal (no REX_SESSION)")?;
     let cwd = cwd.to_string_lossy();
     let focus = if focus { "--focus=true" } else { "--focus=false" };
-    // --interactive: ~/.zshrc too, so the agent sees what a shell tab would.
-    let mut cmd = vec!["window", "new", "-s", &ses];
+    let mut head = vec!["window", "new", "-s", &ses];
     if !label.is_empty() {
-        cmd.push(label);
+        head.push(label);
     }
-    cmd.extend(["-c", &cwd, "--interactive", focus, "--json", "--", "sh", "-c", THEN_SHELL, "o", kind]);
-    cmd.extend(args.iter().map(String::as_str));
+    head.extend(["-c", &cwd, focus, "--json"]);
+    let mut agent = vec!["o", kind];
+    agent.extend(args.iter().map(String::as_str));
     // `--`: a prompt starting with - isn't read as an option (Claude Code and
     // Codex both take it).
-    cmd.extend(["--", prompt]);
-    let out = rex(&cmd).map_err(|e| format!("couldn't open a tab: {e}"))?;
+    agent.extend(["--", prompt]);
+    // --interactive: ~/.zshrc too, so the agent sees what a shell tab would.
+    let native = [&head[..], &["--interactive", "--", "sh", "-c", THEN_SHELL], &agent].concat();
+    let out = match rex(&native) {
+        // Servers older than --interactive (the Oct 29 build): the shell reads
+        // ~/.zshrc itself, as `zsh -i`.
+        Err(e) if e.contains("unknown flag: --interactive") => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            rex(&[&head[..], &["--", &shell, "-ic", THEN_SHELL_RC], &agent].concat())
+        }
+        res => res,
+    };
+    let out = out.map_err(|e| format!("couldn't open a tab: {e}"))?;
     let out: Value = serde_json::from_str(&out).map_err(|e| format!("window new: {e}"))?;
     let block = out["block_ids"][0].as_str().ok_or("window new returned no block")?.to_string();
     let window = out["window_id"].as_str().unwrap_or("");
