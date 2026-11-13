@@ -587,6 +587,9 @@ rex.bind("cmd+shift+f", "dir_focus")
 -- cmd+shift+n opens a new session.
 rex.bind("cmd+shift+n", "session.new")
 
+-- cmd+shift+r asks for a new name for the session you're in.
+rex.bind("cmd+shift+r", "session.rename")
+
 -- cmd+y copies the ID of the focused pane (instead of Quick Look).
 rex.bind("cmd+y", "pane.copy_id")
 
