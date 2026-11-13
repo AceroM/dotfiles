@@ -685,6 +685,58 @@ rex.action{
 }
 rex.bind("cmd+alt+n", "float_here")
 
+-- cmd+shift+x runs `x` (commit everything and push: zsh/.config/zsh/git.zsh) on
+-- the folder of the pane it was pressed in, in a floating pane that goes
+-- straight to the taskbar, minimized, so it stays out of the way. When x
+-- succeeds the pane exits and the float is gone. When it fails,
+-- ~/.local/bin/rex-x brings the float back up, focused, over the bottom right
+-- of the tab, with the error on screen until q, Enter or Escape.
+-- Try it without committing: rex do x_minimized dry_run=1 --json
+local X_BOUNDS = { 0.5, 0.55, 0.48, 0.42 } -- bottom right, when it comes back up
+local X_BIN = (os.getenv("HOME") or "") .. "/.local/bin/rex-x"
+
+rex.action{
+  name = "x_minimized",
+  title = "Commit and Push (x) in the Background",
+  category = "Pane",
+  keywords = "x git commit push background minimized taskbar float",
+  run = function(ctx, args)
+    local view, err = rex.session.view{}
+    if not view then error(err, 0) end
+    local window_id = view.active_window_id
+    for _, w in ipairs(view.windows or {}) do
+      for _, layer in ipairs(w.layers or {}) do
+        for _, b in ipairs(layer.blocks or {}) do
+          if b.block_id == ctx.block_id then window_id = w.window_id end
+        end
+      end
+    end
+    local cwd = ctx.block_id and pane_cwd(ctx.block_id)
+    if not cwd then error("x: no folder for the focused pane", 0) end
+
+    local result = { window_id = window_id, cwd = cwd }
+    if args.dry_run then return result end
+
+    local created = rex.call("session.new_layer", {
+      session_id = ctx.session_id,
+      window_id = window_id,
+      bounds = X_BOUNDS,
+      focus = false,
+      layout = rex.layout.block{
+        flavor = TERMINAL .. ".shell", label = "x",
+        options = { cwd = cwd, command = { X_BIN } },
+      },
+    })
+    rex.call("session.set_layer_state", {
+      session_id = ctx.session_id, layer_id = created.layer_id, state = "minimized",
+    })
+    result.layer_id = created.layer_id
+    result.block_id = (created.block_ids or {})[1]
+    return result
+  end,
+}
+rex.bind("cmd+shift+x", "x_minimized")
+
 -- ctrl+alt+; and ctrl+alt+\ keep Herdr's chords for two dotfiles scripts:
 --   ctrl+alt+;  ~/.local/bin/rex-agent-tab: a new tab right after this one
 --               running the same agent (claude or codex, same flags) as the

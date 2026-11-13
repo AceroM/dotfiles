@@ -1,0 +1,34 @@
+#!/bin/zsh
+# rex-x: what cmd+shift+x runs (x_minimized in rex/.config/rex/init.lua), in a
+# floating pane that starts minimized to the taskbar, in the folder of the pane
+# the key was pressed in.
+#
+# Runs `x` (zsh/.config/zsh/git.zsh: ./scripts/x.sh when the repo has one, else
+# git add . && git commit -m changes && git push) in a login + interactive zsh,
+# so x and PATH are the ones a new tab gets. Args go to x (x "message").
+#
+# Success: exits 0, and Rex closes the pane and its float.
+# Failure: brings the float back up, focused, keeps the output on screen, and
+# closes on q, Enter or Escape.
+
+zsh -lic 'x "$@"' x "$@"
+rc=$?
+(( rc == 0 )) && exit 0
+
+# The float this pane sits in.
+layer=$(rex api call -s "$REX_SESSION" session.view 2>/dev/null |
+  jq -r --arg b "$REX_BLOCK" \
+    '.windows[].layers[] | select(any(.blocks[]?; .block_id == $b)) | .layer_id' |
+  head -1)
+if [[ -n $layer ]]; then
+  rex api call -s "$REX_SESSION" session.set_layer_state \
+    "$(jq -nc --arg l "$layer" '{layer_id: $l, state: "normal", focus: true}')" >/dev/null
+fi
+
+print -P "\n%F{red}x failed (exit $rc)%f in %~ — q, Enter or Esc closes this."
+while read -rsk1 key; do
+  [[ $key == (q|$'\n'|$'\r'|$'\e') ]] && break
+done
+# Exit 0: Rex keeps a pane whose program failed quickly open, and this one has
+# been read.
+exit 0
