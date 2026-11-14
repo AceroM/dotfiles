@@ -375,3 +375,43 @@ if diff_file then
     end,
   }
 end
+
+-- Shared tab wrapping for clients that keep their own keyboard across hosts.
+-- This action declares no keys; each client decides how to bind it.
+local function call(method, params)
+  local result, err = rex.call(method, params)
+  if err ~= nil then error(err, 0) end
+  return result
+end
+
+-- Rex's session.focus_next_window and focus_previous_window stop at the ends. These
+-- wrap around: next from the last tab goes to the first, previous from the first to
+-- the last.
+rex.action{
+  name = "tab_cycle",
+  title = "Next Tab, Wrapping",
+  category = "Tab",
+  description = "Show the next tab, going from the last back to the first (step=-1: the previous one).",
+  args = { step = "integer?" },
+  run = function(ctx, args)
+    local v = call("session.view", { session_id = ctx.session_id })
+    local windows = v.windows or {}
+    if #windows < 2 then return end
+    local current = v.active_window_id
+    for _, window in ipairs(windows) do
+      for _, layer in ipairs(window.layers or {}) do
+        for _, block in ipairs(layer.blocks or {}) do
+          if block.block_id == ctx.block_id then current = window.window_id end
+        end
+      end
+    end
+    local step = args.step or 1
+    for i, window in ipairs(windows) do
+      if window.window_id == current then
+        local target = windows[((i - 1 + step) % #windows) + 1]
+        call("session.focus_window", { session_id = ctx.session_id, window_id = target.window_id })
+        return
+      end
+    end
+  end,
+}
