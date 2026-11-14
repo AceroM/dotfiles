@@ -4,7 +4,8 @@
 //! starts that agent with it in a new Rex tab, and the prompt empties for
 //! the next one.
 //! A pasted image is an `[Image #N]` tag in the text, its file listed at the
-//! end of what's sent; it isn't drawn.
+//! end of what's sent; it isn't drawn. ⌥c copies the text without them, its
+//! spaces and blank lines tidied (field::plain).
 //!
 //! Drafts (drafts.rs): ^s keeps the prompt as one, saved as it's
 //! written from then on (esc leaves it for later, ⏎ sends it and it goes);
@@ -798,6 +799,12 @@ impl App {
             // clears the prompt, and on an empty one it quits. ^x cuts, ^z
             // brings back what was cleared (or sent).
             KeyCode::Char('c') if ctrl => return self.ctrl_c(),
+            // ⌥c copies the text alone: the selection's, else the prompt's,
+            // without its image tags or extra spaces and blank lines.
+            KeyCode::Char('c') if alt => {
+                let text = self.field.selected().unwrap_or(&self.field.text).to_string();
+                self.copy_plain(&text);
+            }
             KeyCode::Char('d') if ctrl && self.field.text.is_empty() && self.editing.is_some() => self.leave_draft(),
             KeyCode::Char('d') if ctrl && self.field.text.is_empty() => return Act::Quit,
             // ^s keeps the prompt as a draft; ^g goes through the drafts.
@@ -1324,6 +1331,7 @@ impl App {
     /// and x deletes them.
     fn list_key(&mut self, k: KeyEvent) -> Act {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let Some(sel) = self.list else { return Act::None };
         let last = self.drafts.len().saturating_sub(1);
@@ -1362,6 +1370,8 @@ impl App {
             KeyCode::Enter | KeyCode::Char('o') if marked => self.send_marked(ctrl),
             KeyCode::Char('x' | ';') if marked => self.delete_marked(),
             KeyCode::Char('c' | 'g' | 'd') if ctrl => self.close_list(),
+            // ⌥c: the selected draft's text alone, as the prompt's.
+            KeyCode::Char('c') if alt => self.copy_plain(&d.text),
             KeyCode::Char('l') if ctrl => return Act::ClearScreen,
             KeyCode::Char('n') if ctrl => self.list = Some((sel + 1).min(last)),
             KeyCode::Char('p') if ctrl => self.list = Some(sel.saturating_sub(1)),
@@ -1579,6 +1589,19 @@ impl App {
         std::mem::swap(&mut self.images, &mut c.1);
         self.field.end();
         self.toast("brought it back", true);
+    }
+
+    /// ⌥c: `text` alone onto the clipboard, its `[Image #N]` tags and
+    /// extra spaces and blank lines out (field::plain).
+    fn copy_plain(&mut self, text: &str) {
+        let plain = field::plain(text);
+        if !plain.is_empty() {
+            self.clip(plain);
+        } else if field::image_tags(text).is_empty() {
+            self.toast("nothing to copy", false);
+        } else {
+            self.toast("nothing to copy but images", false);
+        }
     }
 
     /// `text` onto the clipboard (pbcopy).
@@ -1985,6 +2008,31 @@ mod tests {
         let cleared = matches!(a.handle(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL))), Act::ClearScreen);
         assert!(cleared);
         assert_eq!(a.field.text, "threeone two ");
+    }
+
+    #[test]
+    fn option_c_copies_the_text_without_its_images() {
+        let mut a = app("  look at [Image #1] .\n[Image #2]\n\n\nthen   fix it  ");
+        press(&mut a, KeyCode::Char('c'), KeyModifiers::ALT);
+        assert_eq!(a.would_copy.as_deref(), Some("  look at.\n\nthen fix it"));
+        // Untouched, and not typed into.
+        assert_eq!(a.field.text, "  look at [Image #1] .\n[Image #2]\n\n\nthen   fix it  ");
+        // The selection's, when there's one.
+        press(&mut a, KeyCode::Left, KeyModifiers::SHIFT.union(KeyModifiers::ALT));
+        press(&mut a, KeyCode::Left, KeyModifiers::SHIFT.union(KeyModifiers::ALT));
+        press(&mut a, KeyCode::Char('c'), KeyModifiers::ALT);
+        assert_eq!(a.would_copy.as_deref(), Some("fix it"));
+        // Images alone copy nothing.
+        let mut a = app("[Image #1] [Image #2]");
+        press(&mut a, KeyCode::Char('c'), KeyModifiers::ALT);
+        assert_eq!(a.would_copy, None);
+        // In the drafts list, the selected draft's.
+        let mut a = app("a draft  [Image #1]");
+        press(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char('c'), KeyModifiers::ALT);
+        assert_eq!((a.would_copy.as_deref(), a.list), (Some("a draft"), Some(0)));
     }
 
     #[test]

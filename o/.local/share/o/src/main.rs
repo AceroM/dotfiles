@@ -61,6 +61,8 @@ Runs inside a Rex terminal (oc is the same prompt for Herdr). The keys:
   ends; shift (⌥⇧ a word) with the arrows selects
   ^c copies the selection, else clears the prompt (^z brings it back, or what ⏎ sent);
   esc esc clears it too; ^c, ^d or esc on an empty prompt quits
+  ⌥c copies the text alone (the selection's, else the prompt's; in ^g's list the
+  selected draft's): no [Image #N] tags, spaces run together, a blank line at most
   When an agent exits, its tab is left at a shell in the agent's folder.
 Drafts (o's own, per Rex session, in ~/.local/state/o/drafts.json):
   ^s keeps the prompt as a draft, saved as you type from then on (the prompt reads ◇);

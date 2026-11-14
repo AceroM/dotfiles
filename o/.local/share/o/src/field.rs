@@ -195,6 +195,45 @@ pub fn with_images(text: &str, images: &[PathBuf]) -> String {
     }
 }
 
+/// The text alone, as ⌥c copies it: no `[Image #N]` tags, each line's
+/// spaces run together and its end trimmed (its indent kept), punctuation
+/// back against the word a tag stood after (`see [Image #1] .` reads
+/// `see.`), a line that held only tags gone, and blank lines one at most,
+/// none at either end.
+pub fn plain(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let tags = image_tags(line);
+        let mut s = String::new();
+        let (mut last, mut after_tag) = (0, false);
+        let ends = tags.iter().map(|(r, _)| r.clone()).chain([line.len()..line.len()]);
+        for r in ends {
+            for w in line[last..r.start].split_whitespace() {
+                let stick = after_tag && w.starts_with([',', '.', ';', ':', '!', '?', ')']);
+                if !s.is_empty() && !stick {
+                    s.push(' ');
+                }
+                s.push_str(w);
+                after_tag = false;
+            }
+            after_tag = true;
+            last = r.end;
+        }
+        if s.is_empty() {
+            if tags.is_empty() && out.last().is_some_and(|l| !l.is_empty()) {
+                out.push(String::new());
+            }
+            continue;
+        }
+        let indent = &line[..line.len() - line.trim_start().len()];
+        out.push(format!("{indent}{s}"));
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -741,5 +780,18 @@ mod tests {
         assert_eq!(with_images("see [Image #2]", &images), "see [Image #2]\n\n[Image #2]: /a/2.png");
         assert_eq!(with_images("no tags", &images), "no tags");
         assert_eq!(first_line("\n  \n  fix   the header\nand more"), "fix the header");
+    }
+
+    #[test]
+    fn plain_is_the_text_without_its_tags_or_extra_space() {
+        assert_eq!(plain("see [Image #1] here"), "see here");
+        assert_eq!(plain("look at [Image #1] . and [Image #2], then [Image #3]"), "look at. and, then");
+        assert_eq!(plain("a[Image #1]b"), "a b");
+        assert_eq!(plain("\n\n  fix   the    header   \n[Image #1] [Image #2]\n\n\n\nand more\n\n"), "  fix the header\n\nand more");
+        assert_eq!(plain("one\n[Image #1]\ntwo"), "one\ntwo");
+        assert_eq!(plain("- a\n    - b\t c"), "- a\n    - b c");
+        assert_eq!(plain("[Image #1] [Image #2]"), "");
+        // Not a tag: kept.
+        assert_eq!(plain("[Image #x] stays"), "[Image #x] stays");
     }
 }
