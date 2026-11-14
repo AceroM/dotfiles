@@ -113,7 +113,7 @@ fn sent_selection(app: &App, buf: &mut Buffer, sel: usize) {
         put(buf, 2, 1, max, destination, fg(color));
     }
     if app.lay.text.height > 2 {
-        let keys = format!("{}/{} · ↑ ↓ sessions · ⏎ focus · esc compose", sel + 1, app.sent.len());
+        let keys = format!("{}/{} · ↑ ↓ sessions · ⏎ focus · e edit · esc compose", sel + 1, app.sent.len());
         put(buf, 2, 2, max, &keys, fg(p.dim));
     }
 }

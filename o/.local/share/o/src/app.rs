@@ -6,6 +6,8 @@
 //! A pasted image is an `[Image #N]` tag in the text, its file listed at the
 //! end of what's sent; it isn't drawn. ⌥c copies the text without them, its
 //! spaces and blank lines tidied (field::plain).
+//! ↑ on an empty prompt selects what was sent: ⏎ goes to its tab, e puts it
+//! back in the prompt to change and send again.
 //!
 //! Drafts (drafts.rs): ^s keeps the prompt as one, saved as it's
 //! written from then on (esc leaves it for later, ⏎ sends it and it goes);
@@ -82,6 +84,11 @@ pub struct Sent {
     pub outcome: Option<Outcome>,
     /// The images it took: its agent's pane's, once it's there (panes.rs).
     pub images: Tagged,
+    /// What `e` puts back in the prompt: the text as it went (all of it,
+    /// for drafts sent as one), and the files behind its `[Image #N]` tags.
+    pub again: (String, Vec<PathBuf>),
+    /// The configuration it started; None for a reply.
+    pub agent: Option<usize>,
 }
 
 /// Where things are, in lines from the prompt's first.
@@ -773,6 +780,7 @@ impl App {
                     self.sent_at = if sel + 1 < self.sent.len() { Some(sel + 1) } else { None };
                 }
                 KeyCode::Enter if !shift && !alt => self.focus_sent(sel),
+                KeyCode::Char('e') if !alt && !ctrl && !sup => self.edit_sent(sel),
                 KeyCode::Esc => self.sent_at = None,
                 _ => { self.sent_at = None; return self.key(k); }
             }
@@ -1014,6 +1022,23 @@ impl App {
         }
     }
 
+    /// e on a send: its prompt back in the box, to change and send again, on
+    /// the configuration and in the plan mode it went with. ⏎ starts a new
+    /// agent with it (a reply too: its agent has the first one already).
+    fn edit_sent(&mut self, index: usize) {
+        let Some(s) = self.sent.get(index) else { return };
+        let ((text, images), agent, plan) = (s.again.clone(), s.agent, s.plan);
+        self.sent_at = None;
+        (self.hist_at, self.draft, self.scroll) = (None, None, 0);
+        self.show(text, images);
+        if let Some(i) = agent.filter(|&i| i < self.agents.len()) {
+            self.agent = i;
+        }
+        self.plan = plan;
+        let not_reply = if agent.is_some() { "" } else { " (not as a reply)" };
+        self.toast(format!("back in the prompt · ⏎ starts a new agent with it{not_reply}"), true);
+    }
+
     /// ⏎: start the agent with the prompt in a new tab (`focus`: and go
     /// there). The prompt empties for the next one; ^z brings this one back.
     fn send(&mut self, focus: bool) {
@@ -1038,7 +1063,8 @@ impl App {
         let agent = self.launch(self.agent());
         let n = self.sent.len();
         let tagged = drafts::tagged(&text, &images);
-        self.sent.push(Sent { name: agent.name.clone(), text: text.clone(), plan: self.plan, outcome: None, images: tagged });
+        let again = (text.clone(), images.clone());
+        self.sent.push(Sent { name: agent.name.clone(), text: text.clone(), plan: self.plan, outcome: None, images: tagged, again, agent: Some(self.agent) });
         if self.live {
             spawn::send(n, &agent, &prompt, &self.cwd, &self.label, focus, self.sent_tx.clone());
         } else {
@@ -1302,9 +1328,10 @@ impl App {
         self.remember(text, images);
         let n = self.sent.len();
         let done = |m: &str| (format!("→ {m}"), true, Some(format!("snapshot-{n}")));
+        let again = (text.to_string(), images.to_vec());
         match to {
             Some((pane, label)) => {
-                self.sent.push(Sent { name: format!("↳{label}"), text: text.to_string(), plan: d.plan, outcome: None, images: drafts::tagged(text, images) });
+                self.sent.push(Sent { name: format!("↳{label}"), text: text.to_string(), plan: d.plan, outcome: None, images: drafts::tagged(text, images), again, agent: None });
                 if self.live {
                     spawn::reply(n, &pane, &prompt, self.sent_tx.clone());
                 } else {
@@ -1313,8 +1340,9 @@ impl App {
                 }
             }
             None => {
-                let agent = self.launch(&self.agents[self.agent_of(d).unwrap_or(0)]);
-                self.sent.push(Sent { name: agent.name.clone(), text: text.to_string(), plan: d.plan, outcome: None, images: drafts::tagged(text, images) });
+                let i = self.agent_of(d).unwrap_or(0);
+                let agent = self.launch(&self.agents[i]);
+                self.sent.push(Sent { name: agent.name.clone(), text: text.to_string(), plan: d.plan, outcome: None, images: drafts::tagged(text, images), again, agent: Some(i) });
                 if self.live {
                     spawn::send(n, &agent, &prompt, &d.cwd, "", focus, self.sent_tx.clone());
                 } else {
@@ -1469,7 +1497,8 @@ impl App {
     /// of them is; and they all go.
     fn send_all(&mut self, ds: &[Draft], focus: bool) {
         let first = &ds[0];
-        let agent = self.launch(&self.agents[self.agent_of(first).unwrap_or(0)]);
+        let i = self.agent_of(first).unwrap_or(0);
+        let agent = self.launch(&self.agents[i]);
         let plan = ds.iter().any(|d| d.plan);
         let (text, images) = drafts::combine(ds);
         let ids: Vec<&str> = ds.iter().map(|d| d.id.as_str()).collect();
@@ -1481,7 +1510,8 @@ impl App {
         // ↑ brings back the whole of it, to send again.
         self.remember(&text, &images);
         let n = self.sent.len();
-        self.sent.push(Sent { name: agent.name.clone(), text: drafts::summary(ds), plan, outcome: None, images: drafts::tagged(&text, &images) });
+        let tagged = drafts::tagged(&text, &images);
+        self.sent.push(Sent { name: agent.name.clone(), text: drafts::summary(ds), plan, outcome: None, images: tagged, again: (text, images), agent: Some(i) });
         if self.live {
             spawn::send(n, &agent, &prompt, &first.cwd, "", focus, self.sent_tx.clone());
         } else {
@@ -1860,6 +1890,46 @@ mod tests {
         press(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(!press(&mut a, KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(a.sent_at, None);
+    }
+
+    #[test]
+    fn e_on_a_send_puts_it_back_to_edit_and_send_again() {
+        let mut a = app("fix the [Image #1] header");
+        a.images = vec!["/tmp/shot.png".into()];
+        press(&mut a, KeyCode::Char('2'), KeyModifiers::CONTROL);
+        a.plan = true;
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        a.tick();
+        // Somewhere else since: e goes back to how it went.
+        press(&mut a, KeyCode::Char('1'), KeyModifiers::CONTROL);
+        a.plan = false;
+        press(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        a.layout(100, 24);
+        assert!(crate::term::plain(&crate::ui::draw(&a), 2).contains("e edit"));
+        press(&mut a, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(a.sent_at, None);
+        assert_eq!((a.field.text.as_str(), a.field.cur), ("fix the [Image #1] header", a.field.text.len()));
+        assert_eq!(a.images, [PathBuf::from("/tmp/shot.png")]);
+        assert_eq!((a.agent().name.as_str(), a.plan), ("claude(fable)", true));
+        type_in(&mut a, " again");
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.would_send.as_deref(), Some("/plan fix the [Image #1] header again\n\n[Image #1]: /tmp/shot.png"));
+        assert_eq!(a.sent.len(), 2);
+    }
+
+    #[test]
+    fn e_on_drafts_sent_as_one_puts_back_all_of_it() {
+        let mut a = with_drafts(&["second", "first"]);
+        press(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        press(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+        press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let sent = a.would_send.clone().unwrap();
+        a.tick();
+        assert_eq!(a.list, None);
+        press(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut a, KeyCode::Char('e'), KeyModifiers::NONE);
+        assert!(a.field.text.starts_with("Here are 2 tasks"), "{}", a.field.text);
+        assert_eq!(a.field.text, sent);
     }
 
     #[test]

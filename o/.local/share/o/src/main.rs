@@ -43,6 +43,8 @@ Runs inside a Rex terminal (oc is the same prompt for Herdr). The keys:
   ⏎ sends (to a new tab, in the background) · ^⏎ or ^o sends and goes to the tab
   ⇧⏎ ⌥⏎ ^j newline · ^p plan mode (sends `/plan …`)
   ↑ on an empty prompt selects a created session · ↑ ↓ choose · ⏎ focus · esc compose
+  · e edit: its prompt back in the box (images, configuration and plan mode too), to
+  change and send again to a new agent
   ⇧tab the next configuration (round to the first) · ^1 … ^9 the Nth
   ^n the next Claude profile (account), when there's more than ~/.claude: see below
   ^v pastes the clipboard's image (⌘V too, with only an image on it); a file dragged
