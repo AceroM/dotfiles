@@ -130,11 +130,11 @@ local pane_cwd = dirfocus.pane_cwd
 
 local REX_BIN = (os.getenv("HOME") or "") .. "/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"
 
--- cmd+n is cmd+t (the app's own New Tab: same tab, same shell, shown and
--- focused the same way), except the tab lands right after the one the key was
--- pressed in instead of at the end. The app makes the tab only after this
--- action returns, so new-tab-here.lua, started detached, waits for it to
--- appear and moves it into place. "The one the key was pressed in" is the tab
+-- new_tab_here (fn+e, in keys.lua) is the app's own New Tab (cmd+t: same tab,
+-- same shell, shown and focused the same way), except the tab lands right
+-- after the one the key was pressed in instead of at the end. The app makes
+-- the tab only after this action returns, so new-tab-here.lua, started
+-- detached, waits for it to appear and moves it into place. "The one the key was pressed in" is the tab
 -- holding ctx.block_id: the server's active_window_id doesn't follow the
 -- app's selected tab.
 -- Try it without the app: rex do new_tab_here dry_run=1 --json
@@ -179,7 +179,8 @@ rex.action{
     return result
   end,
 }
-rex.bind("cmd+n", "new_tab_here")
+-- cmd+n is cmd+t, the app's own New Tab at the end of the session.
+rex.bind("cmd+n", "client.tab.new")
 
 -- cmd+e shows the orchestrators tab, the first tab of the agents session,
 -- where `o` waits for prompts, from any session or tab. It keeps that tab

@@ -11,7 +11,7 @@ local bind = rex.bind
 local letters = "abcdefghijklmnopqrstuvwxyz"
 
 -- Tabs: ctrl+alt+h/l walk them, 1..8 jump to one, 9 is the last (the browser rule
--- fn+9 had through Hammerspoon), e opens one after the current tab (cmd+n's
+-- fn+9 had through Hammerspoon), e opens one after the current tab (init.lua's
 -- new_tab_here) and shift+e one before it.
 bind("ctrl+alt+n", "client.tab.new")
 bind("ctrl+alt+e", "new_tab_here")
