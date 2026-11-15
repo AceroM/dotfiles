@@ -4,7 +4,7 @@
 //!   $XDG_CONFIG_HOME/o/config.toml    (else ~/.config/o/config.toml)
 //!
 //! as `[[agent]]` tables: `kind` is the command (claude,
-//! codex); `model` goes to it as `--model MODEL` and into its name;
+//! codex, agy); `model` goes to it as `--model MODEL` and into its name;
 //! `args` are its own arguments; `name` is shown instead of `kind(model)`.
 //! ⇧tab goes to the next one, ^1…^9 straight to the Nth, and o remembers
 //! the one picked last, for the next time it starts:
@@ -51,7 +51,7 @@ impl Default for Config {
 pub struct Agent {
     /// What the prompt shows: `name`, else `kind(model)`, else `kind`.
     pub name: String,
-    /// The command: claude, codex.
+    /// The command: claude, codex, agy.
     pub kind: String,
     /// The agent's own arguments, `--model MODEL` last when there's a model.
     pub args: Vec<String>,
@@ -209,14 +209,15 @@ pub fn remember_profile(name: &str) {
 }
 
 /// Without a config file: Claude Code on Opus, on Fable, then Codex (as the
-/// `c` and `cx` aliases run them).
+/// `c` and `cx` aliases run them), then Google Antigravity.
 pub fn defaults() -> Vec<Agent> {
-    let claude = ["--dangerously-skip-permissions"];
+    let skip_permissions = ["--dangerously-skip-permissions"];
     vec![
-        Agent::new("claude", Some("opus"), &claude, None),
-        Agent::new("claude", Some("fable"), &claude, None),
+        Agent::new("claude", Some("opus"), &skip_permissions, None),
+        Agent::new("claude", Some("fable"), &skip_permissions, None),
         // In this process, not on Codex's background server.
         Agent::new("codex", None, &["--no-daemon", "--yolo"], None),
+        Agent::new("agy", None, &skip_permissions, None),
     ]
 }
 
@@ -275,9 +276,9 @@ pub fn parse(s: &str) -> Result<Config, String> {
             None => Ok(None),
             Some(v) => v.as_str().map(|s| Some(s.trim())).ok_or(format!("agent {n}: `{k}` isn't a string")),
         };
-        let kind = text("kind")?.filter(|k| !k.is_empty()).ok_or(format!("agent {n} has no `kind` (claude, codex)"))?;
+        let kind = text("kind")?.filter(|k| !k.is_empty()).ok_or(format!("agent {n} has no `kind` (claude, codex, agy)"))?;
         if kind.contains(char::is_whitespace) {
-            return Err(format!("agent {n}: `kind` is one word (claude, codex); the rest goes in `args`"));
+            return Err(format!("agent {n}: `kind` is one word (claude, codex, agy); the rest goes in `args`"));
         }
         let model = text("model")?.filter(|m| !m.is_empty());
         let name = text("name")?.filter(|m| !m.is_empty());
@@ -417,6 +418,8 @@ mod tests {
         assert_eq!(pick_start(&all, None, Some("claude(sonnet)")), (0, Why::First));
         // $O_AGENT over it, by name or kind; one that matches nothing doesn't count.
         assert_eq!(pick_start(&all, Some("codex"), Some("claude(fable)")), (2, Why::Env));
+        assert_eq!(pick_start(&all, Some("agy"), Some("codex")), (3, Why::Env));
+        assert_eq!(pick_start(&all, None, Some("agy")), (3, Why::Last));
         assert_eq!(pick_start(&all, Some("claude"), Some("codex")), (0, Why::Env));
         assert_eq!(pick_start(&all, Some("gemini"), Some("codex")), (2, Why::Last));
     }
@@ -452,8 +455,9 @@ mod tests {
         assert_eq!(on2.name, "claude(opus)·2");
         assert_eq!(on2.argv(), ["env", "CLAUDE_CONFIG_DIR=/h/.claude-2", "claude", "--dangerously-skip-permissions", "--model", "opus"]);
         assert_eq!(all[0].argv(), ["claude", "--dangerously-skip-permissions", "--model", "opus"]);
-        // Codex has no Claude profile.
+        // Other agents have no Claude profile.
         assert_eq!(all[2].on(Some(&two)), all[2]);
+        assert_eq!(all[3].on(Some(&two)), all[3]);
     }
 
     #[test]
@@ -477,8 +481,8 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_three() {
+    fn the_defaults_are_the_four() {
         let names: Vec<_> = defaults().into_iter().map(|a| a.name).collect();
-        assert_eq!(names, ["claude(opus)", "claude(fable)", "codex"]);
+        assert_eq!(names, ["claude(opus)", "claude(fable)", "codex", "agy"]);
     }
 }

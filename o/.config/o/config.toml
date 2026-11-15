@@ -4,7 +4,7 @@
 # picked last (kept in ~/.local/state/o/last-agent), else the first; $O_AGENT
 # names one instead (O_AGENT=codex). `o --config` shows what o read.
 #
-#   kind   the command: claude, codex
+#   kind   the command: claude, codex, agy
 #   model  passed as --model MODEL, and shown: claude(fable)
 #   args   the agent's own arguments
 #   name   shown instead of kind(model)
@@ -33,3 +33,8 @@ args = ["--dangerously-skip-permissions"]
 [[agent]]
 kind = "codex"
 args = ["--no-daemon", "--yolo"]
+
+# Google Antigravity, using its current default model.
+[[agent]]
+kind = "agy"
+args = ["--dangerously-skip-permissions"]

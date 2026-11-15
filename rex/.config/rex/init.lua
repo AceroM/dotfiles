@@ -183,14 +183,14 @@ rex.action{
 rex.bind("cmd+n", "client.tab.new")
 
 -- cmd+e shows the orchestrators tab, the first tab of the agents session,
--- where `o` waits for prompts, from any session or tab. It keeps that tab
--- first and labelled "orchestrators" and focuses its o pane. When o isn't
--- running there, it starts it in the directory of the pane cmd+e was pressed
--- in: typed into an idle shell in the tab (cd'ing that shell there), else in
--- a new tab or pane. A first tab holding an agent's chat is never taken over;
--- orchestrators gets a new tab in front of it instead.
+-- where `o` waits for prompts, from any session or tab. Each directory gets
+-- its own o pane: an existing match is focused, otherwise an idle shell is
+-- reused or a pane is added. Two panes sit side by side, then grow into a
+-- 2x2 grid, with at most four panes. A fifth directory needs a pane closed
+-- first; running prompts are never replaced. A first tab holding an agent's
+-- chat is never taken over; orchestrators gets a new tab in front of it.
 -- Try it without moving: rex do orchestrators dry_run=1 --json
-local ORCH = { session = "agents", tab = "orchestrators", program = "o" }
+local ORCH = { session = "agents", tab = "orchestrators", program = "o", max_panes = 4 }
 local SHELLS = { zsh = true, bash = true, fish = true }
 -- A new pane runs o, then a login shell once o exits. set -m gives o its own
 -- process group, so Rex reports o (not sh) as the pane's foreground program;
@@ -209,12 +209,32 @@ end
 local function terminal_panes(session_id, window)
   local panes = {}
   for _, layer in ipairs(window.layers or {}) do
-    for _, b in ipairs(layer.blocks or {}) do
-      if b.creator_name == TERMINAL then
-        table.insert(panes, { block_id = b.block_id, program = foreground(session_id, b.block_id) })
+    if layer.kind == "tiled" then
+      local rects = {}
+      local function walk(node)
+        if not node then return end
+        if node.block_id then rects[node.block_id] = node.rect end
+        if node.split then walk(node.split.before) walk(node.split.after) end
+      end
+      walk(layer.layout)
+      for _, b in ipairs(layer.blocks or {}) do
+        if b.creator_name == TERMINAL then
+          table.insert(panes, {
+            block_id = b.block_id, program = foreground(session_id, b.block_id),
+            cwd = pane_cwd(b.block_id, session_id), rect = rects[b.block_id],
+          })
+        end
       end
     end
   end
+  -- Row order keeps existing top-left / top-right prompts in place as the
+  -- bottom row is added. Floating scratch panes don't belong to the grid.
+  table.sort(panes, function(a, b)
+    local ar, br = a.rect or { 0, 0 }, b.rect or { 0, 0 }
+    if ar[2] ~= br[2] then return ar[2] < br[2] end
+    if ar[1] ~= br[1] then return ar[1] < br[1] end
+    return a.block_id < b.block_id
+  end)
   return panes
 end
 
@@ -222,12 +242,28 @@ end
 local function pick(panes, focused, want)
   local found
   for _, p in ipairs(panes) do
-    if want(p.program) then
+    if want(p) then
       if p.block_id == focused then return p end
       found = found or p
     end
   end
   return found
+end
+
+local function same_directory(a, b)
+  return a ~= nil and b ~= nil and a:gsub("/+$", "") == b:gsub("/+$", "")
+end
+
+-- Moving the existing blocks preserves their processes, prompts and history.
+-- Rebuild from their visual order so old stacked layouts become a grid too.
+local function orchestrators_grid(session_id, panes)
+  for i = 2, #panes do
+    rex.call("session.move_block", {
+      session_id = session_id, block_id = panes[i].block_id,
+      anchor_block_id = panes[i == 4 and 2 or 1].block_id,
+      direction = i == 2 and "horizontal" or "vertical", side = "after", ratio = 0.5,
+    })
+  end
 end
 
 local function session_named(name)
@@ -240,7 +276,7 @@ rex.action{
   name = "orchestrators",
   title = "Go to Orchestrators",
   category = "Tab",
-  keywords = "orchestrators o prompt agents first tab",
+  keywords = "orchestrators o prompt agents directory grid first tab",
   run = function(ctx, args)
     local cwd = pane_cwd(ctx.block_id) or os.getenv("HOME")
     local sid = session_named(args.session or ORCH.session) or ctx.session_id
@@ -265,17 +301,24 @@ rex.action{
     panes = panes or (tab and terminal_panes(sid, tab)) or {}
 
     local focused = tab and tab.focused_block_id
-    local o = pick(panes, focused, function(n) return n == ORCH.program end)
-    local shell = not o and pick(panes, focused, function(n) return SHELLS[n] end)
+    local o = pick(panes, focused, function(p)
+      return p.program == ORCH.program and same_directory(p.cwd, cwd)
+    end)
+    local shell = not o and (pick(panes, focused, function(p)
+      return SHELLS[p.program] and same_directory(p.cwd, cwd)
+    end) or pick(panes, focused, function(p) return SHELLS[p.program] end))
+    local full = not o and not shell and #panes >= ORCH.max_panes
     local result = {
       session_id = sid, cwd = cwd,
       window_id = tab and tab.window_id,
       tab = not tab and "new" or tab.label ~= ORCH.tab and "label" or "labelled",
       first = tab ~= nil and windows[1] == tab,
-      o = o and "running" or shell and "typed_in_shell" or tab and "new_pane" or "new_tab",
+      o = o and "running" or shell and "typed_in_shell" or full and "full" or tab and "new_pane" or "new_tab",
       block_id = (o or shell or {}).block_id,
+      panes = #panes, max_panes = ORCH.max_panes,
     }
     if args.dry_run then return result end
+    if full then error("Orchestrators already has four panes; close one before adding " .. cwd, 0) end
 
     local layout = rex.layout.block{
       flavor = TERMINAL .. ".shell",
@@ -294,9 +337,12 @@ rex.action{
       })
     elseif not o then
       local created = rex.call("session.new_split", {
-        session_id = sid, anchor_id = focused, direction = "vertical", side = "after", layout = layout,
+        session_id = sid, anchor_id = panes[1] and panes[1].block_id or focused,
+        direction = "horizontal", side = "after", layout = layout,
       })
       result.block_id = (created.block_ids or {})[1]
+      panes[#panes + 1] = { block_id = result.block_id }
+      orchestrators_grid(sid, panes)
     end
 
     if windows[1] and windows[1].window_id ~= tab.window_id then

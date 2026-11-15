@@ -3,10 +3,10 @@
 //! `o --start-agent …`, in its own process group, so quitting o right after
 //! ⏎ still gets the agent started.
 //!
-//! The tab runs `sh -c '"$@"; exec $SHELL -l' o AGENT ARGS… -- PROMPT`: the
-//! agent gets the prompt as an argument (no waiting for a shell to be ready
-//! to type into), and when it exits the tab is left at a shell in its
-//! folder, as a tab that had the agent typed into it would be.
+//! The tab runs `sh -c '"$@"; exec $SHELL -l' o AGENT ARGS… -- PROMPT`
+//! (`--prompt-interactive PROMPT` for Antigravity). The agent gets the prompt
+//! as an argument, with no waiting for a shell to be ready to type into.
+//! When it exits, the tab is left at a shell in its folder.
 //!
 //! Which agent, and its arguments, is the configuration the prompt is on
 //! (config.rs); on a Claude profile other than the main one, it runs as
@@ -106,6 +106,17 @@ const THEN_SHELL: &str = r#""$@"; exec "${SHELL:-/bin/zsh}" -l"#;
 /// runs the binary too.)
 const THEN_SHELL_RC: &str = r#"command "$@"; exec "${SHELL:-/bin/zsh}" -l"#;
 
+/// `sh -c`'s $0, then the command and its initial interactive prompt.
+fn shell_args<'a>(command: &'a [String], prompt: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["o"];
+    args.extend(command.iter().map(String::as_str));
+    // Antigravity takes the prompt as a flag value. Claude Code and Codex
+    // take a positional argument after `--`, including one starting with -.
+    let agy = command.first().is_some_and(|c| Path::new(c).file_name().is_some_and(|n| n == "agy"));
+    args.extend([if agy { "--prompt-interactive" } else { "--" }, prompt]);
+    args
+}
+
 fn start(command: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool) -> Result<Outcome, String> {
     let ses = session().ok_or("not in a Rex terminal (no REX_SESSION)")?;
     let cwd = cwd.to_string_lossy();
@@ -115,11 +126,7 @@ fn start(command: &[String], prompt: &str, cwd: &Path, label: &str, focus: bool)
         head.push(label);
     }
     head.extend(["-c", &cwd, focus, "--json"]);
-    let mut agent = vec!["o"];
-    agent.extend(command.iter().map(String::as_str));
-    // `--`: a prompt starting with - isn't read as an option (Claude Code and
-    // Codex both take it).
-    agent.extend(["--", prompt]);
+    let agent = shell_args(command, prompt);
     // --interactive: ~/.zshrc too, so the agent sees what a shell tab would.
     let native = [&head[..], &["--interactive", "--", "sh", "-c", THEN_SHELL], &agent].concat();
     let out = match rex(&native) {
@@ -210,4 +217,24 @@ fn failure(out: &Output) -> String {
     let json = all.lines().find_map(|l| serde_json::from_str::<Value>(l).ok());
     let msg = json.as_ref().and_then(|v| v["error"]["message"].as_str().or(v["message"].as_str())).map(String::from);
     msg.unwrap_or_else(|| all.trim().lines().next().unwrap_or("failed").trim_start_matches("Error: ").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_prompts_use_each_agents_interactive_arguments() {
+        let prompt = "--help\nfix 'quotes' and $(literal)";
+        for agent in crate::config::defaults() {
+            let command = agent.argv();
+            let args = shell_args(&command, prompt);
+            assert_eq!(args[0], "o");
+            assert_eq!(args[1..args.len() - 2], command);
+            let flag = if agent.kind == "agy" { "--prompt-interactive" } else { "--" };
+            assert_eq!(&args[args.len() - 2..], [flag, prompt]);
+        }
+        let command = vec!["/Users/example/.local/bin/agy".to_string(), "--model".to_string(), "custom".to_string()];
+        assert_eq!(shell_args(&command, prompt), ["o", "/Users/example/.local/bin/agy", "--model", "custom", "--prompt-interactive", prompt]);
+    }
 }

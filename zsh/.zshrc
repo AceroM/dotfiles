@@ -30,3 +30,7 @@ fpath=("/Users/miguelacero/.local/share/zsh/site-functions" $fpath)
 # >>> Codex installer >>>
 export PATH="$HOME/.local/bin:$PATH"
 # <<< Codex installer <<<
+
+
+# Added by Antigravity CLI installer
+export PATH="/Users/miguel/.local/bin:$PATH"

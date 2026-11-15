@@ -76,15 +76,16 @@ Drafts (o's own, per Rex session, in ~/.local/state/o/drafts.json):
   a task (images numbered across them), from the first one's folder on its configuration
   (plan mode if any is); x deletes them all (u brings them back); esc unmarks.
 Configurations: ~/.config/o/config.toml lists them, in order, as [[agent]] tables:
-  kind = \"claude\"     the command (claude, codex)
+  kind = \"claude\"     the command (claude, codex, agy)
   model = \"fable\"     passed as --model fable; shown as claude(fable)
   args = [\"…\"]        the agent's own arguments
   name = \"…\"          shown instead of kind(model)
 Without the file: claude(opus) and claude(fable) (--dangerously-skip-permissions), then
-codex (--no-daemon --yolo). o starts on the one picked last (kept in
-~/.local/state/o/last-agent), else the first; $O_AGENT names one instead
-(O_AGENT=codex). Above the tables, max_width = 100 (the default) keeps o in the pane's
-first 100 columns, so the text wraps at about 80 on a wide pane; 0 uses the whole width.
+codex (--no-daemon --yolo), then agy (--dangerously-skip-permissions).
+o starts on the one picked last (kept in ~/.local/state/o/last-agent), else the first;
+$O_AGENT names one instead (O_AGENT=codex). Above the tables, max_width = 100 (the
+default) keeps o in the pane's first 100 columns, so the text wraps at about 80 on a
+wide pane; 0 uses the whole width.
 Claude profiles: ~/.claude, then each ~/.claude-NAME Claude Code has run in (a
 .claude.json in it), as `CLAUDE_CONFIG_DIR=~/.claude-2 claude` makes one for a second
 account. ^n picks the one the claude configurations start on, shown after the name
