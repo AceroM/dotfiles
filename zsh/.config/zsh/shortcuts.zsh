@@ -13,6 +13,9 @@ function 'c!'() {
   c "$@"
 }
 alias ca="claude --permission-mode plan"
+unfunction a 2>/dev/null
+(( $+functions[compdef] )) && compdef -d a 2>/dev/null
+alias a="agy --dangerously-skip-permissions"
 unalias cx cy cxl cxm cxh cxx 2>/dev/null
 _ac_codex_profile() {
   local profile="$1"

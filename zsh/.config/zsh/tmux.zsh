@@ -1,8 +1,8 @@
 # Two tmux servers: default socket = interactive shells, `tmux -L bg` = background processes and detached agents.
-# Default server: a / l / k / r          bg server: bg / ba / bl / bk / bgr / bgn
+# Default server: l / k / r              bg server: bg / ba / bl / bk / bgr / bgn
 
 # stale aliases from older versions of this file shadow the functions below on re-source
-unalias l a k r t tb bg ba bl bk bgr bgn 2>/dev/null
+unalias l k r t tb bg ba bl bk bgr bgn 2>/dev/null
 
 function _tm() {
   local sock="$1"
@@ -151,12 +151,11 @@ alias tx='tmux source-file ~/.tmux.conf; tmux -L bg source-file ~/.tmux.conf 2>/
 alias tz='tx'
 
 # ── default server (interactive socket) ─────────────────────────────
-function a() { _t_attach "" first "$@" }
 function l() { _t_list "" }
 function k() { _t_kill "" "$@" }
 
 # ── bg server (tmux -L bg) ──────────────────────────────────────────
-# no args: attach to the first session; with args: same as `a` but on the bg server
+# no args: attach to the first session; with args: _t_attach on the bg server
 function bg() { # shadows the zsh builtin; use `builtin bg` for job control
   if [[ $# -eq 0 ]]; then
     local first="$(_tm bg list-sessions -F '#S' 2>/dev/null | head -1)"
@@ -189,7 +188,7 @@ function bgn() {
 }
 
 # ── completion: complete existing session names ─────────────────────
-# default-server names for a/k/r, bg-server names for bg/ba/bk/bgr
+# default-server names for k/r, bg-server names for bg/ba/bk/bgr
 function _tm_complete_sessions() {
   local sock="$1" out
   out="$(_tm "$sock" list-sessions -F '#S' 2>/dev/null)"
@@ -200,6 +199,6 @@ function _tm_complete_sessions() {
 function _tm_complete_default() { _tm_complete_sessions "" }
 function _tm_complete_bg()      { _tm_complete_sessions bg }
 if (( $+functions[compdef] )); then
-  compdef _tm_complete_default a k r
+  compdef _tm_complete_default k r
   compdef _tm_complete_bg bg ba bk bgr
 fi
