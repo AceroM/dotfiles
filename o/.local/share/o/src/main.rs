@@ -81,7 +81,8 @@ Configurations: ~/.config/o/config.toml lists them, in order, as [[agent]] table
   args = [\"…\"]        the agent's own arguments
   name = \"…\"          shown instead of kind(model)
 Without the file: claude(opus) and claude(fable) (--dangerously-skip-permissions), then
-codex (--no-daemon --yolo), then agy (--dangerously-skip-permissions).
+codex (--no-daemon --yolo), then agy(argon) (Argon Medium) and agy(carbon) (Carbon High),
+both with --dangerously-skip-permissions.
 o starts on the one picked last (kept in ~/.local/state/o/last-agent), else the first;
 $O_AGENT names one instead (O_AGENT=codex). Above the tables, max_width = 100 (the
 default) keeps o in the pane's first 100 columns, so the text wraps at about 80 on a

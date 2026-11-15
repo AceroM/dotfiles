@@ -34,7 +34,15 @@ args = ["--dangerously-skip-permissions"]
 kind = "codex"
 args = ["--no-daemon", "--yolo"]
 
-# Google Antigravity, using its current default model.
+# Google Antigravity: Argon Medium for everyday work, Carbon High for deeper work.
 [[agent]]
 kind = "agy"
+model = "gemini-4-argon-medium"
+name = "agy(argon)"
+args = ["--dangerously-skip-permissions"]
+
+[[agent]]
+kind = "agy"
+model = "gemini-4-carbon-high"
+name = "agy(carbon)"
 args = ["--dangerously-skip-permissions"]

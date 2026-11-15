@@ -2112,7 +2112,10 @@ mod tests {
         assert_eq!((a.prefix().as_str(), a.lay.text.x), ("codex >", 8));
         press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
         a.layout(80, 30);
-        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("agy >", 6));
+        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("agy(argon) >", 13));
+        press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+        a.layout(80, 30);
+        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("agy(carbon) >", 14));
         // Round to the first.
         press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(a.agent().name, "claude(opus)");
@@ -2125,9 +2128,11 @@ mod tests {
         assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("claude(fable)", "fix it"));
         assert!(a.toast.as_ref().is_some_and(|t| !t.1));
         press(&mut a, KeyCode::Char('4'), KeyModifiers::CONTROL);
-        assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("agy", "fix it"));
+        assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("agy(argon)", "fix it"));
+        press(&mut a, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("agy(carbon)", "fix it"));
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(a.sent[0].name, "agy");
+        assert_eq!(a.sent[0].name, "agy(carbon)");
     }
 
     #[test]

@@ -209,7 +209,8 @@ pub fn remember_profile(name: &str) {
 }
 
 /// Without a config file: Claude Code on Opus, on Fable, then Codex (as the
-/// `c` and `cx` aliases run them), then Google Antigravity.
+/// `c` and `cx` aliases run them), then Google Antigravity on Argon Medium
+/// and Carbon High.
 pub fn defaults() -> Vec<Agent> {
     let skip_permissions = ["--dangerously-skip-permissions"];
     vec![
@@ -217,7 +218,8 @@ pub fn defaults() -> Vec<Agent> {
         Agent::new("claude", Some("fable"), &skip_permissions, None),
         // In this process, not on Codex's background server.
         Agent::new("codex", None, &["--no-daemon", "--yolo"], None),
-        Agent::new("agy", None, &skip_permissions, None),
+        Agent::new("agy", Some("gemini-4-argon-medium"), &skip_permissions, Some("agy(argon)")),
+        Agent::new("agy", Some("gemini-4-carbon-high"), &skip_permissions, Some("agy(carbon)")),
     ]
 }
 
@@ -419,7 +421,9 @@ mod tests {
         // $O_AGENT over it, by name or kind; one that matches nothing doesn't count.
         assert_eq!(pick_start(&all, Some("codex"), Some("claude(fable)")), (2, Why::Env));
         assert_eq!(pick_start(&all, Some("agy"), Some("codex")), (3, Why::Env));
-        assert_eq!(pick_start(&all, None, Some("agy")), (3, Why::Last));
+        assert_eq!(pick_start(&all, None, Some("agy(argon)")), (3, Why::Last));
+        assert_eq!(pick_start(&all, Some("agy(carbon)"), Some("agy(argon)")), (4, Why::Env));
+        assert_eq!(pick_start(&all, None, Some("agy(carbon)")), (4, Why::Last));
         assert_eq!(pick_start(&all, Some("claude"), Some("codex")), (0, Why::Env));
         assert_eq!(pick_start(&all, Some("gemini"), Some("codex")), (2, Why::Last));
     }
@@ -481,8 +485,8 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_four() {
+    fn the_defaults_are_the_five() {
         let names: Vec<_> = defaults().into_iter().map(|a| a.name).collect();
-        assert_eq!(names, ["claude(opus)", "claude(fable)", "codex", "agy"]);
+        assert_eq!(names, ["claude(opus)", "claude(fable)", "codex", "agy(argon)", "agy(carbon)"]);
     }
 }
