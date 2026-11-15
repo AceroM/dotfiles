@@ -19,6 +19,8 @@
 # text at about 80. Left out: 100; 0: the pane's whole width.
 max_width = 100
 
+# Provider pairs: odd shortcuts are everyday, even shortcuts are deeper reasoning.
+# Ctrl+1 / Ctrl+2: Claude Opus / Fable.
 [[agent]]
 kind = "claude"
 model = "opus"
@@ -29,12 +31,22 @@ kind = "claude"
 model = "fable"
 args = ["--dangerously-skip-permissions"]
 
-# As `cx` runs it: in this process, not on Codex's background server.
+# Ctrl+3 / Ctrl+4: Codex Sol 6.1 xhigh / Astra 6 max.
+# Both run in this process, not on Codex's background server.
+# Pin both normal and plan-mode effort so global defaults cannot change the pair.
 [[agent]]
 kind = "codex"
-args = ["--no-daemon", "--yolo"]
+model = "gpt-6.1-sol"
+name = "codex(sol)"
+args = ["--no-daemon", "--yolo", "-c", 'model_reasoning_effort="xhigh"', "-c", 'plan_mode_reasoning_effort="xhigh"']
 
-# Google Antigravity: Argon Medium for everyday work, Carbon High for deeper work.
+[[agent]]
+kind = "codex"
+model = "gpt-6-astra"
+name = "codex(astra)"
+args = ["--no-daemon", "--yolo", "-c", 'model_reasoning_effort="max"', "-c", 'plan_mode_reasoning_effort="max"']
+
+# Ctrl+5 / Ctrl+6: Google Antigravity Argon Medium / Carbon High.
 [[agent]]
 kind = "agy"
 model = "gemini-4-argon-medium"

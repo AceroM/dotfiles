@@ -2109,7 +2109,10 @@ mod tests {
         assert_eq!((a.prefix().as_str(), a.lay.text.x), ("claude(fable) >", 16));
         press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
         a.layout(80, 30);
-        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("codex >", 8));
+        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("codex(sol) >", 13));
+        press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+        a.layout(80, 30);
+        assert_eq!((a.prefix().as_str(), a.lay.text.x), ("codex(astra) >", 15));
         press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
         a.layout(80, 30);
         assert_eq!((a.prefix().as_str(), a.lay.text.x), ("agy(argon) >", 13));
@@ -2120,7 +2123,7 @@ mod tests {
         press(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(a.agent().name, "claude(opus)");
         press(&mut a, KeyCode::Char('3'), KeyModifiers::CONTROL);
-        assert_eq!(a.agent().name, "codex");
+        assert_eq!(a.agent().name, "codex(sol)");
         press(&mut a, KeyCode::Char('2'), KeyModifiers::CONTROL);
         assert_eq!(a.agent().name, "claude(fable)");
         // Nothing typed, and no configuration 7: it stays.
@@ -2128,8 +2131,10 @@ mod tests {
         assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("claude(fable)", "fix it"));
         assert!(a.toast.as_ref().is_some_and(|t| !t.1));
         press(&mut a, KeyCode::Char('4'), KeyModifiers::CONTROL);
-        assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("agy(argon)", "fix it"));
+        assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("codex(astra)", "fix it"));
         press(&mut a, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("agy(argon)", "fix it"));
+        press(&mut a, KeyCode::Char('6'), KeyModifiers::CONTROL);
         assert_eq!((a.agent().name.as_str(), a.field.text.as_str()), ("agy(carbon)", "fix it"));
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(a.sent[0].name, "agy(carbon)");
@@ -2154,7 +2159,7 @@ mod tests {
         // Codex has none: shown as it is, and sent as it is.
         press(&mut a, KeyCode::Char('3'), KeyModifiers::CONTROL);
         a.layout(80, 30);
-        assert_eq!(a.prefix(), "codex >");
+        assert_eq!(a.prefix(), "codex(sol) >");
         press(&mut a, KeyCode::Char('1'), KeyModifiers::CONTROL);
         press(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(a.sent[0].name, "claude(opus)·2");
@@ -2180,7 +2185,7 @@ mod tests {
         // Switched while it's written: saved with it.
         press(&mut a, KeyCode::Char('3'), KeyModifiers::CONTROL);
         a.sync_draft();
-        assert_eq!(a.drafts[0].config.as_deref(), Some("codex"));
+        assert_eq!(a.drafts[0].config.as_deref(), Some("codex(sol)"));
         press(&mut a, KeyCode::Char('2'), KeyModifiers::CONTROL);
         press(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         // Back on the first; opening the draft goes back to fable.

@@ -208,16 +208,25 @@ pub fn remember_profile(name: &str) {
     write_state("last-profile", name);
 }
 
-/// Without a config file: Claude Code on Opus, on Fable, then Codex (as the
-/// `c` and `cx` aliases run them), then Google Antigravity on Argon Medium
-/// and Carbon High.
+/// Without a config file: provider pairs, everyday then deeper reasoning.
+/// Claude Opus / Fable, Codex Sol 6.1 xhigh / Astra 6 max, and Google
+/// Antigravity Argon Medium / Carbon High.
 pub fn defaults() -> Vec<Agent> {
     let skip_permissions = ["--dangerously-skip-permissions"];
     vec![
         Agent::new("claude", Some("opus"), &skip_permissions, None),
         Agent::new("claude", Some("fable"), &skip_permissions, None),
         // In this process, not on Codex's background server.
-        Agent::new("codex", None, &["--no-daemon", "--yolo"], None),
+        Agent::new(
+            "codex", Some("gpt-6.1-sol"),
+            &["--no-daemon", "--yolo", "-c", "model_reasoning_effort=\"xhigh\"", "-c", "plan_mode_reasoning_effort=\"xhigh\""],
+            Some("codex(sol)"),
+        ),
+        Agent::new(
+            "codex", Some("gpt-6-astra"),
+            &["--no-daemon", "--yolo", "-c", "model_reasoning_effort=\"max\"", "-c", "plan_mode_reasoning_effort=\"max\""],
+            Some("codex(astra)"),
+        ),
         Agent::new("agy", Some("gemini-4-argon-medium"), &skip_permissions, Some("agy(argon)")),
         Agent::new("agy", Some("gemini-4-carbon-high"), &skip_permissions, Some("agy(carbon)")),
     ]
@@ -315,16 +324,17 @@ pub fn start(agents: &[Agent]) -> (usize, Why) {
     pick_start(agents, env.as_deref(), read_state("last-agent").as_deref())
 }
 
-/// `env` by name, else the first of that kind; `last` by name only (a
-/// configuration renamed or gone since is forgotten).
+/// By name, else the first of that kind. This keeps older bare names such
+/// as `codex` on that provider's everyday choice after it gains a pair.
 fn pick_start(agents: &[Agent], env: Option<&str>, last: Option<&str>) -> (usize, Why) {
-    if let Some(want) = env.map(str::trim).filter(|s| !s.is_empty()) {
-        let by_name = agents.iter().position(|a| a.name == want);
-        if let Some(i) = by_name.or_else(|| agents.iter().position(|a| a.kind == want)) {
-            return (i, Why::Env);
-        }
+    let at = |name: &str| {
+        let name = name.trim();
+        agents.iter().position(|a| a.name == name).or_else(|| agents.iter().position(|a| a.kind == name))
+    };
+    if let Some(i) = env.and_then(at) {
+        return (i, Why::Env);
     }
-    match last.and_then(|n| agents.iter().position(|a| a.name == n.trim())) {
+    match last.and_then(at) {
         Some(i) => (i, Why::Last),
         None => (0, Why::First),
     }
@@ -416,14 +426,18 @@ mod tests {
         let all = defaults();
         assert_eq!(pick_start(&all, None, None), (0, Why::First));
         assert_eq!(pick_start(&all, None, Some("claude(fable)\n")), (1, Why::Last));
+        assert_eq!(pick_start(&all, None, Some("codex\n")), (2, Why::Last));
+        assert_eq!(pick_start(&all, None, Some("codex(sol)")), (2, Why::Last));
+        assert_eq!(pick_start(&all, None, Some("codex(astra)")), (3, Why::Last));
         // Renamed or gone since: the first.
         assert_eq!(pick_start(&all, None, Some("claude(sonnet)")), (0, Why::First));
         // $O_AGENT over it, by name or kind; one that matches nothing doesn't count.
         assert_eq!(pick_start(&all, Some("codex"), Some("claude(fable)")), (2, Why::Env));
-        assert_eq!(pick_start(&all, Some("agy"), Some("codex")), (3, Why::Env));
-        assert_eq!(pick_start(&all, None, Some("agy(argon)")), (3, Why::Last));
-        assert_eq!(pick_start(&all, Some("agy(carbon)"), Some("agy(argon)")), (4, Why::Env));
-        assert_eq!(pick_start(&all, None, Some("agy(carbon)")), (4, Why::Last));
+        assert_eq!(pick_start(&all, Some("codex(astra)"), Some("codex(sol)")), (3, Why::Env));
+        assert_eq!(pick_start(&all, Some("agy"), Some("codex")), (4, Why::Env));
+        assert_eq!(pick_start(&all, None, Some("agy(argon)")), (4, Why::Last));
+        assert_eq!(pick_start(&all, Some("agy(carbon)"), Some("agy(argon)")), (5, Why::Env));
+        assert_eq!(pick_start(&all, None, Some("agy(carbon)")), (5, Why::Last));
         assert_eq!(pick_start(&all, Some("claude"), Some("codex")), (0, Why::Env));
         assert_eq!(pick_start(&all, Some("gemini"), Some("codex")), (2, Why::Last));
     }
@@ -460,8 +474,9 @@ mod tests {
         assert_eq!(on2.argv(), ["env", "CLAUDE_CONFIG_DIR=/h/.claude-2", "claude", "--dangerously-skip-permissions", "--model", "opus"]);
         assert_eq!(all[0].argv(), ["claude", "--dangerously-skip-permissions", "--model", "opus"]);
         // Other agents have no Claude profile.
-        assert_eq!(all[2].on(Some(&two)), all[2]);
-        assert_eq!(all[3].on(Some(&two)), all[3]);
+        for agent in &all[2..] {
+            assert_eq!(agent.on(Some(&two)), *agent);
+        }
     }
 
     #[test]
@@ -485,8 +500,9 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_five() {
+    fn the_defaults_match_the_shipped_provider_pairs() {
         let names: Vec<_> = defaults().into_iter().map(|a| a.name).collect();
-        assert_eq!(names, ["claude(opus)", "claude(fable)", "codex", "agy(argon)", "agy(carbon)"]);
+        assert_eq!(names, ["claude(opus)", "claude(fable)", "codex(sol)", "codex(astra)", "agy(argon)", "agy(carbon)"]);
+        assert_eq!(Config::default(), parse(include_str!("../../../../.config/o/config.toml")).unwrap());
     }
 }

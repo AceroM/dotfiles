@@ -80,9 +80,12 @@ Configurations: ~/.config/o/config.toml lists them, in order, as [[agent]] table
   model = \"fable\"     passed as --model fable; shown as claude(fable)
   args = [\"…\"]        the agent's own arguments
   name = \"…\"          shown instead of kind(model)
-Without the file: claude(opus) and claude(fable) (--dangerously-skip-permissions), then
-codex (--no-daemon --yolo), then agy(argon) (Argon Medium) and agy(carbon) (Carbon High),
-both with --dangerously-skip-permissions.
+The defaults are provider pairs: odd shortcuts everyday, even shortcuts deeper reasoning.
+  ^1 claude(opus)   ^2 claude(fable)   (both --dangerously-skip-permissions)
+  ^3 codex(sol)    Sol 6.1 xhigh      ^4 codex(astra)  Astra 6 max
+  ^5 agy(argon)    Argon Medium      ^6 agy(carbon)   Carbon High
+Both Codex choices use --no-daemon --yolo and pin normal and plan-mode effort;
+both Antigravity choices use --dangerously-skip-permissions.
 o starts on the one picked last (kept in ~/.local/state/o/last-agent), else the first;
 $O_AGENT names one instead (O_AGENT=codex). Above the tables, max_width = 100 (the
 default) keeps o in the pane's first 100 columns, so the text wraps at about 80 on a
