@@ -1,9 +1,9 @@
--- The second half of fn+e (new_tab_here in init.lua). The app makes the new
+-- The second half of new_tab_here (init.lua; ctrl+alt+e). The app makes the new
 -- tab only after that action returns, so the action starts this script
 -- detached, and it waits for the tab to appear and moves it into place.
 --
 -- rex.args: session_id, the session the tab goes into; before, the tab it
--- goes in front of (the one after the tab fn+e was pressed in); known, the
+-- goes in front of (the one after the tab the key was pressed in); known, the
 -- session's tabs before the new one was made. The first tab that isn't in
 -- known is the new one.
 --
