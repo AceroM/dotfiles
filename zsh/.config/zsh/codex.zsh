@@ -7,8 +7,7 @@
 # the way `_cl_tag` does. Instead we snapshot the rollout uuids that exist *before*
 # launch, start codex, then discover the new rollout whose session_meta `cwd` is ours
 # and stamp it onto the tmux session as the `@codex_session` user option — the codex
-# analogue of `@claude_session`. That lets a future diffshub map the tmux session
-# straight to its rollout (mirrors resolveTranscript in diffshub's index.ts).
+# analogue of `@claude_session`, linking the tmux session to its rollout.
 
 _CODEX_SESSIONS="$HOME/.codex/sessions"
 
@@ -118,8 +117,7 @@ function _cx_pick_name() {
 
 # Build the `direnv exec <dir> codex …` command string for a launch, shell-quoting
 # each forwarded arg and, when set, the prompt. The prompt is passed as codex's
-# POSITIONAL argument so codex submits it itself on boot — the "zero timing" trick
-# (mirrors diffshub's newClaudeSession): a send-keys Enter raced against codex's
+# POSITIONAL argument so codex submits it itself on boot: a send-keys Enter raced against codex's
 # bracketed-paste debounce gets swallowed, leaving the prompt sitting unsent.
 function _cx_cmd() {
   local prompt="$1"; shift
@@ -127,27 +125,6 @@ function _cx_cmd() {
   for arg in "$@"; do cmd+=" ${(q)arg}"; done
   [[ -n "$prompt" ]] && cmd+=" ${(q)prompt}"
   print -r -- "$cmd"
-}
-
-# Spawn a new codex session in <dir> (default $PWD) and switch the attached
-# client to it. Used by tmux-nav's sidebar.
-function _codex_new_here() {
-  local dir="${1:-$PWD}"
-  local client="${2:-}"
-  local sock="${3:-}"
-  local name="$(_cx_pick_name "$sock")"
-  local before="$(_cx_uuids)"
-  local cmd
-
-  builtin cd "$dir" || return 1
-  cmd="$(_cx_cmd "" --dangerously-bypass-approvals-and-sandbox)"
-  _cx_tmux "$sock" new-session -ds "$name" -c "$dir" "$cmd"
-  _cx_tag_async "$name" "$dir" "$before" "$sock"
-  if [[ -n "$client" ]]; then
-    _cx_tmux "$sock" switch-client -c "$client" -t "$name"
-  else
-    _cx_tmux "$sock" switch-client -t "$name"
-  fi
 }
 
 # xc — interactive codex in a fresh tmux session, then attach. The codex twin of `p`.

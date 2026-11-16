@@ -86,7 +86,5 @@ keybind = super+arrow_down=unbind
 keybind = super+shift+arrow_up=unbind
 keybind = super+shift+arrow_down=unbind
 
-# Don't dim the unfocused split. Ghostty defaults to 0.7, which fades the
-# terminal split whenever tmux-nav (the other split) is focused. Keep both
-# splits at full opacity so the terminal stays fully readable while navigating.
+# Keep unfocused splits fully readable.
 unfocused-split-opacity = 1

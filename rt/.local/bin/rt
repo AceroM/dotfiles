@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Resolve Stow's link and build the Go picker when its source changes.
+set -euo pipefail
+script="${BASH_SOURCE[0]}"
+while [[ -L "$script" ]]; do
+  dir="$(cd -P -- "$(dirname -- "$script")" && pwd)"
+  script="$(readlink "$script")"
+  [[ "$script" = /* ]] || script="$dir/$script"
+done
+app_dir="$(cd -- "$(dirname -- "$script")/../share/rt" && pwd)"
+bin="$app_dir/.build/rt"
+if [[ ! -x "$bin" ]] || [[ -n "$(find "$app_dir" -maxdepth 1 \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -newer "$bin" -print -quit)" ]]; then
+  command -v go >/dev/null || { printf '%s\n' 'rt: Go is required to build the tab picker.' >&2; exit 1; }
+  mkdir -p "$app_dir/.build"
+  tmp="$(mktemp "$app_dir/.build/rt.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  (cd "$app_dir" && go build -trimpath -o "$tmp" .)
+  mv -f "$tmp" "$bin"
+  trap - EXIT
+fi
+exec "$bin" "$@"

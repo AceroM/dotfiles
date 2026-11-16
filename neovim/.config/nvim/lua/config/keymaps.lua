@@ -23,10 +23,7 @@ end, { desc = "Find files" })
 vim.keymap.set("n", "<C-g>", function()
   Snacks.picker.resume()
 end, { desc = "Resume last picker" })
--- Normal-mode `'` opens the diffshub prompt modal — owned by the diffshub plugin
--- (lua/plugins/diffshub.lua), set there so this VeryLazy file can't clobber it.
---
--- On a highlight, `'` instead greps for the selected text. Literal, not regex
+-- On a highlight, `'` greps for the selected text. Literal, not regex
 -- (snacks' grep_word runs with regex = false), so `foo.bar()` or a path matches
 -- as typed; the picker's prompt then filters the results, and <C-g>/resume gets
 -- you back. Multi-line highlights grep their FIRST line only — ripgrep matches

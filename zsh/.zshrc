@@ -16,10 +16,7 @@ if [ -f ~/.zsh_private ]; then
 fi
 
 # sentry
-fpath=("/Users/miguelacero/.local/share/zsh/site-functions" $fpath)
-
-# bun completions
-[ -s "/Users/miguel/.bun/_bun" ] && source "/Users/miguel/.bun/_bun"
+fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
 
 # direnv disabled — no .envrc has ever been allowed, and the hook ran on every
 # prompt and twice per cd. Uncomment if you start using .envrc files.
@@ -30,7 +27,3 @@ fpath=("/Users/miguelacero/.local/share/zsh/site-functions" $fpath)
 # >>> Codex installer >>>
 export PATH="$HOME/.local/bin:$PATH"
 # <<< Codex installer <<<
-
-
-# Added by Antigravity CLI installer
-export PATH="/Users/miguel/.local/bin:$PATH"

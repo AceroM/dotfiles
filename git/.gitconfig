@@ -24,9 +24,8 @@
 [pull]
   rebase = true
 
-[user]
-  email = AceroM@users.noreply.github.com
-  name = Miguel Acero
+[include]
+  path = ~/.config/git/identity.gitconfig
 
 [core]
   excludesfile = ~/.gitignore_global

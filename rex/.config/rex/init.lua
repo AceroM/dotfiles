@@ -15,6 +15,8 @@ rex.bind("cmd+shift+z", "pane.send_key", { key = "f20" })
 rex.bind("cmd+h", "client.tab.previous")
 rex.bind("cmd+l", "client.tab.next")
 rex.bind("cmd+;", "client.tab.close")
+rex.bind("cmd+r", "client.tab.rename")
+rex.bind("cmd+alt+;", "tabs")
 
 -- Focus history (focus.lua): the panes I've been in, newest first, for cmd+o
 -- and ctrl+alt+a. focus-history.lua (started at the bottom) records the moves
@@ -651,7 +653,7 @@ rex.bind("cmd+y", "pane.copy_id")
 --
 -- Over o with images pasted into its prompt (the selected draft's, in its
 -- list), or over a tab o started an agent in with images, the float shows
--- those images instead: `o --images BLOCK` (o/.local/share/o/src/viewer.rs),
+-- those images instead: `o --images BLOCK` (o/.local/share/o/internal/viewer),
 -- big, each with its [Image #N] under it, following the prompt as images come
 -- and go. o keeps them in ~/.local/state/o/panes/<block>.json (panes.rs).
 -- cmd+alt+n in the viewer closes it (as esc, q or Enter do), and the pane it
@@ -881,6 +883,7 @@ rex.bind("cmd+shift+y", "copy_agent_session_id")
 -- clients call by name too, and keys.lua binds the ctrl+alt chords a Hammerspoon fn
 -- layer sends. Neither rebinds a key set above.
 require("actions")
+require("tabs")
 require("keys")
 
 -- Pane headers show "<directory>  <title>": pane-labels.lua is a long-running

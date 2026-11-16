@@ -92,4 +92,4 @@ approval for the next. Never touch tabs unrelated to the task.
   wrangler OAuth token, for instance, has only `zone:read` — no DNS-records read).
 - You need parallel sessions → use `browser-use` (one tab per agent in the shared
   Agents group). agent-browser is uninstalled; if a flow truly needs a logged-out
-  profile, ask Miguel.
+  profile, ask the user.

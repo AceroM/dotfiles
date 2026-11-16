@@ -20,7 +20,7 @@ bind("ctrl+alt+x", "client.tab.close")
 bind("ctrl+alt+h", "client.tab.previous")
 bind("ctrl+alt+l", "client.tab.next")
 bind("ctrl+alt+r", "client.tab.rename")
-bind("ctrl+alt+t", "pane.go_to") -- fn+t: herdr's every-tab picker
+bind("ctrl+alt+t", "pane.go_to") -- fn+t: Rex's built-in pane picker
 for i = 1, 8 do
   bind("ctrl+alt+[Digit" .. i .. "]", "client.tab.goto", { index = i })
 end

@@ -1,4 +1,5 @@
-# Cargo build output. Cargo.lock stays tracked: oc is a binary.
+# Legacy Rust build output and local Go binaries.
 /target/
-**/*.rs.bk
+/o
+/o.tmp.*
 .DS_Store

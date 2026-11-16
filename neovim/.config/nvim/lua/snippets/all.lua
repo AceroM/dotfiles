@@ -17,7 +17,6 @@ return {
   s("cj,", { t("content-type: application/json") }),
   s("aj,", { t("accept: application/json") }),
   s("aa,", { t("authorization: {{AUTH}}") }),
-  s("mgm", { t("miguelacero528@gmail.com") }),
   s("t;", {
     f(function()
       return os.date("!%Y-%m-%dT%H:%M:%SZ")

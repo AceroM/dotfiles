@@ -1,6 +1,6 @@
 # Mint a claude session id and stamp it onto a tmux session as the
 # @claude_session option. Pairing `claude --session-id $(_cl_sid)` on launch with
-# `_cl_tag <tmux-session> <sid>` afterwards lets diffshub's Tmux tab map a session
+# `_cl_tag <tmux-session> <sid>` afterwards maps a session
 # straight to its ~/.claude/projects/<dir>/<sid>.jsonl transcript.
 function _cl_tmux() {
   local sock="$1"
@@ -122,12 +122,10 @@ function pa() {
 }
 
 # spawn a new claude session in <dir> (default $PWD) and switch the attached
-# client to it. used by the M-n binding in .tmux.conf and tmux-nav's sidebar.
+# client to it. Used by the M-n binding in .tmux.conf.
 # optional 4th arg prefills the new session's input with <prompt> but does NOT
-# submit it (used by tmux-nav's "branch" key to seed a pointer to another
-# session's transcript, leaving the cursor for the user to finish the prompt).
-# optional 5th arg, when non-empty, launches with --dangerously-skip-permissions
-# (tmux-nav's "!" key).
+# submit it, leaving the cursor for the user to finish the prompt.
+# Optional 5th arg, when non-empty, launches with --dangerously-skip-permissions.
 function _claude_new_here() {
   local dir="${1:-$PWD}"
   local client="${2:-}"
@@ -168,7 +166,7 @@ function _claude_new_here() {
     _cl_tmux "$sock" switch-client -t "$name"
   fi
   # Prefill (but don't submit) the prompt once claude has had a moment to boot.
-  # Backgrounded + disowned so the caller (tmux-nav) doesn't block on the wait.
+  # Backgrounded + disowned so the caller doesn't block on the wait.
   if [[ -n "$prompt" ]]; then
     ( sleep 1.5; _cl_tmux "$sock" send-keys -t "$name:0.0" -l -- "$prompt" ) &!
   fi
@@ -178,9 +176,6 @@ function _claude_new_here() {
 function pb() {
   p --dangerously-skip-permissions "$@"
 }
-
-# open the tmux-nav session navigator sidebar
-alias tn='tmux-nav'
 
 function tnew() {
   local -a adjectives=("${SESSION_NAME_ADJECTIVES[@]}")
@@ -426,19 +421,19 @@ function rl() {
 }
 
 # my spend — Claude tokens + $ spent. usage: ms [name] [lookback]
-#   ms                 -> today (miguel), falls back to latest day if not reported yet
-#   ms miguel 1w       -> last 7 days, per-day breakdown + total
-#   ms gregg 1d|2w|1m  -> lookback units: d=day w=week m=month y=year
+#   ms                 -> today ($CLAUDE_USAGE_WHO or $USER), falls back to latest day
+#   ms teammate 1w     -> last 7 days, per-day breakdown + total
+#   ms teammate 1d|2w|1m -> lookback units: d=day w=week m=month y=year
 function ms() {
   if [[ -z "$ANTHROPIC_ADMIN_API_KEY" ]]; then
     echo "ANTHROPIC_ADMIN_API_KEY is not set"
     return 1
   fi
 
-  WHO="${1:-miguel}" LOOKBACK="${2:-}" bun run - <<'TSEOF'
+  WHO="${1:-${CLAUDE_USAGE_WHO:-$USER}}" LOOKBACK="${2:-}" bun run - <<'TSEOF'
 const BASE = "https://api.anthropic.com/v1";
 const KEY = process.env.ANTHROPIC_ADMIN_API_KEY;
-const WHO = (process.env.WHO ?? "miguel").toLowerCase();
+const WHO = (process.env.WHO ?? "").toLowerCase();
 const LB = (process.env.LOOKBACK ?? "").trim();
 const headers = { "x-api-key": KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" };
 const C = { bold: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", reset: "\x1b[0m" };

@@ -3,7 +3,7 @@
 Bootstrap a fresh Linux VPS from this dotfiles repo.
 
 ```sh
-git clone https://github.com/miguelacero/.dotfiles.git ~/.dotfiles
+git clone 'https://github.com/YOUR_ACCOUNT/.dotfiles.git' ~/.dotfiles
 cd ~/.dotfiles
 ./vps/setup.sh
 ```

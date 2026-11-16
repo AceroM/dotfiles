@@ -1,17 +1,16 @@
 #!/bin/bash
-# o — a fast `>` prompt (Rust) that starts agents in new Rex tabs; oc is the
-# same for Herdr. Source lives in ~/.local/share/o (stowed from
-# o/.local/share/o); this launcher builds it on first run and again whenever a
-# source file is newer than the binary. It runs on every launch, so it uses
-# builtins only: no find, dirname, readlink or subshells.
+# o — a Go prompt that starts agents in new Rex tabs, with local drafts.
+# Source lives in ~/.local/share/o (stowed from o/.local/share/o). Build on
+# first run or source changes. Keep the public build in its own cache so
+# checking this version cannot replace another installation's binary.
 app_dir="${O_HOME:-$HOME/.local/share/o}"
-bin="$app_dir/target/release/o"
+bin="${XDG_CACHE_HOME:-$HOME/.cache}/o-public/o"
 
 stale=
 if [[ ! -x "$bin" ]]; then
   stale=1
 else
-  for f in "$app_dir"/src/*.rs "$app_dir/Cargo.toml" "$app_dir/Cargo.lock"; do
+  for f in "$app_dir"/*.go "$app_dir"/internal/*/*.go "$app_dir/go.mod" "$app_dir/go.sum"; do
     if [[ "$f" -nt "$bin" ]]; then
       stale=1
       break
@@ -20,12 +19,16 @@ else
 fi
 
 if [[ -n "$stale" ]]; then
-  if ! command -v cargo >/dev/null 2>&1; then
-    printf '%s\n' 'o: cargo is required to build o (https://rustup.rs).' >&2
+  if ! command -v go >/dev/null 2>&1; then
+    printf '%s\n' 'o: Go 1.24 or newer is required to build o.' >&2
     exit 1
   fi
   printf '%s\n' 'o: building (first run or sources changed)…' >&2
-  cargo build --release --quiet --manifest-path "$app_dir/Cargo.toml" >&2 || exit 1
+  mkdir -p "${bin%/*}" || exit 1
+  trap 'rm -f "$bin.tmp.$$"' EXIT
+  go -C "$app_dir" build -trimpath -ldflags='-s -w' -o "$bin.tmp.$$" . >&2 || exit 1
+  mv -f "$bin.tmp.$$" "$bin" || exit 1
 fi
 
+[[ ${1:-} == --build-only ]] && exit 0
 exec "$bin" "$@"

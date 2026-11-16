@@ -2,6 +2,13 @@
 
 These are my dotfiles.
 
+## o (Rex agent prompt)
+
+`stow o` installs the Go prompt, with directory-scoped slash presets and local
+drafts. Ctrl+1/2 selects Claude Opus/Fable; Ctrl+3/4 selects Codex Sol/Astra.
+See [o's README](o/.local/share/o/README.md) for installation, keys, and checks.
+Existing installations from another checkout can keep their current links.
+
 ## Shortcuts (Hammerspoon)
 
 With `stow hammerspoon` and Hammerspoon running:
@@ -15,6 +22,14 @@ With `stow hammerspoon` and Hammerspoon running:
 - **Fn+B** toggles horizontal scrolling from any app. While enabled, vertical
   mouse-wheel or trackpad scrolling moves sideways. Press it again to restore
   normal scrolling; a Hammerspoon reload also resets it to off.
+
+## Rex tabs
+
+`stow rt rex && rex config reload` installs the Go tab picker. **Option+Cmd+;**,
+`rt`, or `rex do tabs` opens a nearly full-window, borderless list across all sessions. Use `j/k`
+to move, `/` to filter, Enter to switch, and `;` to close. Space marks tabs;
+`v` selects a range. **Cmd+R** renames the current tab. `rt` replaces `al`;
+`jv`'s `;` shortcut now opens `rt`. See [rt/README.md](rt/README.md).
 
 ## Shared Slack skill
 
@@ -41,7 +56,7 @@ also links the skill into
 ## af (agent pages)
 
 Agents write pages as plain, self-contained `.html` files in `~/artifacts` (`$AF_DIR`); the rules
-they follow are in `miguelacero/.claude/CLAUDE.md` → "Pages". `af` (in `cli/`, `stow cli`) lists
+they follow are in the global agent instructions under "Pages". `af` (in `cli/`, `stow cli`) lists
 the five most recently changed, `af 1` opens the newest in Chrome (focusing and reloading its tab
 if it is already open), `af ls` lists them all and `af path 1` prints a page's path. `af add
 file.html` copies a page in (with a same-named folder of images), and `pbpaste | af add - name`
@@ -71,9 +86,6 @@ The pre-commit hook scans staged paths and content for terms listed in the local
 Enable it in a new checkout with `git config core.hooksPath .githooks` after
 creating that file. The denylist itself stays outside Git.
 
-## Startup items (macOS)
-
-`startup` (in `mac/`) keeps each machine's login items, app helpers and LaunchAgents to an
-allowlist in `private/startup.conf`, and makes every login fresh (no reopened windows/apps).
-On a new Mac: `stow mac && startup init && startup edit && startup apply && startup fresh &&
-startup enforce on`.
+Git identity belongs in the machine-local `~/.config/git/identity.gitconfig`,
+which `git/.gitconfig` includes. Set `user.name` and `user.email` in that file
+before making commits on a new machine.

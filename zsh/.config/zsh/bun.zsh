@@ -11,4 +11,4 @@ export PATH="$HOME/.local/bin:$PATH"
 export TIMEOUT=9999999
 
 # completions
-[ -s "/Users/miguelacero/.bun/_bun" ] && source "/Users/miguelacero/.bun/_bun"
+[ -s "$BUN_INSTALL/_bun" ] && source "$BUN_INSTALL/_bun"

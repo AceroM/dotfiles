@@ -1209,24 +1209,18 @@ impl App {
 
     // ---- `;` ---------------------------------------------------------------
 
-    /// `;`: this Rex session's tabs, in `al` (the dialog is its own CLI).
-    /// jv steps aside while it runs, as for a terminal editor. ^i in al's
-    /// agent box puts in the file at the top of the diff, and its agents
-    /// start where jv's `c` would.
+    /// `;`: this Rex session's tabs, in the Go picker. jv steps aside
+    /// while it runs, as for a terminal editor.
     fn open_tabs(&mut self) -> Act {
         if !agent::in_rex() {
             self.flash("; lists this Rex session's tabs · run jv inside Rex");
             return Act::None;
         }
-        if !source::which("al") {
-            self.flash("; runs al, which isn't on PATH · stow al from ~/.dotfiles");
+        if !source::which("rt") {
+            self.flash("; runs rt, which isn't on PATH · stow rt from ~/.dotfiles");
             return Act::None;
         }
-        let mut cmd = vec!["al".to_string(), "--cwd".to_string(), self.ask_cwd.display().to_string()];
-        if let Some(f) = self.cur_file() {
-            cmd.extend(["--path".to_string(), self.files[f].path.clone()]);
-        }
-        Act::Suspend(cmd)
+        Act::Suspend(vec!["rt".to_string(), "--inline".to_string()])
     }
 
     /// A digit of a vim count (5j, 12G): true when `k` was one. A leading 0
