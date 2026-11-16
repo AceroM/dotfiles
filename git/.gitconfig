@@ -29,7 +29,7 @@
   name = Miguel Acero
 
 [core]
-  excludesfile = /home/miguel/.gitignore_global
+  excludesfile = ~/.gitignore_global
   pager = delta --tabs 2
 [interactive]
    diffFilter = delta --color-only

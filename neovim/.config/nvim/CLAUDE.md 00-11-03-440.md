@@ -39,14 +39,14 @@ This is a LazyVim-based Neovim configuration that extends the LazyVim starter te
 ### Custom Plugin Overrides
 The configuration follows LazyVim's plugin override pattern where plugins in `lua/plugins/` extend or replace default LazyVim behavior:
 
-- `theme.lua`: Dynamic theme loading with fallback to rose-pine
+- `theme.lua`: Rose-pine theme configuration that follows the terminal background
 - `completion.lua`: Blink.cmp configuration with LuaSnip integration  
 - `typescript.lua`: VTSLS language server setup with TypeScript-specific keybindings
 - `neo-tree.lua`: File explorer customizations
 - `statusbar.lua`: Custom status line configuration
 
 ### Theme System
-Uses a dynamic theme system that checks for external theme configuration at `/home/miguel/.config/omarchy/current/theme/neovim.lua` and falls back to rose-pine theme.
+Uses rose-pine with automatic light/dark selection based on the terminal background. Local sessions use a transparent background; SSH sessions use an opaque background.
 
 ### Completion System  
 Uses Blink.cmp for completion with:
