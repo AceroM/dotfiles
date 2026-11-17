@@ -38,6 +38,16 @@ float, in the directory of the pane you pressed it in: the branch's PR diff, or 
 there's no PR. Press it again inside the float to close it. In `jf`, `t` shows or hides test files
 and `^p` goes to a file.
 
+## Rex servers (stop them all)
+
+**Option+Cmd+X** (or `servers-down`, from `stow cli rex`) stops every server in the Rex `servers`
+session properly, then closes the session. Each server gets Ctrl-C first. Servers that other tabs
+are connected to, like Temporal, stop last. Anything still running after 10s gets SIGTERM, then
+SIGKILL. Docker containers a tab attached to are stopped, and the listening ports are checked to be
+free. A Hammerspoon toast shows a spinner while it works, then ✓, or ✕ with what is still up.
+`servers-down --dry-run` lists what it would stop; `--keep-tabs` keeps the session. Start
+again with `rex new servers`, then `scripts/juno/dev-up-rex.sh`.
+
 ## Shared Slack skill
 
 `stow cli agent-config` installs the read-only `slack-agent` CLI and the global Codex

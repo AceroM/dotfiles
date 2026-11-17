@@ -15,8 +15,10 @@
 -- with :line:col, #L12, (12,5) or `", line 12` after them, @path, file:// URLs,
 -- and paths the terminal wrapped onto the next line. Web addresses written
 -- without a scheme (app.example.site/booking) are taken too, and rex-open sends
--- them to the browser when they name no file. Anything else, https:// URLs
--- included, reaches Rex as usual (cmd-click still opens links in the browser).
+-- them to the browser when they name no file. Linear links (https://linear.app/…)
+-- open in the Linear app through its linear:// scheme, with either modifier.
+-- Anything else, other https:// URLs included, reaches Rex as usual (cmd-click
+-- still opens links in the browser).
 --
 --   rexlinks.hit({ x = 400, y = 300 })  -- what a click there would open
 --   rexlinks.start() / rexlinks.stop()
@@ -26,6 +28,7 @@ local toast = require("toast")
 local M = {}
 
 local REX = "com.superlogical.rex"
+local LINEAR = "com.linear"
 local OPEN = os.getenv("HOME") .. "/.local/bin/rex-open"
 local types = hs.eventtap.event.types
 
@@ -110,10 +113,24 @@ local function clean(token)
   return token
 end
 
+local SCHEME = "^%a[%w+.-]*://"
+
+-- The linear:// link for a https://linear.app/… URL, or nil. An issue link
+-- keeps only the workspace and the ID, so a title slug cut short by the wrap
+-- (or run on into the next line's text) doesn't matter.
+local function linearURL(token)
+  local path = token and token:match("^https?://linear%.app/(.+)$")
+  if not path then return nil end
+  local workspace, id = path:match("^([%w_-]+)/issue/(%u[%u%d]*%-%d+)")
+  if workspace then return "linear://" .. workspace .. "/issue/" .. id end
+  return "linear://" .. path
+end
+
 local function looksLikeLocation(token)
   if not token or not token:match("%w") then return false end
   local scheme = token:match("^(%a[%w+.-]*)://")
   if scheme then return scheme == "file" end -- https:// and friends stay Rex's
+  if token:find("://", 1, true) then return false end -- prose glued to a URL: "team:https://…"
   local path = token:gsub("^@", ""):gsub(":%d.*$", ""):gsub("#L%d.*$", "")
   return path:find("/", 1, true) ~= nil -- ~/x, ./x, /abs, a/b
     or path:match("^~$") ~= nil
@@ -166,8 +183,9 @@ function M.hit(pos, terminal)
       wrapped = fullWidth(terminal, range, text)
     end
   end
+  -- A URL starts with its scheme, so nothing on the line above belongs to it.
   local before = text:sub(1, first - 1)
-  if before:match("^%s*$") and lineNumber > 0 then
+  if before:match("^%s*$") and lineNumber > 0 and not run:match(SCHEME) then
     local prevText, prevRange = lineAt(terminal, lineNumber - 1)
     local tail = prevText and prevText:match("(" .. PATH_CHAR .. "+)$")
     if tail then
@@ -178,11 +196,17 @@ function M.hit(pos, terminal)
 
   local readings = { clean(run) }
   if joined ~= run then table.insert(readings, wrapped and 1 or 2, clean(joined)) end
+  local pane = terminal:attributeValue("AXParent")
+  for _, reading in ipairs(readings) do
+    local url = linearURL(reading)
+    if url then
+      return { url = url, token = reading, line = text, label = pane and pane:attributeValue("AXDescription") or "" }
+    end
+  end
   local token, alternates = readings[1], { readings[2] }
   if not looksLikeLocation(token) and not (alternates[1] and looksLikeLocation(alternates[1])) then
     return nil
   end
-  local pane = terminal:attributeValue("AXParent")
   return {
     token = token,
     alternates = alternates,
@@ -236,6 +260,16 @@ function M.start()
     if not ok or not hit then
       print("rexlinks: left to Rex: " .. (ok and "no file location under the pointer" or tostring(hit)))
       return false
+    end
+    if hit.url then
+      -- No Linear app, no linear:// handler: Rex opens it in the browser.
+      if not hs.urlevent.openURLWithBundle(hit.url, LINEAR) then
+        print("rexlinks: left to Rex: Linear didn't take " .. hit.url)
+        return false
+      end
+      print("rexlinks: linear " .. hit.url)
+      swallowUp = true
+      return true
     end
     print(string.format("rexlinks: %s %s (pane %q)", flags.cmd and "float" or "tab", hit.token, hit.label))
     swallowUp = true

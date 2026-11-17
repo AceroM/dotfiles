@@ -184,20 +184,39 @@ rex.action{
 -- cmd+n is cmd+t: the app's own New Tab, at the end of the tab list.
 rex.bind("cmd+n", "client.tab.new")
 
--- cmd+e shows the orchestrators tab, the first tab of the agents session,
--- where `o` waits for prompts, from any session or tab. Each directory gets
--- its own o pane: an existing match is focused, otherwise an idle shell is
--- reused or a pane is added. Two panes sit side by side, then grow into a
--- 2x2 grid, with at most four panes. A fifth directory needs a pane closed
--- first; running prompts are never replaced. A first tab holding an agent's
--- chat is never taken over; orchestrators gets a new tab in front of it.
+-- cmd+shift+e keeps the orchestrators tab, the first tab of the current
+-- session, where `o` waits for prompts: one o pane per directory, picked by the
+-- directory of the pane the key was pressed in. An o pane already there for
+-- the directory is focused; otherwise an idle shell is reused by typing
+-- `cd DIR && o`, or a pane is added. Two panes sit side by side, then grow
+-- into a 2x2 grid, with at most four panes; a fifth directory needs a pane
+-- closed first, and running programs are never replaced. Orchestrators takes
+-- over a first tab holding only shells and o, but never one holding an
+-- agent's chat; it gets a new tab in front of that. session=NAME targets
+-- another session. (cmd+e, o, and cmd+g, a plain shell, are centered floats
+-- instead: float_here.)
 -- Try it without moving: rex do orchestrators dry_run=1 --json
-local ORCH = { session = "agents", tab = "orchestrators", program = "o", max_panes = 4 }
+local MAX_PANES = 4
 local SHELLS = { zsh = true, bash = true, fish = true }
 -- A new pane runs o, then a login shell once o exits. set -m gives o its own
 -- process group, so Rex reports o (not sh) as the pane's foreground program;
 -- without it a pane running o would look like an idle sh.
 local O_COMMAND = { "/bin/sh", "-c", 'set -m; o; exec "${SHELL:-/bin/zsh}" -l' }
+
+local function is_shell(p) return SHELLS[p.program] end
+local function is_o(p) return p.program == "o" end
+
+local GROUPS = {
+  orchestrators = {
+    title = "Go to Orchestrators", key = "cmd+shift+e",
+    keywords = "orchestrators o prompt agents directory grid first tab",
+    command = O_COMMAND, matches = { is_o },
+    -- Typed into an idle shell (after cd) to make it this directory's pane.
+    reuse = " && o",
+    -- A first tab whose panes all pass this is taken over.
+    adopt = function(p) return is_shell(p) or is_o(p) end,
+  },
+}
 
 -- The program in the foreground of a pane, by name: "zsh", "o", "claude".
 local function foreground(session_id, block_id)
@@ -229,7 +248,7 @@ local function terminal_panes(session_id, window)
       end
     end
   end
-  -- Row order keeps existing top-left / top-right prompts in place as the
+  -- Row order keeps existing top-left / top-right panes in place as the
   -- bottom row is added. Floating scratch panes don't belong to the grid.
   table.sort(panes, function(a, b)
     local ar, br = a.rect or { 0, 0 }, b.rect or { 0, 0 }
@@ -258,7 +277,7 @@ end
 
 -- Moving the existing blocks preserves their processes, prompts and history.
 -- Rebuild from their visual order so old stacked layouts become a grid too.
-local function orchestrators_grid(session_id, panes)
+local function grid(session_id, panes)
   for i = 2, #panes do
     rex.call("session.move_block", {
       session_id = session_id, block_id = panes[i].block_id,
@@ -274,103 +293,133 @@ local function session_named(name)
   end
 end
 
-rex.action{
-  name = "orchestrators",
-  title = "Go to Orchestrators",
-  category = "Tab",
-  keywords = "orchestrators o prompt agents directory grid first tab",
-  run = function(ctx, args)
-    local cwd = pane_cwd(ctx.block_id) or os.getenv("HOME")
-    local sid = session_named(args.session or ORCH.session) or ctx.session_id
-    -- Reading another session's view takes an attach first.
-    local view = (rex.call("session.attach", { session_id = sid }) or {}).view or {}
-    local windows = view.windows or {}
+local function tab_label(w) return dirfocus.strip(w.label) end
 
-    -- The tab already labelled orchestrators, else a first tab holding only
-    -- shells and o.
-    local tab, panes
-    for _, w in ipairs(windows) do
-      if dirfocus.strip(w.label) == ORCH.tab then tab = w break end
-    end
-    if not tab and windows[1] then
-      local ps = terminal_panes(sid, windows[1])
-      local plain = #ps > 0
-      for _, p in ipairs(ps) do
-        if not (SHELLS[p.program] or p.program == ORCH.program) then plain = false end
-      end
-      if plain then tab, panes = windows[1], ps end
-    end
-    panes = panes or (tab and terminal_panes(sid, tab)) or {}
+local function group_tab(name, spec, ctx, args)
+  local cwd = pane_cwd(ctx.block_id) or os.getenv("HOME")
+  local sid = ctx.session_id
+  if args.session then
+    sid = session_named(args.session) or error("No session named " .. args.session, 0)
+  end
+  -- Reading another session's view takes an attach first.
+  local view = (rex.call("session.attach", { session_id = sid }) or {}).view or {}
+  local windows = view.windows or {}
 
-    local focused = tab and tab.focused_block_id
-    local o = pick(panes, focused, function(p)
-      return p.program == ORCH.program and same_directory(p.cwd, cwd)
-    end)
-    local shell = not o and (pick(panes, focused, function(p)
-      return SHELLS[p.program] and same_directory(p.cwd, cwd)
-    end) or pick(panes, focused, function(p) return SHELLS[p.program] end))
-    local full = not o and not shell and #panes >= ORCH.max_panes
-    local result = {
-      session_id = sid, cwd = cwd,
-      window_id = tab and tab.window_id,
-      tab = not tab and "new" or tab.label ~= ORCH.tab and "label" or "labelled",
-      first = tab ~= nil and windows[1] == tab,
-      o = o and "running" or shell and "typed_in_shell" or full and "full" or tab and "new_pane" or "new_tab",
-      block_id = (o or shell or {}).block_id,
-      panes = #panes, max_panes = ORCH.max_panes,
-    }
-    if args.dry_run then return result end
-    if full then error("Orchestrators already has four panes; close one before adding " .. cwd, 0) end
+  -- The tab already labelled with this group's name, else (orchestrators) a
+  -- first tab that isn't another group's and holds only shells and o.
+  local tab, panes
+  for _, w in ipairs(windows) do
+    if tab_label(w) == name then tab = w break end
+  end
+  if not tab and spec.adopt and windows[1] and not GROUPS[tab_label(windows[1])] then
+    local ps = terminal_panes(sid, windows[1])
+    local plain = #ps > 0
+    for _, p in ipairs(ps) do
+      if not spec.adopt(p) then plain = false end
+    end
+    if plain then tab, panes = windows[1], ps end
+  end
+  panes = panes or (tab and terminal_panes(sid, tab)) or {}
 
-    local layout = rex.layout.block{
-      flavor = TERMINAL .. ".shell",
-      options = { cwd = cwd, command = O_COMMAND },
-    }
-    if not tab then
-      local created = rex.call("session.new_window", { session_id = sid, focus = false, layout = layout })
-      tab = { window_id = created.window_id }
-      result.window_id, result.block_id = created.window_id, (created.block_ids or {})[1]
-    elseif shell then
-      -- ctrl+u first clears anything half-typed at the prompt.
-      local quoted = "'" .. cwd:gsub("'", "'\\''") .. "'"
-      rex.call("block.method", {
-        session_id = sid, block_id = shell.block_id, method = "write",
-        args = { data = "\21cd -- " .. quoted .. " && o\r" },
-      })
-    elseif not o then
-      local created = rex.call("session.new_split", {
-        session_id = sid, anchor_id = panes[1] and panes[1].block_id or focused,
-        direction = "horizontal", side = "after", layout = layout,
-      })
-      result.block_id = (created.block_ids or {})[1]
-      panes[#panes + 1] = { block_id = result.block_id }
-      orchestrators_grid(sid, panes)
-    end
+  local focused = tab and tab.focused_block_id
+  local function here(p) return same_directory(p.cwd, cwd) end
+  local found
+  for _, want in ipairs(spec.matches) do
+    found = pick(panes, focused, function(p) return want(p) and here(p) end)
+    if found then break end
+  end
+  local shell = not found and spec.reuse and (pick(panes, focused, function(p)
+    return is_shell(p) and here(p)
+  end) or pick(panes, focused, is_shell))
+  local full = not found and not shell and #panes >= MAX_PANES
 
-    if windows[1] and windows[1].window_id ~= tab.window_id then
-      rex.call("session.move_window", {
-        session_id = sid, window_id = tab.window_id, before_window_id = windows[1].window_id,
-      })
+  -- Its place: first, or right after the spec.after tab. A new tab starts
+  -- at the end.
+  local others, at = {}, 1
+  for _, w in ipairs(windows) do
+    if not tab or w.window_id ~= tab.window_id then others[#others + 1] = w end
+  end
+  if spec.after then
+    for i, w in ipairs(others) do
+      if tab_label(w) == spec.after then at = i + 1 break end
     end
-    if tab.label ~= ORCH.tab then
-      rex.call("session.set_window_label", { session_id = sid, window_id = tab.window_id, label = ORCH.tab })
-    end
+  end
+  local before = others[at]
+  local in_place = not before
+  for i, w in ipairs(windows) do
+    if tab and w.window_id == tab.window_id then in_place = i == at end
+  end
 
-    remember(ctx, sid, result.block_id or tab.focused_block_id)
-    if result.block_id then
-      rex.call("session.focus_block", { session_id = sid, block_id = result.block_id })
-    else
-      rex.call("session.focus_window", { session_id = sid, window_id = tab.window_id })
-    end
-    -- The app keeps its own selected session and tab, so tell it to show
-    -- this one. quiet=1 skips that, to try it on another session unseen.
-    if not args.quiet then
-      pcall(rex.client.queue, "session.select", { session_id = sid, window_id = tab.window_id })
-    end
-    return result
-  end,
-}
-rex.bind("cmd+e", "orchestrators")
+  local result = {
+    session_id = sid, cwd = cwd,
+    window_id = tab and tab.window_id,
+    tab = not tab and "new" or tab_label(tab) ~= name and "label" or "labelled",
+    in_place = in_place,
+    pane = found and "running" or shell and "typed_in_shell" or full and "full"
+      or tab and "new_pane" or "new_tab",
+    block_id = (found or shell or {}).block_id,
+    panes = #panes, max_panes = MAX_PANES,
+  }
+  if args.dry_run then return result end
+  if full then
+    error(name:gsub("^%l", string.upper) .. " already has four panes; close one before adding " .. cwd, 0)
+  end
+
+  local layout = rex.layout.block{
+    flavor = TERMINAL .. ".shell",
+    options = { cwd = cwd, command = spec.command },
+  }
+  if not tab then
+    local created = rex.call("session.new_window", { session_id = sid, focus = false, layout = layout })
+    tab = { window_id = created.window_id }
+    result.window_id, result.block_id = created.window_id, (created.block_ids or {})[1]
+  elseif shell then
+    -- ctrl+u first clears anything half-typed at the prompt.
+    local quoted = "'" .. cwd:gsub("'", "'\\''") .. "'"
+    rex.call("block.method", {
+      session_id = sid, block_id = shell.block_id, method = "write",
+      args = { data = "\21cd -- " .. quoted .. spec.reuse .. "\r" },
+    })
+  elseif not found then
+    local created = rex.call("session.new_split", {
+      session_id = sid, anchor_id = panes[1] and panes[1].block_id or focused,
+      direction = "horizontal", side = "after", layout = layout,
+    })
+    result.block_id = (created.block_ids or {})[1]
+    panes[#panes + 1] = { block_id = result.block_id }
+    grid(sid, panes)
+  end
+
+  if not in_place then
+    rex.call("session.move_window", {
+      session_id = sid, window_id = tab.window_id, before_window_id = before and before.window_id,
+    })
+  end
+  if result.tab ~= "labelled" then
+    rex.call("session.set_window_label", { session_id = sid, window_id = tab.window_id, label = name })
+  end
+
+  remember(ctx, sid, result.block_id or tab.focused_block_id)
+  if result.block_id then
+    rex.call("session.focus_block", { session_id = sid, block_id = result.block_id })
+  else
+    rex.call("session.focus_window", { session_id = sid, window_id = tab.window_id })
+  end
+  -- The app keeps its own selected session and tab, so tell it to show
+  -- this one. quiet=1 skips that, to try it on another session unseen.
+  if not args.quiet then
+    pcall(rex.client.queue, "session.select", { session_id = sid, window_id = tab.window_id })
+  end
+  return result
+end
+
+for name, spec in pairs(GROUPS) do
+  rex.action{
+    name = name, title = spec.title, category = "Tab", keywords = spec.keywords,
+    run = function(ctx, args) return group_tab(name, spec, ctx, args) end,
+  }
+  rex.bind(spec.key, name)
+end
 
 -- Show a pane in any session: focus it on the server, then tell the app,
 -- which keeps its own selected session and tab, to show it.
@@ -658,6 +707,12 @@ rex.bind("cmd+y", "pane.copy_id")
 -- and go. o keeps them in ~/.local/state/o/panes/<block>.json (panes.rs).
 -- cmd+alt+n in the viewer closes it (as esc, q or Enter do), and the pane it
 -- was opened over gets the focus back.
+--
+-- cmd+g is the same float with shell=1: always a new shell, never the images
+-- or the viewer's close, whatever pane it's pressed in. cmd+e (o=1) is that
+-- with o running in it, ready for a prompt in the pane's directory; ⏎ sends
+-- and o stays for the next one, and quitting o (esc, ^c or ^d on an empty
+-- prompt) closes the float.
 -- Try it without opening anything: rex do float_here dry_run=1 --json
 local FLOAT_BOUNDS = { 0.15, 0.15, 0.7, 0.7 } -- x, y, w, h as fractions of the tab
 local O_BIN = (os.getenv("HOME") or "") .. "/.local/bin/o"
@@ -698,16 +753,19 @@ rex.action{
     end
     local cwd = (ctx.block_id and pane_cwd(ctx.block_id)) or os.getenv("HOME")
 
-    local program = ctx.block_id and foreground(ctx.session_id, ctx.block_id) or ""
-    local viewer = program == "o" and layer_kind ~= "tiled"
-      and (label or ""):find(O_VIEWER, 1, true) ~= nil
-    local rec = not viewer and ctx.block_id and o_images(ctx.block_id) or nil
-    -- A prompt's images count only while o still runs there.
-    if rec and rec.kind ~= "sent" and program ~= "o" then rec = nil end
+    local viewer, rec = false, nil
+    if not (args.shell or args.o) then
+      local program = ctx.block_id and foreground(ctx.session_id, ctx.block_id) or ""
+      viewer = program == "o" and layer_kind ~= "tiled"
+        and (label or ""):find(O_VIEWER, 1, true) ~= nil
+      rec = not viewer and ctx.block_id and o_images(ctx.block_id) or nil
+      -- A prompt's images count only while o still runs there.
+      if rec and rec.kind ~= "sent" and program ~= "o" then rec = nil end
+    end
 
     local result = {
       window_id = window_id, cwd = cwd, bounds = FLOAT_BOUNDS,
-      shows = viewer and "close_viewer" or rec and "images" or "shell",
+      shows = viewer and "close_viewer" or rec and "images" or args.o and "o" or "shell",
       images = rec and #rec.images or 0,
     }
     if args.dry_run then return result end
@@ -720,7 +778,11 @@ rex.action{
     end
 
     local options = { cwd = cwd }
-    if rec then options.command = { O_BIN, "--images", ctx.block_id } end
+    if rec then
+      options.command = { O_BIN, "--images", ctx.block_id }
+    elseif args.o then
+      options.command = { O_BIN }
+    end
     local created = rex.call("session.new_layer", {
       session_id = ctx.session_id,
       window_id = window_id,
@@ -737,9 +799,13 @@ rex.action{
   end,
 }
 rex.bind("cmd+alt+n", "float_here")
+-- cmd+t too (and fn+n, keys.lua): new tabs are cmd+n.
+rex.bind("cmd+t", "float_here")
 -- cmd+m minimizes the focused float to the taskbar and brings it back, as
 -- Rex's own cmd+alt+m does. It takes over macOS's Minimize.
 rex.bind("cmd+m", "pane.minimize_floating")
+rex.bind("cmd+g", "float_here", { shell = true })
+rex.bind("cmd+e", "float_here", { o = true })
 
 -- cmd+shift+x runs `x` (commit everything and push: zsh/.config/zsh/git.zsh) on
 -- the folder of the pane it was pressed in, in a floating pane that goes
@@ -888,6 +954,13 @@ rex.bind("cmd+shift+y", "copy_agent_session_id")
 require("actions")
 require("tabs")
 require("keys")
+
+-- cmd+alt+o opens the focused pane's directory on GitHub (github.lua).
+require("github")
+
+-- cmd+alt+x stops everything in the servers session properly, then closes the
+-- session, with a promise toast (servers.lua, cli/.local/bin/servers-down).
+require("servers")
 
 -- fn+d opens jf (the branch's PR diff) in a centred float (jf.lua).
 require("jf")

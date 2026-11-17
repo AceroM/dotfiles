@@ -1,0 +1,365 @@
+#!/usr/bin/env bash
+# servers-down: stop every server in the Rex `servers` session properly, then
+# close the session, so the stack can be started again from scratch
+# (`rex new servers && scripts/juno/dev-up-rex.sh`). Rex's cmd+alt+x runs it
+# (servers.lua).
+#
+#   servers-down                 stop them all, then close the session
+#   servers-down --keep-tabs     stop them, keep the session and its tabs, each
+#                                at its shell prompt (Up+Enter restarts)
+#   servers-down --session NAME  another session (default: servers)
+#   servers-down --dry-run       show what it would stop, touch nothing
+#
+# Closing a tab isn't enough: Rex sends SIGHUP and kills the pane's processes
+# a moment later, so nothing gets the Ctrl-C shutdown it expects (Temporal's
+# SQLite, Next, workers draining), and a container started with `docker start
+# --attach` keeps running, holding its port. So:
+#
+#   1. Every busy pane's foreground job gets SIGINT, what Ctrl-C sends. Panes
+#      whose ports other panes are connected to (Temporal, S3) go last, so the
+#      workers can drain against a server that's still there.
+#   2. A pane gets SERVERS_DOWN_GRACE seconds (default 10) to exit. Whatever
+#      is left of its process tree then gets SIGTERM, and 3s later SIGKILL.
+#   3. Containers a pane ran or attached to are `docker stop`ped.
+#   4. Every port the panes listened on is checked free.
+#   5. The session closes (`rex kill`), last, after the final toast, since
+#      a pane running this script goes with it.
+#
+# A pane is busy when its foreground isn't its own shell (dev-up-rex.sh's
+# test). Background jobs in a pane (`cmd &`) aren't stopped.
+#
+# Progress shows as a Hammerspoon promise toast (hammerspoon://toast with an
+# id, so it redraws in place): a spinner while stopping, then ✓ or ✕ and what
+# is still up. Log: ~/.cache/servers-down.log
+set -uo pipefail
+
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+command -v rex >/dev/null 2>&1 ||
+  PATH="$PATH:$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS"
+
+session_name="${SERVERS_SESSION:-servers}"
+grace="${SERVERS_DOWN_GRACE:-10}"
+keep_tabs=0
+dry_run=0
+while (($#)); do
+  case "$1" in
+    --keep-tabs) keep_tabs=1 ;;
+    -n | --dry-run) dry_run=1 ;;
+    -s | --session)
+      session_name="${2:?--session needs a session name}"
+      shift
+      ;;
+    -h | --help)
+      sed -n '2,/^set /{/^set /d;s/^# \{0,1\}//;p;}' "$0"
+      exit 0
+      ;;
+    *)
+      echo "servers-down: unknown argument '$1' (see --help)" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+log_file="$HOME/.cache/servers-down.log"
+mkdir -p "${log_file%/*}"
+say() {
+  printf '%s\n' "$*"
+  ((dry_run)) || printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log_file"
+}
+
+uri() { jq -rn --arg s "$1" '$s | @uri'; }
+
+# toast STATE MESSAGE [MAX_LINES]: redraw the one servers-down toast.
+toast() {
+  say "[$1] $2"
+  ((dry_run)) && return 0
+  local q="id=servers-down&title=$(uri "$session_name")&state=$1&msg=$(uri "$2")"
+  [[ -n "${3:-}" ]] && q+="&maxLines=$3"
+  open -g "hammerspoon://toast?$q" >/dev/null 2>&1 || true
+}
+
+fail() {
+  toast error "$1" 3
+  exit 1
+}
+
+# One run at a time: a second cmd+alt+x while this one works is a no-op (its
+# toast is already up). A lock left by a killed run is taken over.
+if ((!dry_run)); then
+  lock="${TMPDIR:-/tmp}/servers-down.lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    other="$(cat "$lock/pid" 2>/dev/null)"
+    if [[ -n "$other" ]] && kill -0 "$other" 2>/dev/null; then
+      say "already running (pid $other)"
+      exit 0
+    fi
+    rm -rf "$lock"
+    mkdir "$lock" || exit 1
+  fi
+  echo $$ >"$lock/pid"
+  trap 'rm -rf "$lock"' EXIT
+  say "--- servers-down (session $session_name)"
+fi
+
+sessions="$(rex ls --json 2>/dev/null)" || fail "Can't reach the Rex server"
+session="$(jq -r --arg l "$session_name" \
+  '.sessions[] | select(.label == $l or .session_id == $l) | .session_id' <<<"$sessions" | head -1)"
+[[ -n "$session" ]] || fail "No Rex session named $session_name"
+
+toast loading "Stopping servers…"
+
+windows="$(rex window ls -s "$session" --json)" || fail "Can't list the tabs in $session_name"
+blocks="$(rex block ls -s "$session" --json)" || fail "Can't list the panes in $session_name"
+
+# pid ppid pgid stat comm, for every process, once.
+ps_table="$(ps -A -o pid=,ppid=,pgid=,stat=,comm=)"
+comm_of() { awk -v p="$1" '$1 == p { $1 = $2 = $3 = $4 = ""; sub(/^ +/, ""); n = split($0, a, "/"); print a[n]; exit }' <<<"$ps_table"; }
+
+# This script's own ancestors: a pane running it is left alone.
+my_ancestors=" $(awk -v p=$$ '{ parent[$1] = $2 } END { while (p > 1) { printf "%s ", p; p = parent[p] } }' <<<"$ps_table") "
+
+# Each pane's foreground job, as parallel arrays indexed by pane.
+pane_label=() pane_window=() pane_pgid=() pane_pids=() pane_cmd=()
+busy=() # indexes of panes with something to stop
+own_window=""
+
+while IFS=$'\t' read -r wid wlabel; do
+  [[ -n "$wid" ]] || continue
+  own=0
+  for block in $(jq -r --arg w "$wid" '.blocks[] | select(.window_id == $w) | .block_id' <<<"$blocks"); do
+    proc="$(rex block call -s "$session" -b "$block" process 2>/dev/null)" || continue
+    login="$(jq -r '.child.pid // empty' <<<"$proc")"
+    fg="$(jq -r '.foreground.pid // empty' <<<"$proc")"
+    [[ -n "$login" && -n "$fg" ]] || continue
+    if [[ "$my_ancestors" == *" $login "* ]]; then
+      own=1
+      continue
+    fi
+    # Idle: the foreground is the pane's login shell itself.
+    if jq -e '(.foreground.name // "" | test("^-?(zsh|bash|fish|sh|dash|ksh|nu)$"))
+      and ([.ancestors[]? | select(.name != "login")] | length == 0)' <<<"$proc" >/dev/null; then
+      continue
+    fi
+    pgid="$(awk -v p="$fg" '$1 == p { print $3; exit }' <<<"$ps_table")"
+    [[ -n "$pgid" && "$pgid" -gt 1 && "$pgid" != "$login" ]] || continue
+    # The job: every process in the foreground group, and everything under them
+    # (children that moved to their own group or session included).
+    pids="$(awk -v g="$pgid" '
+      { kids[$2] = kids[$2] " " $1; if ($3 == g) q[++n] = $1 }
+      END {
+        for (i = 1; i <= n; i++) {
+          if (seen[q[i]]++) continue
+          print q[i]
+          m = split(kids[q[i]], k, " ")
+          for (j = 1; j <= m; j++) q[++n] = k[j]
+        }
+      }' <<<"$ps_table" | tr '\n' ' ')"
+    [[ -n "${pids// /}" ]] || continue
+    i=${#pane_label[@]}
+    pane_label[i]="${wlabel:-$wid}"
+    pane_window[i]="$wid"
+    pane_pgid[i]="$pgid"
+    pane_pids[i]="$pids"
+    pane_cmd[i]="$(jq -r '.foreground.name // "?"' <<<"$proc")"
+    busy+=("$i")
+  done
+  ((own)) && own_window="$wid"
+done < <(jq -r '.windows[] | [.window_id, (.label // "")] | @tsv' <<<"$windows")
+
+n=${#busy[@]}
+all_pids=()
+for i in ${busy[@]+"${busy[@]}"}; do all_pids+=(${pane_pids[i]}); done
+
+# Ports and connections: which pane listens where, and which panes other panes
+# are connected to (those stop last). "pid L port" / "pid C remote_port".
+pane_ports=()
+last_wave=()
+ports=()
+if ((n)); then
+  net="$(lsof -nP -a -iTCP -p "$(IFS=,; echo "${all_pids[*]}")" -F pnT 2>/dev/null | awk '
+    /^p/ { pid = substr($0, 2) }
+    /^n/ { name = substr($0, 2) }
+    /^TST=/ {
+      st = substr($0, 5)
+      if (st == "LISTEN") { sub(/.*:/, "", name); print pid, "L", name }
+      else if (st == "ESTABLISHED" && index(name, "->")) { sub(/.*->/, "", name); sub(/.*:/, "", name); print pid, "C", name }
+    }')"
+  pidpane="$(for i in "${busy[@]}"; do for p in ${pane_pids[i]}; do echo "$p $i"; done; done)"
+  analysis="$(awk '
+    NR == FNR { pane[$1] = $2; next }
+    !($1 in pane) { next }
+    $2 == "L" { t = pane[$1]; if (!seen[t, $3]++) ports[t] = ports[t] " " $3; owner[$3] = t; next }
+    $2 == "C" { conn[pane[$1]] = conn[pane[$1]] " " $3 }
+    END {
+      for (t in ports) print "P", t, ports[t]
+      for (t in conn) {
+        m = split(conn[t], c, " ")
+        for (k = 1; k <= m; k++) if ((c[k] in owner) && owner[c[k]] != t) dep[owner[c[k]]] = 1
+      }
+      for (t in dep) print "D", t
+    }' <(printf '%s\n' "$pidpane") <(printf '%s\n' "$net"))"
+  while read -r kind idx rest; do
+    case "$kind" in
+      P) pane_ports[idx]="$rest" ;;
+      D) last_wave[idx]=1 ;;
+    esac
+  done <<<"$analysis"
+  ports=($(printf '%s\n' ${pane_ports[@]+"${pane_ports[@]}"} | tr ' ' '\n' | sed '/^$/d' | sort -un))
+fi
+
+# Containers a pane ran (`docker run --name X`) or attached to (`docker start X`).
+containers=()
+if ((n)); then
+  containers=($(ps -o command= -p "$(IFS=,; echo "${all_pids[*]}")" 2>/dev/null | awk '
+    {
+      d = 0
+      for (i = 1; i <= NF; i++) if ($i ~ /(^|\/)docker$/) { d = i; break }
+      if (!d) next
+      if ($(d + 1) == "start") { for (j = d + 2; j <= NF; j++) if ($j !~ /^-/) print $j }
+      else if ($(d + 1) == "run") {
+        for (j = d + 2; j <= NF; j++) {
+          if ($j == "--name") print $(j + 1)
+          else if ($j ~ /^--name=/) { x = $j; sub(/^--name=/, "", x); print x }
+        }
+      }
+    }' | sort -u))
+fi
+
+if ((dry_run)); then
+  say "session $session_name ($session): $n busy pane(s) in $(jq '.windows | length' <<<"$windows") tab(s)"
+  for i in ${busy[@]+"${busy[@]}"}; do
+    say "  ${pane_label[i]}: ${pane_cmd[i]} (group ${pane_pgid[i]}; pids ${pane_pids[i]% }) ports:${pane_ports[i]:- none}$([[ -n "${last_wave[i]:-}" ]] && echo '  [stops last: others connect to it]')"
+  done
+  ((${#containers[@]})) && say "  containers: ${containers[*]}"
+  ((${#ports[@]})) && say "  ports to free: ${ports[*]}"
+  ((keep_tabs)) || say "  then closes the session $session_name"
+  [[ -n "$own_window" ]] && say "  leaves alone the pane running this script, in $own_window"
+  exit 0
+fi
+
+# --- stopping ---------------------------------------------------------------
+
+alive_now=" "
+refresh_alive() {
+  alive_now=" "
+  ((${#all_pids[@]})) || return 0
+  alive_now=" $(ps -o pid=,stat= -p "$(IFS=,; echo "${all_pids[*]}")" 2>/dev/null | awk '$2 !~ /^Z/ { printf "%s ", $1 }')"
+}
+pane_alive() {
+  local p
+  for p in ${pane_pids[$1]}; do [[ "$alive_now" == *" $p "* ]] && return 0; done
+  return 1
+}
+last_down=-1
+progress() {
+  local i down=0
+  for i in "${busy[@]}"; do pane_alive "$i" || down=$((down + 1)); done
+  if ((down != last_down)); then
+    last_down=$down
+    ((down < n)) && toast loading "Stopping $n server$( ((n == 1)) || echo s)… $down/$n down"
+  fi
+}
+# wait_for SECONDS PANE...: true once those panes' processes have all exited.
+wait_for() {
+  local until=$((SECONDS + $1)) i any
+  shift
+  while :; do
+    refresh_alive
+    progress
+    any=0
+    for i in "$@"; do pane_alive "$i" && any=1; done
+    ((any)) || return 0
+    ((SECONDS >= until)) && return 1
+    sleep 0.25
+  done
+}
+labels() {
+  local i out=()
+  for i in "$@"; do out+=("${pane_label[i]}"); done
+  local IFS=,
+  echo "${out[*]}" | sed 's/,/, /g'
+}
+
+forced=()
+# stop_wave PANE...: Ctrl-C them, then TERM and KILL whatever outlasts the grace.
+stop_wave() {
+  (($#)) || return 0
+  local i left=() pids=() p
+  for i in "$@"; do
+    say "SIGINT ${pane_label[i]} (group ${pane_pgid[i]})"
+    kill -INT -- "-${pane_pgid[i]}" 2>/dev/null
+  done
+  wait_for "$grace" "$@" && return 0
+  for i in "$@"; do pane_alive "$i" && left+=("$i"); done
+  forced+=("${left[@]}")
+  toast loading "Ctrl-C wasn't enough for $(labels "${left[@]}"); terminating…" 2
+  for i in "${left[@]}"; do
+    for p in ${pane_pids[i]}; do [[ "$alive_now" == *" $p "* ]] && pids+=("$p"); done
+  done
+  say "SIGTERM ${pids[*]}"
+  kill -TERM "${pids[@]}" 2>/dev/null
+  wait_for 3 "${left[@]}" && return 0
+  refresh_alive
+  pids=()
+  for i in "${left[@]}"; do
+    for p in ${pane_pids[i]}; do [[ "$alive_now" == *" $p "* ]] && pids+=("$p"); done
+  done
+  say "SIGKILL ${pids[*]}"
+  kill -KILL "${pids[@]}" 2>/dev/null
+  wait_for 2 "${left[@]}"
+}
+
+problems=()
+if ((n)); then
+  first=() second=()
+  for i in "${busy[@]}"; do
+    if [[ -n "${last_wave[i]:-}" ]]; then second+=("$i"); else first+=("$i"); fi
+  done
+  stop_wave ${first[@]+"${first[@]}"}
+  stop_wave ${second[@]+"${second[@]}"}
+
+  refresh_alive
+  for i in "${busy[@]}"; do
+    for p in ${pane_pids[i]}; do
+      [[ "$alive_now" == *" $p "* ]] && problems+=("${pane_label[i]}: $(comm_of "$p") $p won't die")
+    done
+  done
+
+  for c in ${containers[@]+"${containers[@]}"}; do
+    if [[ "$(docker container inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" == true ]]; then
+      toast loading "Stopping container $c…"
+      docker stop "$c" >/dev/null 2>&1 || problems+=("container $c won't stop")
+    fi
+  done
+
+  for port in ${ports[@]+"${ports[@]}"}; do
+    holder="$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1)"
+    if [[ -n "$holder" ]]; then
+      problems+=(":$port held by $(ps -o comm= -p "$holder" 2>/dev/null | sed 's#.*/##') $holder")
+    fi
+  done
+fi
+
+# --- the verdict, then the session ------------------------------------------
+
+summary="Stopped $n server$( ((n == 1)) || echo s)"
+((n)) || summary="Nothing was running"
+((keep_tabs)) || summary+=", closed $session_name"
+((${#forced[@]})) && summary+=$'\n'"Force-killed $(labels "${forced[@]}")"
+
+status=0
+if ((${#problems[@]})); then
+  joined="$(printf '%s; ' "${problems[@]}")"
+  toast error "$summary"$'\n'"Still up: ${joined%; }" 4
+  status=1
+else
+  ((${#ports[@]})) && summary+=$'\n'"$(printf ':%s ' "${ports[@]}")free"
+  toast success "$summary" 3
+fi
+
+# Last: when this runs in one of the session's panes, it goes too.
+if ((!keep_tabs)); then
+  rex kill "$session" >/dev/null 2>&1 || toast error "Stopped the servers, but couldn't close $session_name" 2
+fi
+exit "$status"

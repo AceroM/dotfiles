@@ -115,7 +115,7 @@ class OrchestratorsTests(unittest.TestCase):
         panes, pids = [], {}
         for index, source in enumerate(self.sources[:4]):
             preview = self.action(source, dry_run=True)
-            self.assertEqual(preview["o"], "new_tab" if index == 0 else "new_pane")
+            self.assertEqual(preview["pane"], "new_tab" if index == 0 else "new_pane")
             result = self.action(source)
             block = result["block_id"]
             panes.append(block)
@@ -129,7 +129,7 @@ class OrchestratorsTests(unittest.TestCase):
             # different directory was focused last and when all four are full.
             for previous, target in zip(self.sources, panes):
                 repeated = self.action(previous)
-                self.assertEqual((repeated["o"], repeated["block_id"]), ("running", target))
+                self.assertEqual((repeated["pane"], repeated["block_id"]), ("running", target))
                 self.assertEqual(self.orchestrators()["focused_block_id"], target)
                 self.assertEqual(self.process(target)["pid"], pids[target])
 
@@ -146,7 +146,7 @@ class OrchestratorsTests(unittest.TestCase):
         self.api("session.new_layer", window_id=self.orchestrators()["window_id"],
                  bounds=[0.1, 0.1, 0.8, 0.8], focus=False,
                  layout=self.layout(self.dirs[4]))
-        self.assertEqual(self.action(self.sources[4], dry_run=True)["o"], "full")
+        self.assertEqual(self.action(self.sources[4], dry_run=True)["pane"], "full")
         full = self.action(self.sources[4], check=False)
         self.assertNotEqual(full.returncode, 0)
         self.assertIn("already has four panes", full.stderr)
@@ -174,7 +174,7 @@ class OrchestratorsTests(unittest.TestCase):
         target = second["block_ids"][0]
         self.wait_program(target, "zsh")
         result = self.action(self.sources[1])
-        self.assertEqual((result["o"], result["block_id"]), ("typed_in_shell", target))
+        self.assertEqual((result["pane"], result["block_id"]), ("typed_in_shell", target))
         self.assertEqual(self.wait_program(target, "o")["cwd"], str(self.dirs[1]))
         self.assertEqual(self.process(shell["block_ids"][0])["argv0"], "/bin/zsh")
         self.assertEqual(len(self.tiles()["blocks"]), 2)

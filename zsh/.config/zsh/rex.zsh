@@ -632,9 +632,9 @@ function hkill() {
 }
 
 # ce — close every other tab in this session, keeping the one the shell lives in
-# and the agents session's orchestrators tab (where o runs). "This one" is the
-# tab holding $REX_BLOCK, not whichever tab the app shows, so it behaves the
-# same when run from a background tab. A tab whose agent is still working or
+# and its orchestrators tab (cmd+shift+e, where o runs). "This one" is the tab
+# holding $REX_BLOCK, not whichever tab the app shows, so it behaves the same
+# when run from a background tab. A tab whose agent is still working or
 # blocked is closed too, but flagged in the output.
 function ce() {
   _r_guard || return 1

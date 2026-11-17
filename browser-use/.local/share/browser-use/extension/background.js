@@ -703,18 +703,20 @@ const COMMANDS = {
     const vv = metrics.cssVisualViewport;
     const dpr = await inPage(tab.id, () => window.devicePixelRatio);
     const scale = args.hires ? 1 : 1 / dpr;
+    // captureScreenshot's clip is in unzoomed pixels: at 150% page zoom a CSS-pixel clip covers 2/3 of the view.
+    const zoom = await chrome.tabs.getZoom(tab.id);
     const params = { format: "png", captureBeyondViewport: !!args.full };
     if (args.full) {
       const size = metrics.cssContentSize;
-      params.clip = { x: 0, y: 0, width: size.width, height: Math.min(size.height, 16000), scale };
+      params.clip = { x: 0, y: 0, width: size.width * zoom, height: Math.min(size.height, 16000) * zoom, scale };
     } else {
-      params.clip = { x: vv.pageX, y: vv.pageY, width: vv.clientWidth, height: vv.clientHeight, scale };
+      params.clip = { x: vv.pageX * zoom, y: vv.pageY * zoom, width: vv.clientWidth * zoom, height: vv.clientHeight * zoom, scale };
     }
     const { data } = await cdp(tab.id, "Page.captureScreenshot", params);
     return {
       data,
-      width: Math.round(params.clip.width * scale * dpr),
-      height: Math.round(params.clip.height * scale * dpr),
+      width: Math.round((params.clip.width / zoom) * scale * dpr),
+      height: Math.round((params.clip.height / zoom) * scale * dpr),
       coords: args.hires ? `image px = CSS px × ${dpr}` : "image px = CSS px (click coordinates map 1:1)",
       url: tab.url,
     };

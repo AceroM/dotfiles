@@ -29,12 +29,23 @@ secureinput.start()
 
 -- Generic toast entry point for scripts:
 --   open -g "hammerspoon://toast?title=nvim&msg=done&placement=center&timeout=5"
+-- A promise toast: give it an id and a state (loading, success, error), and
+-- each later one with that id redraws it in place (see toast.lua):
+--   open -g "hammerspoon://toast?id=deploy&state=loading&msg=Deploying…"
+--   open -g "hammerspoon://toast?id=deploy&state=success&msg=Deployed&maxLines=2"
 hs.urlevent.bind("toast", function(_, params)
-  toast.show(params.msg or "", {
+  local opts = {
     title = params.title,
     placement = params.placement,
     timeout = tonumber(params.timeout),
-  })
+    state = params.state,
+    maxLines = tonumber(params.maxLines),
+  }
+  if params.id and params.id ~= "" then
+    toast.update(params.id, params.msg or "", opts)
+  else
+    toast.show(params.msg or "", opts)
+  end
 end)
 
 -- Kept for ~/.claude/hooks/toast.sh.
