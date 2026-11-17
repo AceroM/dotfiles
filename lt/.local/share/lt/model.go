@@ -206,12 +206,12 @@ type model struct {
 	pendingCount int
 	// The issue before the last g jump, so gx can still open that issue.
 	beforeG string
-	marks        map[string]bool
+	marks   map[string]bool
 	// Visual mode's other end (an issue id); the range runs from it to the cursor.
-	visual string
-	query  string
-	typing bool
-	order  order
+	visual      string
+	query       string
+	typing      bool
+	order       order
 	showBacklog bool
 	hideTriage  bool
 	help        bool
@@ -588,7 +588,10 @@ func (m *model) key(k tea.KeyPressMsg) {
 	}
 	if id := m.beforeG; id != "" {
 		m.beforeG = ""
-		if s == "x" {
+		switch s {
+		case "g":
+			return
+		case "x":
 			if at := m.pos(id); at >= 0 {
 				m.moveTo(at)
 				m.open()

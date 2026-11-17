@@ -234,6 +234,7 @@ func get(m *model, id string) issue { return m.all[m.find(id)] }
 
 func TestStatusOrderAndHeadings(t *testing.T) {
 	m, _ := fixture(t)
+	press(m, "b")
 	want := []string{"OPS-1", "ENG-3", "ENG-1", "ENG-2", "OPS-2", "ENG-4"}
 	if got := shown(m); !reflect.DeepEqual(got, want) {
 		t.Fatalf("order: %v", got)
@@ -258,37 +259,62 @@ func TestStatusOrderAndHeadings(t *testing.T) {
 	}
 }
 
-func TestMovesWithCountsAndPrefixes(t *testing.T) {
+func TestStatusVisibility(t *testing.T) {
 	m, _ := fixture(t)
+	if got := shown(m); !reflect.DeepEqual(got, []string{"OPS-1", "ENG-3", "ENG-1", "ENG-2"}) {
+		t.Fatalf("default list: %v", got)
+	}
+	press(m, "j", "b", "t", "R")
+	if got := shown(m); !reflect.DeepEqual(got, []string{"ENG-3", "ENG-1", "ENG-2", "OPS-2", "ENG-4"}) || m.selectedID() != "e3" {
+		t.Fatalf("Backlog shown, Triage hidden: %v on %s", got, m.selectedID())
+	}
+	press(m, "/")
+	typeText(m, "chore")
+	press(m, "enter")
+	if got := shown(m); !reflect.DeepEqual(got, []string{"OPS-2"}) {
+		t.Fatalf("Backlog matches while shown: %v", got)
+	}
+	press(m, "b")
+	if len(m.view) != 0 || m.visibleCount() != 3 {
+		t.Fatalf("Backlog hidden from both matches and count: %v of %d", shown(m), m.visibleCount())
+	}
+	press(m, "esc", "t")
+	if m.pos("o1") < 0 || m.pos("o2") >= 0 {
+		t.Fatalf("Triage shown, Backlog hidden: %v", shown(m))
+	}
+}
+
+func TestMovesWithCountsAndPrefixes(t *testing.T) {
+	m, f := fixture(t)
 	press(m, "3", "j")
 	if m.cur != 3 {
 		t.Fatalf("3j: %d", m.cur)
 	}
-	press(m, "g", "g")
+	press(m, "g")
 	if m.cur != 0 {
-		t.Fatal("gg goes to the top")
+		t.Fatal("g goes to the top immediately")
 	}
 	press(m, "G")
-	if m.cur != 5 {
+	if m.cur != 3 {
 		t.Fatal("G goes to the bottom")
 	}
-	press(m, "2", "g", "g")
+	press(m, "2", "g")
 	if m.cur != 1 {
-		t.Fatalf("2gg: %d", m.cur)
+		t.Fatalf("2g: %d", m.cur)
 	}
 	press(m, "4", "G")
 	if m.cur != 3 {
 		t.Fatalf("4G: %d", m.cur)
 	}
 	press(m, "g", "j")
-	if m.cur != 4 || m.pending != "" {
-		t.Fatalf("g then j: the prefix drops and j moves (%d %q)", m.cur, m.pending)
+	if m.cur != 1 || m.pending != "" {
+		t.Fatalf("g then j: j moves down from the top (%d %q)", m.cur, m.pending)
 	}
 	var opened string
 	m.opener = func(u string) error { opened = u; return nil }
-	press(m, "g", "g", "j", "j", "g", "x")
-	if opened != "https://linear.app/x/issue/ENG-1" {
-		t.Fatalf("gx opens the issue: %q", opened)
+	press(m, "j", "g", "x")
+	if opened != "https://linear.app/x/issue/ENG-1" || m.selectedID() != "e1" || len(f.removed) != 0 {
+		t.Fatalf("gx opens the original issue: %q, selected %s, deleted %v", opened, m.selectedID(), f.removed)
 	}
 	press(m, "9", "esc")
 	if m.count != 0 || m.quitting {
@@ -302,14 +328,14 @@ func TestDeleteMovesOnAndUndoRestores(t *testing.T) {
 	if !reflect.DeepEqual(f.removed, [][]string{{"e3"}}) {
 		t.Fatalf("removed %v", f.removed)
 	}
-	if m.selectedID() != "e1" || len(m.view) != 5 {
+	if m.selectedID() != "e1" || len(m.view) != 3 {
 		t.Fatalf("cursor lands on the next issue, got %s", m.selectedID())
 	}
 	if !strings.Contains(m.msg, "deleted ENG-3") {
 		t.Fatalf("flash: %q", m.msg)
 	}
 	press(m, "u")
-	if !reflect.DeepEqual(f.restored, [][]string{{"e3"}}) || len(m.view) != 6 || m.selectedID() != "e3" {
+	if !reflect.DeepEqual(f.restored, [][]string{{"e3"}}) || len(m.view) != 4 || m.selectedID() != "e3" {
 		t.Fatalf("u restores and goes to it: %v %v %s", f.restored, shown(m), m.selectedID())
 	}
 	press(m, "u")
@@ -350,7 +376,7 @@ func TestFailedDeleteComesBack(t *testing.T) {
 	m, f := fixture(t)
 	f.failNext = true
 	press(m, "x")
-	if len(m.view) != 6 || !m.msgBad || len(m.undo) != 0 {
+	if len(m.view) != 4 || !m.msgBad || len(m.undo) != 0 {
 		t.Fatalf("a failed delete shows the issue again: %v %q", shown(m), m.msg)
 	}
 }
@@ -385,6 +411,7 @@ func TestStatusPickerDigitsAndUndo(t *testing.T) {
 
 func TestStatusAcrossTeamsMapsByNameThenType(t *testing.T) {
 	m, f := fixture(t)
+	press(m, "b")
 	// Mark ENG-1 (In Progress) and OPS-2 (Backlog); the cursor's on ENG-1, so ENG's workflow.
 	press(m, "2", "j", "space", "j", "space", "k", "k", "k")
 	if m.selectedID() != "e1" {
@@ -408,6 +435,7 @@ func TestStatusAcrossTeamsMapsByNameThenType(t *testing.T) {
 
 func TestStatusPickerSkipsTeamsWithoutTheState(t *testing.T) {
 	m, f := fixture(t)
+	press(m, "b")
 	// Cursor on OPS-2 (OPS has triage); mark ENG-2 too: ENG has no triage.
 	m.cur = m.pos("o2")
 	m.marks["o2"], m.marks["e2"] = true, true
@@ -496,6 +524,7 @@ func TestChangesKeepTheCursorRow(t *testing.T) {
 
 func TestHalfPageKeepsTheScreenRow(t *testing.T) {
 	m, _ := fixture(t)
+	press(m, "b")
 	// 6 rows of list, so half is 3. Rows: Triage, OPS-1, In Review, ENG-3, In Progress, ENG-1,
 	// Todo, ENG-2, Backlog, OPS-2, ENG-4: 11, so the list scrolls at most to row 5.
 	m.height = 8
@@ -658,7 +687,7 @@ func TestNewIssueFromAClosedStatusGoesToTodo(t *testing.T) {
 
 func TestFilterMarkAllAndEscape(t *testing.T) {
 	m, _ := fixture(t)
-	press(m, "/")
+	press(m, "b", "/")
 	typeText(m, "eng")
 	if len(m.view) != 4 {
 		t.Fatalf("filter by id: %v", shown(m))
@@ -692,7 +721,7 @@ func TestFilterMarkAllAndEscape(t *testing.T) {
 
 func TestMarkStatus(t *testing.T) {
 	m, _ := fixture(t)
-	press(m, "G", "*")
+	press(m, "b", "G", "*")
 	if !m.marks["o2"] || !m.marks["e4"] || len(m.marks) != 2 {
 		t.Fatalf("* marks the whole backlog, across teams: %v", m.marks)
 	}
@@ -784,5 +813,43 @@ func TestRenderFitsEveryWidth(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 10, Height: 2})
 	if !strings.Contains(m.render(), "lt") {
 		t.Fatal("tiny panes say so")
+	}
+}
+
+func TestShortcutsOnlyInHelp(t *testing.T) {
+	for _, tc := range []struct {
+		keys   []string
+		footer string
+	}{
+		{nil, ""},
+		{[]string{"m"}, ""},
+		{[]string{"c"}, ""},
+		{[]string{"A", "z"}, "@z▏"},
+		{[]string{"v", "j"}, "-- VISUAL 2 --"},
+		{[]string{"/", "e", "enter"}, "/e · 4 of 4"},
+		{[]string{"C"}, "comment on OPS-1: ▏"},
+		{[]string{"x"}, "deleted OPS-1"},
+	} {
+		m, _ := fixture(t)
+		press(m, tc.keys...)
+		lines := strings.Split(ansi.Strip(m.render()), "\n")
+		if got := strings.TrimSpace(lines[len(lines)-1]); got != tc.footer {
+			t.Fatalf("%v footer: got %q, want %q", tc.keys, got, tc.footer)
+		}
+	}
+
+	m, _ := fixture(t)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	press(m, "j", "enter", "?")
+	for range 20 {
+		press(m, "j")
+	}
+	out := ansi.Strip(m.render())
+	if !strings.Contains(out, "toggle Backlog") || !strings.Contains(out, "toggle Triage") {
+		t.Fatalf("scrolled help:\n%s", out)
+	}
+	press(m, "?")
+	if m.help || !m.detail || m.selectedID() != "e3" {
+		t.Fatal("closing help returns to the same issue and detail pane")
 	}
 }

@@ -14,7 +14,7 @@ function lk() {
   [[ -n "$pids" ]] && echo "$pids" | xargs kill
 }
 function kt() { pkill -f tsgo }
-function kn() { pkill -f node }
+function kn() { pkill -f 'node|tsgo' }
 alias pp="pbpaste"
 alias pc="pbcopy"
 alias e="echo"

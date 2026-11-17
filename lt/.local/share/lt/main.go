@@ -26,7 +26,7 @@ usage:
 move:
   j k  ↓ ↑             next / previous (5j, 3k: counts, by the relative numbers)
   ^d ^u                half a page down / up
-  gg G  12G            first / last / issue 12
+  g G  12G             first / last / issue 12
   ⇥ ⇧⇥                 next / previous scope: mine, created, each team
 
 change (the issue, a count from it, the visual range, or every marked issue):
@@ -49,6 +49,8 @@ select:
 
 view:
   ⏎                    details: the description under the list (J K scroll it)
+  b                    toggle Backlog (hidden on startup)
+  t                    toggle Triage (shown on startup)
   /                    filter by id, title, status, project, label, assignee
   s                    order: status → priority → least recently updated → project
   o gx                 open in Linear
@@ -138,6 +140,7 @@ func run(args []string) int {
 		}
 		writeCache("scope-"+key, is)
 		m.all = is
+		m.showBacklog = true
 		m.setView("")
 		printList(m)
 		return 0

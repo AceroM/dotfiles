@@ -77,7 +77,10 @@ func (m *model) View() tea.View {
 func (m *model) render() string {
 	w, h := m.width, m.height
 	if w < 30 || h < 5 {
-		return ansi.Truncate("lt · make the pane bigger · q quits", max(1, w), "")
+		return ansi.Truncate("lt · make the pane bigger", max(1, w), "")
+	}
+	if m.help {
+		return m.renderHelp(w, h)
 	}
 	listH, pickH, detailH := m.layout()
 	lines := make([]string, 0, h)
@@ -89,14 +92,11 @@ func (m *model) render() string {
 	if detailH > 0 {
 		lines = append(lines, m.detailLines(w, detailH)...)
 	}
-	if p := m.prompt; p != nil && p.kind == "comment" {
-		switch {
-		case p.posting:
+	if p := m.prompt; p.hasCommentStatus() {
+		if p.posting {
 			lines = append(lines, " "+yellow.Render("posting comment…"))
-		case p.err != nil:
+		} else {
 			lines = append(lines, " "+red.Render("couldn't post: "+oneLine(p.err.Error())))
-		default:
-			lines = append(lines, " "+muted.Render("⏎ post  esc cancel"))
 		}
 	}
 	lines = append(lines, m.statusLine(w))
@@ -110,11 +110,11 @@ func (m *model) render() string {
 // right, the current one lit.
 func (m *model) titleLine(w int) string {
 	rest := fmt.Sprintf(" · %d issue%s", len(m.view), plural(len(m.view)))
-	if len(m.all) >= maxIssues {
-		rest = fmt.Sprintf(" · the %d updated last", len(m.view))
-	}
 	if m.query != "" {
 		rest = fmt.Sprintf(" · %d of %d", len(m.view), m.visibleCount())
+	}
+	if len(m.all) >= maxIssues {
+		rest += fmt.Sprintf(" · latest %d loaded", maxIssues)
 	}
 	if m.order != orderStatus {
 		rest += " · " + m.order.String()
@@ -170,21 +170,18 @@ func (m *model) titleLine(w int) string {
 func (m *model) visibleCount() int {
 	n := 0
 	for _, i := range m.all {
-		if !m.deleted[i.ID] {
+		if m.includes(i) {
 			n++
 		}
 	}
 	return n
 }
 
-// list is exactly n lines: the issues (or the keys, for `?`).
+// list is exactly n lines of issues and headings.
 func (m *model) list(w, n int) []string {
 	lines := make([]string, 0, n)
-	switch {
-	case m.help:
-		lines = append(lines, helpView(w, n)...)
-	case len(m.view) == 0:
-		text := "nothing open here"
+	if len(m.view) == 0 {
+		text := "no issues to show"
 		switch {
 		case m.query != "":
 			text = fmt.Sprintf("nothing matches “%s”", m.query)
@@ -192,7 +189,7 @@ func (m *model) list(w, n int) []string {
 			text = "loading…"
 		}
 		lines = append(lines, "   "+muted.Render(text))
-	default:
+	} else {
 		lo, hi, vis := m.visualRange()
 		c := m.columns(w)
 		now := time.Now()
@@ -450,44 +447,18 @@ func (m *model) detailLines(w, n int) []string {
 	return lines[:n]
 }
 
-// statusLine: a prompt or filter being typed, a message, a count, or what the keys do now.
+// statusLine shows input, messages, and active mode status.
 func (m *model) statusLine(w int) string {
 	room := w - 2
-	hints := func(lead string, pairs ...[2]string) string {
-		out, used := " "+lead, 1+ansi.StringWidth(lead)
-		for i, p := range pairs {
-			sep := "  "
-			if i == 0 && lead == "" {
-				sep = ""
-			}
-			cell := sep + p[0] + " " + p[1]
-			if used+ansi.StringWidth(cell) > room {
-				break
-			}
-			used += ansi.StringWidth(cell)
-			out += sep + plain.Render(p[0]) + " " + muted.Render(p[1])
-		}
-		return out
-	}
 	switch {
-	case m.help:
-		return hints("", [2]string{"any key", "back to the issues"})
 	case m.prompt != nil:
 		label := m.prompt.label
 		text := truncateLeft(m.prompt.text, max(1, room-ansi.StringWidth(label)-1))
 		return " " + accent.Render(label) + text + accent.Render("▏")
 	case m.picker != nil && m.picker.kind == "assignee" && m.picker.filter != "":
-		return " " + accent.Render("@") + m.picker.filter + accent.Render("▏") + muted.Render("  ⏎ pick  esc cancel")
+		return " " + accent.Render("@") + m.picker.filter + accent.Render("▏")
 	case m.picker != nil:
-		last := len(m.picker.opts) - 1
-		if last > 9 {
-			last = 9
-		}
-		pairs := [][2]string{{fmt.Sprintf("0-%d", last), "pick"}, {"j/k", "move"}, {"⏎", "pick"}, {"esc", "cancel"}}
-		if m.picker.kind == "assignee" {
-			pairs[1] = [2]string{"type", "to find someone"}
-		}
-		return hints("", pairs...)
+		return ""
 	case m.typing:
 		counts := fmt.Sprintf("  %d of %d", len(m.view), m.visibleCount())
 		q := truncateLeft(m.query, max(1, room-2-ansi.StringWidth(counts)))
@@ -508,25 +479,29 @@ func (m *model) statusLine(w int) string {
 		return " " + yellow.Render(s+m.pending)
 	}
 	if lo, hi, ok := m.visualRange(); ok {
-		return hints(accent.Render(fmt.Sprintf("-- VISUAL %d --", hi-lo+1)),
-			[2]string{"c", "status"}, [2]string{"p", "priority"}, [2]string{"A", "assignee"}, [2]string{"d", "delete"},
-			[2]string{"space", "mark"}, [2]string{"esc", "cancel"})
-	}
-	if len(m.marks) > 0 {
-		return hints("", [2]string{"c", "status"}, [2]string{"p", "priority"}, [2]string{"A", "assignee"},
-			[2]string{"x", fmt.Sprintf("delete %d", len(m.marks))}, [2]string{"esc", "unmark"})
+		return " " + accent.Render(fmt.Sprintf("-- VISUAL %d --", hi-lo+1))
 	}
 	if m.query != "" {
-		lead := accent.Render(fmt.Sprintf("/%s · %d of %d", ansi.Truncate(m.query, 30, "…"), len(m.view), m.visibleCount()))
-		return hints(lead, [2]string{"a", "mark all"}, [2]string{"c", "status"}, [2]string{"esc", "drop filter"})
+		return " " + accent.Render(fmt.Sprintf("/%s · %d of %d", ansi.Truncate(m.query, 30, "…"), len(m.view), m.visibleCount()))
 	}
-	return hints("", [2]string{"c", "status"}, [2]string{"C", "comment"}, [2]string{"p", "priority"}, [2]string{"A", "assignee"},
-		[2]string{"x", "delete"}, [2]string{"space", "mark"}, [2]string{"u", "undo"}, [2]string{"/", "filter"},
-		[2]string{"⇥", "scope"}, [2]string{"⏎", "details"}, [2]string{"?", "keys"})
+	return ""
 }
 
-// helpView lays the keys out in n lines: without the blank lines when they don't fit, and in
-// two columns (split at a section) when the pane is wide enough.
+func (m *model) renderHelp(w, h int) string {
+	n := h - 2
+	rows := helpView(w, n)
+	lines := make([]string, h)
+	lines[0] = " " + bold.Render("Shortcuts")
+	copy(lines[1:h-1], rows[m.helpTop:])
+	closeHelp := "? close"
+	if len(rows) > n {
+		closeHelp = "j/k scroll · " + closeHelp
+	}
+	lines[h-1] = " " + muted.Render(closeHelp)
+	return strings.Join(lines, "\n")
+}
+
+// helpView fits the shortcuts in the viewport when possible, using two columns in wide panes.
 func helpView(w, n int) []string {
 	src := helpLines()
 	if len(src) > n {
@@ -542,7 +517,7 @@ func helpView(w, n int) []string {
 		if strings.HasPrefix(l, "  ") && len([]rune(l)) > 23 {
 			r := []rune(l)
 			keys, what := strings.TrimRight(string(r[2:23]), " "), string(r[23:])
-			return "   " + plain.Render(fit(keys, 21)) + muted.Render(ansi.Truncate(what, max(0, width-24), "…"))
+			return "   " + plain.Render(fit(keys, 12)) + muted.Render(ansi.Truncate(what, max(0, width-15), "…"))
 		}
 		if l != "" {
 			return " " + accent.Bold(true).Render(ansi.Truncate(l, max(0, width-1), "…"))
