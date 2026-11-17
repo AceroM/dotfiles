@@ -21,17 +21,21 @@ type tab struct {
 	Label     string `json:"label"`
 	Detail    string `json:"detail"`
 	Panes     int    `json:"panes"`
+	pane      pane
+	terminals []pane
+	activity  activity
 }
 
 type snapshot struct {
-	Label string `json:"label"`
-	Tabs  []tab  `json:"tabs"`
+	Label               string `json:"label"`
+	Tabs                []tab  `json:"tabs"`
+	activityUnavailable bool
 }
 
 type rexCLI struct {
-	ctx                            context.Context
-	session, client, block, source string
-	current                        bool
+	ctx                    context.Context
+	session, client, block string
+	current                bool
 }
 
 func (r *rexCLI) call(args ...string) ([]byte, error) {
@@ -54,17 +58,7 @@ func (r *rexCLI) call(args ...string) ([]byte, error) {
 	return out, nil
 }
 
-func (r *rexCLI) popup() error {
-	args := []string{"do", "-s", r.session}
-	if r.block != "" {
-		args = append(args, "-b", r.block)
-	}
-	options, _ := json.Marshal(map[string]any{"client": r.client, "current_session": r.current})
-	_, err := r.call(append(args, "tabs", "--args", string(options))...)
-	return err
-}
-
-func (r *rexCLI) snapshot() (snapshot, error) {
+func (r *rexCLI) listTabs() (snapshot, error) {
 	if r.current {
 		return r.sessionSnapshot(r.session)
 	}
@@ -99,21 +93,23 @@ func (r *rexCLI) sessionSnapshot(id string) (snapshot, error) {
 	if err != nil {
 		return snapshot{}, err
 	}
-	return parseSnapshot(out, r.block, r.source)
+	return parseSnapshot(out, r.block)
 }
 
-func parseSnapshot(data []byte, block, source string) (snapshot, error) {
+func parseSnapshot(data []byte, block string) (snapshot, error) {
 	var view struct {
 		ID      string `json:"session_id"`
 		Label   string
 		Windows []struct {
-			ID     string `json:"window_id"`
-			Label  string
-			Layers []struct {
+			ID      string `json:"window_id"`
+			Focused string `json:"focused_block_id"`
+			Label   string
+			Layers  []struct {
 				Kind   string
 				Blocks []struct {
-					ID    string `json:"block_id"`
-					Label string
+					ID      string `json:"block_id"`
+					Creator string `json:"creator_name"`
+					Label   string
 				}
 			}
 		}
@@ -123,16 +119,25 @@ func parseSnapshot(data []byte, block, source string) (snapshot, error) {
 	}
 	result := snapshot{Label: clean(view.Label), Tabs: []tab{}}
 	for i, w := range view.Windows {
-		mine := w.ID == source
+		mine := false
 		var details []string
+		var target pane
+		var terminals []pane
 		panes := 0
 		for _, layer := range w.Layers {
 			for _, b := range layer.Blocks {
 				mine = mine || (block != "" && b.ID == block)
+				p := pane{id: b.ID, label: clean(b.Label)}
+				if target.id == "" || p.id == w.Focused {
+					target = p
+				}
+				if b.Creator == "com.superlogical.terminal" {
+					terminals = append(terminals, p)
+				}
 				if layer.Kind == "tiled" {
 					panes++
-					if label := clean(b.Label); label != "" && label != "shell" {
-						details = append(details, label)
+					if p.label != "" && p.label != "shell" {
+						details = append(details, p.label)
 					}
 				}
 			}
@@ -144,8 +149,8 @@ func parseSnapshot(data []byte, block, source string) (snapshot, error) {
 		if label == "" {
 			label = fmt.Sprintf("Tab %d", i+1)
 		}
-		result.Tabs = append(result.Tabs, tab{ID: w.ID, SessionID: view.ID, Session: clean(view.Label),
-			Index: i + 1, Label: label, Detail: strings.Join(details, " · "), Panes: panes})
+		result.Tabs = append(result.Tabs, tab{ID: w.ID, SessionID: view.ID, Session: result.Label,
+			Index: i + 1, Label: label, Detail: strings.Join(details, " · "), Panes: panes, pane: target, terminals: terminals})
 	}
 	return result, nil
 }
@@ -167,7 +172,7 @@ func clean(s string) string {
 func (r *rexCLI) closeTab(id string) error {
 	// Re-check ownership at the destructive boundary, including the current
 	// pane if it moved since the picker opened. Never infer a target by number.
-	snap, err := r.snapshot()
+	snap, err := r.listTabs()
 	if err != nil {
 		return err
 	}
@@ -180,23 +185,89 @@ func (r *rexCLI) closeTab(id string) error {
 	return fmt.Errorf("tab disappeared or hosts this picker; refreshed the list")
 }
 
-func (r *rexCLI) selectTab(id string) error {
-	snap, err := r.snapshot()
+func (r *rexCLI) checkPane(t tab) error {
+	if t.pane.id == "" {
+		return fmt.Errorf("this tab has no pane")
+	}
+	out, err := r.call("block", "inspect", "-s", t.SessionID, t.pane.id, "--json")
 	if err != nil {
 		return err
 	}
-	for _, t := range snap.Tabs {
-		if t.ID != id {
-			continue
+	var result struct {
+		Block struct {
+			WindowID string `json:"window_id"`
 		}
-		// Show the actual app tab first. If Remote Control is off, retain the
-		// picker and show Rex's error instead of changing only server focus.
-		args, _ := json.Marshal(map[string]string{"session_id": t.SessionID, "window_id": id})
-		if _, err = r.call("do", "session.select", "--args", string(args), "--json"); err != nil {
-			return err
-		}
-		_, err = r.call("focus", "-s", t.SessionID, id)
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return fmt.Errorf("read Rex pane: %w", err)
+	}
+	if result.Block.WindowID != t.ID {
+		return fmt.Errorf("the pane moved to another tab or was detached")
+	}
+	return nil
+}
+
+func (r *rexCLI) focusPane(t tab) error {
+	if err := r.checkPane(t); err != nil {
 		return err
 	}
-	return fmt.Errorf("tab disappeared; select another tab")
+	// Show the actual app tab first, so an app refusal leaves server focus alone.
+	args, _ := json.Marshal(map[string]string{"session_id": t.SessionID, "window_id": t.ID})
+	if _, err := r.call("do", "session.select", "--args", string(args), "--json"); err != nil {
+		return err
+	}
+	_, err := r.call("focus", "-s", t.SessionID, "-w", t.ID, t.pane.id)
+	return err
+}
+
+func (r *rexCLI) copyID(t tab, agent bool) error {
+	if err := r.checkPane(t); err != nil {
+		return err
+	}
+	id := t.pane.id
+	if agent {
+		var err error
+		id, err = r.agentID(t)
+		if err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "pbcopy")
+	cmd.Stdin = strings.NewReader(id)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("copy to clipboard: %w", err)
+	}
+	return nil
+}
+
+func (r *rexCLI) agentID(t tab) (string, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rex-agent-id", "-s", t.SessionID, "-b", t.pane.id, "--json")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if message := clean(stderr.String()); message != "" {
+			return "", fmt.Errorf("%s", message)
+		}
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return "", fmt.Errorf("read agent session ID: %w", err)
+	}
+	var agent struct {
+		SessionID string `json:"session_id"`
+		BlockID   string `json:"block_id"`
+	}
+	if err := json.Unmarshal(out, &agent); err != nil {
+		return "", fmt.Errorf("read agent session ID: %w", err)
+	}
+	// rex-agent-id can fall back to a sibling's agent when used with Cmd+Shift+Y.
+	if agent.BlockID != t.pane.id || agent.SessionID == "" {
+		return "", fmt.Errorf("no agent session in this pane")
+	}
+	return agent.SessionID, nil
 }

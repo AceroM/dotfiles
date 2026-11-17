@@ -15,27 +15,6 @@ use serde_json::Value;
 
 use crate::prs::{self, Pr};
 
-pub const HELP: &str = "\
-jn — tick your open PRs; the right side is their net diff: every ticked PR
-merged onto the default branch, against that branch
-
-usage:
-  jn                     your open PRs in this repo; the current branch's
-                         stack starts ticked
-  jn 123 456             tick those PRs (any author) instead
-  jn [search terms]      narrow the list with GitHub search, as in jp
-                         (jn juno, jn label:bug, jn review-requested:@me)
-  -n N                   how many PRs to list (default 40, at most 100)
-
-Merges happen in this checkout with git merge-tree (no checkout, no refs
-moved); PR heads it doesn't have yet are fetched from origin. A PR that
-conflicts with what's merged before it keeps its conflict markers in the
-diff and is flagged in the list.
-
-jv's options work too (-s, -u, --no-wrap, --tests, --theme). Inside, press ?
-for keys: space ticks a PR, S its stack, a all, ⏎ the net diff's files.
-";
-
 /// What `jn` was asked for: a PR search (always open PRs in this repo) and
 /// PRs named by number.
 pub struct Args {

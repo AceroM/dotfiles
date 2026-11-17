@@ -2,6 +2,12 @@
 
 These are my dotfiles.
 
+## Memory Guard
+
+`./memory-guard/install.sh` installs the native macOS menu bar watchdog for
+Node and Google Chrome. See [Memory Guard](memory-guard/README.md) for limits,
+recovery behavior, and the event log.
+
 ## o (Rex agent prompt)
 
 `stow o` installs the Go prompt, with directory-scoped slash presets and local
@@ -25,13 +31,22 @@ With `stow hammerspoon` and Hammerspoon running:
 
 ## Rex tabs
 
-`stow rt rex && rex config reload` installs the Go tab picker. **Option+Cmd+;**,
-`rt`, or `rex do tabs` opens a nearly full-window, borderless list across all sessions. Use `j/k`
-to move, `/` to filter, Enter to switch, and `;` to close. Space marks tabs;
-`v` selects a range. **Cmd+R** renames the current tab. `rt` replaces `al`;
-`jv`'s `;` shortcut now opens `rt`. See [rt/README.md](rt/README.md).
+`stow rt` installs the Go tab browser. Run `rt` in a Rex terminal to see tabs
+across sessions grouped by activity. Use `j/k` to move, `/` to filter, Enter to
+focus the pane, `y`/`Y` to copy its block or agent session ID, and `;` to close.
+Space marks tabs and `v` selects a range. `jv`'s `;` shortcut opens `rt`.
+**Cmd+R** renames the current tab. See [rt/README.md](rt/README.md).
+
+Copy a Rex tab or pane ID and press **Fn+Shift+T** to jump to it from any Rex session.
+The shortcut accepts full `window:` or `block:` IDs and unique short IDs such as
+`bf94a017`. **Fn+Y** copies the current pane's ID. **Fn+T** opens Rex's Go to Anything picker.
 
 ## Rex PR diff (jf)
+
+`stow jv` installs `jv` (PR diff), `jf` (flat view), `jg` (git diff),
+`jp` (PR list), and `jn` (net diff). They share a Go CLI and diff loader.
+The interactive viewer uses Rust. The launchers build each part on demand
+with Go and Cargo.
 
 **Fn+D** (or `rex do jf_float`, from `stow jv rex`) opens `jf` in a large centered
 float, in the directory of the pane you pressed it in: the branch's PR diff, or local changes when

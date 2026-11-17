@@ -1,7 +1,9 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -12,7 +14,8 @@ import (
 type tabsAPI interface {
 	snapshot() (snapshot, error)
 	closeTab(string) error
-	selectTab(string) error
+	focusPane(tab) error
+	copyID(tab, bool) error
 }
 
 type tickMsg struct{}
@@ -27,6 +30,10 @@ type closedMsg struct {
 	err    error
 }
 type selectedMsg struct{ err error }
+type copiedMsg struct {
+	what string
+	err  error
+}
 
 type model struct {
 	api                           tabsAPI
@@ -66,7 +73,7 @@ func (m *model) filter(keep string) {
 	m.rows = nil
 	terms := strings.Fields(strings.ToLower(m.query))
 	for _, t := range m.snap.Tabs {
-		haystack := strings.ToLower(t.Session + " " + t.Label + " " + t.Detail)
+		haystack := strings.ToLower(t.Session + " " + t.Label + " " + t.Detail + " " + t.pane.label + " " + t.activity.App)
 		match := true
 		for _, q := range terms {
 			if !strings.Contains(haystack, q) {
@@ -78,6 +85,16 @@ func (m *model) filter(keep string) {
 			m.rows = append(m.rows, t)
 		}
 	}
+	slices.SortStableFunc(m.rows, func(a, b tab) int {
+		group := a.activity.group()
+		if order := cmp.Compare(group, b.activity.group()); order != 0 {
+			return order
+		}
+		if group == done {
+			return b.activity.UpdatedAt.Compare(a.activity.UpdatedAt)
+		}
+		return 0
+	})
 	anchorFound := false
 	for i, t := range m.rows {
 		if t.ID == keep {
@@ -106,16 +123,30 @@ func (m *model) apply(snap snapshot) {
 	m.filter(keep)
 }
 
-func (m *model) pageRows() int { return max(1, m.height-9) }
+func (m *model) pageRows() int { return max(2, m.height-3) }
+
+func (m *model) sectionStart(i, start int) bool {
+	return i == start || m.rows[i].activity.group() != m.rows[i-1].activity.group()
+}
+
+func (m *model) listLines(start, end int) int {
+	lines := end - start
+	for i := start; i < end; i++ {
+		if m.sectionStart(i, start) {
+			lines++
+		}
+	}
+	return lines
+}
 
 func (m *model) clamp() {
 	m.cursor = max(0, min(m.cursor, len(m.rows)-1))
-	m.offset = max(0, min(m.offset, len(m.rows)-m.pageRows()))
-	if m.cursor < m.offset {
-		m.offset = m.cursor
+	m.offset = min(m.offset, m.cursor)
+	for m.offset < m.cursor && m.listLines(m.offset, m.cursor+1) > m.pageRows() {
+		m.offset++
 	}
-	if m.cursor >= m.offset+m.pageRows() {
-		m.offset = m.cursor - m.pageRows() + 1
+	for m.offset > 0 && m.listLines(m.offset-1, len(m.rows)) <= m.pageRows() {
+		m.offset--
 	}
 }
 
@@ -172,7 +203,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loadedMsg:
 		m.refreshing = false
 		if msg.gen != m.generation {
-			break // A close/select began after this read; ignore stale rows.
+			break // An action began after this read; ignore stale rows.
 		}
 		if msg.err != nil {
 			m.message, m.failed = msg.err.Error(), true
@@ -202,7 +233,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.filter("")
 		}
-		m.message, m.failed = fmt.Sprintf("Closed %d tab(s)", len(msg.closed)), false
+		m.message, m.failed = fmt.Sprintf("Closed %d", len(msg.closed)), false
 		if msg.err != nil {
 			m.message, m.failed = msg.err.Error(), true
 		}
@@ -213,6 +244,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.message, m.failed = msg.err.Error(), true
+	case copiedMsg:
+		m.busy, m.refreshError = false, false
+		m.message, m.failed = "Copied "+msg.what, false
+		if msg.err != nil {
+			m.message, m.failed = msg.err.Error(), true
+		}
 	case tea.PasteMsg:
 		if m.searching {
 			m.query += clean(msg.Content)
@@ -356,11 +393,22 @@ func (m *model) key(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return result
 		}
 	case "enter":
-		if id := m.currentID(); id != "" {
-			m.busy, m.message, m.failed = true, "Switching tab…", false
+		if len(m.rows) > 0 {
+			m.busy, m.message, m.failed = true, "Focusing pane…", false
 			m.generation++
-			api := m.api
-			return m, func() tea.Msg { return selectedMsg{api.selectTab(id)} }
+			api, target := m.api, m.rows[m.cursor]
+			return m, func() tea.Msg { return selectedMsg{api.focusPane(target)} }
+		}
+	case "y", "Y", "shift+y":
+		if len(m.rows) > 0 {
+			agent, what := k != "y", "block ID"
+			if agent {
+				what = "agent session ID"
+			}
+			m.busy, m.message, m.failed = true, "Copying "+what+"…", false
+			m.generation++
+			api, target := m.api, m.rows[m.cursor]
+			return m, func() tea.Msg { return copiedMsg{what, api.copyID(target, agent)} }
 		}
 	}
 	m.clamp()

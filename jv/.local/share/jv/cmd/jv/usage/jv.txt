@@ -1,0 +1,28 @@
+jv — review a PR diff: file tree on the left, syntax-highlighted hunks on the right
+
+usage:
+  jv [PR | URL | BRANCH] [gh pr diff flags]   a PR (current branch's when omitted)
+  jv . | -l                                    local changes (git diff HEAD)
+  jv -g [git diff args]                        `git diff …`: everything after -g goes to git
+                                               (jv -g --staged, jv -g main..., jv -g HEAD~3 -- src)
+  jv -c 'git diff main...'                     any command that prints a diff
+  git diff | jv                                a diff on stdin
+  jv --prs [search terms]                      your recent PRs beside the diff (`jp`; jp -h)
+  jv --net [PR… | search terms]                tick open PRs, see their net diff (`jn`; jn -h)
+  jv --flat [PR | …]                           the diff alone, no file tree (`jf`)
+
+options:
+  -s, --split        start in split view (default: split when the pane is wide)
+  -u, --unified      start in unified view
+      --no-wrap      don't wrap long lines (h/l scroll sideways)
+      --tests        show test files (hidden by default for PRs)
+      --no-tests     hide test files (__tests__/, *.test.*, *.spec.*)
+      --theme NAME   syntax theme (default TwoDark; also $JV_THEME)
+      --themes       list syntax themes
+      --flat         no file tree: one continuous diff (e brings the tree back;
+                     t shows / hides test files, ^p goes to a file)
+      --popup        Esc quits once it has nothing left to clear; E leaves for its tab
+  -h, --help
+
+Inside jv, press ? for keys. With no PR on the current branch, jv shows
+local changes instead.

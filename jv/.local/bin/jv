@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# jv — PR diff viewer (Rust). Source lives in ../share/jv; this launcher builds
-# it on first run and again whenever a source file is newer than the binary.
+# All five command names point here. Keep the invoked name across Stow links.
 set -euo pipefail
-
+name="${0##*/}"
 script="${BASH_SOURCE[0]}"
 while [[ -L "$script" ]]; do
   dir="$(cd -P -- "$(dirname -- "$script")" && pwd)"
@@ -10,15 +9,17 @@ while [[ -L "$script" ]]; do
   [[ "$script" = /* ]] || script="$dir/$script"
 done
 app_dir="$(cd -- "$(cd -P -- "$(dirname -- "$script")" && pwd)/../share/jv" && pwd)"
-bin="$app_dir/target/release/jv"
+bin="$app_dir/target/jv"
 
-if [[ ! -x "$bin" ]] || [[ -n "$(find -L "$app_dir/src" "$app_dir/Cargo.toml" "$app_dir/Cargo.lock" -newer "$bin" -print -quit 2>/dev/null)" ]]; then
-  if ! command -v cargo >/dev/null 2>&1; then
-    printf '%s\n' 'jv: cargo is required to build jv (https://rustup.rs).' >&2
-    exit 1
-  fi
-  printf '%s\n' 'jv: building (first run or sources changed)…' >&2
-  cargo build --release --quiet --manifest-path "$app_dir/Cargo.toml" >&2
+if [[ ! -x "$bin" ]] || [[ -n "$(find -L "$app_dir/cmd" "$app_dir"/go.* -newer "$bin" -print -quit)" ]]; then
+  command -v go >/dev/null || { printf '%s\n' 'jv: Go is required to build the CLI.' >&2; exit 1; }
+  mkdir -p "$app_dir/target"
+  tmp="$(mktemp "$app_dir/target/jv.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  (cd "$app_dir" && go build -trimpath -o "$tmp" ./cmd/jv) >&2
+  mv -f "$tmp" "$bin"
+  trap - EXIT
 fi
 
-exec "$bin" "$@"
+export _JV_VIEWER="${_JV_VIEWER:-$app_dir/viewer.sh}"
+exec -a "$name" "$bin" "$@"

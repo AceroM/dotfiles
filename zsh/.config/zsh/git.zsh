@@ -23,14 +23,9 @@ function jt() {
     awk '/^diff --git / { skip = ($3 ~ /(^|\/)__tests__\// || $3 ~ /\.test\.ts$/) } !skip' |
     delta
 }
-# jv [pr] is a binary now (~/.dotfiles/jv, Rust): file tree + highlighted diff,
-# tests hidden by default (T toggles). Drop any jv function an older shell
-# still has loaded so the binary wins.
+# jv and jg are installed by `stow jv`. Drop definitions from older shells.
 (( $+functions[jv] )) && unfunction jv
-# jg [git diff args] — jv for `git diff` instead of `gh pr diff`: same tree,
-# highlighting and keys. Args go to git untouched (jg, jg --staged, jg HEAD,
-# jg main..., jg HEAD~3 -- src). For jv flags: jv -u -g --staged.
-function jg() { jv -g "$@"; }
+(( $+functions[jg] )) && unfunction jg
 function jc() {
   gh pr checkout "$@"
 }

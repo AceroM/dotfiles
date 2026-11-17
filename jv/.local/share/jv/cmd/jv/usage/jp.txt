@@ -1,0 +1,13 @@
+jp — your recent PRs on the left, the selected one's diff on the right
+
+usage:
+  jp [search terms]      your PRs in this repo, most recently updated first
+                         (terms are GitHub search: is:open, label:bug, juno …;
+                          review-requested:@me lists PRs waiting on you instead)
+  -o, --open             open PRs only
+  -a, --all              every repo, not just this one
+  -R, --repo OWNER/REPO  that repo instead of this one
+  -n N                   how many (default 40, at most 100)
+
+jv's options work too (-s, -u, --no-wrap, --tests, --theme). Inside, press ?
+for keys: j/k pick a PR, ⏎ opens its files, - goes back, tab moves to the diff.

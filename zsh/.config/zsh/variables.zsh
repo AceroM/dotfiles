@@ -8,7 +8,6 @@ export VISUAL="nvim"
 # once the server was started from a shell) loses alt+backspace, ctrl+a/e, etc.
 bindkey -e
 # option+arrow word movement and shift selection live in line-editing.zsh.
-DROP_TABLES_SQL="DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 
 # Shared adjective/noun pools for tmux/Claude session names.
 typeset -ga SESSION_NAME_ADJECTIVES=(

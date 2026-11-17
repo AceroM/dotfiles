@@ -13,7 +13,8 @@ syntect = { version = "5.3", default-features = false, features = ["parsing", "r
 two-face = "0.4"
 similar = "2.7"
 unicode-width = "0.2"
-# rex answers in JSON (the tabs `c`, `E` and `C` open).
+# Viewer options from the Go CLI and Rex replies.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [profile.release]

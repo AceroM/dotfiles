@@ -23,6 +23,7 @@ bind("ctrl+alt+h", "client.tab.previous")
 bind("ctrl+alt+l", "client.tab.next")
 bind("ctrl+alt+r", "client.tab.rename")
 bind("ctrl+alt+t", "pane.go_to") -- fn+t: Rex's built-in pane picker
+bind("ctrl+alt+shift+t", "jump_to_id") -- fn+shift+t: jump to the copied tab or pane ID
 for i = 1, 8 do
   bind("ctrl+alt+[Digit" .. i .. "]", "client.tab.goto", { index = i })
 end

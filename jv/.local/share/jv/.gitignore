@@ -1,4 +1,4 @@
-# Cargo build output. Cargo.lock stays tracked: jv is a binary.
+# Go CLI and Cargo build output. Cargo.lock stays tracked.
 /target/
 
 # rustfmt backups and MSVC debug info

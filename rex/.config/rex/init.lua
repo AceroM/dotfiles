@@ -17,7 +17,6 @@ rex.bind("cmd+h", "client.tab.previous")
 rex.bind("cmd+l", "client.tab.next")
 rex.bind("cmd+;", "client.tab.close")
 rex.bind("cmd+r", "client.tab.rename")
-rex.bind("cmd+alt+;", "tabs")
 
 -- Focus history (focus.lua): the panes I've been in, newest first, for cmd+o
 -- and ctrl+alt+a. focus-history.lua (started at the bottom) records the moves
@@ -1024,7 +1023,6 @@ rex.bind("cmd+shift+y", "copy_agent_session_id")
 -- clients call by name too, and keys.lua binds the ctrl+alt chords a Hammerspoon fn
 -- layer sends. Neither rebinds a key set above.
 require("actions")
-require("tabs")
 require("keys")
 
 -- cmd+shift+o opens the focused pane's directory on GitHub (github.lua).

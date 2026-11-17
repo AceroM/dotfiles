@@ -17,7 +17,7 @@ local dirfocus = require("dir-focus")
 local HOME = os.getenv("HOME") or ""
 local TERMINAL = "com.superlogical.terminal"
 local BOUNDS = { 0.05, 0.05, 0.9, 0.9 } -- x, y, w, h as fractions of the tab
--- A login zsh, so jf finds gh, git and cargo (the server's PATH is minimal).
+-- A login zsh, so jf finds gh, git and the build tools (the server's PATH is minimal).
 -- exec leaves jv as the pane's program, which is how a second press finds it.
 local COMMAND = { "/bin/zsh", "-lc", "exec '" .. HOME .. "/.local/bin/jf' --popup" }
 

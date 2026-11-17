@@ -132,16 +132,63 @@ end
 -- (herdr's last_pane, for the moves these actions make).
 local last_jump
 
-local function show(ctx, target)
+local function focus_target(target)
   if target.block_id then
     check(rex.call("session.focus_block", { session_id = target.session_id, block_id = target.block_id }))
   elseif target.window_id then
     check(rex.call("session.focus_window", { session_id = target.session_id, window_id = target.window_id }))
   end
+end
+
+local function show(ctx, target)
+  focus_target(target)
   if target.session_id ~= ctx.session_id then
     rex.client.queue("session.select", { session_id = target.session_id, window_id = target.window_id })
   end
 end
+
+rex.action{
+  name = "jump_to_id",
+  title = "Jump to Copied Tab or Pane ID",
+  category = "Pane",
+  keywords = "clipboard paste block window suffix focus switch",
+  args = { id = "string?", dry_run = "boolean?" },
+  run = function(ctx, args)
+    local id = args.id
+    if not id then
+      local clipboard = rex.exec({ "/usr/bin/pbpaste" }, { timeout = 2 })
+      if not (clipboard and clipboard.ok) then error("Couldn't read the clipboard", 0) end
+      id = clipboard.stdout
+    end
+    id = (id or ""):match("^%s*(.-)%s*$"):lower()
+    local suffix = #id >= 4 and #id <= 32 and id:match("^%x+$")
+    if not (suffix or id:match("^block:[%x%-]+$") or id:match("^window:[%x%-]+$")) then
+      error("Copy a Rex pane ID, tab ID, or short ID first", 0)
+    end
+
+    -- Leaving out context lets Rex resolve IDs across all sessions.
+    local result = check(rex.call("target.resolve", { kinds = { "window", "block" }, queries = { id } })).results[1]
+    if result.status == "ambiguous" then error("That Rex ID is ambiguous. Copy the full ID instead", 0) end
+    local target = result.target
+    if not target then error("No tab or pane matches that Rex ID", 0) end
+    local matched_id = target.block_id or target.window_id
+    if suffix and matched_id:gsub("%-", ""):sub(-#id) ~= id then
+      error("No tab or pane matches that Rex ID", 0)
+    end
+    if not target.window_id then error("That pane is detached from its tab", 0) end
+    if args.dry_run then return target end
+
+    if target.session_id ~= ctx.session_id then
+      check(rex.call("session.attach", { session_id = target.session_id }))
+    end
+    -- The app tracks its selected tab separately from the server's focus.
+    if ctx.origin == "key" or ctx.origin == "palette" then
+      rex.client.queue("session.select", { session_id = target.session_id, window_id = target.window_id })
+    end
+    focus_target(target)
+    return target
+  end,
+}
 
 local function jump(ctx, target)
   if target.block_id and target.block_id == ctx.block_id then return end

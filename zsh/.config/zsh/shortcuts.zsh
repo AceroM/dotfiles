@@ -38,11 +38,8 @@ alias ob="obsidian"
 alias rnd="openssl rand -base64 32"
 alias kc='pkill -i "Google Chrome"; pkill -i "chrome"; echo "Done"'
 
-unalias rs 2>/dev/null
-rs() {
-  local db="${1:?usage: rs <database>}"
-  psql "$db" -c "$DROP_TABLES_SQL"
-}
+# Clear the retired database shortcuts in shells that reload this file.
+unfunction rs rt 2>/dev/null
 alias ..='cd ..'
 alias ...='cd ../..'
 

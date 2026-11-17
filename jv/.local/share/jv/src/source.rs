@@ -41,98 +41,32 @@ impl Source {
 
     /// The diff, plus a note when it didn't come the usual way.
     pub fn fetch_noted(&self) -> Result<(String, Option<String>), String> {
-        match self {
-            Source::Gh(args) => gh_pr_diff(args),
-            other => other.fetch_plain().map(|t| (t, None)),
-        }
-    }
-
-    fn fetch_plain(&self) -> Result<String, String> {
-        match self {
-            Source::Gh(args) => gh_pr_diff(args).map(|(t, _)| t),
-            Source::Local => git_diff(&["HEAD".to_string()]),
-            Source::Git(args) => git_diff(args),
-            Source::Cmd(c) => run(Command::new("sh").arg("-c").arg(c)),
+        let (kind, args): (&str, &[String]) = match self {
+            Source::Gh(args) => ("pr", args),
+            Source::Git(args) => ("git", args),
+            Source::Local => ("local", &[]),
+            Source::Cmd(command) => ("cmd", std::slice::from_ref(command)),
             Source::Stdin => {
-                let mut s = String::new();
-                std::io::stdin().read_to_string(&mut s).map_err(|e| format!("reading stdin: {e}"))?;
-                Ok(s)
+                let mut text = String::new();
+                std::io::stdin().read_to_string(&mut text).map_err(|e| format!("reading stdin: {e}"))?;
+                return Ok((text, None));
             }
+        };
+        let out = driver()?.args(["--jv-fetch", kind]).args(args).output()
+            .map_err(|e| format!("running the diff loader: {e}"))?;
+        let message = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if !out.status.success() {
+            return Err(if message.is_empty() { format!("diff loader exited with {}", out.status) } else { message });
         }
+        Ok((String::from_utf8_lossy(&out.stdout).into_owned(), (!message.is_empty()).then_some(message)))
     }
 }
 
-/// `gh pr diff`, or for a PR past GitHub's 20,000-line diff limit (HTTP 406
-/// too_large), the same three-dot diff built from local git.
-fn gh_pr_diff(args: &[String]) -> Result<(String, Option<String>), String> {
-    match run(Command::new("gh").arg("pr").arg("diff").args(args).arg("--color=never")) {
-        Ok(t) => Ok((t, None)),
-        Err(e) if e.contains("too_large") || e.contains("exceeded the maximum number of lines") => {
-            let t = pr_diff_via_git(args).map_err(|g| format!("{e}\nbuilding it locally failed too: {g}"))?;
-            Ok((t, Some("too big for GitHub's diff API · built locally (git diff base...head)".into())))
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// GitHub's PR diff is `git diff base...head` on the PR's current base tip and
-/// pushed head; fetch either commit from origin when it isn't local.
-fn pr_diff_via_git(args: &[String]) -> Result<String, String> {
-    let out = run(Command::new("gh").args(["pr", "view"]).args(selector(args)).args([
-        "--json",
-        "number,baseRefName,baseRefOid,headRefOid",
-        "--jq",
-        "[.number, .baseRefName, .baseRefOid, .headRefOid] | @tsv",
-    ]))?;
-    let f: Vec<&str> = out.trim().split('\t').collect();
-    let [number, base_ref, base, head] = f[..] else {
-        return Err(format!("unexpected `gh pr view` output: {}", out.trim()));
-    };
-    let have = |oid: &str| {
-        Command::new("git")
-            .args(["cat-file", "-e", &format!("{oid}^{{commit}}")])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    };
-    if !have(base) || !have(head) {
-        let pull = format!("refs/pull/{number}/head");
-        run(Command::new("git").args(["fetch", "--quiet", "--no-tags", "origin", base_ref, &pull]))?;
-    }
-    git_diff(&[format!("{base}...{head}")])
-}
-
-/// Only the selector and -R carry over from `gh pr diff` flags to `gh pr view`.
-fn selector(args: &[String]) -> Vec<String> {
-    let mut sel = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-R" || a == "--repo" {
-            sel.push(a.clone());
-            sel.extend(it.next().cloned());
-        } else if a.starts_with("--repo=") || !a.starts_with('-') {
-            sel.push(a.clone());
-        }
-    }
-    sel
-}
-
-/// `git diff ARGS` as plain text jv can parse, whatever the user's git config
-/// says about color, pagers, external diff tools or path quoting.
-fn git_diff(args: &[String]) -> Result<String, String> {
-    run(Command::new("git").args(["-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff"]).args(args))
-}
-
-fn run(cmd: &mut Command) -> Result<String, String> {
-    let out = cmd
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("{}: {e}", cmd.get_program().to_string_lossy()))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if err.is_empty() { format!("{} exited with {}", cmd.get_program().to_string_lossy(), out.status) } else { err });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+fn driver() -> Result<Command, String> {
+    let path = std::env::var_os("_JV_DRIVER").ok_or("missing Go diff loader")?;
+    let mut cmd = Command::new(path);
+    cmd.stdin(Stdio::null());
+    Ok(cmd)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -160,16 +94,9 @@ pub fn spawn_meta(args: Vec<String>) -> mpsc::Receiver<PrMeta> {
 }
 
 pub fn pr_meta(args: &[String]) -> Option<PrMeta> {
-    let out = Command::new("gh")
-        .args(["pr", "view"])
-        .args(selector(args))
-        .args([
-            "--json",
-            "number,title,author,headRefName,baseRefName,isDraft,state,url",
-            "--jq",
-            "[.number, .title, .author.login, .headRefName, .baseRefName, .isDraft, .state, .url] | @tsv",
-        ])
-        .stdin(Stdio::null())
+    let out = driver().ok()?
+        .arg("--jv-meta")
+        .args(args)
         .stderr(Stdio::null())
         .output()
         .ok()?;

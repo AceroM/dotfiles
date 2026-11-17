@@ -1221,18 +1221,17 @@ impl App {
 
     // ---- `;` ---------------------------------------------------------------
 
-    /// `;`: this Rex session's tabs, in the Go picker. jv steps aside
-    /// while it runs, as for a terminal editor.
+    /// `;`: browse Rex tabs. jv steps aside while rt runs.
     fn open_tabs(&mut self) -> Act {
         if !agent::in_rex() {
-            self.flash("; lists this Rex session's tabs · run jv inside Rex");
+            self.flash("; browses Rex tabs · run jv inside Rex");
             return Act::None;
         }
         if !source::which("rt") {
             self.flash("; runs rt, which isn't on PATH · stow rt from ~/.dotfiles");
             return Act::None;
         }
-        Act::Suspend(vec!["rt".to_string(), "--inline".to_string()])
+        Act::Suspend(vec!["rt".to_string()])
     }
 
     /// A digit of a vim count (5j, 12G): true when `k` was one. A leading 0

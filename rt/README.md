@@ -1,33 +1,35 @@
 # rt
 
-A Go tab picker for Rex. `stow rt rex`, then `rex config reload`.
+A terminal tab browser for Rex. Install with `stow rt`.
 The launcher builds on first use and after source changes (Go 1.26+).
 
-`rt`, `rex do tabs`, or **Option+Cmd+;** opens a nearly full-window floating picker over the
-invoking tab. **Cmd+R** renames the current Rex tab. `rt --inline` draws in
-the current terminal; `jv` uses that for its `;` shortcut.
+Run `rt` in a Rex shell or press `;` in `jv`. The browser opens in your terminal,
+with one row per tab across all sessions. Tabs use Rex's live pane activity to
+group into Needs attention, Working, Done and Other tabs. Done shows the latest
+finishes first. Shell and tool tabs stay in the list.
 
 - `j` / `k`, arrows, counts (`5j`), `g` / `gg`, `G`, `12G`, Ctrl+D / Ctrl+U.
 - `/` filters session names, tab names and pane titles/directories. Enter keeps the filter;
-  Escape cancels editing. Enter in the list switches to the selected tab.
+  Escape cancels editing. Enter in the list focuses the selected row's pane.
+- `y` copies that pane's Rex block ID. `Y` copies the Claude Code or Codex
+  session ID for the agent running there, using `rex-agent-id` from `stow cli`.
 - `;` or `x` closes a tab. Space marks, `v` starts a visual range, `a` marks
   all matches; `;` closes the range or marked tabs. `5x` closes five tabs.
 - Escape clears the visual range, marks, then filter; otherwise it quits.
   `q` quits immediately. `?` shows help.
 
-Lists all other tabs across every session, including shells and tools, in
-session and tab-strip order. The left numbers are relative movement counts; the right
-numbers are list positions (`12G` selects tab 12). Refreshes once a second and
-preserves selection by ID as tabs move. Closing ends every pane in the tab;
-there is no undo. The hosting tab is excluded and checked again before closing.
+The selected row shows the position used by `12G`. Other rows show their distance
+from the cursor for `5j` and `3k`. The list refreshes once a second and preserves
+selection by ID as activity changes. Closing ends every pane in the tab. The
+hosting tab is excluded and checked again before closing.
 
-`rt ls` prints position, ID, session, name and pane details as TSV. `rt ls --json`
-prints a JSON snapshot. `--current-session` limits the list to one session.
-`--session ID` and `--client ID` choose explicit Rex
-targets. The borderless UI uses the terminal's background and ANSI palette,
-so it follows the Rex theme and fits directly inside its floating pane.
+`rt ls` prints position, ID, session, name and pane details as TSV in session and
+tab-strip order. `rt ls --json` prints a JSON snapshot. `--current-session` limits
+the list to one session. `--session ID` and `--client ID` choose explicit Rex targets.
 
-Enter selects the actual session and tab in Rex.app before dismissing the picker.
+Each row targets the pane whose activity it shows. For tabs without reported
+activity, the row targets the tab's focused pane. Enter opens that pane in
+Rex.app and dismisses the picker.
 Rex requires **Settings → Rex Server → Remote Control** for app selection. If
 disabled, the picker stays open and displays the app's error.
 

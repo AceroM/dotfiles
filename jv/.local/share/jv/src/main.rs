@@ -34,136 +34,67 @@ use source::Source;
 use theme::Palette;
 use viewed::Viewed;
 
-const HELP: &str = "\
-jv — review a PR diff: file tree on the left, syntax-highlighted hunks on the right
-
-usage:
-  jv [PR | URL | BRANCH] [gh pr diff flags]   a PR (current branch's when omitted)
-  jv . | -l                                    local changes (git diff HEAD)
-  jv -g [git diff args]                        `git diff …`: everything after -g goes to git
-                                               (jv -g --staged, jv -g main..., jv -g HEAD~3 -- src)
-  jv -c 'git diff main...'                     any command that prints a diff
-  git diff | jv                                a diff on stdin
-  jv --prs [search terms]                      your recent PRs beside the diff (`jp`; jp -h)
-  jv --net [PR… | search terms]                tick open PRs, see their net diff (`jn`; jn -h)
-  jv --flat [PR | …]                           the diff alone, no file tree (`jf`)
-
-options:
-  -s, --split        start in split view (default: split when the pane is wide)
-  -u, --unified      start in unified view
-      --no-wrap      don't wrap long lines (h/l scroll sideways)
-      --tests        show test files (hidden by default for PRs)
-      --no-tests     hide test files (__tests__/, *.test.*, *.spec.*)
-      --theme NAME   syntax theme (default TwoDark; also $JV_THEME)
-      --themes       list syntax themes
-      --flat         no file tree: one continuous diff (e brings the tree back;
-                     t shows / hides test files, ^p goes to a file)
-      --popup        Esc quits once it has nothing left to clear; E leaves for its tab
-  -h, --help
-
-Inside jv, press ? for keys. With no PR on the current branch, jv shows
-local changes instead.
-";
-
+#[derive(serde::Deserialize)]
 struct Cli {
-    gh: Vec<String>,
     split: Option<bool>,
     wrap: bool,
     tests: Option<bool>,
     theme: Option<String>,
-    cmd: Option<String>,
-    local: bool,
-    git: Option<Vec<String>>,
     popup: bool,
     snapshot: Option<(u16, u16)>,
     keys: String,
     out: Option<String>,
-    /// `--prs` (jp): the PR list on the left; `gh` holds its search words.
     prs: bool,
-    /// `--net` (jn): jp's list with ticks, and the ticked PRs' net diff.
     net: bool,
-    /// `--flat` (jf): no file tree.
     flat: bool,
 }
 
-fn parse_cli() -> Result<Cli, String> {
-    let mut c = Cli {
-        gh: Vec::new(),
-        split: None,
-        wrap: true,
-        tests: None,
-        theme: std::env::var("JV_THEME").ok(),
-        cmd: None,
-        local: false,
-        git: None,
-        popup: false,
-        snapshot: None,
-        keys: String::new(),
-        out: None,
-        prs: false,
-        net: false,
-        flat: false,
-    };
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "-h" | "--help" => {
-                print!("{}", if c.net { net::HELP } else if c.prs { prs::HELP } else { HELP });
-                std::process::exit(0);
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some(agent::CHILD_FLAG) => return agent::child(&args[1..]),
+        Some(commit::CHILD_FLAG) => return commit::child(&args[1..]),
+        Some("--themes") => {
+            for name in highlight::theme_names() {
+                println!("{name}");
             }
-            "--prs" => c.prs = true,
-            "--net" => c.net = true,
-            "--flat" | "--no-tree" => c.flat = true,
-            "--themes" => {
-                for n in highlight::theme_names() {
-                    println!("{n}");
-                }
-                std::process::exit(0);
+            return ExitCode::SUCCESS;
+        }
+        Some("--view") if args.len() >= 3 => {}
+        // Let the Go CLI parse public arguments to cargo run, then resume this build.
+        _ => {
+            use std::os::unix::process::CommandExt;
+            let launcher = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/jv");
+            let mut cli = Command::new(launcher);
+            if let Ok(exe) = std::env::current_exe() {
+                cli.env("_JV_VIEWER", exe);
             }
-            "-s" | "--split" => c.split = Some(true),
-            "-u" | "--unified" => c.split = Some(false),
-            "--no-wrap" | "--nowrap" => c.wrap = false,
-            "--tests" => c.tests = Some(true),
-            "--no-tests" => c.tests = Some(false),
-            "--popup" => c.popup = true,
-            "--theme" => c.theme = Some(args.next().ok_or("--theme needs a name")?),
-            "-c" | "--cmd" => c.cmd = Some(args.next().ok_or("--cmd needs a command")?),
-            "-l" | "--local" | "." => c.local = true,
-            // git diff's own flags clash with jv's (-s is --no-patch there), so
-            // -g ends jv's options: the rest goes to git untouched.
-            "-g" | "--git" => c.git = Some(args.by_ref().collect()),
-            // Hidden: offscreen render for UI work.
-            "--snapshot" => {
-                let v = args.next().ok_or("--snapshot needs WxH")?;
-                let (w, h) = v.split_once('x').ok_or("--snapshot needs WxH")?;
-                c.snapshot = Some((w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?));
-            }
-            "--keys" => c.keys = args.next().ok_or("--keys needs keys")?,
-            "--out" => c.out = Some(args.next().ok_or("--out needs a path")?),
-            "--" => c.gh.extend(args.by_ref()),
-            _ => match a.strip_prefix("--theme=") {
-                Some(t) => c.theme = Some(t.to_string()),
-                None => c.gh.push(a),
-            },
+            let err = cli.args(args).exec();
+            eprintln!("jv: starting the CLI: {err}");
+            return ExitCode::FAILURE;
         }
     }
-    Ok(c)
-}
-
-fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().collect();
-    match argv.get(1).map(String::as_str) {
-        Some(agent::CHILD_FLAG) => return agent::child(&argv[2..]),
-        Some(commit::CHILD_FLAG) => return commit::child(&argv[2..]),
-        _ => {}
-    }
-    let cli = match parse_cli() {
-        Ok(c) => c,
+    let cli: Cli = match serde_json::from_str(&args[1]) {
+        Ok(cli) => cli,
         Err(e) => {
-            eprintln!("jv: {e}");
+            eprintln!("jv: invalid viewer options: {e}");
             return ExitCode::from(2);
         }
     };
+    let source = match args[2].as_str() {
+        "pr" => Source::Gh(args[3..].to_vec()),
+        "git" => Source::Git(args[3..].to_vec()),
+        "local" => Source::Local,
+        "cmd" if args.len() == 4 => Source::Cmd(args[3].clone()),
+        kind => {
+            eprintln!("jv: unknown diff source {kind:?}");
+            return ExitCode::from(2);
+        }
+    };
+    run_viewer(cli, source)
+}
+
+fn run_viewer(cli: Cli, mut source: Source) -> ExitCode {
     // On a light background (Rex in a light theme) the default syntax theme is GitHub's.
     let light = base().light;
     let syntax = cli.theme.clone().unwrap_or_else(|| if light { "GitHub" } else { highlight::DEFAULT_THEME }.to_string());
@@ -175,21 +106,12 @@ fn main() -> ExitCode {
         }
     };
     if cli.net {
-        return run_net(cli, hl);
+        return run_net(cli, hl, source);
     }
     if cli.prs {
-        return run_prs(cli, hl);
+        return run_prs(cli, hl, source);
     }
 
-    let mut source = if let Some(c) = &cli.cmd {
-        Source::Cmd(c.clone())
-    } else if let Some(a) = &cli.git {
-        Source::Git(a.clone())
-    } else if cli.local {
-        Source::Local
-    } else {
-        Source::Gh(cli.gh.clone())
-    };
     // A pipe wins over the current branch's PR, but an empty or closed stdin
     // (cron, editors, agent shells) shouldn't hide it.
     let mut stdin_text = None;
@@ -313,12 +235,12 @@ fn background() -> Palette {
 
 /// jp: search for the PRs, then open on the first one. Its diff and the
 /// rest load in the background, so the list shows as soon as GitHub answers.
-fn run_prs(cli: Cli, hl: highlight::Hl) -> ExitCode {
-    if cli.cmd.is_some() || cli.git.is_some() || cli.local {
+fn run_prs(cli: Cli, hl: highlight::Hl, source: Source) -> ExitCode {
+    let Source::Gh(words) = source else {
         eprintln!("jp: -c, -g and -l are jv's; jp shows PRs");
         return ExitCode::from(2);
-    }
-    let q = match prs::Query::parse(&cli.gh) {
+    };
+    let q = match prs::Query::parse(&words) {
         Ok(q) => q,
         Err(e) => {
             eprintln!("jp: {e}");
@@ -370,12 +292,12 @@ fn run_prs(cli: Cli, hl: highlight::Hl) -> ExitCode {
 
 /// jn: list the open PRs (and any named ones), tick the asked-for set (or
 /// the current branch's stack), and merge it in the background.
-fn run_net(cli: Cli, hl: highlight::Hl) -> ExitCode {
-    if cli.cmd.is_some() || cli.git.is_some() || cli.local {
+fn run_net(cli: Cli, hl: highlight::Hl, source: Source) -> ExitCode {
+    let Source::Gh(words) = source else {
         eprintln!("jn: -c, -g and -l are jv's; jn shows PRs");
         return ExitCode::from(2);
-    }
-    let args = match net::Args::parse(&cli.gh) {
+    };
+    let args = match net::Args::parse(&words) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("jn: {e}");

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -14,11 +15,17 @@ type fakeAPI struct {
 	snap     snapshot
 	closed   []string
 	selected string
+	copied   string
+	agent    bool
 	fail     string
 }
 
 func (f *fakeAPI) snapshot() (snapshot, error) { return f.snap, nil }
-func (f *fakeAPI) selectTab(id string) error   { f.selected = id; return nil }
+func (f *fakeAPI) focusPane(t tab) error       { f.selected = t.pane.id; return nil }
+func (f *fakeAPI) copyID(t tab, agent bool) error {
+	f.copied, f.agent = t.pane.id, agent
+	return nil
+}
 func (f *fakeAPI) closeTab(id string) error {
 	if id == f.fail {
 		return errors.New("close failed")
@@ -38,7 +45,7 @@ func fixture() (*model, *fakeAPI) {
 	f := &fakeAPI{snap: snapshot{Label: "code", Tabs: []tab{
 		{ID: "window:a", Index: 1, Label: "first", Detail: "~/Code/a", Panes: 1},
 		{ID: "window:b", Index: 3, Label: "second", Detail: "~/temp/b", Panes: 2},
-		{ID: "window:c", Index: 4, Label: "third", Detail: "~/Code/c", Panes: 1},
+		{ID: "window:c", Index: 4, Label: "third", Detail: "~/Code/c", Panes: 1, pane: pane{id: "block:c"}},
 		{ID: "window:d", Index: 5, Label: "last", Panes: 1},
 	}}}
 	return newModel(f, f.snap), f
@@ -183,8 +190,28 @@ func TestCountedCloseAndSelect(t *testing.T) {
 	}
 	cmd := press(m, "enter")
 	_, quit := m.Update(cmd())
-	if f.selected != "window:c" || quit == nil {
+	if f.selected != "block:c" || quit == nil {
 		t.Fatal("select did not dismiss")
+	}
+}
+
+func TestCopyKeysTargetTheHighlightedPane(t *testing.T) {
+	m, f := fixture()
+	press(m, "2")
+	press(m, "j")
+	for _, key := range []string{"y", "Y"} {
+		cmd := press(m, key)
+		if cmd == nil {
+			t.Fatalf("%s did not start a copy", key)
+		}
+		_, quit := m.Update(cmd())
+		if f.copied != "block:c" || f.agent != (key == "Y") || quit != nil || m.failed {
+			t.Fatalf("%s copied the wrong ID or dismissed the picker", key)
+		}
+	}
+	press(m, "/")
+	if press(m, "y") != nil || press(m, "Y") != nil || m.query != "yY" {
+		t.Fatal("search interpreted text as a copy key")
 	}
 }
 
@@ -215,7 +242,7 @@ func TestViewFitsTerminal(t *testing.T) {
 	m.rows[0].Label = "🦊" + strings.Repeat("界", 50)
 	for _, help := range []bool{false, true} {
 		m.help = help
-		for _, size := range [][2]int{{10, 3}, {28, 9}, {60, 12}, {100, 30}} {
+		for _, size := range [][2]int{{10, 3}, {24, 5}, {28, 9}, {60, 12}, {100, 30}} {
 			m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 			text := m.View().Content
 			lines := strings.Split(text, "\n")
@@ -228,5 +255,27 @@ func TestViewFitsTerminal(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestActivityGroupsKeepSelectionVisible(t *testing.T) {
+	m, f := fixture()
+	now := time.Now()
+	press(m, "j")
+	f.snap.Tabs[0].activity = activity{State: "done", UpdatedAt: now.Add(-time.Hour)}
+	f.snap.Tabs[1].activity = activity{State: "done", UpdatedAt: now}
+	f.snap.Tabs[2].activity = activity{State: "working"}
+	m.apply(f.snap)
+	if m.rows[0].ID != "window:c" || m.rows[1].ID != "window:b" || m.rows[2].ID != "window:a" || m.currentID() != "window:b" {
+		t.Fatal("tab order or selection after activity refresh", m.rows, m.currentID())
+	}
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 5})
+	frame := ansi.Strip(m.View().Content)
+	if !strings.Contains(frame, "Done") || !strings.Contains(frame, "second") || strings.Contains(frame, "Working") {
+		t.Fatal("section header left the selected tab off-screen", frame)
+	}
+	press(m, "k")
+	if frame := ansi.Strip(m.View().Content); !strings.Contains(frame, "Working") || !strings.Contains(frame, "third") {
+		t.Fatal("scrolling between sections lost the current tab", frame)
 	}
 }

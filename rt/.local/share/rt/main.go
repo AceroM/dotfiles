@@ -13,15 +13,15 @@ import (
 
 const help = `rt — switch and close tabs across every Rex session
 
-  rt                   open a floating picker (also: rex do tabs, option+cmd+;)
+  rt                   browse Rex tabs in this terminal
   rt ls [--json]       list tabs in session and tab-strip order
-  rt --inline          draw in the current terminal, like ct
 
   j k / ↓ ↑           move (5j, 3k work too)
   g / gg / G / 12G    first / first / last / tab 12
   ctrl+d / ctrl+u     half a page down / up
   /                   filter by session, tab name and pane titles/directories
-  Enter               switch to the selected tab and dismiss the picker
+  Enter               focus the selected pane and dismiss the picker
+  y / Y               copy its Rex block ID / agent session ID
   ; or x              close selected tab, marked tabs, or visual range
   Space / m           mark or unmark, then move down
   v                   select a visual range with j/k
@@ -49,12 +49,11 @@ func run() error {
 		args = args[1:]
 	}
 	flags := flag.NewFlagSet("rt", flag.ContinueOnError)
-	inline := flags.Bool("inline", false, "draw in this terminal")
+	flags.Bool("inline", true, "compatibility flag; rt always draws in this terminal")
 	asJSON := flags.Bool("json", false, "print the list as JSON")
 	session := flags.String("session", os.Getenv("REX_SESSION"), "Rex session")
 	client := flags.String("client", os.Getenv("REX_CLIENT"), "Rex app")
 	current := flags.Bool("current-session", false, "list only the invoking session")
-	source := flags.String("source-window", "", "tab hosting the picker")
 	flags.Usage = func() { fmt.Fprint(flags.Output(), help) }
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -70,11 +69,8 @@ func run() error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r := &rexCLI{ctx: ctx, session: *session, client: *client, block: os.Getenv("REX_BLOCK"), source: *source, current: *current}
-	if !list && !*inline {
-		return r.popup()
-	}
-	snap, err := r.snapshot()
+	r := &rexCLI{ctx: ctx, session: *session, client: *client, block: os.Getenv("REX_BLOCK"), current: *current}
+	snap, err := r.listTabs()
 	if err != nil {
 		return err
 	}
@@ -92,6 +88,7 @@ func run() error {
 		return err
 	}
 	defer tty.Close()
+	r.addActivity(&snap)
 	_, err = tea.NewProgram(newModel(r, snap), tea.WithInput(tty), tea.WithContext(ctx)).Run()
 	return err
 }

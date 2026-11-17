@@ -577,6 +577,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "ratatui",
+ "serde",
  "serde_json",
  "similar",
  "syntect",
