@@ -4,7 +4,8 @@
 #   jf                 the current branch's PR (local changes when there's none)
 #   jf 1234 | URL      that PR
 #   jf -g --staged     git diff instead of gh pr diff
-# J K ] [ next / prev file, t go to file, e brings the tree back. jv -h for the rest.
+# J K ] [ next / prev file, t shows / hides test files, ^p go to file, e brings
+# the tree back. jv -h for the rest. fn+d in Rex opens it in a float.
 set -euo pipefail
 
 script="${BASH_SOURCE[0]}"

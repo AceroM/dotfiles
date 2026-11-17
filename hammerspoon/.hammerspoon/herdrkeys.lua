@@ -3,14 +3,14 @@
 --
 -- In Rex.app, fn+key becomes ctrl+alt+key and Rex's ~/.config/rex/keys.lua does
 -- the rest:
---   fn+a e h i j k l n o r s t w x y z - ; /   become ctrl+alt+the same key
+--   fn+a d e h i j k l n o r s t w x y z - ; /   become ctrl+alt+the same key
+--                      (fn+d: jf in a float, fn+n: a centred float shell)
 --   fn+1..8, fn+9      become cmd+alt+shift+1..9 (session N, last session)
 --   fn+shift+1..9      become ctrl+alt+1..9 (tab N, last tab; cmd+1..9 too)
---   fn+c, fn+d         become ctrl+alt+b, ctrl+alt+v (sidebar, split)
+--   fn+c               becomes ctrl+alt+b (sidebar)
 --   fn+←/→             become ctrl+alt+←/→ (macOS has already turned them into
 --                      home/end, so those keycodes are mapped back to arrows)
---   fn+shift+key       adds shift (ctrl+alt+shift+key); fn+shift+d keeps its
---                      letter (the diff popup)
+--   fn+shift+key       adds shift (ctrl+alt+shift+key)
 --   fn+option/cmd+j/k/9  become ctrl+alt+shift+j/k/9 (the agent axis)
 -- fn+a, fn+e and fn+n act once per press, not on key repeat.
 --
@@ -39,14 +39,13 @@ local workspaceKeys = {}
 for number = 1, 9 do workspaceKeys[keys[tostring(number)]] = true end
 
 -- Rex.app: fn+key becomes ctrl+alt+key for every key below, with a few renames
--- (fn+c -> b, fn+d -> v, fn+home/end -> left/right).
+-- (fn+c -> b, fn+home/end -> left/right).
 local rexKeys = {}
-for _, name in ipairs({ "a", "e", "h", "i", "j", "k", "l", "n", "o", "r", "s", "t", "w", "x", "y", "z", "-", ";", "/" }) do
+for _, name in ipairs({ "a", "d", "e", "h", "i", "j", "k", "l", "n", "o", "r", "s", "t", "w", "x", "y", "z", "-", ";", "/" }) do
   rexKeys[keys[name]] = true
 end
 for number = 1, 9 do rexKeys[keys[tostring(number)]] = true end
 rexKeys[keys.c] = keys.b
-rexKeys[keys.d] = keys.v
 rexKeys[keys.home] = keys.left
 rexKeys[keys["end"]] = keys.right
 -- Held down, these would open or jump again on every repeat.
@@ -125,8 +124,7 @@ local function forwardToRex(event, code, flags)
   else
     event:setFlags({ ctrl = true, alt = true, shift = flags.shift or nil })
   end
-  -- fn+shift+d keeps its letter: that's the diff popup, not a split.
-  if target ~= true and not (flags.shift and code == keys.d) then
+  if target ~= true then
     event:setKeyCode(target)
   end
   return false

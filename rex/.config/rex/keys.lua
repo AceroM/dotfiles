@@ -13,7 +13,9 @@ local letters = "abcdefghijklmnopqrstuvwxyz"
 -- Tabs: ctrl+alt+h/l walk them, 1..8 jump to one, 9 is the last (fn+shift+1..9
 -- through Hammerspoon; cmd+1..9 in init.lua do the same), e opens one after the
 -- current tab (init.lua's new_tab_here) and shift+e one before it.
-bind("ctrl+alt+n", "client.tab.new")
+-- fn+n isn't a new tab here: it's cmd+alt+n's centred float (init.lua's
+-- float_here), and fn+d is jf in a centred float (jf.lua binds ctrl+alt+d).
+bind("ctrl+alt+n", "float_here")
 bind("ctrl+alt+e", "new_tab_here")
 bind("ctrl+alt+shift+e", "tab_new_beside", { side = "left" })
 bind("ctrl+alt+x", "client.tab.close")

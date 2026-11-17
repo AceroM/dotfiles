@@ -54,7 +54,8 @@ options:
       --no-tests     hide test files (__tests__/, *.test.*, *.spec.*)
       --theme NAME   syntax theme (default TwoDark; also $JV_THEME)
       --themes       list syntax themes
-      --flat         no file tree: one continuous diff (e brings the tree back)
+      --flat         no file tree: one continuous diff (e brings the tree back;
+                     t shows / hides test files, ^p goes to a file)
       --popup        Esc quits once it has nothing left to clear; E leaves for its tab
   -h, --help
 
@@ -229,6 +230,7 @@ fn main() -> ExitCode {
                 None => {
                     clear(chatty);
                     eprintln!("jv: {e}");
+                    popup_pause(cli.popup);
                     return ExitCode::FAILURE;
                 }
             }
@@ -243,6 +245,7 @@ fn main() -> ExitCode {
         {
             eprintln!("jv: everything is staged; try `jg --staged` or `jg HEAD`");
         }
+        popup_pause(cli.popup);
         return ExitCode::SUCCESS;
     }
 
@@ -269,6 +272,24 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// --popup with nothing to show (empty diff, gh failed): jv exits before its
+/// screen ever opens, and the float would close on the message. Keep it up
+/// until a key.
+fn popup_pause(popup: bool) {
+    use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    if !popup || !io::stdin().is_terminal() {
+        return;
+    }
+    eprint!("any key closes");
+    let _ = enable_raw_mode();
+    while let Ok(ev) = event::read() {
+        if matches!(ev, event::Event::Key(k) if k.kind == event::KeyEventKind::Press) {
+            break;
+        }
+    }
+    let _ = disable_raw_mode();
 }
 
 /// The base colors: Rex's theme inside Rex, One Dark on $JV_BG elsewhere. Read once.

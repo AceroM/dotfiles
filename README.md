@@ -31,6 +31,13 @@ to move, `/` to filter, Enter to switch, and `;` to close. Space marks tabs;
 `v` selects a range. **Cmd+R** renames the current tab. `rt` replaces `al`;
 `jv`'s `;` shortcut now opens `rt`. See [rt/README.md](rt/README.md).
 
+## Rex PR diff (jf)
+
+**Fn+D** (or `rex do jf_float`, from `stow jv rex`) opens `jf` in a large centered
+float, in the directory of the pane you pressed it in: the branch's PR diff, or local changes when
+there's no PR. Press it again inside the float to close it. In `jf`, `t` shows or hides test files
+and `^p` goes to a file.
+
 ## Shared Slack skill
 
 `stow cli agent-config` installs the read-only `slack-agent` CLI and the global Codex

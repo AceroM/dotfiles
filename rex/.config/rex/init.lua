@@ -645,7 +645,7 @@ rex.bind("cmd+y", "pane.copy_id")
 
 -- cmd+alt+n opens a shell in a floating pane centred over the tab, in the
 -- directory of the pane the key was pressed in, and focuses it. Rex's own
--- floating keys still work on it: cmd+alt+m minimizes it to the taskbar (and
+-- floating keys still work on it: cmd+m (or cmd+alt+m) minimizes it to the taskbar (and
 -- brings it back), cmd+alt+enter docks it into the layout, cmd+w closes it.
 -- The app's New Floating Pane has no default key and picks its own spot; this
 -- one always lands in the middle. The tab is the one holding ctx.block_id,
@@ -737,6 +737,9 @@ rex.action{
   end,
 }
 rex.bind("cmd+alt+n", "float_here")
+-- cmd+m minimizes the focused float to the taskbar and brings it back, as
+-- Rex's own cmd+alt+m does. It takes over macOS's Minimize.
+rex.bind("cmd+m", "pane.minimize_floating")
 
 -- cmd+shift+x runs `x` (commit everything and push: zsh/.config/zsh/git.zsh) on
 -- the folder of the pane it was pressed in, in a floating pane that goes
@@ -885,6 +888,9 @@ rex.bind("cmd+shift+y", "copy_agent_session_id")
 require("actions")
 require("tabs")
 require("keys")
+
+-- fn+d opens jf (the branch's PR diff) in a centred float (jf.lua).
+require("jf")
 
 -- Pane headers show "<directory>  <title>": pane-labels.lua is a long-running
 -- script, so start it detached, once (the [r] keeps this shell from matching).

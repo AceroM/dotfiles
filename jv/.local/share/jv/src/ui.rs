@@ -538,11 +538,11 @@ fn diff(app: &App, buf: &mut Buffer) {
     }
     if app.visible.is_empty() {
         let msg = if app.filter_on() && app.hidden_tests > 0 {
-            format!("Only test files match \"{}\". T shows the {} hidden; esc clears the filter.", app.filter, app.hidden_tests)
+            format!("Only test files match \"{}\". {} shows the {} hidden; esc clears the filter.", app.filter, tests_key(app), app.hidden_tests)
         } else if app.filter_on() {
             format!("No files match \"{}\". Esc clears the filter.", app.filter)
         } else if app.hidden_tests > 0 {
-            format!("Only test files changed. T shows the {} hidden.", app.hidden_tests)
+            format!("Only test files changed. {} shows the {} hidden.", tests_key(app), app.hidden_tests)
         } else {
             "No files in this diff.".to_string()
         };
@@ -1147,6 +1147,20 @@ const PR_HELP: Section = (
     ],
 );
 
+/// The key that shows / hides test files: jf has t for it, jv and jp T.
+fn tests_key(app: &App) -> &'static str {
+    if app.flat { "t" } else { "T" }
+}
+
+/// jf's help: t toggles test files there (T still does), so go to file is ^p only.
+fn flat_key(k: &'static str) -> &'static str {
+    match k {
+        "T" => "t T",
+        "t  ^p" => "^p",
+        _ => k,
+    }
+}
+
 const KEY_W: u16 = 13;
 const COL_W: u16 = 60;
 
@@ -1194,7 +1208,7 @@ fn help(app: &App, buf: &mut Buffer, area: Rect) {
                 if y >= inner.bottom() {
                     break;
                 }
-                put(buf, x0 + 3, y, right, k, fg(p.accent));
+                put(buf, x0 + 3, y, right, if app.flat { flat_key(k) } else { k }, fg(p.accent));
                 put(buf, x0 + 3 + KEY_W, y, right, d, fg(p.fg));
                 y += 1;
             }

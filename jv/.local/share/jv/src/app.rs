@@ -1784,6 +1784,8 @@ impl App {
             (KeyCode::Char('f'), _) | (KeyCode::PageDown, _) | (KeyCode::Char(' '), false) => self.scroll_by(page * n),
             (KeyCode::Char('b'), _) | (KeyCode::PageUp, _) => self.scroll_by(-page * n),
             (KeyCode::Char('o'), true) => self.jump_back(),
+            // jf (the flat view) gives t to test files; ^p still goes to a file.
+            (KeyCode::Char('t'), false) if self.flat => self.toggle_tests(),
             (KeyCode::Char('p'), true) | (KeyCode::Char('t'), false) => self.open_goto(),
             (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => self.mode = Mode::Help,
             (KeyCode::Tab | KeyCode::BackTab, _) => {
