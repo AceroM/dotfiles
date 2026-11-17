@@ -1,7 +1,7 @@
 // lt — linear tickets. Your open Linear issues in one terminal list, for going through them
 // fast: change status (c), priority (p) or assignee (A) on one issue, a count, a visual range
-// or every marked issue; delete (x ; dd) to Linear's trash; rename (r), create (n); `u` undoes.
-// Tab switches between your issues, the ones you created, and each of your teams.
+// or every marked issue; delete (x ; dd) to Linear's trash; rename (r), create (n), comment (C).
+// `u` undoes issue changes. Tab switches between your issues, issues you created, and your teams.
 package main
 
 import (
@@ -38,6 +38,7 @@ change (the issue, a count from it, the visual range, or every marked issue):
   x ; dd               delete (Linear's trash; 3x: three)
   r                    rename (the issue's title, typed below)
   n                    new issue in this issue's team and status
+  C                    comment on the issue at the cursor (⏎ posts, esc cancels)
   u                    undo the last change, delete or create (again: the one before)
 
 select:

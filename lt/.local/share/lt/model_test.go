@@ -17,6 +17,8 @@ type call struct {
 	input map[string]any
 }
 
+type commentCall struct{ id, body string }
+
 type fakeLinear struct {
 	m        meta
 	lists    map[string][]issue
@@ -24,6 +26,7 @@ type fakeLinear struct {
 	removed  [][]string
 	restored [][]string
 	created  []map[string]any
+	comments []commentCall
 	failNext bool
 	ppl      []person
 	next     int
@@ -103,6 +106,15 @@ func (f *fakeLinear) create(input map[string]any) (issue, error) {
 		ID: fmt.Sprintf("new%d", f.next), Identifier: fmt.Sprintf("ENG-%d", 100+f.next), Title: input["title"].(string),
 		State: f.stateByID(fmt.Sprint(input["stateId"])), TeamID: input["teamId"].(string), Updated: time.Now(),
 	}, nil
+}
+
+func (f *fakeLinear) comment(id, body string) error {
+	if f.failNext {
+		f.failNext = false
+		return errors.New("boom")
+	}
+	f.comments = append(f.comments, commentCall{id, body})
+	return nil
 }
 
 // Two teams. ENG has no triage and a later started state (review); OPS has triage, a started
@@ -594,6 +606,46 @@ func TestRenameAndCreate(t *testing.T) {
 	}
 }
 
+func TestCommentTargetsIssueAtCursor(t *testing.T) {
+	m, f := fixture(t)
+	press(m, "m", "C", "space", "enter")
+	if m.prompt == nil || len(f.comments) != 0 || !strings.Contains(ansi.Strip(m.render()), "comment on ENG-3") {
+		t.Fatal("C opens a prompt on the issue at the cursor, and blank input keeps it open")
+	}
+	m.Update(tea.PasteMsg{Content: "I'll take this 👍"})
+	// The prompt still targets ENG-3 if a refresh moves the cursor while the draft is open.
+	m.Update(loadedMsg{key: "mine", issues: []issue{get(m, "e2")}, gen: m.gen})
+	_, submit := m.Update(key("enter"))
+	_, duplicate := m.Update(key("enter"))
+	if submit == nil || duplicate != nil || !strings.Contains(ansi.Strip(m.render()), "posting comment") {
+		t.Fatal("enter posts once while Linear is responding")
+	}
+	drain(m, submit)
+	want := []commentCall{{"e3", "I'll take this 👍"}}
+	if !reflect.DeepEqual(f.comments, want) || m.prompt != nil || m.msg != "comment posted" || m.inflight != 0 {
+		t.Fatalf("comments: %+v, prompt: %+v, message: %q, inflight: %d", f.comments, m.prompt, m.msg, m.inflight)
+	}
+}
+
+func TestCommentFailureKeepsDraft(t *testing.T) {
+	m, f := fixture(t)
+	f.failNext = true
+	press(m, "C")
+	typeText(m, "Ready for review")
+	press(m, "enter")
+	if m.prompt == nil || m.prompt.text != "Ready for review" || !strings.Contains(ansi.Strip(m.render()), "couldn't post: boom") {
+		t.Fatal("a failed post shows the error and keeps the draft")
+	}
+	press(m, "enter")
+	if !reflect.DeepEqual(f.comments, []commentCall{{"o1", "Ready for review"}}) {
+		t.Fatalf("retry: %+v", f.comments)
+	}
+	press(m, "C", "x", "esc")
+	if m.prompt != nil || len(f.comments) != 1 {
+		t.Fatal("esc discards the draft")
+	}
+}
+
 func TestNewIssueFromAClosedStatusGoesToTodo(t *testing.T) {
 	m, f := fixture(t)
 	press(m, "2", "j", "c", "4", "n")
@@ -713,7 +765,7 @@ func TestCopyAndDetail(t *testing.T) {
 
 func TestRenderFitsEveryWidth(t *testing.T) {
 	for _, size := range [][2]int{{30, 5}, {50, 12}, {80, 24}, {120, 40}, {200, 50}} {
-		for _, keys := range [][]string{{}, {"c"}, {"A"}, {"enter"}, {"?"}, {"v", "j"}, {"/", "x"}, {"r"}} {
+		for _, keys := range [][]string{{}, {"c"}, {"A"}, {"enter"}, {"?"}, {"v", "j"}, {"/", "x"}, {"r"}, {"enter", "C"}} {
 			m, _ := fixture(t)
 			m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 			press(m, keys...)

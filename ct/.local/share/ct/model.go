@@ -27,6 +27,7 @@ type browser interface {
 	list() (snapshot, error)
 	closeTabs(ids []int64) error
 	reopen(tabs []gone) (opened []int64, failed int, err error)
+	focus(id int64) error
 }
 
 type order int
@@ -72,6 +73,11 @@ type loadedMsg struct {
 type closedMsg struct {
 	gone []gone
 	err  error
+}
+
+type focusedMsg struct {
+	title string
+	err   error
 }
 
 type reopenedMsg struct {
@@ -231,6 +237,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.onClosed(msg)
 	case reopenedMsg:
 		m.onReopened(msg)
+	case focusedMsg:
+		if msg.err != nil {
+			m.flashErr("couldn't show it: " + msg.err.Error())
+		} else {
+			m.flash("showing " + msg.title)
+		}
 	case tea.PasteMsg:
 		if m.typing {
 			m.query += oneLine(msg.Content)
@@ -364,6 +376,8 @@ func (m *model) key(k tea.KeyPressMsg) {
 		if count > 0 {
 			m.moveTo(count - 1)
 		}
+	case "enter":
+		m.focus()
 	case ";", "x":
 		m.closeKey(n)
 	case "space", "m":
@@ -390,6 +404,21 @@ func (m *model) key(k tea.KeyPressMsg) {
 	case "?":
 		m.help = true
 	}
+}
+
+// focus (⏎) shows the cursor's tab in the browser and brings the browser to the front. ct stays
+// open (it re-reads the list every second), so you can look and come back to keep closing.
+func (m *model) focus() {
+	if m.cur >= len(m.view) {
+		return
+	}
+	t := m.tab(m.cur)
+	if !m.live {
+		m.flash("showing " + t.displayTitle())
+		return
+	}
+	api, id, title := m.api, t.ID, t.displayTitle()
+	m.cmds = append(m.cmds, func() tea.Msg { return focusedMsg{title, api.focus(id)} })
 }
 
 // escape undoes the most recent kind of state, one at a time, then quits.

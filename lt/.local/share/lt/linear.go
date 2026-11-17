@@ -214,6 +214,7 @@ type api interface {
 	remove(ids []string) error
 	restore(ids []string) error
 	create(input map[string]any) (issue, error)
+	comment(id, body string) error
 }
 
 type client struct {
@@ -512,6 +513,23 @@ func (c *client) create(input map[string]any) (issue, error) {
 		return issue{}, err
 	}
 	return out.Create.Issue.issue(), nil
+}
+
+func (c *client) comment(id, body string) error {
+	var out struct {
+		Create struct {
+			Success bool `json:"success"`
+		} `json:"commentCreate"`
+	}
+	err := c.do(`mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`,
+		map[string]any{"input": map[string]string{"issueId": id, "body": body}}, &out)
+	if err != nil {
+		return err
+	}
+	if !out.Create.Success {
+		return errors.New("Linear didn't confirm the comment")
+	}
+	return nil
 }
 
 // The cache: the last meta and each scope's last list, so lt draws before the network answers.

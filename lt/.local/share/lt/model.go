@@ -119,13 +119,20 @@ func (p *picker) shown() []int {
 	return out
 }
 
-// prompt is a line typed in the status line: a new title or a new issue.
+// prompt is a title or comment typed in the status line.
 type prompt struct {
 	kind  string
 	label string
 	text  string
 	id    string
 	input map[string]any
+	// Comments keep the prompt open until Linear confirms the post.
+	posting bool
+	err     error
+}
+
+func (p *prompt) hasCommentStatus() bool {
+	return p != nil && (p.posting || p.err != nil)
 }
 
 type (
@@ -172,7 +179,8 @@ type (
 		issue issue
 		err   error
 	}
-	flashMsg struct {
+	commentedMsg struct{ err error }
+	flashMsg     struct {
 		text string
 		err  error
 	}
@@ -193,16 +201,21 @@ type model struct {
 	width, height int
 	// A vim count being typed (5j, 12G, 3x); 0 when none.
 	count int
-	// `g` or `d` waiting for its second key (gg, gx, dd), with the count typed before it.
+	// `d` waiting for its second key, with the count typed before it.
 	pending      string
 	pendingCount int
+	// The issue before the last g jump, so gx can still open that issue.
+	beforeG string
 	marks        map[string]bool
 	// Visual mode's other end (an issue id); the range runs from it to the cursor.
 	visual string
 	query  string
 	typing bool
 	order  order
-	help   bool
+	showBacklog bool
+	hideTriage  bool
+	help        bool
+	helpTop     int
 	// The detail pane (⏎): the issue's description under the list, scrolled by J/K.
 	detail    bool
 	detailTop int
@@ -371,10 +384,12 @@ func (m *model) flash(s string) { m.msg, m.msgBad, m.msgAt = s, false, time.Now(
 
 func (m *model) flashErr(s string) { m.msg, m.msgBad, m.msgAt = s, true, time.Now() }
 
-// layout splits the lines between the title and status lines: the list, then the picker or
-// the detail pane.
+// layout splits the available lines between the list and the picker or detail pane.
 func (m *model) layout() (list, pick, detail int) {
 	n := max(1, m.height-2)
+	if m.prompt.hasCommentStatus() {
+		n = max(1, n-1)
+	}
 	switch {
 	case m.picker != nil:
 		pick = min(len(m.picker.shown())+1, 12, max(2, n/2))
@@ -392,6 +407,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.help {
+			m.scrollHelp(0)
+		}
 	case tickMsg:
 		m.cmds = append(m.cmds, tick())
 		if m.msg != "" && time.Since(m.msgAt) > flashFor {
@@ -440,6 +458,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.onRestored(msg)
 	case createdMsg:
 		m.onCreated(msg)
+	case commentedMsg:
+		m.landed()
+		if msg.err != nil {
+			m.prompt.posting, m.prompt.err = false, msg.err
+		} else {
+			m.prompt = nil
+			m.flash("comment posted")
+		}
 	case flashMsg:
 		if msg.err != nil {
 			m.flashErr(msg.err.Error())
@@ -539,7 +565,14 @@ func (m *model) key(k tea.KeyPressMsg) {
 		return
 	}
 	if m.help {
-		m.help = false
+		switch s {
+		case "j", "down":
+			m.scrollHelp(1)
+		case "k", "up":
+			m.scrollHelp(-1)
+		default:
+			m.help = false
+		}
 		return
 	}
 	switch {
@@ -553,6 +586,16 @@ func (m *model) key(k tea.KeyPressMsg) {
 		m.filterKey(k, s)
 		return
 	}
+	if id := m.beforeG; id != "" {
+		m.beforeG = ""
+		if s == "x" {
+			if at := m.pos(id); at >= 0 {
+				m.moveTo(at)
+				m.open()
+			}
+			return
+		}
+	}
 	if len(s) == 1 && s[0] >= '0' && s[0] <= '9' && (s != "0" || m.count > 0) && m.pending == "" {
 		m.count = min(99_999, m.count*10+int(s[0]-'0'))
 		return
@@ -562,14 +605,7 @@ func (m *model) key(k tea.KeyPressMsg) {
 	if p := m.pending; p != "" {
 		count = m.pendingCount
 		m.pending = ""
-		switch p + s {
-		case "gg":
-			m.moveTo(max(0, count-1))
-			return
-		case "gx":
-			m.open()
-			return
-		case "dd":
+		if p+s == "dd" {
 			m.remove(max(1, count))
 			return
 		}
@@ -592,7 +628,8 @@ func (m *model) key(k tea.KeyPressMsg) {
 	case "k", "up", "ctrl+p":
 		m.moveBy(-n)
 	case "g":
-		m.pending, m.pendingCount = "g", count
+		m.beforeG = m.selectedID()
+		m.moveTo(max(0, count-1))
 	case "home":
 		m.moveTo(0)
 	case "G", "end":
@@ -622,6 +659,10 @@ func (m *model) key(k tea.KeyPressMsg) {
 		m.remove(n)
 	case "c":
 		m.openStatus(n)
+	case "C":
+		if cur, ok := m.selected(); ok {
+			m.prompt = &prompt{kind: "comment", label: "comment on " + cur.Identifier + ": ", id: cur.ID}
+		}
 	case "p":
 		m.openPriority(n)
 	case "A":
@@ -646,6 +687,12 @@ func (m *model) key(k tea.KeyPressMsg) {
 		m.undoLast()
 	case "/":
 		m.typing, m.visual = true, ""
+	case "b":
+		m.showBacklog = !m.showBacklog
+		m.setView(m.selectedID())
+	case "t":
+		m.hideTriage = !m.hideTriage
+		m.setView(m.selectedID())
 	case "s":
 		m.order = m.order.next()
 		m.setView(m.selectedID())
@@ -664,12 +711,17 @@ func (m *model) key(k tea.KeyPressMsg) {
 	case "B":
 		m.copyField("branch")
 	case "?":
-		m.help = true
+		m.help, m.helpTop = true, 0
 	default:
 		if d, ok := strings.CutPrefix(s, "ctrl+"); ok && len(d) == 1 && d[0] >= '0' && int(d[0]-'0') < len(statusSlots) {
 			m.setStatus(int(d[0]-'0'), n)
 		}
 	}
+}
+
+func (m *model) scrollHelp(d int) {
+	n := max(1, m.height-2)
+	m.helpTop = max(0, min(m.helpTop+d, len(helpView(m.width, n))-n))
 }
 
 // escape undoes the most recent kind of state, one at a time, then quits.
@@ -718,7 +770,7 @@ func (m *model) paste(s string) {
 	case m.picker != nil && m.picker.kind == "assignee":
 		m.picker.filter += s
 		m.picker.sel = 0
-	case m.prompt != nil:
+	case m.prompt != nil && !m.prompt.posting:
 		m.prompt.text += s
 	case m.typing:
 		m.query += s
@@ -949,7 +1001,7 @@ func (m *model) onRemoved(msg removedMsg) {
 		m.flash("undid: deleted " + m.namesOf(msg.issues))
 		return
 	}
-	m.flash("deleted " + m.namesOf(msg.issues) + " · u restores")
+	m.flash("deleted " + m.namesOf(msg.issues))
 	m.pushUndo(undoEntry{kind: "delete", issues: msg.issues})
 }
 
@@ -1103,9 +1155,9 @@ func (m *model) onUpdated(msg updatedMsg) {
 		return
 	}
 	if msg.note != "" {
-		m.flashErr(m.names(ids) + " → " + what + " · " + msg.note + " · u undoes")
+		m.flashErr(m.names(ids) + " → " + what + " · " + msg.note)
 	} else {
-		m.flash(m.names(ids) + " → " + what + " · u undoes")
+		m.flash(m.names(ids) + " → " + what)
 	}
 	m.pushUndo(undoEntry{kind: "update", field: msg.field, changes: msg.changes})
 }
@@ -1532,33 +1584,47 @@ func (m *model) newIssue() {
 // promptKey: ⏎ saves, esc cancels.
 func (m *model) promptKey(k tea.KeyPressMsg, s string) {
 	p := m.prompt
+	if p.posting {
+		return
+	}
 	switch s {
 	case "esc":
 		m.prompt = nil
 		return
 	case "enter":
-		m.prompt = nil
-		title := strings.TrimSpace(p.text)
-		if title == "" {
+		if p.kind != "comment" {
+			m.prompt = nil
+		}
+		text := strings.TrimSpace(p.text)
+		if text == "" {
 			return
 		}
 		switch p.kind {
 		case "rename":
 			if at := m.find(p.id); at >= 0 {
 				after := m.all[at]
-				after.Title = title
+				after.Title = text
 				m.change(fieldTitle, []change{{m.all[at], after}}, false, "")
 			}
 		case "new":
-			in := map[string]any{"title": title}
+			in := map[string]any{"title": text}
 			for k, v := range p.input {
 				in[k] = v
 			}
-			m.flash("creating “" + title + "”…")
+			m.flash("creating “" + text + "”…")
 			a := m.api
 			m.send(func() tea.Msg {
 				i, err := a.create(in)
 				return createdMsg{i, err}
+			})
+		case "comment":
+			if !m.live {
+				return
+			}
+			p.posting, p.err = true, nil
+			a, id := m.api, p.id
+			m.send(func() tea.Msg {
+				return commentedMsg{a.comment(id, text)}
 			})
 		}
 		return
@@ -1577,7 +1643,7 @@ func (m *model) onCreated(msg createdMsg) {
 	m.all = append(m.all, msg.issue)
 	m.touched[msg.issue.ID] = true
 	m.setView(msg.issue.ID)
-	m.flash("created " + msg.issue.Identifier + " · u deletes it")
+	m.flash("created " + msg.issue.Identifier)
 	m.pushUndo(undoEntry{kind: "create", issues: []issue{msg.issue}})
 }
 
@@ -1651,13 +1717,19 @@ func prioRank(p int) int {
 	return p
 }
 
+func (m *model) includes(i issue) bool {
+	return !m.deleted[i.ID] &&
+		(m.showBacklog || i.State.Type != "backlog") &&
+		(!m.hideTriage || i.State.Type != "triage")
+}
+
 // setView recomputes what's shown (filter, order, headings), keeping the cursor on issue keep
 // when it's still there and on the same row otherwise.
 func (m *model) setView(keep string) {
 	words := strings.Fields(strings.ToLower(m.query))
 	view := []int{}
 	for n, i := range m.all {
-		if !m.deleted[i.ID] && i.matches(words) {
+		if m.includes(i) && i.matches(words) {
 			view = append(view, n)
 		}
 	}

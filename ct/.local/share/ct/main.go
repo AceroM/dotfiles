@@ -1,8 +1,8 @@
 // ct — chrome tabs. Every browser tab in one list, by title and URL, for deciding what stays
 // and closing the rest fast. `;` closes the tab under the cursor, or every marked tab, or a
 // visual range. Marks come from space, `*` (same site), `D` (duplicates) and `a` (whatever a
-// `/` filter shows). `u` reopens what was closed. No preview and no switching (ctab does
-// those).
+// `/` filter shows). `u` reopens what was closed. ⏎ shows the tab in the browser. No preview
+// (ctab does that).
 package main
 
 import (
@@ -26,6 +26,7 @@ move:
   j k  ↓ ↑             next / previous (5j, 3k: counts, by the relative numbers)
   ^d ^u                half a page down / up
   g G  12G             first / last / tab 12
+  ⏎                    show the tab in the browser (ct stays open)
 
 close:
   ; x                  close the tab (5x: five), or every marked tab, or the visual range

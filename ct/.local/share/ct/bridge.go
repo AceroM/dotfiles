@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -183,6 +184,17 @@ func (h *host) list() (snapshot, error) {
 func (h *host) closeTabs(ids []int64) error {
 	_, err := h.call("switcher.close", map[string]any{"tabs": ids}, 5*time.Second)
 	return err
+}
+
+// focus makes the tab its window's active one, raises the window, then brings the browser
+// app itself forward (switcher.focus only raises the window inside the browser).
+func (h *host) focus(id int64) error {
+	if _, err := h.call("switcher.focus", map[string]any{"tab": id}, 2*time.Second); err != nil {
+		return err
+	}
+	// The tab is already showing in its window; failing to raise the app isn't worth an error.
+	_ = exec.Command("open", "-a", h.browser).Run()
+	return nil
 }
 
 // reopen opens closed tabs again where they were: the new tabs' ids, and how many couldn't

@@ -23,8 +23,9 @@ opened before if it's still there, else a new one. Without --float, a Neovim in
 a pane of the tab gets it (siblings first), and the float is the fallback.
 Quitting a floating Neovim closes its pane.
 
---float on a web page (.html, .htm) opens it in the default browser instead;
-without --float it goes to Neovim like any other file, so it stays editable.
+--float on a web page (.html, .htm) opens it in the default browser instead,
+and on a directory opens it in Finder; without --float both go to Neovim like
+any other file, so they stay editable.
 
 A location that names no file but reads as a web address without its scheme
 (app.example.site/booking, example.com, localhost:3000/x) opens in the default
@@ -396,6 +397,11 @@ def open_in_browser(target):
     return f"{target} in {browser or 'the default app'}"
 
 
+def open_in_finder(target):
+    run(["/usr/bin/open", "-a", "Finder", str(target)])
+    return f"{target} in Finder"
+
+
 def open_floating(source, target, line, column):
     directory = target if target.is_dir() else target.parent
     root = git_root(directory) or directory
@@ -461,6 +467,13 @@ def main():
                               "browser": default_browser() or "default app"}, indent=2))
         else:
             print("Opened " + open_in_browser(target))
+        return
+    if args.float and target.is_dir():
+        if args.dry_run:
+            print(json.dumps({"target": str(target), "source": source, "directories": directories,
+                              "finder": True}, indent=2))
+        else:
+            print("Opened " + open_in_finder(target))
         return
     editor = choose_editor(tab, target, args.float)
 

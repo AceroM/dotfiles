@@ -14,6 +14,7 @@ type fakeBrowser struct {
 	snap     snapshot
 	closed   [][]int64
 	reopened [][]gone
+	focused  []int64
 	failNext bool
 	nextID   int64
 }
@@ -38,6 +39,15 @@ func (f *fakeBrowser) closeTabs(ids []int64) error {
 		}
 	}
 	f.snap.Tabs = keep
+	return nil
+}
+
+func (f *fakeBrowser) focus(id int64) error {
+	if f.failNext {
+		f.failNext = false
+		return errors.New("no tab with id")
+	}
+	f.focused = append(f.focused, id)
 	return nil
 }
 
@@ -170,6 +180,33 @@ func TestCloseMovesToTheNextTabAndUndoReopens(t *testing.T) {
 	press(m, "u")
 	if m.msg != "nothing to reopen" {
 		t.Fatalf("flash: %q", m.msg)
+	}
+}
+
+func TestEnterShowsTheTabAndStaysOpen(t *testing.T) {
+	m, f := fixture()
+	press(m, "j", "enter")
+	if !reflect.DeepEqual(f.focused, []int64{3}) {
+		t.Fatalf("focused %v", f.focused)
+	}
+	if m.quitting || m.msg != "showing Repo again" {
+		t.Fatalf("quitting=%v flash %q", m.quitting, m.msg)
+	}
+	// ⏎ while typing a filter only keeps it; the next ⏎ shows the match.
+	press(m, "/")
+	typeText(m, "docs")
+	press(m, "enter")
+	if len(f.focused) != 1 || m.typing {
+		t.Fatalf("first ⏎ keeps the filter: focused %v typing %v", f.focused, m.typing)
+	}
+	press(m, "enter")
+	if !reflect.DeepEqual(f.focused, []int64{3, 4}) {
+		t.Fatalf("focused %v", f.focused)
+	}
+	f.failNext = true
+	press(m, "enter")
+	if !m.msgBad || !strings.Contains(m.msg, "couldn't show it") {
+		t.Fatalf("flash %q bad=%v", m.msg, m.msgBad)
 	}
 }
 

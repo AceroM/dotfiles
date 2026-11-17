@@ -89,6 +89,16 @@ func (m *model) render() string {
 	if detailH > 0 {
 		lines = append(lines, m.detailLines(w, detailH)...)
 	}
+	if p := m.prompt; p != nil && p.kind == "comment" {
+		switch {
+		case p.posting:
+			lines = append(lines, " "+yellow.Render("posting comment…"))
+		case p.err != nil:
+			lines = append(lines, " "+red.Render("couldn't post: "+oneLine(p.err.Error())))
+		default:
+			lines = append(lines, " "+muted.Render("⏎ post  esc cancel"))
+		}
+	}
 	lines = append(lines, m.statusLine(w))
 	for i, l := range lines {
 		lines[i] = ansi.Truncate(l, w, "")
@@ -510,7 +520,7 @@ func (m *model) statusLine(w int) string {
 		lead := accent.Render(fmt.Sprintf("/%s · %d of %d", ansi.Truncate(m.query, 30, "…"), len(m.view), m.visibleCount()))
 		return hints(lead, [2]string{"a", "mark all"}, [2]string{"c", "status"}, [2]string{"esc", "drop filter"})
 	}
-	return hints("", [2]string{"c", "status"}, [2]string{"p", "priority"}, [2]string{"A", "assignee"},
+	return hints("", [2]string{"c", "status"}, [2]string{"C", "comment"}, [2]string{"p", "priority"}, [2]string{"A", "assignee"},
 		[2]string{"x", "delete"}, [2]string{"space", "mark"}, [2]string{"u", "undo"}, [2]string{"/", "filter"},
 		[2]string{"⇥", "scope"}, [2]string{"⏎", "details"}, [2]string{"?", "keys"})
 }
