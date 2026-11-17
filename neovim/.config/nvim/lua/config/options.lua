@@ -6,6 +6,7 @@ vim.opt.cmdheight = 0
 vim.opt.scrolloff = 0
 vim.opt.spell = false
 vim.g.lazyvim_prettier_needs_config = false
+vim.g.go_recommended_style = 0 -- Let Go buffers inherit LazyVim's space indentation.
 
 -- `nl` shell alias launches nvim with NVIM_NO_LSP=1 to open files fast with no
 -- language servers. options.lua loads before lazy.nvim, so no-op'ing vim.lsp.start

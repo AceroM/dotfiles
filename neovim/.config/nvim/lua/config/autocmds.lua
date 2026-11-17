@@ -33,6 +33,15 @@ vim.api.nvim_create_autocmd("FileType", {
   end,
 })
 
+vim.api.nvim_create_autocmd({ "FileType", "BufWinEnter" }, {
+  desc = "Display Go tabs as spaces",
+  callback = function(args)
+    if vim.bo[args.buf].filetype == "go" then
+      vim.opt_local.listchars:append({ tab = "  " })
+    end
+  end,
+})
+
 -- Follow the terminal's light/dark appearance. Neovim queries the terminal
 -- (OSC 11) at startup and updates `background` once the response arrives, which
 -- is after the colorscheme has been applied. It also fires if you toggle your
