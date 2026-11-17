@@ -184,8 +184,9 @@ rex.action{
 -- cmd+n is cmd+t: the app's own New Tab, at the end of the tab list.
 rex.bind("cmd+n", "client.tab.new")
 
--- cmd+shift+e keeps the orchestrators tab, the first tab of the current
--- session, where `o` waits for prompts: one o pane per directory, picked by the
+-- Go to Orchestrators (command palette only; cmd+shift+e is now the o float
+-- in ~/.dotfiles, see float_here) keeps the orchestrators tab, the first tab
+-- of the current session, where `o` waits for prompts: one o pane per directory, picked by the
 -- directory of the pane the key was pressed in. An o pane already there for
 -- the directory is focused; otherwise an idle shell is reused by typing
 -- `cd DIR && o`, or a pane is added. Two panes sit side by side, then grow
@@ -208,7 +209,7 @@ local function is_o(p) return p.program == "o" end
 
 local GROUPS = {
   orchestrators = {
-    title = "Go to Orchestrators", key = "cmd+shift+e",
+    title = "Go to Orchestrators",
     keywords = "orchestrators o prompt agents directory grid first tab",
     command = O_COMMAND, matches = { is_o },
     -- Typed into an idle shell (after cd) to make it this directory's pane.
@@ -418,7 +419,7 @@ for name, spec in pairs(GROUPS) do
     name = name, title = spec.title, category = "Tab", keywords = spec.keywords,
     run = function(ctx, args) return group_tab(name, spec, ctx, args) end,
   }
-  rex.bind(spec.key, name)
+  if spec.key then rex.bind(spec.key, name) end
 end
 
 -- Show a pane in any session: focus it on the server, then tell the app,
@@ -712,7 +713,8 @@ rex.bind("cmd+y", "pane.copy_id")
 -- the images or the viewer's close, whatever pane they're pressed in. cmd+e (o=1) is that
 -- with o running in it, ready for a prompt in the pane's directory; ⏎ sends
 -- and o stays for the next one, and quitting o (esc, ^c or ^d on an empty
--- prompt) closes the float.
+-- prompt) closes the float. cmd+shift+e is cmd+e always in ~/.dotfiles
+-- (cwd=DIR), whatever pane it's pressed in.
 -- Try it without opening anything: rex do float_here dry_run=1 --json
 local FLOAT_BOUNDS = { 0.15, 0.15, 0.7, 0.7 } -- x, y, w, h as fractions of the tab
 local O_BIN = (os.getenv("HOME") or "") .. "/.local/bin/o"
@@ -751,7 +753,7 @@ rex.action{
         end
       end
     end
-    local cwd = (ctx.block_id and pane_cwd(ctx.block_id)) or os.getenv("HOME")
+    local cwd = args.cwd or (ctx.block_id and pane_cwd(ctx.block_id)) or os.getenv("HOME")
 
     local viewer, rec = false, nil
     if not (args.shell or args.o) then
@@ -806,6 +808,7 @@ rex.bind("cmd+t", "float_here", { shell = true })
 rex.bind("cmd+m", "pane.minimize_floating")
 rex.bind("cmd+g", "float_here", { shell = true })
 rex.bind("cmd+e", "float_here", { o = true })
+rex.bind("cmd+shift+e", "float_here", { o = true, cwd = (os.getenv("HOME") or "") .. "/.dotfiles" })
 
 -- cmd+shift+x runs `x` (commit everything and push: zsh/.config/zsh/git.zsh) on
 -- the folder of the pane it was pressed in, in a floating pane that goes
