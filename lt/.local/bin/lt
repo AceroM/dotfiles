@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# lt — linear tickets: your open Linear issues; change status, priority, assignee, delete, in bulk (Go).
+# Source lives in ../share/lt; this launcher builds it on first run and again whenever a source
+# file is newer than the binary.
+set -euo pipefail
+
+script="${BASH_SOURCE[0]}"
+while [[ -L "$script" ]]; do
+  dir="$(cd -P -- "$(dirname -- "$script")" && pwd)"
+  script="$(readlink "$script")"
+  [[ "$script" = /* ]] || script="$dir/$script"
+done
+app_dir="$(cd -- "$(cd -P -- "$(dirname -- "$script")" && pwd)/../share/lt" && pwd)"
+bin="$app_dir/.build/lt"
+
+if [[ ! -x "$bin" ]] || [[ -n "$(find "$app_dir" -maxdepth 1 \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -newer "$bin" -print -quit)" ]]; then
+  command -v go >/dev/null || { printf '%s\n' 'lt: Go is required to build lt.' >&2; exit 1; }
+  printf '%s\n' 'lt: building (first run or sources changed)…' >&2
+  mkdir -p "$app_dir/.build"
+  tmp="$(mktemp "$app_dir/.build/lt.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  (cd "$app_dir" && go build -trimpath -o "$tmp" .)
+  mv -f "$tmp" "$bin"
+  trap - EXIT
+fi
+
+exec "$bin" "$@"
