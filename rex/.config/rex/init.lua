@@ -1,8 +1,9 @@
 -- Rex config. Reload with: rex config reload
 
 -- Panes: Rex's default cmd+option+arrows move focus between panes (and
--- cmd+[ / cmd+] cycle them). option+left/right stay unbound so they reach
--- the shell as word movement.
+-- cmd+[ / cmd+] cycle them), except that cmd+option+left/right in a floating
+-- pane step through the tab's floats (float_cycle, below float_here).
+-- option+left/right stay unbound so they reach the shell as word movement.
 
 -- Undo / redo as in a text field. cmd+z sends ctrl+/ (^_), which is undo in
 -- zsh and in Claude Code's prompt. cmd+shift+z sends F20, which zsh binds to
@@ -809,6 +810,74 @@ rex.bind("cmd+m", "pane.minimize_floating")
 rex.bind("cmd+g", "float_here", { shell = true })
 rex.bind("cmd+e", "float_here", { o = true })
 rex.bind("cmd+shift+e", "float_here", { o = true, cwd = (os.getenv("HOME") or "") .. "/.dotfiles" })
+
+-- cmd+alt+left / right in a floating pane step through the tab's floats,
+-- oldest first and wrapping, minimized ones included. float_here stacks them
+-- all in the same spot, so Rex's own directional focus has nowhere to go.
+-- Stepping onto a minimized float brings it up and minimizes the one left,
+-- so the same number of floats stay showing (one, usually). In a tiled pane,
+-- or in the tab's only float, they're Rex's pane.focus.left / right as before.
+-- Try it without moving: rex do float_cycle direction=right dry_run=1 --json
+rex.action{
+  name = "float_cycle",
+  title = "Next Floating Pane",
+  category = "Pane",
+  keywords = "float floating pane next previous cycle switch left right taskbar minimized",
+  run = function(ctx, args)
+    local direction = args.direction == "left" and "left" or "right"
+    local view, err = rex.session.view{}
+    if not view then error(err, 0) end
+
+    local window, here
+    for _, w in ipairs(view.windows or {}) do
+      for _, layer in ipairs(w.layers or {}) do
+        for _, b in ipairs(layer.blocks or {}) do
+          if b.block_id == ctx.block_id then window, here = w, layer end
+        end
+      end
+    end
+
+    -- Layer IDs are UUIDv7s, so sorting them puts the floats in the order
+    -- they were opened, which raising one doesn't change.
+    local floats, at = {}, nil
+    for _, layer in ipairs(window and window.layers or {}) do
+      if layer.kind == "floating" and #(layer.blocks or {}) > 0 then table.insert(floats, layer) end
+    end
+    table.sort(floats, function(a, b) return a.layer_id < b.layer_id end)
+    for i, layer in ipairs(floats) do
+      if layer == here then at = i end
+    end
+
+    if not at or #floats < 2 then
+      local result = { does = "pane.focus." .. direction, floats = #floats }
+      if not args.dry_run then rex.client.queue(result.does) end
+      return result
+    end
+
+    local index = (at - 1 + (direction == "left" and -1 or 1)) % #floats + 1
+    local target = floats[index]
+    local swap = target.state == "minimized"
+    local result = {
+      does = "float", floats = #floats, index = index,
+      from = here.layer_id, to = target.layer_id, minimizes = swap and here.layer_id or nil,
+    }
+    if args.dry_run then return result end
+
+    -- Bring the target up and focus it first: the float being left no longer
+    -- has focus when it's minimized, so focus stays put.
+    rex.call("session.set_layer_state", {
+      session_id = ctx.session_id, layer_id = target.layer_id, state = "normal", focus = true,
+    })
+    if swap then
+      rex.call("session.set_layer_state", {
+        session_id = ctx.session_id, layer_id = here.layer_id, state = "minimized",
+      })
+    end
+    return result
+  end,
+}
+rex.bind("cmd+alt+left", "float_cycle", { direction = "left" })
+rex.bind("cmd+alt+right", "float_cycle", { direction = "right" })
 
 -- cmd+shift+x runs `x` (commit everything and push: zsh/.config/zsh/git.zsh) on
 -- the folder of the pane it was pressed in, in a floating pane that goes

@@ -239,8 +239,8 @@ func pickProfile(profiles []Profile, env, last string) (int, Why) {
 func RememberProfile(name string) { writeState("last-profile", name) }
 
 // Defaults is the configurations without a config file: provider pairs,
-// everyday then deeper reasoning. Claude Opus / Fable, Codex Sol 6.1 xhigh
-// / Astra 6 max. The Mac
+// everyday then deeper reasoning. Claude Opus / Fable, Codex Sol 6.2 xhigh
+// / Astra 6.2 max. The Mac
 // runs Codex in its own process (--no-daemon); Linux's Claude skips its
 // Chrome integration (--no-chrome), as its shell wrappers do.
 func Defaults() []Agent {
@@ -257,8 +257,8 @@ func Defaults() []Agent {
 	return []Agent{
 		newAgent("claude", "opus", claude, ""),
 		newAgent("claude", "fable", claude, ""),
-		newAgent("codex", "gpt-6.1-sol", effort("xhigh"), "codex(sol)"),
-		newAgent("codex", "gpt-6-astra", effort("max"), "codex(astra)"),
+		newAgent("codex", "gpt-6.2-sol", effort("xhigh"), "codex(sol)"),
+		newAgent("codex", "gpt-6.2-astra", effort("max"), "codex(astra)"),
 	}
 }
 

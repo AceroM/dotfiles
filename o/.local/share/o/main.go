@@ -99,7 +99,7 @@ Configurations: ~/.config/o/config.toml lists them, in order, as [[agent]] table
   name = "…"          shown instead of kind(model)
 Without the file: provider pairs, everyday then deeper reasoning:
   ^1 claude(opus)   ^2 claude(fable)   (--dangerously-skip-permissions; --no-chrome on Linux)
-  ^3 codex(sol)    Sol 6.1 xhigh      ^4 codex(astra)  Astra 6 max  (--yolo; --no-daemon on the Mac)
+  ^3 codex(sol)    Sol 6.2 xhigh      ^4 codex(astra)  Astra 6.2 max  (--yolo; --no-daemon on the Mac)
 o starts on the one picked last (kept in ~/.local/state/o/last-agent), else the first;
 $O_AGENT names one instead (O_AGENT=codex). Above the tables, max_width = 100 (the
 default) keeps o in the pane's first 100 columns, so the text wraps at about 80 on a

@@ -31,17 +31,17 @@ kind = "claude"
 model = "fable"
 args = ["--dangerously-skip-permissions"]
 
-# Ctrl+3 / Ctrl+4: Codex Sol 6.1 xhigh / Astra 6 max.
+# Ctrl+3 / Ctrl+4: Codex Sol 6.2 xhigh / Astra 6.2 max.
 # Both run in this process, not on Codex's background server.
 # Pin both normal and plan-mode effort so global defaults cannot change the pair.
 [[agent]]
 kind = "codex"
-model = "gpt-6.1-sol"
+model = "gpt-6.2-sol"
 name = "codex(sol)"
 args = ["--no-daemon", "--yolo", "-c", 'model_reasoning_effort="xhigh"', "-c", 'plan_mode_reasoning_effort="xhigh"']
 
 [[agent]]
 kind = "codex"
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 name = "codex(astra)"
 args = ["--no-daemon", "--yolo", "-c", 'model_reasoning_effort="max"', "-c", 'plan_mode_reasoning_effort="max"']

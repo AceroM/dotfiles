@@ -576,7 +576,6 @@ func (m *model) key(k tea.KeyPressMsg) {
 		// Anything else drops the prefix and is itself.
 	}
 	n := max(1, count)
-	half := max(1, m.listH()/2)
 	switch s {
 	case "esc":
 		if count == 0 {
@@ -585,9 +584,9 @@ func (m *model) key(k tea.KeyPressMsg) {
 	case "q":
 		m.quitting = true
 	case "ctrl+d", "pgdown":
-		m.moveBy(half)
+		m.halfPage(1)
 	case "ctrl+u", "pgup":
-		m.moveBy(-half)
+		m.halfPage(-1)
 	case "j", "down", "ctrl+n":
 		m.moveBy(n)
 	case "k", "up", "ctrl+p":
@@ -1037,6 +1036,7 @@ func (m *model) change(field string, cs []change, undo bool, note string) {
 	groups := map[string][]string{}
 	inputs := map[string]map[string]any{}
 	var keys []string
+	now := time.Now()
 	for _, c := range real {
 		in := inputFor(field, c.after)
 		b, _ := json.Marshal(in)
@@ -1048,10 +1048,15 @@ func (m *model) change(field string, cs []change, undo bool, note string) {
 		groups[key] = append(groups[key], c.after.ID)
 		if at := m.find(c.after.ID); at >= 0 {
 			setField(field, &m.all[at], c.after)
+			// Linear will say it was just updated: sort it there now, so the reply doesn't
+			// reorder the list under the cursor.
+			m.all[at].Updated = now
 		}
 		m.touched[c.after.ID] = true
 	}
-	m.setView(m.selectedID())
+	// The cursor keeps its row: a changed issue moves off to its new place and the next one
+	// slides up under the cursor, ready for the next key.
+	m.setView("")
 	a := m.api
 	m.send(func() tea.Msg {
 		var got []issue
@@ -1796,15 +1801,36 @@ func (m *model) buildRows() {
 }
 
 // scroll keeps the cursor's issue, and the headings right above it, in view.
-func (m *model) scroll() {
-	h := m.listH()
-	r := 0
+// rowOf is issue k's row in rows (headings included).
+func (m *model) rowOf(k int) int {
 	for i, x := range m.rows {
-		if x.k == m.cur {
-			r = i
-			break
+		if x.k == k {
+			return i
 		}
 	}
+	return 0
+}
+
+// halfPage (^d ^u) scrolls like vim: the list and the cursor move half a screen together, so
+// the cursor keeps its screen row; at either end the list stops and the cursor goes on.
+func (m *model) halfPage(dir int) {
+	if len(m.rows) == 0 {
+		return
+	}
+	h := m.listH()
+	d := max(1, h/2)
+	t := max(0, min(m.rowOf(m.cur)+dir*d, len(m.rows)-1))
+	m.top = max(0, min(m.top+dir*d, len(m.rows)-h))
+	// A heading isn't an issue: the first one under it.
+	for t < len(m.rows)-1 && m.rows[t].k < 0 {
+		t++
+	}
+	m.cur = m.rows[t].k
+}
+
+func (m *model) scroll() {
+	h := m.listH()
+	r := m.rowOf(m.cur)
 	head := r
 	for head > 0 && m.rows[head-1].k < 0 {
 		head--

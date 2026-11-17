@@ -74,7 +74,7 @@ func (f *fakeLinear) update(ids []string, input map[string]any) ([]issue, error)
 					i.Title = v.(string)
 				}
 			}
-			i.Updated = i.Updated.Add(time.Minute)
+			i.Updated = time.Now()
 			f.lists["mine"][k] = i
 			out = append(out, i)
 		}
@@ -453,6 +453,57 @@ func TestCtrlDigitsSetStatus(t *testing.T) {
 	press(m, "ctrl+8", "ctrl+9")
 	if len(f.updates) != n {
 		t.Fatal("^8 ^9 aren't slots")
+	}
+}
+
+func TestChangesKeepTheCursorRow(t *testing.T) {
+	m, _ := fixture(t)
+	// OPS-1, ENG-3, ENG-1, ENG-2, …: ENG-1 done drops to the end, ENG-2 slides up under the
+	// cursor, and Linear's reply doesn't move it.
+	m.cur = m.pos("e1")
+	press(m, "ctrl+1")
+	if m.cur != 2 || m.selectedID() != "e2" {
+		t.Fatalf("row %d on %s; want row 2 on ENG-2", m.cur, m.selectedID())
+	}
+	// Undo brings ENG-1 back to its row, under the cursor.
+	press(m, "u")
+	if m.cur != 2 || m.selectedID() != "e1" {
+		t.Fatalf("after undo: row %d on %s", m.cur, m.selectedID())
+	}
+	// Same through the picker, and for marks elsewhere in the list.
+	press(m, "c", "4")
+	if m.cur != 2 || m.selectedID() != "e2" {
+		t.Fatalf("picker: row %d on %s", m.cur, m.selectedID())
+	}
+	m.marks["o1"] = true
+	press(m, "ctrl+5")
+	if m.cur != 2 || get(m, "o1").State.Name != "Backlog" {
+		t.Fatalf("marks: row %d, OPS-1 %s", m.cur, get(m, "o1").State.Name)
+	}
+}
+
+func TestHalfPageKeepsTheScreenRow(t *testing.T) {
+	m, _ := fixture(t)
+	// 6 rows of list, so half is 3. Rows: Triage, OPS-1, In Review, ENG-3, In Progress, ENG-1,
+	// Todo, ENG-2, Backlog, OPS-2, ENG-4: 11, so the list scrolls at most to row 5.
+	m.height = 8
+	m.cur = m.pos("e2")
+	press(m, "ctrl+u", "ctrl+u")
+	if m.top != 0 {
+		t.Fatalf("top %d", m.top)
+	}
+	m.cur = m.pos("e3") // row 3, screen row 3
+	press(m, "ctrl+d")
+	if m.top != 3 || m.selectedID() != "e2" {
+		t.Fatalf("^d: top %d on %s; want 3, ENG-2 (row 6 is a heading: the issue under it)", m.top, m.selectedID())
+	}
+	press(m, "ctrl+d")
+	if m.top != 5 || m.selectedID() != "e4" {
+		t.Fatalf("^d at the end: the list stops, the cursor goes on: top %d on %s", m.top, m.selectedID())
+	}
+	press(m, "ctrl+u")
+	if m.top != 2 || m.selectedID() != "e2" || m.rowOf(m.cur)-m.top != 5 {
+		t.Fatalf("^u keeps screen row 5: top %d on %s", m.top, m.selectedID())
 	}
 }
 

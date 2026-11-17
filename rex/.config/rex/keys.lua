@@ -57,10 +57,11 @@ bind("ctrl+alt+shift+a", "remember_then", { action = "session.switch" }) -- was 
 bind("ctrl+alt+o", "last_pane")
 bind("ctrl+alt+i", "last_pane")
 
--- Panes. option+←/→ stay the shell's word movement; Rex's own cmd+option+arrows
--- move focus too.
-bind("ctrl+alt+left", "pane.focus.left")
-bind("ctrl+alt+right", "pane.focus.right")
+-- Panes. option+←/→ stay the shell's word movement; cmd+option+arrows move focus
+-- too. ←/→ are init.lua's float_cycle, as cmd+option+←/→ are: in a floating pane
+-- they step through the tab's floats, elsewhere they're pane.focus.left/right.
+bind("ctrl+alt+left", "float_cycle", { direction = "left" })
+bind("ctrl+alt+right", "float_cycle", { direction = "right" })
 bind("ctrl+alt+up", "pane.focus.up")
 bind("ctrl+alt+down", "pane.focus.down")
 bind("ctrl+alt+v", "pane.split.right")

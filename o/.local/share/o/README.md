@@ -16,8 +16,8 @@ The checked-in config and built-in defaults contain exactly these shortcuts:
 | --- | --- | --- |
 | Ctrl+1 | `claude(opus)` | Claude default |
 | Ctrl+2 | `claude(fable)` | Claude default |
-| Ctrl+3 | `codex(sol)` (`gpt-6.1-sol`) | xhigh |
-| Ctrl+4 | `codex(astra)` (`gpt-6-astra`) | max |
+| Ctrl+3 | `codex(sol)` (`gpt-6.2-sol`) | xhigh |
+| Ctrl+4 | `codex(astra)` (`gpt-6.2-astra`) | max |
 
 Codex uses `--yolo`, with normal and plan-mode effort both pinned. Shift+Tab
 cycles through the four agents. Claude profiles remain available with Ctrl+N.
