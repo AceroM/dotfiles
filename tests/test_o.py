@@ -74,6 +74,18 @@ class PublicOTests(unittest.TestCase):
         wrapped = self.run_o("--snapshot", "80x24", "--keys", "<C-4><BackTab>")
         self.assertIn("claude(opus) >", wrapped.stdout)
 
+    def test_ctrl_s_saves_clears_and_reopens_a_draft(self):
+        text = "save this prompt for later"
+        cleared = self.run_o("--snapshot", "80x24", "--keys", f"{text}<C-s>")
+        self.assertEqual(cleared.returncode, 0, cleared.stderr)
+        self.assertIn("claude(opus) >\n", cleared.stdout)
+        self.assertIn("saved as a draft", cleared.stdout)
+        self.assertNotIn(text, cleared.stdout)
+        reopened = self.run_o("--snapshot", "80x24", "--keys", f"{text}<C-s><C-g>e")
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        self.assertIn(f"claude(opus) ◇ {text}", reopened.stdout)
+        self.assertNotIn("sent:", reopened.stderr)
+
     def test_no_network_dependencies_or_account_commands(self):
         deps = subprocess.run(["go", "list", "-deps", "."], cwd=SOURCE,
                               capture_output=True, text=True, timeout=60)

@@ -80,8 +80,9 @@ Slash presets (for every agent, stored as plain Markdown):
   Unknown slash commands go to the agent; //name sends literal /name, bypassing o.
   Presets contain text, expand once, and travel with their directory, independent of drafts.
 Drafts (local, per Rex session, in ~/.local/state/o/drafts.json):
-  ^s keeps the prompt as a draft, saved as you type from then on (the prompt reads ◇);
-  esc leaves it for later, ⏎ sends it (from the folder it was written in) and it goes
+  ^s saves the prompt as a draft and clears the input; ^g finds it again.
+  Editing a draft (◇) saves as you type; ^s or esc leaves it for later,
+  ⏎ sends it (from the folder it was written in) and it goes
   ^g goes through this session's drafts: j k move · ⏎ sends (^⏎ ^o and goes there) ·
   e (l, r) edits · x ; deletes · u brings it back · d a new one · esc back to the prompt.
   The selected draft's images show over the list, small (Kitty graphics; O_IMAGES=0 off);

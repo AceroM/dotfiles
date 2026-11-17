@@ -6,8 +6,8 @@
 // text, its file listed at the end of what's sent; it isn't drawn. ⌥c copies
 // the text without them, its spaces and blank lines tidied.
 //
-// Drafts: ^s keeps the prompt as one, saved as it's written from then on
-// (esc leaves it for later, ⏎ sends it and it goes); ^g goes through this
+// Drafts: ^s saves the prompt as one and clears the input; editing a draft
+// saves as it's written (esc leaves it, ⏎ sends it and it goes). ^g goes through this
 // session's drafts, a list in the prompt's place with al's keys: j k, ⏎
 // sends, e edits, x deletes, u brings it back, d a new one. ⇧↑ ⇧↓ mark
 // drafts (space one, a all): ⏎ then sends the marked ones as one prompt, a
@@ -936,7 +936,7 @@ func (a *App) key(k tui.Key) Act {
 		a.leaveDraft()
 	case ch('d') && ctrl && a.Field.Text == "":
 		return ActQuit
-	// ^s keeps the prompt as a draft; ^g goes through the drafts.
+	// ^s saves and leaves the prompt as a draft; ^g goes through the drafts.
 	case ch('s') && ctrl:
 		a.keepAsDraft()
 	case ch('g') && ctrl:
@@ -1446,36 +1446,32 @@ func (a *App) saveDraft() {
 	a.storeDraft(d)
 }
 
-// keepAsDraft is ^s: the prompt becomes a draft, saved as it's written from now on.
+// keepAsDraft is ^s: save the prompt as a draft and leave it for later.
 func (a *App) keepAsDraft() {
-	if a.Editing != nil {
-		a.saveDraft()
-		a.Say("it's a draft already: saved as you type · esc keeps it for later", true)
-		return
-	}
+	d, editing := a.current()
 	if strings.TrimSpace(a.Field.Text) == "" {
-		a.Say("nothing written to keep yet", false)
+		if editing {
+			a.leaveDraft()
+		} else {
+			a.Say("nothing written to keep yet", false)
+		}
 		return
 	}
-	a.reloadDrafts()
-	ws, space := a.scopeOf()
-	id := drafts.NewID()
-	text := a.Field.Text
-	images := append([]string(nil), a.Images...)
-	if a.Live {
-		images = drafts.KeepImages(id, text, a.Images)
+	if !editing {
+		a.reloadDrafts()
+		ws, space := a.scopeOf()
+		d = drafts.Draft{ID: drafts.NewID(), Workspace: ws, Space: space, Cwd: a.Cwd, Text: a.Field.Text, Images: append([]string(nil), a.Images...), Created: drafts.Now(), Kind: a.Current().Kind, Config: a.Current().Name, Plan: a.Plan}
 	}
-	d := drafts.Draft{ID: id, Workspace: ws, Space: space, Cwd: a.Cwd, Text: text, Images: images, Created: drafts.Now(), Kind: a.Current().Kind, Config: a.Current().Name, Plan: a.Plan}
+	if a.Live {
+		d.Images = drafts.KeepImages(d.ID, d.Text, d.Images)
+	}
 	if !a.storeDraft(d) {
 		return
 	}
-	before := a.Images
-	a.Images = append([]string(nil), images...)
-	a.imagesMoved(before, a.Images)
-	e := d.Clone()
-	a.Editing = &e
-	a.fromList, a.histAt, a.draft = false, -1, nil
-	a.Say("saved as a draft · esc keeps it for later · ^g goes through them", true)
+	a.imagesMoved(a.Images, d.Images)
+	a.histAt, a.draft = -1, nil
+	a.unbind(d.ID)
+	a.Say("saved as a draft · ^g goes through them", true)
 }
 
 // openList is ^g: go through this session's drafts.

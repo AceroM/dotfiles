@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -237,20 +239,19 @@ func TestUpAndDownGoThroughWhatWasSent(t *testing.T) {
 func TestCtrlSKeepsADraftAndCtrlGGoesThroughThem(t *testing.T) {
 	a := newApp("fix the header")
 	ch(a, 's', ctrl)
-	if len(a.Drafts) != 1 {
-		t.Fatal(a.Drafts)
-	}
-	typeIn(a, " now")
-	a.saveDraft()
-	if a.Drafts[0].Text != "fix the header now" {
-		t.Fatal(a.Drafts[0].Text)
-	}
-	if press(a, tui.KeyEsc, 0, 0) || a.Field.Text != "" || a.Editing != nil || len(a.Drafts) != 1 {
-		t.Fatal("esc")
+	if len(a.Drafts) != 1 || a.Drafts[0].Text != "fix the header" || a.Field.Text != "" || a.Editing != nil || a.List != -1 {
+		t.Fatal(a.Drafts, a.Field.Text, a.Editing, a.List)
 	}
 	typeIn(a, "second")
+	a.saveDraft()
+	if a.Drafts[0].Text != "fix the header" {
+		t.Fatal("new input changed the saved draft")
+	}
 	ch(a, 's', ctrl)
-	press(a, tui.KeyEsc, 0, 0)
+	ch(a, 's', ctrl)
+	if len(a.Drafts) != 2 || a.Field.Text != "" || a.Editing != nil || a.Toast == nil || a.Toast.OK {
+		t.Fatal("saving an empty prompt created a draft", a.Drafts, a.Toast)
+	}
 	typeIn(a, "being written")
 	ch(a, 'g', ctrl)
 	if a.List != 0 {
@@ -262,12 +263,12 @@ func TestCtrlSKeepsADraftAndCtrlGGoesThroughThem(t *testing.T) {
 	}
 	ch(a, 'j', 0)
 	ch(a, 'e', 0)
-	if a.Field.Text != "fix the header now" || a.List != -1 {
+	if a.Field.Text != "fix the header" || a.List != -1 {
 		t.Fatal(a.Field.Text)
 	}
 	typeIn(a, "!")
-	press(a, tui.KeyEsc, 0, 0)
-	if a.List != 1 || a.Drafts[1].Text != "fix the header now!" {
+	ch(a, 's', ctrl)
+	if a.List != 1 || a.Drafts[1].Text != "fix the header!" || len(a.Drafts) != 2 || a.Editing != nil || a.Field.Text != "" {
 		t.Fatal(a.List, a.Drafts[1].Text)
 	}
 	press(a, tui.KeyEsc, 0, 0)
@@ -276,18 +277,71 @@ func TestCtrlSKeepsADraftAndCtrlGGoesThroughThem(t *testing.T) {
 	}
 }
 
+func TestCtrlSSavesImagesAndPlanBeforeClearing(t *testing.T) {
+	a := newApp("look ")
+	ch(a, '3', ctrl)
+	a.Plan = true
+	a.Attach("/one.png")
+	text := a.Field.Text
+	ch(a, 's', ctrl)
+	if a.Field.Text != "" || len(a.Images) != 0 || a.Plan || a.Editing != nil || len(a.Showing()) != 0 {
+		t.Fatal("composer was not cleared", a.Field.Text, a.Images, a.Plan)
+	}
+	d := a.Drafts[0]
+	if d.Text != text || !reflect.DeepEqual(d.Images, []string{"/one.png"}) || !d.Plan || d.Config != "codex(sol)" {
+		t.Fatal(d)
+	}
+	ch(a, 'g', ctrl)
+	ch(a, 'e', 0)
+	if a.Field.Text != d.Text || !reflect.DeepEqual(a.Images, d.Images) || !a.Plan || a.Editing.ID != d.ID {
+		t.Fatal("draft did not reopen intact")
+	}
+}
+
+func TestCtrlSLeavesInputIntactWhenSavingFails(t *testing.T) {
+	for _, editing := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new", true: "editing"}[editing], func(t *testing.T) {
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			if err := os.WriteFile(filepath.Join(state, "o"), []byte("blocks the state directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			a := newApp("keep this")
+			if editing {
+				ch(a, 's', ctrl)
+				ch(a, 'g', ctrl)
+				ch(a, 'e', 0)
+				typeIn(a, " edit")
+			}
+			a.Live = true
+			a.scope = &[2]string{"session:test", "test"}
+			text := a.Field.Text
+			ch(a, 's', ctrl)
+			if a.Field.Text != text || a.List != -1 || (a.Editing != nil) != editing || a.Toast == nil || a.Toast.OK || !strings.Contains(a.Toast.Msg, "couldn't save the draft") {
+				t.Fatal("failed save lost the input or its error", a.Field.Text, a.Editing, a.Toast)
+			}
+			if err := os.Remove(filepath.Join(state, "o")); err != nil {
+				t.Fatal(err)
+			}
+			ch(a, 's', ctrl)
+			if a.Field.Text != "" || a.Editing != nil || a.Toast == nil || !a.Toast.OK || len(drafts.Load()) != 1 || drafts.Load()[0].Text != text {
+				t.Fatal("retry did not save and clear the input", a.Field.Text, a.Toast, drafts.Load())
+			}
+		})
+	}
+}
+
 func TestADraftIsSentDeletedAndBroughtBack(t *testing.T) {
 	a := newApp("one")
 	ch(a, 'p', ctrl)
 	ch(a, 's', ctrl)
-	press(a, tui.KeyEsc, 0, 0)
 	typeIn(a, "two")
 	ch(a, 's', ctrl)
+	ch(a, 'g', ctrl)
 	press(a, tui.KeyEnter, 0, 0)
 	if str(a.WouldSend) != "two" || len(a.Drafts) != 1 || a.Field.Text != "" {
 		t.Fatal(str(a.WouldSend))
 	}
-	ch(a, 'g', ctrl)
 	ch(a, 'x', 0)
 	if len(a.Drafts) != 0 || a.List != -1 {
 		t.Fatal(a.List)
@@ -310,6 +364,8 @@ func TestAnEmptiedDraftGoesAndHistoryStaysOutOfOne(t *testing.T) {
 	press(a, tui.KeyEnter, 0, 0)
 	typeIn(a, "x")
 	ch(a, 's', ctrl)
+	ch(a, 'g', ctrl)
+	ch(a, 'e', 0)
 	press(a, tui.KeyUp, 0, 0)
 	if a.Field.Text != "x" {
 		t.Fatal(a.Field.Text)
@@ -364,7 +420,6 @@ func TestOptionCCopiesTheTextWithoutItsImages(t *testing.T) {
 	}
 	a = newApp("a draft  [Image #1]")
 	ch(a, 's', ctrl)
-	press(a, tui.KeyEsc, 0, 0)
 	ch(a, 'g', ctrl)
 	ch(a, 'c', alt)
 	if str(a.WouldCopy) != "a draft" || a.List != 0 {
@@ -509,7 +564,6 @@ func TestCtrlNGoesThroughTheClaudeProfiles(t *testing.T) {
 	if a.Drafts[0].Config != "claude(opus)" {
 		t.Fatal(a.Drafts[0].Config)
 	}
-	press(a, tui.KeyEsc, 0, 0)
 	ch(a, 'n', ctrl)
 	a.Layout(80, 30)
 	if a.Prefix() != "claude(opus) >" {
@@ -524,6 +578,8 @@ func TestADraftKeepsItsConfiguration(t *testing.T) {
 	if a.Drafts[0].Kind != "claude" || a.Drafts[0].Config != "claude(fable)" {
 		t.Fatal(a.Drafts[0])
 	}
+	ch(a, 'g', ctrl)
+	ch(a, 'e', 0)
 	a.Layout(80, 30)
 	if a.Prefix() != "claude(fable) ◇" {
 		t.Fatal(a.Prefix())
@@ -552,7 +608,6 @@ func withDrafts(texts ...string) *App {
 	for _, s := range texts {
 		typeIn(a, s)
 		ch(a, 's', ctrl)
-		press(a, tui.KeyEsc, 0, 0)
 	}
 	return a
 }
@@ -662,7 +717,6 @@ func TestTheSelectedDraftsImagesGoOverTheList(t *testing.T) {
 	a.Attach("/wide.png")
 	a.Attach("/square.png")
 	ch(a, 's', ctrl)
-	press(a, tui.KeyEsc, 0, 0)
 	a.Gfx = &gfx.Gfx{CellW: 10, CellH: 20}
 	a.SetPic("/wide.png", 900, 450)
 	a.SetPic("/square.png", 90, 90)
@@ -720,6 +774,8 @@ func TestADraftsImagesGoOverItsTextInOneRow(t *testing.T) {
 		t.Fatal(a.Pictures)
 	}
 	ch(a, 's', ctrl)
+	ch(a, 'g', ctrl)
+	ch(a, 'e', 0)
 	a.Toast = nil
 	a.Layout(100, 40)
 	if a.Pictures.Height != 9 || !reflect.DeepEqual(thumbsOf(a.Pictures.Thumbs), [][4]int{{0, 32, 8, 1}, {34, 16, 8, 2}}) {

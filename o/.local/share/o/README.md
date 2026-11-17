@@ -70,6 +70,14 @@ through to the agent; `//review` sends literal `/review`.
 No preset files are created until you save one. Presets belong to their directory
 and are independent of drafts and the agents' own commands.
 
+## Drafts
+
+Ctrl+S saves the prompt as a local draft and clears the composer for the next
+prompt. Ctrl+G opens this session's drafts; `e` edits the selected draft, which
+saves as you type (the prompt reads ◇). Ctrl+S saves and leaves that draft, as
+Esc does, returning to the list or the prompt set aside for it. Enter sends the
+draft and removes it. If saving fails, Ctrl+S keeps the input and shows the error.
+
 ## Checks
 
 ```sh
