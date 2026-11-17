@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# jn — your open PRs on the left with ticks; on the right, the net diff of the
+# ticked ones: all of them merged onto the default branch, against that branch.
+# It's jv's net mode (`jv --net`): same diff view, keys and viewed marks.
+#   jn                 this repo's open PRs; the current branch's stack starts ticked
+#   jn 123 456         tick those PRs instead (anyone's)
+#   jn juno            narrow the list with GitHub search terms, as in jp
+# Inside: space ticks a PR, S its whole stack, a every PR listed. jn -h for the rest.
+set -euo pipefail
+
+script="${BASH_SOURCE[0]}"
+while [[ -L "$script" ]]; do
+  dir="$(cd -P -- "$(dirname -- "$script")" && pwd)"
+  script="$(readlink "$script")"
+  [[ "$script" = /* ]] || script="$dir/$script"
+done
+exec "$(cd -P -- "$(dirname -- "$script")" && pwd)/jv" --net "$@"

@@ -1,17 +1,14 @@
 [package]
-name = "ct"
+name = "tg"
 version = "0.1.0"
 edition = "2021"
-description = "Chrome tabs (ct) and Chrome tab groups (tg): centered lists for closing tabs and removing tab groups"
+description = "Chrome tab groups (tg): a centered list for removing tab groups"
 
-# What ct and tg share: the browser-use host, the colors (Rex's theme when inside Rex), text helpers.
+# The browser-use host, the colors (Rex's theme when inside Rex), text helpers. (ct shared them
+# until it moved to Go in ../ct.)
 [lib]
 name = "tabkit"
 path = "src/lib.rs"
-
-[[bin]]
-name = "ct"
-path = "src/main.rs"
 
 [[bin]]
 name = "tg"

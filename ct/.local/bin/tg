@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tg — chrome tab groups: every tab group, open or closed, with its tabs; remove the ones you don't need (Rust).
-# Source lives in ../share/ct (tg is a second binary of the ct crate); this launcher builds it on
+# Source lives in ../share/tg (ct, its Go sibling, lives in ../share/ct); this launcher builds it on
 # first run and again whenever a source file is newer than the binary.
 set -euo pipefail
 
@@ -10,7 +10,7 @@ while [[ -L "$script" ]]; do
   script="$(readlink "$script")"
   [[ "$script" = /* ]] || script="$dir/$script"
 done
-app_dir="$(cd -- "$(cd -P -- "$(dirname -- "$script")" && pwd)/../share/ct" && pwd)"
+app_dir="$(cd -- "$(cd -P -- "$(dirname -- "$script")" && pwd)/../share/tg" && pwd)"
 bin="$app_dir/target/release/tg"
 
 if [[ ! -x "$bin" ]] || [[ -n "$(find -L "$app_dir/src" "$app_dir/Cargo.toml" "$app_dir/Cargo.lock" -newer "$bin" -print -quit 2>/dev/null)" ]]; then

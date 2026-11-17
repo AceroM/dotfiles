@@ -264,17 +264,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ct"
-version = "0.1.0"
-dependencies = [
- "core-foundation",
- "ratatui",
- "rusty-leveldb",
- "serde_json",
- "unicode-width",
-]
-
-[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1568,6 +1557,17 @@ dependencies = [
  "wezterm-dynamic",
  "wezterm-input-types",
  "winapi",
+]
+
+[[package]]
+name = "tg"
+version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "ratatui",
+ "rusty-leveldb",
+ "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

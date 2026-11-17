@@ -116,6 +116,8 @@ pub struct Pr {
     pub updated: i64,
     pub head: String,
     pub base: String,
+    /// The head branch's commit when the search ran (jn merges it).
+    pub head_oid: String,
     pub author: String,
     pub adds: usize,
     pub dels: usize,
@@ -149,7 +151,7 @@ impl Pr {
     }
 }
 
-const FIELDS: &str = "number title state isDraft url updatedAt headRefName baseRefName \
+pub const FIELDS: &str = "number title state isDraft url updatedAt headRefName baseRefName headRefOid \
     additions deletions changedFiles reviewDecision author { login } repository { nameWithOwner }";
 const CI: &str = "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 
@@ -182,7 +184,7 @@ pub fn list(q: &Query, ci: bool) -> Result<Vec<Pr>, String> {
     Ok(nodes.iter().filter_map(|n| parse_pr(n, ci)).collect())
 }
 
-fn parse_pr(n: &Value, ci: bool) -> Option<Pr> {
+pub fn parse_pr(n: &Value, ci: bool) -> Option<Pr> {
     let s = |k: &str| n[k].as_str().unwrap_or("").to_string();
     let u = |k: &str| n[k].as_u64().unwrap_or(0) as usize;
     let number = n["number"].as_u64()? as u32;
@@ -197,6 +199,7 @@ fn parse_pr(n: &Value, ci: bool) -> Option<Pr> {
         updated: parse_time(n["updatedAt"].as_str().unwrap_or("")).unwrap_or(0),
         head: s("headRefName"),
         base: s("baseRefName"),
+        head_oid: s("headRefOid"),
         author: n["author"]["login"].as_str().unwrap_or("ghost").to_string(),
         adds: u("additions"),
         dels: u("deletions"),

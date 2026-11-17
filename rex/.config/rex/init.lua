@@ -708,8 +708,8 @@ rex.bind("cmd+y", "pane.copy_id")
 -- cmd+alt+n in the viewer closes it (as esc, q or Enter do), and the pane it
 -- was opened over gets the focus back.
 --
--- cmd+g is the same float with shell=1: always a new shell, never the images
--- or the viewer's close, whatever pane it's pressed in. cmd+e (o=1) is that
+-- cmd+t and cmd+g are the same float with shell=1: always a new shell, never
+-- the images or the viewer's close, whatever pane they're pressed in. cmd+e (o=1) is that
 -- with o running in it, ready for a prompt in the pane's directory; ⏎ sends
 -- and o stays for the next one, and quitting o (esc, ^c or ^d on an empty
 -- prompt) closes the float.
@@ -799,8 +799,8 @@ rex.action{
   end,
 }
 rex.bind("cmd+alt+n", "float_here")
--- cmd+t too (and fn+n, keys.lua): new tabs are cmd+n.
-rex.bind("cmd+t", "float_here")
+-- fn+n too (keys.lua). New tabs are cmd+n.
+rex.bind("cmd+t", "float_here", { shell = true })
 -- cmd+m minimizes the focused float to the taskbar and brings it back, as
 -- Rex's own cmd+alt+m does. It takes over macOS's Minimize.
 rex.bind("cmd+m", "pane.minimize_floating")

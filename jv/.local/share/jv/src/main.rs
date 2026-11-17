@@ -6,6 +6,7 @@ mod doc;
 mod edit;
 mod fuzzy;
 mod highlight;
+mod net;
 mod prs;
 mod snapshot;
 mod source;
@@ -44,6 +45,7 @@ usage:
   jv -c 'git diff main...'                     any command that prints a diff
   git diff | jv                                a diff on stdin
   jv --prs [search terms]                      your recent PRs beside the diff (`jp`; jp -h)
+  jv --net [PR… | search terms]                tick open PRs, see their net diff (`jn`; jn -h)
   jv --flat [PR | …]                           the diff alone, no file tree (`jf`)
 
 options:
@@ -78,6 +80,8 @@ struct Cli {
     out: Option<String>,
     /// `--prs` (jp): the PR list on the left; `gh` holds its search words.
     prs: bool,
+    /// `--net` (jn): jp's list with ticks, and the ticked PRs' net diff.
+    net: bool,
     /// `--flat` (jf): no file tree.
     flat: bool,
 }
@@ -97,16 +101,18 @@ fn parse_cli() -> Result<Cli, String> {
         keys: String::new(),
         out: None,
         prs: false,
+        net: false,
         flat: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
-                print!("{}", if c.prs { prs::HELP } else { HELP });
+                print!("{}", if c.net { net::HELP } else if c.prs { prs::HELP } else { HELP });
                 std::process::exit(0);
             }
             "--prs" => c.prs = true,
+            "--net" => c.net = true,
             "--flat" | "--no-tree" => c.flat = true,
             "--themes" => {
                 for n in highlight::theme_names() {
@@ -168,6 +174,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if cli.net {
+        return run_net(cli, hl);
+    }
     if cli.prs {
         return run_prs(cli, hl);
     }
@@ -354,6 +363,84 @@ fn run_prs(cli: Cli, hl: highlight::Hl) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("jp: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// jn: list the open PRs (and any named ones), tick the asked-for set (or
+/// the current branch's stack), and merge it in the background.
+fn run_net(cli: Cli, hl: highlight::Hl) -> ExitCode {
+    if cli.cmd.is_some() || cli.git.is_some() || cli.local {
+        eprintln!("jn: -c, -g and -l are jv's; jn shows PRs");
+        return ExitCode::from(2);
+    }
+    let args = match net::Args::parse(&cli.gh) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("jn: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let q = args.query.clone();
+    let repo = q.repo.clone().unwrap_or_default();
+    let chatty = io::stderr().is_terminal() && cli.snapshot.is_none();
+    if chatty {
+        eprint!("jn: {}…", q.label());
+    }
+    // The search, the PRs named by number and origin's default branch, at once.
+    let base = std::thread::spawn(net::default_branch);
+    let nums = args.numbers.clone();
+    let named = std::thread::spawn(move || net::by_numbers(&repo, &nums));
+    let found = prs::list(&q, false);
+    let named = named.join().unwrap_or_else(|_| Err("the PR lookup stopped".into()));
+    let base = base.join().ok().and_then(Result::ok);
+    if chatty {
+        eprint!("\r\x1b[2K");
+    }
+    let (mut items, named) = match (found, named) {
+        (Ok(f), Ok(n)) => (f, n),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("jn: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Named PRs the search didn't find (someone else's, or past -n) go first.
+    for pr in named.into_iter().rev() {
+        if !items.iter().any(|x| x.number == pr.number) {
+            items.insert(0, pr);
+        }
+    }
+    if items.is_empty() {
+        eprintln!("jn: no open PRs found ({})", q.search());
+        return ExitCode::SUCCESS;
+    }
+    let ticked: std::collections::BTreeSet<u32> = if !args.numbers.is_empty() {
+        args.numbers.iter().copied().collect()
+    } else {
+        let trunk = base.as_ref().map_or("main", |b| b.name.as_str());
+        app::current_branch()
+            .and_then(|b| items.iter().position(|x| x.head == b))
+            .map(|i| app::stack_of(&items, i, trunk).into_iter().collect())
+            .unwrap_or_default()
+    };
+    let viewed = if cli.snapshot.is_some() { Viewed::ephemeral() } else { Viewed::load() };
+    let opts = Opts {
+        split: cli.split,
+        wrap: cli.wrap,
+        show_tests: cli.tests.unwrap_or(false),
+        popup: cli.popup,
+        flat: false,
+    };
+    let mut app = App::new(Source::Gh(Vec::new()), "", hl, background(), opts, viewed);
+    app.start_net(q, items, base, ticked);
+    if let Some((w, h)) = cli.snapshot {
+        return snapshot::run(app, w, h, &cli.keys, cli.out.as_deref());
+    }
+    match run(app) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("jn: {e}");
             ExitCode::FAILURE
         }
     }

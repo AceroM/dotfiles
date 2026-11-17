@@ -12,6 +12,11 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{Act, Anchor, App, Focus, Left, Mode};
+
+/// Digits in a number (the list's line-number column, as ui.rs draws it).
+fn digits(n: usize) -> usize {
+    n.max(1).ilog10() as usize + 1
+}
 use crate::diff;
 use crate::prs::{self, Pr, Query};
 use crate::source::{self, PrMeta, Source};
@@ -151,12 +156,15 @@ impl App {
 
     /// Background work the event loop should wake up for sooner.
     pub fn pr_fetching(&self) -> bool {
-        self.prs.as_ref().is_some_and(|p| !p.inflight.is_empty() || p.list_rx.is_some())
+        self.prs.as_ref().is_some_and(|p| !p.inflight.is_empty() || p.list_rx.is_some()) || self.net_busy()
     }
 
     /// What the diff pane says instead of a diff: the PR is still loading, or
     /// gh failed.
     pub fn pr_placeholder(&self) -> Option<String> {
+        if self.net.is_some() {
+            return self.net_placeholder();
+        }
         let p = self.prs.as_ref()?;
         let pr = p.cur_item()?;
         match p.cache.get(&pr.key()) {
@@ -180,6 +188,10 @@ impl App {
     /// `poll_prs` does, once per frame, so holding j parses only the PR it
     /// stops on.
     fn apply_pr(&mut self) {
+        if self.net.is_some() {
+            self.apply_net();
+            return;
+        }
         let Some(p) = self.prs.as_ref() else { return };
         let Some(pr) = p.cur_item().cloned() else { return };
         let key = pr.key();
@@ -293,7 +305,7 @@ impl App {
         }
     }
 
-    fn spawn_list(&mut self, announce: bool) {
+    pub(super) fn spawn_list(&mut self, announce: bool) {
         let Some(p) = self.prs.as_mut() else { return };
         if p.list_rx.is_some() {
             return;
@@ -309,8 +321,8 @@ impl App {
 
     /// Take in finished fetches. Returns true when a redraw is needed.
     pub fn poll_prs(&mut self) -> bool {
-        let Some(p) = self.prs.as_mut() else { return false };
-        let mut dirty = false;
+        let mut dirty = self.poll_net();
+        let Some(p) = self.prs.as_mut() else { return dirty };
         while let Ok((key, got)) = p.rx.try_recv() {
             p.inflight.remove(&key);
             p.cache.insert(key, got);
@@ -351,7 +363,14 @@ impl App {
     /// A fresh search result: the new order and data (CI, reviews), the same
     /// PR still selected. A PR updated since may have new commits, so its
     /// diff is fetched again.
-    fn merge_list(&mut self, items: Vec<Pr>) {
+    fn merge_list(&mut self, mut items: Vec<Pr>) {
+        // jn: a ticked PR the search doesn't return (named on the command
+        // line, or merged since) stays in the list, and in the net diff.
+        if let (Some(n), Some(p)) = (self.net.as_ref(), self.prs.as_ref()) {
+            let gone = p.items.iter().filter(|x| n.ticked.contains(&x.number) && !items.iter().any(|y| y.number == x.number));
+            let keep: Vec<Pr> = gone.cloned().collect();
+            items.splice(0..0, keep);
+        }
         let Some(p) = self.prs.as_mut() else { return };
         let old: HashMap<String, i64> = p.items.iter().map(|x| (x.key(), x.updated)).collect();
         for it in &items {
@@ -375,7 +394,11 @@ impl App {
         loop {
             self.poll_prs();
             let Some(p) = self.prs.as_ref() else { return };
-            let waiting = p.cur_key().is_some_and(|k| !p.cache.contains_key(&k)) || p.list_rx.is_some();
+            let waiting = if self.net.is_some() {
+                self.net_busy() || p.list_rx.is_some()
+            } else {
+                p.cur_key().is_some_and(|k| !p.cache.contains_key(&k)) || p.list_rx.is_some()
+            };
             if !waiting || start.elapsed() > Duration::from_secs(30) {
                 return;
             }
@@ -403,7 +426,7 @@ impl App {
         p.top = p.top.min(p.shown.len().saturating_sub(h));
     }
 
-    fn pr_set(&mut self, i: usize) {
+    pub(super) fn pr_set(&mut self, i: usize) {
         let Some(p) = self.prs.as_mut() else { return };
         if p.shown.is_empty() {
             return;
@@ -412,7 +435,7 @@ impl App {
         self.ensure_pr_visible();
     }
 
-    fn pr_move(&mut self, d: isize) {
+    pub(super) fn pr_move(&mut self, d: isize) {
         let Some(p) = self.prs.as_ref() else { return };
         self.pr_set((p.cur as isize + d).max(0) as usize);
     }
@@ -536,6 +559,9 @@ impl App {
     /// jp's keys, ahead of jv's. None leaves the key to jv.
     pub(super) fn key_prs(&mut self, k: KeyEvent, n: isize, count: Option<usize>) -> Option<Act> {
         self.prs.as_ref()?;
+        if let Some(act) = self.key_net(k, n) {
+            return Some(act);
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         // Anywhere: the list's own keys for when it isn't focused (or shown).
         match k.code {
@@ -607,6 +633,13 @@ impl App {
             // A click picks a PR; a click on the picked one opens its files.
             MouseEventKind::Down(MouseButton::Left) => {
                 let i = p.top + (y - a.y) as usize / 2;
+                // jn: the tick column (where jp has the state dot) ticks.
+                let nw = digits(p.shown.len()).max(2) as u16;
+                if self.net.is_some() && (x == a.x + nw + 2 || x == a.x + nw + 1) {
+                    self.focus = Focus::Tree;
+                    self.net_click_tick(i);
+                    return true;
+                }
                 let again = i == p.cur && self.focus == Focus::Tree;
                 self.focus = Focus::Tree;
                 if i < p.shown.len() {

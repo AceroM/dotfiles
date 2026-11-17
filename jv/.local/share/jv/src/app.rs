@@ -26,7 +26,9 @@ use crate::tree::{self, RowKind};
 use crate::ui;
 use crate::viewed::Viewed;
 
+mod netpane;
 mod prpane;
+pub use netpane::{current_branch, stack_of, NetPane};
 pub use prpane::PrPane;
 
 /// Files with more changed lines than this start folded, like GitHub's
@@ -237,6 +239,8 @@ pub struct App {
     /// jp (`--prs`): the PR list, and which of it or the file tree is on the left.
     pub prs: Option<PrPane>,
     pub left: Left,
+    /// jn (`--net`): ticks on jp's list, and their net diff on the right.
+    pub net: Option<NetPane>,
 }
 
 fn digits(n: u32) -> usize {
@@ -310,6 +314,7 @@ impl App {
             bg_rx,
             prs: None,
             left: Left::Files,
+            net: None,
         };
         app.rebuild_tree();
         app.rebuild_doc();
@@ -992,8 +997,15 @@ impl App {
 
     /// `O`: this file, at the top line on screen, in the PR's diff on GitHub.
     fn open_github(&mut self) {
-        let Some(url) = self.meta.as_ref().map(|m| m.url.clone()).filter(|u| !u.is_empty()) else {
-            self.flash(if self.meta_rx.is_some() { "still loading the PR…" } else { "O needs a PR (jv <number>)" });
+        let net_url = self.cur_file().and_then(|f| self.net_pr_url(&self.files[f].path));
+        let Some(url) = self.meta.as_ref().map(|m| m.url.clone()).filter(|u| !u.is_empty()).or(net_url) else {
+            self.flash(if self.meta_rx.is_some() {
+                "still loading the PR…"
+            } else if self.net.is_some() {
+                "no PR in the net diff changes this file"
+            } else {
+                "O needs a PR (jv <number>)"
+            });
             return;
         };
         let Some((f, line, old)) = self.first_code_pos() else { return };

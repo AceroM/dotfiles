@@ -175,10 +175,36 @@ fn top_bar(app: &App, buf: &mut Buffer) {
     let rx = r.right().saturating_sub(rw as u16);
     let lmax = rx.saturating_sub(2);
 
-    let name = if app.prs.is_some() { "jp" } else if app.flat { "jf" } else { "jv" };
+    let name = if app.net.is_some() {
+        "jn"
+    } else if app.prs.is_some() {
+        "jp"
+    } else if app.flat {
+        "jf"
+    } else {
+        "jv"
+    };
     let mut x = put(buf, r.x + 1, r.y, lmax, name, fg(p.accent).add_modifier(Modifier::BOLD));
     x += 2;
-    if let Some(m) = &app.meta {
+    if let Some((what, order)) = app.net_summary() {
+        x = put(buf, x, r.y, lmax, &what, fg(p.bright).add_modifier(Modifier::BOLD));
+        let shown = app.net_shown();
+        if let Some(n) = shown.filter(|n| !n.conflicts.is_empty() || !n.skipped.is_empty()) {
+            let mut t = Vec::new();
+            if !n.conflicts.is_empty() {
+                t.push(format!("{} conflicting", n.conflicts.len()));
+            }
+            if !n.skipped.is_empty() {
+                t.push(format!("{} left out", n.skipped.len()));
+            }
+            x = put(buf, x + 2, r.y, lmax, &format!("⚠ {}", t.join(" · ")), fg(p.red));
+        }
+        x += 1;
+        for num in order {
+            let bad = shown.is_some_and(|n| n.conflicted(num).is_some() || n.skip_reason(num).is_some());
+            x = put(buf, x + 1, r.y, lmax, &format!("#{num}"), fg(if bad { p.red } else { p.muted }));
+        }
+    } else if let Some(m) = &app.meta {
         if let Some(pr) = app.prs.as_ref().filter(|p| p.all_repos()).and_then(|p| p.cur_item()) {
             x = put(buf, x, r.y, lmax, pr.repo.rsplit('/').next().unwrap_or(&pr.repo), fg(p.muted));
         }
@@ -389,7 +415,11 @@ fn left_head(app: &App, buf: &mut Buffer) {
     fill(buf, r, p.panel);
     let max = r.right().saturating_sub(1);
     if app.left == Left::Prs {
-        let n = if pane.filter_on() { format!("{}/{}", pane.shown.len(), pane.items.len()) } else { pane.items.len().to_string() };
+        let mut n = if pane.filter_on() { format!("{}/{}", pane.shown.len(), pane.items.len()) } else { pane.items.len().to_string() };
+        if let Some(net) = &app.net {
+            let t = pane.items.iter().filter(|x| net.ticked.contains(&x.number)).count();
+            n = format!("✓{t} · {n}");
+        }
         let right = if pane.refreshing() { format!("↻ {n}") } else { n };
         let rx = max.saturating_sub(right.width() as u16);
         let label = truncate(&pane.query.label(), rx.saturating_sub(r.x + 2) as usize);
@@ -400,6 +430,9 @@ fn left_head(app: &App, buf: &mut Buffer) {
     let mut x = put(buf, r.x + 1, r.y, max, "‹ PRs", fg(p.accent).add_modifier(Modifier::BOLD));
     if let Some(m) = &app.meta {
         x = put(buf, x + 2, r.y, max, &format!("#{}", m.number), fg(p.muted));
+    }
+    if let Some((what, _)) = app.net_summary() {
+        x = put(buf, x + 2, r.y, max, what.split(" onto ").next().unwrap_or(&what), fg(p.muted));
     }
     let n = app.visible.len();
     put(buf, x + 2, r.y, max, &format!("{n} file{}", if n == 1 { "" } else { "s" }), fg(p.dim));
@@ -452,13 +485,19 @@ fn pr_list(app: &App, buf: &mut Buffer) {
             (i.abs_diff(pane.cur), fg(p.dim))
         };
         put(buf, a.x + 1, y, max, &format!("{n:>nw$}"), nst);
-        let (g, gc) = pr_glyph(pr, p);
+        // jn: the state dot's column holds the tick instead (every PR there is open).
+        let ticked = app.net.as_ref().map(|n| n.ticked.contains(&pr.number));
+        let (g, gc) = match ticked {
+            Some(true) => ("✓", p.green),
+            Some(false) => ("·", p.dim),
+            None => pr_glyph(pr, p),
+        };
         let x = put(buf, a.x + nw as u16 + 2, y, max, g, fg(gc).add_modifier(Modifier::BOLD)) + 1;
         let viewed = app.pr_viewed(pr);
         let done = viewed.is_some_and(|(v, n)| n > 0 && v == n);
         let st = if cur {
             fg(p.bright).add_modifier(Modifier::BOLD)
-        } else if done {
+        } else if done || ticked == Some(false) {
             fg(p.muted)
         } else {
             fg(p.fg)
@@ -503,6 +542,20 @@ fn pr_info(app: &App, buf: &mut Buffer, x: u16, y: u16, max: u16, pr: &Pr, viewe
     }
     if let Some((v, n)) = viewed.filter(|&(v, _)| v > 0) {
         segs.push((if v == n { "✓ viewed".into() } else { format!("✓ {v}/{n}") }, p.green_dim));
+    }
+    if let Some(net) = app.net_shown() {
+        if let Some(f) = net.conflicted(pr.number) {
+            segs.insert(1, (format!("conflicts ×{}", f.len()), p.red));
+        } else if net.skip_reason(pr.number).is_some() {
+            segs.insert(1, ("left out".into(), p.red));
+        }
+    }
+    // jn: a ticked PR stacked on unticked ones brings their changes along.
+    if app.net.as_ref().is_some_and(|n| n.ticked.contains(&pr.number)) {
+        let k = app.net_below(pr).len();
+        if k > 0 {
+            segs.insert(1, (format!("+{k} below"), p.yellow));
+        }
     }
     let st = stats(pr.adds, pr.dels, p);
     let sw: usize = st.iter().map(|(s, _)| s.width()).sum();
@@ -588,6 +641,16 @@ fn file_header(app: &App, buf: &mut Buffer, r: Rect, f: usize) {
     let max = r.right();
 
     let mut right: Vec<(String, Style)> = Vec::new();
+    // jn: the PRs that change this file, and whether their merge left markers in it.
+    if let Some(net) = app.net_shown() {
+        if net.conflict_paths().contains(file.path.as_str()) {
+            right.push(("conflict".into(), fg(p.red).add_modifier(Modifier::BOLD)));
+        }
+        let by: Vec<String> = app.net_prs_for(&file.path).iter().map(|n| format!("#{n}")).collect();
+        if !by.is_empty() {
+            right.push((by.join(" "), fg(p.muted)));
+        }
+    }
     if file.is_test {
         right.push(("test".into(), fg(p.dim)));
     }
@@ -1147,6 +1210,24 @@ const PR_HELP: Section = (
     ],
 );
 
+/// jn's keys, first in the help instead of jp's.
+const NET_HELP: Section = (
+    "Net diff (jn)",
+    &[
+        ("space", "list: tick / untick a PR (then down one)"),
+        ("S", "list: tick / untick the PR's whole stack"),
+        ("a", "list: tick / untick every PR listed"),
+        ("j k", "list: move (the net diff stays put)"),
+        ("⏎ l", "list: the net diff's files in the tree"),
+        ("- ⌫ h", "files: back to the PR list"),
+        ("/", "list: filter (title, branch, #, draft…)"),
+        ("x", "list: mark the files the PR touches viewed"),
+        ("O", "list: the PR on GitHub · diff: the file in it"),
+        ("y Y", "list: copy the PR's URL · branch"),
+        ("r", "fetch, list and merge everything again"),
+    ],
+);
+
 /// The key that shows / hides test files: jf has t for it, jv and jp T.
 fn tests_key(app: &App) -> &'static str {
     if app.flat { "t" } else { "T" }
@@ -1171,7 +1252,9 @@ fn help_height(sections: &[Section]) -> usize {
 fn help(app: &App, buf: &mut Buffer, area: Rect) {
     let p = &app.pal;
     let mut first = HELP[0].to_vec();
-    if app.prs.is_some() {
+    if app.net.is_some() {
+        first.insert(0, NET_HELP);
+    } else if app.prs.is_some() {
         first.insert(0, PR_HELP);
     }
     let both = [first, HELP[1].to_vec()];
@@ -1185,7 +1268,9 @@ fn help(app: &App, buf: &mut Buffer, area: Rect) {
     if r.width < 30 || r.height < 6 {
         return;
     }
-    let title = if app.prs.is_some() {
+    let title = if app.net.is_some() {
+        "jn keys"
+    } else if app.prs.is_some() {
         "jp keys"
     } else if app.flat {
         "jf keys"
