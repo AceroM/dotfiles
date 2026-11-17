@@ -408,6 +408,54 @@ func TestStatusPickerSkipsTeamsWithoutTheState(t *testing.T) {
 	}
 }
 
+func TestCtrlDigitsSetStatus(t *testing.T) {
+	m, f := fixture(t)
+	// ^1 is Done in every team, though ENG's picker would call it 4.
+	m.cur = m.pos("e1")
+	press(m, "ctrl+1")
+	if m.picker != nil || get(m, "e1").State.ID != "e-done" {
+		t.Fatalf("^1 → Done at once: %+v", get(m, "e1").State)
+	}
+	press(m, "u")
+	if get(m, "e1").State.ID != "e-prog" {
+		t.Fatal("u undoes it")
+	}
+	press(m, "ctrl+3")
+	if get(m, "e1").State.ID != "e-todo" {
+		t.Fatalf("^3 → Todo: %+v", get(m, "e1").State)
+	}
+	// Marks across teams: ^2 is In Progress by name in ENG, Doing by type in OPS.
+	f.updates = nil
+	m.marks["e2"], m.marks["o2"] = true, true
+	press(m, "ctrl+2")
+	if get(m, "e2").State.ID != "e-prog" || get(m, "o2").State.ID != "o-doing" || len(m.marks) != 0 || len(f.updates) != 2 {
+		t.Fatalf("marks: %+v %+v %+v", get(m, "e2").State, get(m, "o2").State, f.updates)
+	}
+	// ^4 In Review only by name: OPS has none, so OPS-1 stays (not In Progress by type).
+	m.marks["e2"], m.marks["o1"] = true, true
+	press(m, "ctrl+4")
+	if get(m, "e2").State.ID != "e-review" || get(m, "o1").State.ID != "o-triage" {
+		t.Fatalf("review: %+v %+v", get(m, "e2").State, get(m, "o1").State)
+	}
+	if !m.msgBad || !strings.Contains(m.msg, "without “In Review”") {
+		t.Fatalf("flash: %q", m.msg)
+	}
+	// 2^6 cancels two from the cursor; ^8 and ^9 do nothing.
+	m.cur = m.pos("e1")
+	two := m.ids(m.cur, m.cur+2)
+	press(m, "2", "ctrl+6")
+	for _, id := range two {
+		if get(m, id).State.Type != "canceled" {
+			t.Fatalf("2^6 cancels two: %s is %+v", id, get(m, id).State)
+		}
+	}
+	n := len(f.updates)
+	press(m, "ctrl+8", "ctrl+9")
+	if len(f.updates) != n {
+		t.Fatal("^8 ^9 aren't slots")
+	}
+}
+
 func TestPickerKeys(t *testing.T) {
 	m, f := fixture(t)
 	press(m, "j", "c", "d")

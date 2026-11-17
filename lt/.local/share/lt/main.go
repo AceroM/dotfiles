@@ -31,6 +31,8 @@ move:
 
 change (the issue, a count from it, the visual range, or every marked issue):
   c                    status: 0-9 picks (triage 0, backlog 1, todo 2, …), j/k ⏎
+  ^1 ^2 ^3             status at once, in every team: done / in progress / todo
+  ^4-^7 ^0             in review, backlog, canceled, duplicate; triage
   p                    priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low
   A                    assignee: 0 nobody, 1 me, or type a name
   x ; dd               delete (Linear's trash; 3x: three)

@@ -666,6 +666,10 @@ func (m *model) key(k tea.KeyPressMsg) {
 		m.copyField("branch")
 	case "?":
 		m.help = true
+	default:
+		if d, ok := strings.CutPrefix(s, "ctrl+"); ok && len(d) == 1 && d[0] >= '0' && int(d[0]-'0') < len(statusSlots) {
+			m.setStatus(int(d[0]-'0'), n)
+		}
 	}
 }
 
@@ -1360,11 +1364,86 @@ func (m *model) pick(o option) {
 		}
 	}
 	field := map[string]string{"status": fieldState, "priority": fieldPriority, "assignee": fieldAssignee}[p.kind]
-	note := ""
-	if skipped > 0 {
-		note = fmt.Sprintf("%d in a team without “%s” left as %s", skipped, o.label, map[bool]string{true: "it was", false: "they were"}[skipped == 1])
+	m.change(field, cs, false, skippedNote(skipped, o.label))
+}
+
+func skippedNote(skipped int, label string) string {
+	if skipped == 0 {
+		return ""
 	}
-	m.change(field, cs, false, note)
+	return fmt.Sprintf("%d in a team without “%s” left as %s", skipped, label, map[bool]string{true: "it was", false: "they were"}[skipped == 1])
+}
+
+// statusSlots are ^0–^7, the same in every team (the c picker's numbers shift with the team's
+// workflow): the most used first under ^1 ^2 ^3. Each finds its state in the issue's own team
+// by name, then by type; In Review only by name, since by type it would be In Progress.
+var statusSlots = [...]struct{ name, typ string }{
+	{"Triage", "triage"},
+	{"Done", "completed"},
+	{"In Progress", "started"},
+	{"Todo", "unstarted"},
+	{"In Review", ""},
+	{"Backlog", "backlog"},
+	{"Canceled", "canceled"},
+	{"Duplicate", "duplicate"},
+}
+
+// slotState is statusSlots[slot] in the team; names match ignoring case and punctuation
+// (In-progress is In Progress).
+func (m *model) slotState(slot int, teamID string) (state, bool) {
+	sl := statusSlots[slot]
+	t, ok := m.meta.team(teamID)
+	if !ok {
+		return state{}, false
+	}
+	squash := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				return unicode.ToLower(r)
+			}
+			return -1
+		}, s)
+	}
+	for _, x := range t.States {
+		if squash(x.Name) == squash(sl.name) {
+			return x, true
+		}
+	}
+	if sl.typ != "" {
+		for _, x := range t.sortedStates() {
+			if x.Type == sl.typ {
+				return x, true
+			}
+		}
+	}
+	return state{}, false
+}
+
+// setStatus (^0–^7) moves the targets to a status slot at once, no picker.
+func (m *model) setStatus(slot, n int) {
+	ids, src := m.targets(n)
+	if len(ids) == 0 {
+		return
+	}
+	m.consume(src)
+	var cs []change
+	skipped := 0
+	for _, id := range ids {
+		at := m.find(id)
+		if at < 0 {
+			continue
+		}
+		before := m.all[at]
+		st, ok := m.slotState(slot, before.TeamID)
+		if !ok {
+			skipped++
+			continue
+		}
+		after := before
+		after.State = st
+		cs = append(cs, change{before, after})
+	}
+	m.change(fieldState, cs, false, skippedNote(skipped, statusSlots[slot].name))
 }
 
 // stateFor is the state in team `to` that matches s from team `from`: itself, the one with the
