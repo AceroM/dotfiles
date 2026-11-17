@@ -10,9 +10,9 @@
 local bind = rex.bind
 local letters = "abcdefghijklmnopqrstuvwxyz"
 
--- Tabs: ctrl+alt+h/l walk them, 1..8 jump to one, 9 is the last (the browser rule
--- fn+9 had through Hammerspoon), e opens one after the current tab (init.lua's
--- new_tab_here) and shift+e one before it.
+-- Tabs: ctrl+alt+h/l walk them, 1..8 jump to one, 9 is the last (fn+shift+1..9
+-- through Hammerspoon; cmd+1..9 in init.lua do the same), e opens one after the
+-- current tab (init.lua's new_tab_here) and shift+e one before it.
 bind("ctrl+alt+n", "client.tab.new")
 bind("ctrl+alt+e", "new_tab_here")
 bind("ctrl+alt+shift+e", "tab_new_beside", { side = "left" })
@@ -27,7 +27,8 @@ end
 bind("ctrl+alt+[Digit9]", "client.tab.goto", { index = -1 })
 
 -- Sessions: ctrl+alt+j/k walk the sidebar, u/g jump to its ends, cmd+alt+shift
--- with a digit or a letter jumps by position or by initial.
+-- with a digit or a letter jumps by position or by initial. Hammerspoon sends
+-- the digits for fn+1..9 (fn+9 is the last session).
 bind("ctrl+alt+j", "session.next")
 bind("ctrl+alt+k", "session.previous")
 bind("ctrl+alt+u", "session_goto", { index = 1 })

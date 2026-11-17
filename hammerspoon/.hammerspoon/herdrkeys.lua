@@ -4,12 +4,12 @@
 -- In Rex.app, fn+key becomes ctrl+alt+key and Rex's ~/.config/rex/keys.lua does
 -- the rest:
 --   fn+a e h i j k l n o r s t w x y z - ; /   become ctrl+alt+the same key
---   fn+1..8, fn+9      become ctrl+alt+1..9 (tab N, last tab)
+--   fn+1..8, fn+9      become cmd+alt+shift+1..9 (session N, last session)
+--   fn+shift+1..9      become ctrl+alt+1..9 (tab N, last tab; cmd+1..9 too)
 --   fn+c, fn+d         become ctrl+alt+b, ctrl+alt+v (sidebar, split)
 --   fn+←/→             become ctrl+alt+←/→ (macOS has already turned them into
 --                      home/end, so those keycodes are mapped back to arrows)
---   fn+shift+key       adds shift (ctrl+alt+shift+key); fn+shift+1..9 becomes
---                      cmd+alt+shift+1..9 (session N), and fn+shift+d keeps its
+--   fn+shift+key       adds shift (ctrl+alt+shift+key); fn+shift+d keeps its
 --                      letter (the diff popup)
 --   fn+option/cmd+j/k/9  become ctrl+alt+shift+j/k/9 (the agent axis)
 -- fn+a, fn+e and fn+n act once per press, not on key repeat.
@@ -115,8 +115,13 @@ local function forwardToRex(event, code, flags)
       return false
     end
     event:setFlags({ ctrl = true, alt = true, shift = true })
-  elseif flags.shift and workspaceKeys[code] then
-    event:setFlags({ cmd = true, alt = true, shift = true }) -- session N
+  elseif workspaceKeys[code] then
+    -- fn+1..9 is session N (cmd+alt+shift+N); fn+shift+1..9 is tab N (ctrl+alt+N).
+    if flags.shift then
+      event:setFlags({ ctrl = true, alt = true })
+    else
+      event:setFlags({ cmd = true, alt = true, shift = true })
+    end
   else
     event:setFlags({ ctrl = true, alt = true, shift = flags.shift or nil })
   end
