@@ -955,7 +955,7 @@ require("actions")
 require("tabs")
 require("keys")
 
--- cmd+alt+o opens the focused pane's directory on GitHub (github.lua).
+-- cmd+shift+o opens the focused pane's directory on GitHub (github.lua).
 require("github")
 
 -- cmd+alt+x stops everything in the servers session properly, then closes the
@@ -964,6 +964,14 @@ require("servers")
 
 -- fn+d opens jf (the branch's PR diff) in a centred float (jf.lua).
 require("jf")
+
+-- Machine-local keys and actions that stay out of Git: private.lua, stowed
+-- from the ignored private/ package. Loaded after the rest, when it's there.
+local private = io and io.open((os.getenv("HOME") or "") .. "/.config/rex/private.lua")
+if private then
+  private:close()
+  require("private")
+end
 
 -- Pane headers show "<directory>  <title>": pane-labels.lua is a long-running
 -- script, so start it detached, once (the [r] keeps this shell from matching).

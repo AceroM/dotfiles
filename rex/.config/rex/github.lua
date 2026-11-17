@@ -1,4 +1,4 @@
--- cmd+alt+o opens the focused pane's GitHub page in the default browser: the
+-- cmd+shift+o opens the focused pane's GitHub page in the default browser: the
 -- current branch's pull request when it has one (`gh pr view -w`), else the
 -- directory: the repo's page at its root, else /tree/<branch>/<path>.
 --
@@ -116,4 +116,4 @@ rex.action{
     return result
   end,
 }
-rex.bind("cmd+alt+o", "github_open")
+rex.bind("cmd+shift+o", "github_open")

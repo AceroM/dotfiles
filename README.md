@@ -98,6 +98,11 @@ See `artifacts/README.md`.
 ## Private references
 
 Keep machine-specific configuration and secrets under the ignored `private/` directory.
+
+Rex loads `~/.config/rex/private.lua` last when it exists, for machine-local keys and actions
+(Hammerspoon forwards **Fn+P** as ctrl+alt+p for one of them). The `private` package also holds
+files that don't belong in `~`, so stow it with ignores:
+`stow --ignore=commit-denylist --ignore='startup\.conf' --ignore='archive-purged-skills.*' --ignore=dance-emoji private`.
 The pre-commit hook scans staged paths and content for terms listed in the local
 `private/commit-denylist` file (one literal term per line, with no blank lines).
 Enable it in a new checkout with `git config core.hooksPath .githooks` after

@@ -3,8 +3,9 @@
 --
 -- In Rex.app, fn+key becomes ctrl+alt+key and Rex's ~/.config/rex/keys.lua does
 -- the rest:
---   fn+a d e h i j k l n o r s t w x y z - ; /   become ctrl+alt+the same key
---                      (fn+d: jf in a float, fn+n: a centred float shell)
+--   fn+a d e h i j k l n o p r s t w x y z - ; /   become ctrl+alt+the same key
+--                      (fn+d: jf in a float, fn+n: a centred float shell,
+--                      fn+p: whatever ~/.config/rex/private.lua binds to it)
 --   fn+1..8, fn+9      become cmd+alt+shift+1..9 (session N, last session)
 --   fn+shift+1..9      become ctrl+alt+1..9 (tab N, last tab; cmd+1..9 too)
 --   fn+c               becomes ctrl+alt+b (sidebar)
@@ -12,7 +13,7 @@
 --                      home/end, so those keycodes are mapped back to arrows)
 --   fn+shift+key       adds shift (ctrl+alt+shift+key)
 --   fn+option/cmd+j/k/9  become ctrl+alt+shift+j/k/9 (the agent axis)
--- fn+a, fn+e and fn+n act once per press, not on key repeat.
+-- fn+a, fn+e, fn+n and fn+p act once per press, not on key repeat.
 --
 -- Quick Record, from any app (Rex included):
 --   fn+q               toggle region recording
@@ -41,7 +42,7 @@ for number = 1, 9 do workspaceKeys[keys[tostring(number)]] = true end
 -- Rex.app: fn+key becomes ctrl+alt+key for every key below, with a few renames
 -- (fn+c -> b, fn+home/end -> left/right).
 local rexKeys = {}
-for _, name in ipairs({ "a", "d", "e", "h", "i", "j", "k", "l", "n", "o", "r", "s", "t", "w", "x", "y", "z", "-", ";", "/" }) do
+for _, name in ipairs({ "a", "d", "e", "h", "i", "j", "k", "l", "n", "o", "p", "r", "s", "t", "w", "x", "y", "z", "-", ";", "/" }) do
   rexKeys[keys[name]] = true
 end
 for number = 1, 9 do rexKeys[keys[tostring(number)]] = true end
@@ -49,7 +50,7 @@ rexKeys[keys.c] = keys.b
 rexKeys[keys.home] = keys.left
 rexKeys[keys["end"]] = keys.right
 -- Held down, these would open or jump again on every repeat.
-local rexOnce = { [keys.a] = true, [keys.e] = true, [keys.n] = true }
+local rexOnce = { [keys.a] = true, [keys.e] = true, [keys.n] = true, [keys.p] = true }
 
 -- The chords that used to reach Herdr from any app; swallowed outside Rex.
 local formerlyGlobal = {
