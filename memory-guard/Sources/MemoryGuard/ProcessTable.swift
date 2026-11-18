@@ -13,7 +13,6 @@ struct LocalProcess: Sendable {
     let executable: String
 
     var pid: pid_t { identity.pid }
-    var isNode: Bool { executable.hasSuffix("/node") }
 }
 
 struct ChromeApp: Sendable {

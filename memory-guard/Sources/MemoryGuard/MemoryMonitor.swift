@@ -9,7 +9,7 @@ final class MemoryMonitor {
     private var breaches = BreachTracker()
     private var chromeRestarting = false
     private var chromeCooldownUntil: ContinuousClock.Instant?
-    private var recoveringNode: Set<ProcessIdentity> = []
+    private var stoppingCommands: Set<ProcessIdentity> = []
     private var samplingTask: Task<Void, Never>?
     private(set) var snapshot: Snapshot?
     private(set) var sampleFailed = false
@@ -33,14 +33,16 @@ final class MemoryMonitor {
             let defaults = Self.defaultLimits
             return Limits(
                 nodeGiB: savedLimit("nodeGiB", default: defaults.nodeGiB),
+                tsgoGiB: savedLimit("tsgoGiB", default: defaults.tsgoGiB),
                 chromeGiB: savedLimit("chromeGiB", default: defaults.chromeGiB)
             )
         }
         set {
             preferences.set(newValue.nodeGiB, forKey: "nodeGiB")
+            preferences.set(newValue.tsgoGiB, forKey: "tsgoGiB")
             preferences.set(newValue.chromeGiB, forKey: "chromeGiB")
             breaches = BreachTracker()
-            EventLog.append("Limits set to Node \(newValue.nodeGiB) GiB, Chrome \(newValue.chromeGiB) GiB")
+            EventLog.append("Limits set to Node \(newValue.nodeGiB) GiB, tsgo \(newValue.tsgoGiB) GiB, Chrome \(newValue.chromeGiB) GiB")
             onChange?()
         }
     }
@@ -80,9 +82,10 @@ final class MemoryMonitor {
             return
         }
         if snapshot == nil {
-            let node = fresh.nodePeak.map(formatGiB) ?? "none"
+            let node = fresh.peak(for: .node).map(formatGiB) ?? "none"
+            let tsgo = fresh.peak(for: .tsgo).map(formatGiB) ?? "none"
             let chrome = fresh.chromePeak.map(formatGiB) ?? "none"
-            EventLog.append("Monitoring \(paused ? "paused" : "ready"). Node peak \(node) / \(limits.nodeGiB) GiB. Chrome \(chrome) / \(limits.chromeGiB) GiB.")
+            EventLog.append("Monitoring \(paused ? "paused" : "ready"). Node peak \(node) / \(limits.nodeGiB) GiB. tsgo peak \(tsgo) / \(limits.tsgoGiB) GiB. Chrome \(chrome) / \(limits.chromeGiB) GiB.")
         }
         sampleFailed = false
         snapshot = fresh
@@ -90,12 +93,12 @@ final class MemoryMonitor {
         guard !paused else { return }
 
         let chromeReady = !chromeRestarting && (chromeCooldownUntil.map { $0 <= .now } ?? true)
-        let eligible = chromeReady ? fresh.node + fresh.chrome : fresh.node
+        let eligible = chromeReady ? fresh.commands + fresh.chrome : fresh.commands
         for reading in breaches.observe(eligible, limits: limits) {
             switch reading.target {
-            case .node:
-                guard recoveringNode.insert(reading.process.identity).inserted else { continue }
-                Task { await recoverNode(reading) }
+            case .command(let command):
+                guard stoppingCommands.insert(reading.process.identity).inserted else { continue }
+                Task { await stopCommand(reading, command: command) }
             case .chrome(let descriptor):
                 guard !chromeRestarting,
                       let app = apps.first(where: { $0.processIdentifier == descriptor.pid }) else { continue }
@@ -106,12 +109,12 @@ final class MemoryMonitor {
         }
     }
 
-    private func recoverNode(_ reading: Reading) async {
+    private func stopCommand(_ reading: Reading, command: MonitoredCommand) async {
         let process = reading.process
-        defer { recoveringNode.remove(process.identity) }
+        defer { stoppingCommands.remove(process.identity) }
         guard !paused else { return }
         let cwd = ProcessTable.workingDirectory(process.pid) ?? "unknown"
-        let label = "Node PID \(process.pid)"
+        let label = "\(command.displayName) PID \(process.pid)"
         let detail = "\(label), \(formatGiB(reading.bytes)), cwd \(cwd)"
         do {
             guard try ProcessTable.signal(SIGTERM, to: process) else { return }

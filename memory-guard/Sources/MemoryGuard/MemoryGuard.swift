@@ -75,9 +75,11 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate, UN
         }
         let limits = monitor.limits
         if let snapshot = monitor.snapshot {
-            let node = snapshot.nodePeak.map(formatGiB) ?? "—"
+            let node = snapshot.peak(for: .node).map(formatGiB) ?? "—"
+            let tsgo = snapshot.peak(for: .tsgo).map(formatGiB) ?? "—"
             let chrome = snapshot.chromePeak.map(formatGiB) ?? "—"
             add("Node peak  \(node)  /  \(limits.nodeGiB) GiB per process", to: menu)
+            add("tsgo peak  \(tsgo)  /  \(limits.tsgoGiB) GiB per process", to: menu)
             add("Chrome  \(chrome)  /  \(limits.chromeGiB) GiB", to: menu)
         } else {
             add(monitor.sampleFailed ? "Process sample unavailable" : "Reading memory usage…", to: menu)
@@ -124,9 +126,11 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate, UN
     @objc private func editLimits() {
         let limits = monitor.limits
         let node = NSTextField(string: String(limits.nodeGiB))
+        let tsgo = NSTextField(string: String(limits.tsgoGiB))
         let chrome = NSTextField(string: String(limits.chromeGiB))
         let fields = NSGridView(views: [
             [NSTextField(labelWithString: "Node per process (GiB)"), node],
+            [NSTextField(labelWithString: "tsgo per process (GiB)"), tsgo],
             [NSTextField(labelWithString: "Chrome with helpers (GiB)"), chrome],
         ])
         fields.column(at: 1).width = 72
@@ -149,8 +153,9 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate, UN
                 let units = 1...1024
                 let whitespace = CharacterSet.whitespacesAndNewlines
                 if let nodeGiB = Int(node.stringValue.trimmingCharacters(in: whitespace)), units.contains(nodeGiB),
+                   let tsgoGiB = Int(tsgo.stringValue.trimmingCharacters(in: whitespace)), units.contains(tsgoGiB),
                    let chromeGiB = Int(chrome.stringValue.trimmingCharacters(in: whitespace)), units.contains(chromeGiB) {
-                    monitor.limits = Limits(nodeGiB: nodeGiB, chromeGiB: chromeGiB)
+                    monitor.limits = Limits(nodeGiB: nodeGiB, tsgoGiB: tsgoGiB, chromeGiB: chromeGiB)
                     return
                 }
                 dialog.informativeText = "Enter a whole number from 1 to 1024 for each limit."

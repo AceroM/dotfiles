@@ -2,18 +2,33 @@ import Foundation
 
 let gibibyte: UInt64 = 1 << 30
 
+enum MonitoredCommand: String, Sendable {
+    case node
+    case tsgo
+
+    init?(executable: String) {
+        guard let name = executable.split(separator: "/").last else { return nil }
+        self.init(rawValue: String(name))
+    }
+
+    var displayName: String { self == .node ? "Node" : "tsgo" }
+}
+
 struct Limits: Equatable {
     var nodeGiB: Int
+    var tsgoGiB: Int
     var chromeGiB: Int
 
     static func defaults(physicalMemory: UInt64) -> Self {
         let ram = Int(physicalMemory / gibibyte)
-        return Limits(nodeGiB: max(4, ram / 4), chromeGiB: max(6, ram / 3))
+        let commandGiB = max(4, ram / 4)
+        return Limits(nodeGiB: commandGiB, tsgoGiB: commandGiB, chromeGiB: max(6, ram / 3))
     }
 
     func bytes(for target: Reading.Target) -> UInt64 {
         let limit = switch target {
-        case .node: nodeGiB
+        case .command(.node): nodeGiB
+        case .command(.tsgo): tsgoGiB
         case .chrome: chromeGiB
         }
         return UInt64(limit) * gibibyte
@@ -22,7 +37,7 @@ struct Limits: Equatable {
 
 struct Reading: Sendable {
     enum Target: Sendable {
-        case node
+        case command(MonitoredCommand)
         case chrome(ChromeApp)
     }
 
@@ -50,17 +65,24 @@ struct BreachTracker {
 }
 
 struct Snapshot: Sendable {
-    let node: [Reading]
+    let commands: [Reading]
     let chrome: [Reading]
 
-    var nodePeak: UInt64? { node.map(\.bytes).max() }
     var chromePeak: UInt64? { chrome.map(\.bytes).max() }
+
+    func peak(for command: MonitoredCommand) -> UInt64? {
+        commands.lazy.compactMap { reading -> UInt64? in
+            guard case .command(let kind) = reading.target, kind == command else { return nil }
+            return reading.bytes
+        }.max()
+    }
 
     static func collect(chrome apps: [ChromeApp]) throws -> Self {
         let table = try ProcessTable.read()
-        let node = table.values.filter(\.isNode).compactMap { process -> Reading? in
-            guard let bytes = ProcessTable.footprint(process.pid) else { return nil }
-            return Reading(target: .node, process: process, bytes: bytes)
+        let commands = table.values.compactMap { process -> Reading? in
+            guard let command = MonitoredCommand(executable: process.executable),
+                  let bytes = ProcessTable.footprint(process.pid) else { return nil }
+            return Reading(target: .command(command), process: process, bytes: bytes)
         }
         let chrome = apps.compactMap { app -> Reading? in
             let members = app.members(in: table)
@@ -72,6 +94,6 @@ struct Snapshot: Sendable {
             }
             return Reading(target: .chrome(app), process: root, bytes: bytes)
         }
-        return Snapshot(node: node, chrome: chrome)
+        return Snapshot(commands: commands, chrome: chrome)
     }
 }
