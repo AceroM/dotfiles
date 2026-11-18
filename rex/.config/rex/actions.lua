@@ -5,8 +5,10 @@
 --
 -- init.lua has the richer versions of three moves, and keys.lua binds those:
 -- new_tab_here (tab_new_beside here also takes side=left), next_agent_waiting
--- (attention_next here has no memory of what I've seen) and last_pane (jump_back
--- here only knows the jumps these actions made).
+-- (attention_next here has no memory of what I've seen) and tab_back / tab_forward
+-- (jump_back here only knows the jumps these actions made). The jumps here still
+-- go in init.lua's tab history (focus.lua), since the server doesn't hear the app
+-- switch sessions.
 --
 -- "Session" is a herdr workspace/space and "window" is a tab, as in Rex's own API.
 
@@ -129,8 +131,28 @@ local function here(ctx)
 end
 
 -- Jumps remember where they came from, so jump_back can bounce between the two
--- (herdr's last_pane, for the moves these actions make).
+-- (herdr's last_pane, for the moves these actions make), and add both ends to
+-- the tab history behind cmd+o / cmd+i (focus.lua).
+local focus = require("focus")
 local last_jump
+
+local function leave(ctx, to)
+  last_jump = here(ctx)
+  pcall(focus.moved, last_jump, to)
+end
+
+-- The tab a session shows when it's selected without one: its active tab.
+-- Only for the history, so a failed look gives nil rather than an error.
+local function shown(session_id)
+  local ok, v = pcall(view, session_id)
+  if not ok then return nil end
+  for _, window in ipairs(v.windows or {}) do
+    if window.window_id == v.active_window_id then
+      return { session_id = session_id, window_id = window.window_id, block_id = window.focused_block_id }
+    end
+  end
+  return nil
+end
 
 local function focus_target(target)
   if target.block_id then
@@ -192,7 +214,7 @@ rex.action{
 
 local function jump(ctx, target)
   if target.block_id and target.block_id == ctx.block_id then return end
-  last_jump = here(ctx)
+  leave(ctx, target)
   show(ctx, target)
 end
 
@@ -219,7 +241,7 @@ rex.action{
     local i = args.index < 0 and #list + args.index + 1 or args.index
     local target = list[i]
     if target and target.session_id ~= ctx.session_id then
-      last_jump = here(ctx)
+      leave(ctx, shown(target.session_id))
       rex.client.queue("session.select", { session_id = target.session_id })
     end
   end,
@@ -236,7 +258,7 @@ rex.action{
     for _, s in ipairs(sessions()) do
       if (s.label or ""):lower():sub(1, #letter) == letter then
         if s.session_id ~= ctx.session_id then
-          last_jump = here(ctx)
+          leave(ctx, shown(s.session_id))
           rex.client.queue("session.select", { session_id = s.session_id })
         end
         return
@@ -267,7 +289,7 @@ rex.action{
       session_id = created.session_id,
       before_session_id = after and after.session_id or nil,
     }))
-    last_jump = here(ctx)
+    leave(ctx, shown(created.session_id))
     rex.client.queue("session.select", { session_id = created.session_id })
     return { session_id = created.session_id }
   end,
@@ -367,7 +389,7 @@ rex.action{
   run = function(ctx)
     if not last_jump then error("No jump to go back to", 0) end
     local target = last_jump
-    last_jump = here(ctx)
+    leave(ctx, target)
     show(ctx, target)
   end,
 }

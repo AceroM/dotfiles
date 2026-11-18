@@ -18,9 +18,9 @@ rex.bind("cmd+l", "client.tab.next")
 rex.bind("cmd+;", "client.tab.close")
 rex.bind("cmd+r", "client.tab.rename")
 
--- Focus history (focus.lua): the panes I've been in, newest first, for cmd+o
--- and ctrl+alt+a. focus-history.lua (started at the bottom) records the moves
--- the server sees; the actions here record the rest.
+-- Focus history (focus.lua): the panes and tabs I've been in, for cmd+o /
+-- cmd+i and ctrl+alt+a. focus-history.lua (started at the bottom) records the
+-- moves the server sees; the actions here record the rest.
 local focus = require("focus")
 
 -- cmd+shift+f's mark, state, and project test (dir-focus.lua), shared with
@@ -28,13 +28,12 @@ local focus = require("focus")
 -- so anything matching a tab label exactly strips it first.
 local dirfocus = require("dir-focus")
 
--- Record a move: from the pane the key was pressed in, to the pane being
--- shown when it's known.
-local function remember(ctx, session_id, block_id)
-  local st = focus.load()
-  focus.visit(st, ctx.session_id, ctx.block_id)
-  if block_id then focus.visit(st, session_id, block_id) end
-  focus.save(st)
+-- Record a move: from the pane the key was pressed in, to the pane (or tab)
+-- being shown when it's known.
+local function remember(ctx, session_id, block_id, window_id)
+  local to = (block_id or window_id)
+    and { session_id = session_id, block_id = block_id, window_id = window_id } or nil
+  focus.moved({ session_id = ctx.session_id, block_id = ctx.block_id }, to)
 end
 
 -- Switching sessions in the app sends the server no event, so the session
@@ -110,7 +109,7 @@ rex.action{
     }
     if args.dry_run then return result end
 
-    remember(ctx, ctx.session_id, target.focused_block_id)
+    remember(ctx, ctx.session_id, target.focused_block_id, target.window_id)
     rex.session.focus_window{ window_id = target.window_id }
     -- The app keeps its own selected tab, so tell it to show this one.
     pcall(rex.client.queue, "session.select", {
@@ -400,7 +399,7 @@ local function group_tab(name, spec, ctx, args)
     rex.call("session.set_window_label", { session_id = sid, window_id = tab.window_id, label = name })
   end
 
-  remember(ctx, sid, result.block_id or tab.focused_block_id)
+  remember(ctx, sid, result.block_id or tab.focused_block_id, tab.window_id)
   if result.block_id then
     rex.call("session.focus_block", { session_id = sid, block_id = result.block_id })
   else
@@ -422,35 +421,91 @@ for name, spec in pairs(GROUPS) do
   if spec.key then rex.bind(spec.key, name) end
 end
 
--- Show a pane in any session: focus it on the server, then tell the app,
--- which keeps its own selected session and tab, to show it.
+-- Show a pane (or a tab, at the pane it last had focused) in any session:
+-- focus it on the server, then tell the app, which keeps its own selected
+-- session and tab, to show it.
 local function show(target)
-  rex.call("session.focus_block", { session_id = target.session_id, block_id = target.block_id })
+  if target.block_id then
+    rex.call("session.focus_block", { session_id = target.session_id, block_id = target.block_id })
+  else
+    rex.call("session.focus_window", { session_id = target.session_id, window_id = target.window_id })
+  end
   pcall(rex.client.queue, "session.select", {
     session_id = target.session_id,
     window_id = target.window_id,
   })
 end
 
--- A pane's window, or nil once it's closed or taken out of its window.
-local function window_of(session_id, block_id)
-  local function describe()
-    local ok, r = pcall(rex.call, "session.describe_block",
-      { session_id = session_id, block_id = block_id })
-    return ok and r and r.block
+local window_of = focus.window_of
+
+-- cmd+o / cmd+i walk back / forward through the tabs I've been in, across
+-- sessions, like vim's ctrl-o / ctrl-i through its jump list: cmd+o again goes
+-- further back instead of toggling, cmd+i retraces, and going anywhere else
+-- from the middle starts again from the end (focus.lua's jump). Each tab comes
+-- up once, at the pane it last had focused; closed tabs are dropped.
+-- Try it without moving: rex do tab_back dry_run=1 --json
+local function tab_walk(ctx, args, step)
+  local st = focus.load()
+  -- The app switches sessions without telling the server, so the history may
+  -- not know I'm here. Count it as a jump first, as vim does when ctrl-o
+  -- starts somewhere new; not mid-walk, though, when here may be the tab the
+  -- last press left and the app hasn't caught up.
+  local here = window_of(ctx.session_id, ctx.block_id)
+  if here and not focus.walking(st, here) then focus.jump(st, ctx.session_id, here) end
+
+  -- Which tabs are still open, read once per session.
+  local views, focused = {}, {}
+  local function alive(e)
+    if views[e.s] == nil then
+      local ok, r = pcall(rex.call, "session.attach", { session_id = e.s })
+      views[e.s] = ok and r and r.view or false
+    end
+    for _, w in ipairs(views[e.s] and views[e.s].windows or {}) do
+      if w.window_id == e.w then
+        focused[e.w] = w.focused_block_id
+        return true
+      end
+    end
+    return false
   end
-  local b = describe()
-  if not b then
-    -- Another session's blocks may need an attach first.
-    pcall(rex.call, "session.attach", { session_id = session_id })
-    b = describe()
+
+  local e = focus.walk(st, step, alive)
+  local result = { verdict = e and "go" or "none", at = st.at, of = #st.jumps }
+  if e then
+    result.target = { session_id = e.s, window_id = e.w, block_id = focused[e.w] }
   end
-  return b and b.placement == "placed" and b.window_id or nil
+  if args.dry_run then return result end
+
+  if e then
+    focus.visit(st, ctx.session_id, ctx.block_id)
+    focus.visit(st, e.s, focused[e.w])
+  end
+  focus.save(st)
+  if e then show(result.target) end
+  return result
 end
 
--- cmd+o goes back to the pane I was in before this one, in whatever tab or
--- session it is, like Herdr's last_pane (ctrl+alt+o). Pressed again it comes
--- back, so two panes toggle. History is focus.lua's; closed panes are skipped.
+rex.action{
+  name = "tab_back",
+  title = "Back in Tab History",
+  category = "Tab",
+  keywords = "jump list back previous older history recent last tab ctrl-o vim",
+  run = function(ctx, args) return tab_walk(ctx, args, -1) end,
+}
+rex.action{
+  name = "tab_forward",
+  title = "Forward in Tab History",
+  category = "Tab",
+  keywords = "jump list forward next newer history recent tab ctrl-i vim",
+  run = function(ctx, args) return tab_walk(ctx, args, 1) end,
+}
+rex.bind("cmd+o", "tab_back")
+rex.bind("cmd+i", "tab_forward")
+
+-- The pane I was in before this one, in whatever tab or session it is, like
+-- Herdr's last_pane (ctrl+alt+o). Pressed again it comes back, so two panes
+-- toggle. History is focus.lua's mru; closed panes are skipped. It was cmd+o
+-- until cmd+o / cmd+i became the tab history; now it's in the palette only.
 -- Try it without moving: rex do last_pane dry_run=1 --json
 rex.action{
   name = "last_pane",
@@ -473,13 +528,13 @@ rex.action{
     if not target then return { verdict = "none" } end
     if args.dry_run then return { verdict = "go", target = target } end
 
-    focus.visit(st, target.session_id, target.block_id)
+    focus.arrive(st, { session_id = ctx.session_id, block_id = ctx.block_id })
+    focus.arrive(st, target)
     focus.save(st)
     show(target)
     return { verdict = "go", target = target }
   end,
 }
-rex.bind("cmd+o", "last_pane")
 
 -- ctrl+alt+a focuses the next agent waiting on me, across every session:
 -- blocked agents first, then agents that finished since I last looked at
@@ -571,7 +626,10 @@ rex.action{
     local verdict = not target and (#queue == 0 and "none" or "self") or "go"
     if args.dry_run then return { verdict = verdict, target = target, queue = queue } end
 
-    if target then focus.visit(st, target.session_id, target.block_id) end
+    if target then
+      focus.arrive(st, { session_id = ctx.session_id, block_id = ctx.block_id })
+      focus.arrive(st, target)
+    end
     focus.save(st)
     if target then show(target) end
     return { verdict = verdict, target = target }
@@ -796,7 +854,7 @@ rex.action{
     })
     result.layer_id = created.layer_id
     result.block_id = (created.block_ids or {})[1]
-    if ctx.block_id then remember(ctx, ctx.session_id, result.block_id) end
+    if ctx.block_id then remember(ctx, ctx.session_id, result.block_id, window_id) end
     return result
   end,
 }
@@ -1060,7 +1118,7 @@ rex.exec.start({
     .. (os.getenv("HOME") or "") .. "/.config/rex/tab-labels.lua'",
 }, { detach = true })
 
--- The focus history behind cmd+o and ctrl+alt+a (focus.lua): focus-history.lua
+-- The focus history behind cmd+o / cmd+i and ctrl+alt+a (focus.lua): focus-history.lua
 -- records every tab and pane I land on, across all sessions.
 rex.exec.start({
   "/bin/sh", "-c",

@@ -35,6 +35,20 @@ O_HOME="$PWD/o/.local/share/o" \
   XDG_CONFIG_HOME="$PWD/o/.config" ./o/.local/bin/o --config
 ```
 
+## Long pastes
+
+As in Claude Code, a paste over 800 characters, or with more than two line
+breaks (fewer in a terminal under 13 rows), goes in as one tag:
+`[Pasted text #1 +187 lines]` (`[Pasted text #1]` for a single long line). The
+number counts with `[Image #N]` tags. Backspace deletes the whole tag, and the
+cursor never lands inside it. The send has the pasted text back in place of its
+tag. Ctrl+C, Ctrl+X and Alt+C copy the text too.
+
+The text is kept in `$XDG_STATE_HOME/o/pastes` until it is sent, and up to a
+month after that for ↑ history. A draft keeps its own copy beside its images.
+A prompt whose pasted text has gone isn't sent. `/save` writes the pasted text
+into the preset.
+
 ## Slash presets
 
 Presets work with every agent. In the composer, enter:

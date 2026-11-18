@@ -2,7 +2,7 @@
 --
 -- The ctrl+alt chords are what a Hammerspoon fn layer sends while Rex is in front,
 -- so fn+h/l walk tabs, fn+j/k sessions, and so on, exactly as in herdr. They sit
--- beside init.lua's cmd keys (cmd+h/l, cmd+j/k, cmd+n, cmd+o, ...), which this file
+-- beside init.lua's cmd keys (cmd+h/l, cmd+j/k, cmd+n, cmd+o/i, ...), which this file
 -- leaves alone, and reach for init.lua's actions where it has the better one.
 --
 -- herdr space -> Rex session, herdr tab -> Rex window (tab), herdr pane -> Rex block.
@@ -48,15 +48,16 @@ for letter in letters:gmatch(".") do
   bind("cmd+alt+shift+" .. letter, "session_letter", { letter = letter })
 end
 
--- Agents: shift on the session axis walks agents, and ctrl+alt+o/i go back to the
--- pane I was in before (cmd+o's last_pane). ctrl+alt+a, the next agent waiting on
+-- Agents: shift on the session axis walks agents, and ctrl+alt+o/i walk back /
+-- forward through the tabs I've been in (cmd+o / cmd+i's tab_back / tab_forward,
+-- vim's jump list). ctrl+alt+a, the next agent waiting on
 -- me, and ctrl+alt+;, a new tab running this pane's agent, are init.lua's.
 bind("ctrl+alt+shift+j", "agent_next")
 bind("ctrl+alt+shift+k", "agent_next", { direction = "previous" })
 bind("ctrl+alt+shift+[Digit9]", "agent_goto", { index = -1 })
 bind("ctrl+alt+shift+a", "remember_then", { action = "session.switch" }) -- was View Activity, now cmd+p
-bind("ctrl+alt+o", "last_pane")
-bind("ctrl+alt+i", "last_pane")
+bind("ctrl+alt+o", "tab_back")
+bind("ctrl+alt+i", "tab_forward")
 
 -- Panes. option+←/→ stay the shell's word movement; cmd+option+arrows move focus
 -- too. ←/→ are init.lua's float_cycle, as cmd+option+←/→ are: in a floating pane

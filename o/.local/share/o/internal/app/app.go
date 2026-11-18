@@ -3,8 +3,10 @@
 // next one, ^1…^9 the Nth): write it (as many lines as it takes, images
 // pasted in), ⏎ starts that agent with it in a new Rex tab, and the prompt
 // empties for the next one. A pasted image is an `[Image #N]` tag in the
-// text, its file listed at the end of what's sent; it isn't drawn. ⌥c copies
-// the text without them, its spaces and blank lines tidied.
+// text, its file listed at the end of what's sent; it isn't drawn. A long
+// paste is a `[Pasted text #N +M lines]` tag, as in Claude Code, its text
+// put back in its place as it's sent (and as it's copied). ⌥c copies the
+// text without image tags, its spaces and blank lines tidied.
 //
 // Drafts: ^s saves the prompt as one and clears the input; editing a draft
 // saves as it's written (esc leaves it, ⏎ sends it and it goes). ^g goes through this
@@ -198,7 +200,8 @@ type App struct {
 	Pal   theme.Palette
 	Field field.Field
 	slash slashState
-	// Images is the file behind each tag: `[Image #N]` is Images[N-1].
+	// Images is the file behind each tag: `[Image #N]` is Images[N-1], and
+	// so is `[Pasted text #N …]` (a text file); the two count together.
 	Images   []string
 	Cwd      string
 	Label    string
@@ -1119,6 +1122,9 @@ func (a *App) remember(text string, images []string) {
 	if n := len(all); n > 0 && all[n-1].text == text && equalStrings(all[n-1].images, images) {
 		return
 	}
+	if a.Live {
+		images = drafts.KeepPastes(text, images)
+	}
 	a.history = append(all, hist{text, append([]string(nil), images...)})
 	if len(a.history) > history {
 		a.history = a.history[len(a.history)-history:]
@@ -1288,7 +1294,11 @@ func (a *App) send(focus bool) {
 	if strings.HasPrefix(text, "//") && a.slash.literal == "" {
 		text = text[1:]
 	}
-	body := field.WithImages(text, a.Images)
+	body, err := field.Prompt(text, a.Images)
+	if err != nil {
+		a.Say(err.Error()+" · not sent", false)
+		return
+	}
 	prompt := body
 	if a.Plan {
 		prompt = "/plan " + body
@@ -1601,7 +1611,11 @@ func (a *App) dispatch(d drafts.Draft, text string, images []string, focus bool)
 		}
 		label = d.Reply.Label
 	}
-	body := field.WithImages(text, images)
+	body, err := field.Prompt(text, images)
+	if err != nil {
+		a.Say(err.Error()+" · not sent", false)
+		return false
+	}
 	prompt := body
 	if d.Plan {
 		prompt = "/plan " + body
@@ -1848,10 +1862,14 @@ func (a *App) sendAll(ds []drafts.Draft, focus bool) {
 		ids[i] = d.ID
 	}
 	text, images := drafts.Combine(ds)
+	body, err := field.Prompt(text, images)
+	if err != nil {
+		a.Say(err.Error()+" · not sent", false)
+		return
+	}
 	if !a.dropDrafts(ids...) {
 		return
 	}
-	body := field.WithImages(text, images)
 	prompt := body
 	if plan {
 		prompt = "/plan " + body
@@ -1945,7 +1963,7 @@ func (a *App) UndoLast() []drafts.Draft { return a.undo }
 
 func (a *App) ctrlC() Act {
 	if text, ok := a.Field.Selected(); ok {
-		a.clip(text)
+		a.clip(a.expand(text))
 		return ActNone
 	}
 	if a.Field.Text == "" {
@@ -1971,7 +1989,7 @@ func (a *App) cut() {
 	if !ok {
 		return
 	}
-	a.clip(text)
+	a.clip(a.expand(text))
 	a.Field.DeleteSelection()
 }
 
@@ -1989,10 +2007,17 @@ func (a *App) unclear() {
 	a.Say("brought it back", true)
 }
 
+// expand is text with its pasted texts in place of their tags, for the
+// clipboard (one whose file is gone stays a tag).
+func (a *App) expand(text string) string {
+	out, _ := field.Expand(text, a.Images)
+	return out
+}
+
 // copyPlain is ⌥c: text alone onto the clipboard, its `[Image #N]` tags and
-// extra spaces and blank lines out.
+// extra spaces and blank lines out (pasted texts in, as they are).
 func (a *App) copyPlain(text string) {
-	plain := field.Plain(text)
+	plain := field.Plain(a.expand(text))
 	switch {
 	case plain != "":
 		a.clip(plain)
@@ -2055,9 +2080,28 @@ func (a *App) pasteImage() {
 	}
 }
 
-// paste is a bracketed paste: the text, whole. Image files dropped in
-// become tags, and an empty paste (⌘V with only an image on the clipboard)
-// takes the clipboard's image.
+// AttachText adds pasted text as a `[Pasted text #N +M lines]` tag, its
+// text kept in a file till it's sent. If it can't be kept it goes in as
+// itself.
+func (a *App) AttachText(s string) {
+	dir := drafts.PasteDir()
+	if !a.Live {
+		dir = filepath.Join(field.TmpDir(), "pastes")
+	}
+	path, err := drafts.SavePaste(dir, s)
+	if err != nil {
+		a.Say("couldn't keep the paste aside: "+err.Error(), false)
+		a.Field.Insert(s)
+		return
+	}
+	a.Images = append(a.Images, path)
+	a.Field.InsertWord(field.PasteTag(len(a.Images), field.PasteLines(s)))
+}
+
+// paste is a bracketed paste: the text, whole; a long one (field.Collapse)
+// as a `[Pasted text #N +M lines]` tag. Image files dropped in become
+// tags, and an empty paste (⌘V with only an image on the clipboard) takes
+// the clipboard's image.
 func (a *App) paste(s string) {
 	s = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\t", "    ").Replace(s)
 	if strings.TrimSpace(s) == "" {
@@ -2072,6 +2116,10 @@ func (a *App) paste(s string) {
 		for _, f := range files {
 			a.Attach(f)
 		}
+		return
+	}
+	if field.Collapse(s, a.Lay.ScreenH) {
+		a.AttachText(s)
 		return
 	}
 	a.Field.Insert(s)

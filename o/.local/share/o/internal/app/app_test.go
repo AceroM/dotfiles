@@ -874,3 +874,88 @@ func TestAClickPutsTheCursorThere(t *testing.T) {
 		t.Fatal(a.Field.Cur)
 	}
 }
+
+func TestLongPasteIsATagAndGoesOutWhole(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	a := newApp("")
+	a.Layout(80, 40)
+	a.Handle(tui.Paste("short\npaste\n"))
+	if a.Field.Text != "short\npaste\n" || len(a.Images) != 0 {
+		t.Fatalf("a short paste goes in as itself: %q", a.Field.Text)
+	}
+	a = newApp("")
+	a.Layout(80, 40)
+	typeIn(a, "review")
+	long := "func a() {\r\n\treturn\r\n}\r\n// end"
+	a.Handle(tui.Paste(long))
+	if a.Field.Text != "review [Pasted text #1 +3 lines] " || len(a.Images) != 1 {
+		t.Fatalf("%q %v", a.Field.Text, a.Images)
+	}
+	if b, _ := os.ReadFile(a.Images[0]); string(b) != "func a() {\n    return\n}\n// end" {
+		t.Fatalf("kept %q", b)
+	}
+	// It counts with images: the next image is #2.
+	a.Attach("/tmp/x.png")
+	typeIn(a, "plus ")
+	a.Handle(tui.Paste(strings.Repeat("y", 900)))
+	if a.Field.Text != "review [Pasted text #1 +3 lines] [Image #2] plus [Pasted text #3] " {
+		t.Fatalf("%q", a.Field.Text)
+	}
+	// ⌫ takes the tag whole; ^z after a send brings it all back.
+	press(a, tui.KeyBackspace, 0, 0)
+	press(a, tui.KeyBackspace, 0, 0)
+	if a.Field.Text != "review [Pasted text #1 +3 lines] [Image #2] plus " {
+		t.Fatalf("%q", a.Field.Text)
+	}
+	press(a, tui.KeyEnter, 0, 0)
+	want := "review func a() {\n    return\n}\n// end [Image #2] plus\n\n[Image #2]: /tmp/x.png"
+	if str(a.WouldSend) != want {
+		t.Fatalf("sent %q", str(a.WouldSend))
+	}
+	if a.Sent[0].Text != "review [Pasted text #1 +3 lines] [Image #2] plus" {
+		t.Fatalf("listed %q", a.Sent[0].Text)
+	}
+	ch(a, 'z', ctrl)
+	if !strings.HasPrefix(a.Field.Text, "review [Pasted text #1 +3 lines]") || len(a.Images) != 3 {
+		t.Fatalf("%q", a.Field.Text)
+	}
+}
+
+func TestPastedTextCopiesWholeAndIsntSentWithoutItsFile(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	a := newApp("")
+	a.Layout(80, 40)
+	a.Handle(tui.Paste("1\n2\n3\n4"))
+	a.Field.Select(field.Range{Start: 0, End: len(a.Field.Text)})
+	ch(a, 'c', ctrl)
+	if str(a.WouldCopy) != "1\n2\n3\n4 " {
+		t.Fatalf("copied %q", str(a.WouldCopy))
+	}
+	ch(a, 'c', alt)
+	if str(a.WouldCopy) != "1\n2\n3\n4" {
+		t.Fatalf("⌥c copied %q", str(a.WouldCopy))
+	}
+	os.Remove(a.Images[0])
+	press(a, tui.KeyEnter, 0, 0)
+	if a.WouldSend != nil || len(a.Sent) != 0 || a.Field.Text == "" || a.Toast == nil || !strings.Contains(a.Toast.Msg, "pasted text #1 is gone") {
+		t.Fatal("sent without its pasted text", str(a.WouldSend), a.Toast)
+	}
+}
+
+func TestSavePresetKeepsPastedTextAsText(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	cwd := t.TempDir()
+	a := newApp("")
+	a.Cwd = cwd
+	a.Live = true
+	a.Layout(80, 40)
+	typeIn(a, "/save notes ")
+	a.Live = false
+	a.Handle(tui.Paste("a\nb\nc\nd"))
+	a.Live = true
+	press(a, tui.KeyEnter, 0, 0)
+	body, err := os.ReadFile(filepath.Join(cwd, ".o", "commands", "notes.md"))
+	if err != nil || !strings.Contains(string(body), "a\nb\nc\nd") || strings.Contains(string(body), "Pasted text") {
+		t.Fatalf("%q %v %v", body, err, a.Toast)
+	}
+}

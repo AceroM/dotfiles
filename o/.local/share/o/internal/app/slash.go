@@ -259,6 +259,12 @@ func (a *App) localSlash() bool {
 			a.Say("presets save text only · remove image tags first", false)
 			return true
 		}
+		// A pasted text is text: it's saved in place of its tag.
+		body, err := field.Expand(body, a.Images)
+		if err != nil {
+			a.Say(err.Error()+" · not saved", false)
+			return true
+		}
 		path := filepath.Join(prompts.Dir(a.promptCwd()), preset+".md")
 		if a.Live {
 			var err error

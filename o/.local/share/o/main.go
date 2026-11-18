@@ -52,6 +52,9 @@ Runs inside a Rex terminal. The keys:
   ^v pastes the clipboard's image (pngpaste on the Mac, wl-paste on Linux; ⌘V too, with
   only an image on it); a file dragged in is attached. Either is an [Image #N] tag, its
   file listed at the end of what's sent (not drawn).
+  A long paste (over 800 characters, or more than 2 line breaks) is a
+  [Pasted text #N +M lines] tag, as in Claude Code: ⌫ takes it whole, ^c ^x ⌥c copy
+  its text, and what's sent has the text back in its place.
   ⌥⌘N (Rex) shows them big, each over its tag, in a floating pane in the middle
   of the tab, following the prompt as images come and go (the selected draft's, in the
   list); in a tab o started an agent in, the images it was sent. 1…9 one alone, ← →

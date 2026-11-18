@@ -39,9 +39,10 @@ type Draft struct {
 	Workspace, Space string
 	// Cwd is where its agent starts.
 	Cwd string
-	// Text is the prompt, `[Image #N]` tags and all.
+	// Text is the prompt, `[Image #N]` and `[Pasted text #N …]` tags and all.
 	Text string
-	// Images is the file behind each tag: `[Image #N]` is Images[N-1].
+	// Images is the file behind each tag: `[Image #N]` (or `[Pasted text
+	// #N …]`, a text file) is Images[N-1].
 	Images []string
 	// Created is seconds since the epoch.
 	Created int64
@@ -207,8 +208,33 @@ func StateDir() string {
 // File is the drafts file.
 func File() string { return filepath.Join(StateDir(), "drafts.json") }
 
-// ImageDir is where draft id keeps its images.
+// ImageDir is where draft id keeps its images (and pasted texts).
 func ImageDir(id string) string { return filepath.Join(StateDir(), "drafts", id) }
+
+// PasteDir is where a long paste's text is kept while it's a tag in the
+// prompt (and in the history after it's sent): Sweep empties it of a month-old file.
+func PasteDir() string { return filepath.Join(StateDir(), "pastes") }
+
+// SavePaste keeps text in a file of its own in dir, for its tag.
+func SavePaste(dir, text string) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, "paste-*.txt")
+	if err != nil {
+		return "", err
+	}
+	if _, err = f.WriteString(text); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
 
 // Stamp is when the file last changed (zero when it isn't there): it's
 // read again when this moves.
@@ -395,8 +421,9 @@ const elsewhere = "- A task written in another folder names it in its heading: d
 
 // Combine is drafts ds as one prompt, for one agent started in the first
 // one's folder: the preamble, then each as `## Task i of n`. Their
-// `[Image #N]` tags are numbered again across all of them; the files come
-// back in that order (a tag with no file reads `[missing image]`).
+// `[Image #N]` and `[Pasted text #N …]` tags are numbered again across all
+// of them; the files come back in that order (a tag with no file reads
+// `[missing image]`, `[missing pasted text]`).
 func Combine(ds []Draft) (string, []string) {
 	if len(ds) == 0 {
 		return "", nil
@@ -422,13 +449,13 @@ func Combine(ds []Draft) (string, []string) {
 	return out.String(), images
 }
 
-// renumber is text with each `[Image #N]` (the Nth of own) numbered as it
-// lands in all, which it's added to.
+// renumber is text with each tag (the Nth of own) numbered as it lands in
+// all, which it's added to.
 func renumber(text string, own []string, all *[]string) string {
 	var out strings.Builder
 	seen := map[int]int{}
 	at := 0
-	for _, t := range field.ImageTags(text) {
+	for _, t := range field.Tags(text) {
 		out.WriteString(text[at:t.R.Start])
 		to, ok := seen[t.N]
 		if !ok && t.N >= 1 && t.N <= len(own) {
@@ -436,9 +463,14 @@ func renumber(text string, own []string, all *[]string) string {
 			to, ok = len(*all), true
 			seen[t.N] = to
 		}
-		if ok {
+		switch {
+		case ok && t.Paste:
+			out.WriteString(field.PasteTag(to, t.Lines))
+		case ok:
 			fmt.Fprintf(&out, "[Image #%d]", to)
-		} else {
+		case t.Paste:
+			out.WriteString("[missing pasted text]")
+		default:
 			out.WriteString("[missing image]")
 		}
 		at = t.R.End
@@ -508,14 +540,15 @@ func base36(n uint64) string {
 // Now is seconds since the epoch.
 func Now() int64 { return time.Now().Unix() }
 
-// KeepImages copies the images text still tags into draft id's folder, so
-// they last as long as it does (a pasted image lives in $TMPDIR, which
-// macOS empties). Returns the list with the copies in place; a file that
-// can't be copied keeps its old path.
+// KeepImages copies the images (and pasted texts) text still tags into
+// draft id's folder, so they last as long as it does (a pasted image lives
+// in $TMPDIR, which macOS empties; a pasted text is swept after a month).
+// Returns the list with the copies in place; a file that can't be copied
+// keeps its old path.
 func KeepImages(id, text string, images []string) []string {
 	dir := ImageDir(id)
 	out := append([]string(nil), images...)
-	for _, t := range field.ImageTags(text) {
+	for _, t := range field.Tags(text) {
 		i := t.N - 1
 		if i < 0 || i >= len(out) || out[i] == "" || strings.HasPrefix(out[i], dir+"/") {
 			continue
@@ -527,6 +560,26 @@ func KeepImages(id, text string, images []string) []string {
 		to := filepath.Join(dir, fmt.Sprintf("%d.%s", t.N, ext))
 		if os.MkdirAll(dir, 0o755) == nil && copyFile(out[i], to) == nil {
 			out[i] = to
+		}
+	}
+	return out
+}
+
+// KeepPastes is files with each pasted text that text tags kept in
+// PasteDir, for the history: a sent draft's folder (where its copies are)
+// is swept three days on, PasteDir a month on.
+func KeepPastes(text string, files []string) []string {
+	out := append([]string(nil), files...)
+	dir := PasteDir()
+	for _, t := range field.Tags(text) {
+		i := t.N - 1
+		if !t.Paste || i < 0 || i >= len(out) || out[i] == "" || filepath.Dir(out[i]) == dir {
+			continue
+		}
+		if body, err := os.ReadFile(out[i]); err == nil {
+			if p, err := SavePaste(dir, string(body)); err == nil {
+				out[i] = p
+			}
 		}
 	}
 	return out
@@ -554,10 +607,18 @@ func copyFile(from, to string) error {
 	return os.Rename(tmp, to)
 }
 
-// Sweep deletes image folders no draft has used for three days (al's). In
-// a goroutine, at start.
+// Sweep deletes image folders no draft has used for three days (al's), and
+// pasted texts a month old (a draft keeps its own copy). In a goroutine, at
+// start.
 func Sweep() {
 	const age = 3 * 24 * time.Hour
+	if pastes, err := os.ReadDir(PasteDir()); err == nil {
+		for _, e := range pastes {
+			if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > 30*24*time.Hour {
+				_ = os.Remove(filepath.Join(PasteDir(), e.Name()))
+			}
+		}
+	}
 	ids := map[string]bool{}
 	for _, d := range Load() {
 		ids[d.ID] = true

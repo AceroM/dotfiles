@@ -5,6 +5,8 @@
 //
 // Like Claude Code, the prompt keeps the tags, and what's sent lists each
 // one's file at the end, so the agent opens them with its own file tools.
+// A long paste is a `[Pasted text #N +M lines]` tag the same way (Collapse
+// says when), its text in a file, put back in its place as it's sent.
 package field
 
 import (
@@ -184,42 +186,159 @@ func shellWords(s string) []string {
 	return out
 }
 
-// Tag is an `[Image #N]` in a text: its bytes and N.
+// Tag is an attachment's tag in a text: its bytes and N. `[Image #N]`, or
+// (Paste) `[Pasted text #N +M lines]` for text pasted in whole, as Claude
+// Code has it: M (Lines) is its line breaks, and with none it's
+// `[Pasted text #N]`. Both kinds count from one list, the Nth file.
 type Tag struct {
-	R Range
-	N int
+	R     Range
+	N     int
+	Paste bool
+	Lines int
 }
 
-// ImageTags is the `[Image #N]` tags in text.
-func ImageTags(text string) []Tag {
-	const open = "[Image #"
+const (
+	imageOpen = "[Image #"
+	pasteOpen = "[Pasted text #"
+)
+
+// Tags is the tags in text, images' and pasted texts', in order.
+func Tags(text string) []Tag {
 	var out []Tag
 	i := 0
 	for {
-		p := strings.Index(text[i:], open)
+		p := strings.IndexByte(text[i:], '[')
 		if p < 0 {
 			return out
 		}
 		s := i + p
-		rest := text[s+len(open):]
-		d := 0
-		for d < len(rest) && rest[d] >= '0' && rest[d] <= '9' {
-			d++
-		}
-		i = s + len(open)
-		if d > 0 && d < len(rest) && rest[d] == ']' {
-			end := i + d + 1
-			n, err := strconv.Atoi(rest[:d])
-			if err != nil {
-				n = 0
-			}
-			out = append(out, Tag{Range{s, end}, n})
-			i = end
+		if t, ok := tagAt(text, s); ok {
+			out = append(out, t)
+			i = t.R.End
+		} else {
+			i = s + 1
 		}
 	}
 }
 
-// TagNums is the numbers text tags, sorted, each once.
+// tagAt is the tag starting at byte s of text, if one does.
+func tagAt(text string, s int) (Tag, bool) {
+	rest, paste := text[s:], false
+	switch {
+	case strings.HasPrefix(rest, imageOpen):
+		rest = rest[len(imageOpen):]
+	case strings.HasPrefix(rest, pasteOpen):
+		rest, paste = rest[len(pasteOpen):], true
+	default:
+		return Tag{}, false
+	}
+	n, d := number(rest)
+	if d == 0 {
+		return Tag{}, false
+	}
+	rest = rest[d:]
+	lines := 0
+	if paste && strings.HasPrefix(rest, " +") {
+		if m, md := number(rest[2:]); md > 0 && strings.HasPrefix(rest[2+md:], " lines") {
+			lines, rest = m, rest[2+md+len(" lines"):]
+		}
+	}
+	if !strings.HasPrefix(rest, "]") {
+		return Tag{}, false
+	}
+	return Tag{Range{s, len(text) - len(rest) + 1}, n, paste, lines}, true
+}
+
+// number is the digits s starts with, read (0 if too big), and how many.
+func number(s string) (int, int) {
+	d := 0
+	for d < len(s) && s[d] >= '0' && s[d] <= '9' {
+		d++
+	}
+	n, err := strconv.Atoi(s[:d])
+	if err != nil {
+		n = 0
+	}
+	return n, d
+}
+
+// ImageTags is the `[Image #N]` tags in text.
+func ImageTags(text string) []Tag {
+	var out []Tag
+	for _, t := range Tags(text) {
+		if !t.Paste {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// PasteTag is the tag for pasted text n of lines line breaks, Claude Code's:
+// `[Pasted text #3 +187 lines]`, `[Pasted text #3]` for one line.
+func PasteTag(n, lines int) string {
+	if lines == 0 {
+		return fmt.Sprintf("[Pasted text #%d]", n)
+	}
+	return fmt.Sprintf("[Pasted text #%d +%d lines]", n, lines)
+}
+
+// PasteLines is the line breaks in s, as a paste's tag counts them.
+func PasteLines(s string) int { return strings.Count(s, "\n") }
+
+// Collapse reports whether a paste of s goes in as a tag rather than as
+// itself: Claude Code's rule, more than 800 characters or more line breaks
+// than min(screen rows - 10, 2).
+func Collapse(s string, screenRows int) bool {
+	return utf8.RuneCountInString(s) > 800 || PasteLines(s) > max(0, min(screenRows-10, 2))
+}
+
+// Expand is text with each `[Pasted text #N …]` tag put back as the text
+// pasted (the Nth of files holds it). A tag whose file can't be read stays
+// as it is, and the error says which.
+func Expand(text string, files []string) (string, error) {
+	var out strings.Builder
+	var lost error
+	at := 0
+	for _, t := range Tags(text) {
+		if !t.Paste {
+			continue
+		}
+		var body []byte
+		err := fmt.Errorf("no file")
+		if t.N >= 1 && t.N <= len(files) && files[t.N-1] != "" {
+			body, err = os.ReadFile(files[t.N-1])
+		}
+		if err != nil {
+			if lost == nil {
+				lost = fmt.Errorf("pasted text #%d is gone", t.N)
+			}
+			continue
+		}
+		out.WriteString(text[at:t.R.Start])
+		out.Write(body)
+		at = t.R.End
+	}
+	if at == 0 {
+		return text, lost
+	}
+	out.WriteString(text[at:])
+	return out.String(), lost
+}
+
+// Prompt is text as it goes to an agent: its pasted texts put back in
+// place, then the file behind each `[Image #N]` it has (WithImages). An
+// error when a pasted text is gone, so it isn't sent without it.
+func Prompt(text string, files []string) (string, error) {
+	body, err := Expand(text, files)
+	if err != nil {
+		return "", err
+	}
+	// The images text tags, not ones a pasted text happens to name.
+	listed := WithImages(text, files)
+	return body + listed[len(text):], nil
+}
+
+// TagNums is the numbers text's image tags have, sorted, each once.
 func TagNums(text string) []int {
 	var nums []int
 	for _, t := range ImageTags(text) {
@@ -375,9 +494,9 @@ func (f *Field) Key(k tui.Key) bool {
 	case ch('e', 'E') && ctrl:
 		f.go_(f.lineEnd(f.Cur), shift)
 	case ch('b') && ctrl:
-		f.go_(f.prev(), false)
+		f.go_(f.left(), false)
 	case ch('f') && ctrl:
-		f.go_(f.next(), false)
+		f.go_(f.right(), false)
 	case ch('d') && ctrl:
 		f.Delete()
 	case ch('u') && ctrl:
@@ -400,9 +519,9 @@ func (f *Field) Key(k tui.Key) bool {
 	case c == tui.KeyRight && !shift && f.hasSelection():
 		f.go_(f.Selection().End, false)
 	case c == tui.KeyLeft:
-		f.go_(f.prev(), shift)
+		f.go_(f.left(), shift)
 	case c == tui.KeyRight:
-		f.go_(f.next(), shift)
+		f.go_(f.right(), shift)
 	case c == tui.KeyBackspace:
 		f.Backspace()
 	case c == tui.KeyDelete:
@@ -542,8 +661,8 @@ func (f *Field) PosAt(rows []Range, row, col int) int {
 		}
 		at = end
 	}
-	// Never inside an `[Image #N]` tag.
-	for _, t := range ImageTags(f.Text) {
+	// Never inside a tag.
+	for _, t := range Tags(f.Text) {
 		if t.R.Start < at && at < t.R.End {
 			return t.R.Start
 		}
@@ -553,9 +672,9 @@ func (f *Field) PosAt(rows []Range, row, col int) int {
 
 // WordAt is what a double-click at at takes: the word there by Unicode's
 // word bounds (a run of spaces or of punctuation is one too), the one
-// ending there at a line's end; an `[Image #N]` tag whole.
+// ending there at a line's end; a tag whole.
 func (f *Field) WordAt(at int) Range {
-	for _, t := range ImageTags(f.Text) {
+	for _, t := range Tags(f.Text) {
 		if t.R.Start <= at && at < t.R.End {
 			return t.R
 		}
@@ -633,17 +752,40 @@ func (f *Field) next() int {
 	return f.Cur + n
 }
 
+// left is ←: a character back, or over a whole tag (never into one).
+func (f *Field) left() int {
+	p := f.prev()
+	for _, t := range Tags(f.Text) {
+		if t.R.Start < p && p < t.R.End {
+			return t.R.Start
+		}
+	}
+	return p
+}
+
+// right is →: a character on, or over a whole tag.
+func (f *Field) right() int {
+	n := f.next()
+	for _, t := range Tags(f.Text) {
+		if t.R.Start < n && n < t.R.End {
+			return t.R.End
+		}
+	}
+	return n
+}
+
 // End puts the cursor at the very end of the text.
 func (f *Field) End() { f.go_(len(f.Text), false) }
 
-// Backspace deletes the selection, or the character before the cursor; an
-// `[Image #N]` tag goes in one keystroke, like a single character.
+// Backspace deletes the selection, or the character before the cursor; a
+// tag (`[Image #N]`, `[Pasted text #N …]`) goes in one keystroke, like a
+// single character.
 func (f *Field) Backspace() {
 	if f.DeleteSelection() {
 		return
 	}
 	p := f.prev()
-	for _, t := range ImageTags(f.Text) {
+	for _, t := range Tags(f.Text) {
 		if t.R.End == f.Cur {
 			p = t.R.Start
 			break
@@ -658,7 +800,7 @@ func (f *Field) Delete() {
 		return
 	}
 	n := f.next()
-	for _, t := range ImageTags(f.Text) {
+	for _, t := range Tags(f.Text) {
 		if t.R.Start == f.Cur {
 			n = t.R.End
 			break
@@ -698,8 +840,8 @@ func (f *Field) wordLeftPos() int {
 			pos -= n
 		}
 	}
-	// An `[Image #N]` tag is one word.
-	for _, t := range ImageTags(f.Text) {
+	// A tag is one word.
+	for _, t := range Tags(f.Text) {
 		if t.R.Start < pos && pos < t.R.End {
 			return t.R.Start
 		}
@@ -719,7 +861,7 @@ func (f *Field) wordEnd() int {
 			end += n
 		}
 	}
-	for _, t := range ImageTags(f.Text) {
+	for _, t := range Tags(f.Text) {
 		if t.R.Start < end && end < t.R.End {
 			return t.R.End
 		}

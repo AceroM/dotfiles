@@ -116,3 +116,36 @@ func TestPutRemoveAndKeepImages(t *testing.T) {
 		t.Fatal(all)
 	}
 }
+
+func TestCombineAndKeepCarryPastedTexts(t *testing.T) {
+	a := draft("/r", "fix [Pasted text #2 +9 lines] per [Image #1]", "/a1.png", "/a2.txt")
+	b := draft("/r", "and [Pasted text #1] [Pasted text #4 +3 lines]", "/b1.txt")
+	text, files := Combine([]Draft{a, b})
+	if !strings.HasSuffix(text, "fix [Pasted text #1 +9 lines] per [Image #2]\n\n## Task 2 of 2\n\nand [Pasted text #3] [missing pasted text]") {
+		t.Fatal(text)
+	}
+	if !reflect.DeepEqual(files, []string{"/a2.txt", "/a1.png", "/b1.txt"}) {
+		t.Fatal(files)
+	}
+
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	src, err := SavePaste(PasteDir(), "a\nb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := KeepImages("d1", "[Pasted text #1 +1 lines]", []string{src})
+	if kept[0] != filepath.Join(ImageDir("d1"), "1.txt") {
+		t.Fatal(kept)
+	}
+	if body, _ := os.ReadFile(kept[0]); string(body) != "a\nb" {
+		t.Fatalf("%q", body)
+	}
+	// Into the history: back out of the draft's folder, which is swept sooner.
+	hist := KeepPastes("[Pasted text #1 +1 lines] [Image #2]", []string{kept[0], "/x.png"})
+	if filepath.Dir(hist[0]) != PasteDir() || hist[1] != "/x.png" {
+		t.Fatal(hist)
+	}
+	if body, _ := os.ReadFile(hist[0]); string(body) != "a\nb" {
+		t.Fatalf("%q", body)
+	}
+}

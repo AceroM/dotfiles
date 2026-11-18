@@ -53,10 +53,10 @@ func truncate(s string, w int) string {
 	return out.String()
 }
 
-// textRow draws row r of text at (x, y) in st, its `[Image #N]` tags in
-// tag. Returns the column after it.
+// textRow draws row r of text at (x, y) in st, its `[Image #N]` and
+// `[Pasted text #N …]` tags in tag. Returns the column after it.
 func textRow(buf *tui.Buffer, x, y, maxX int, text string, r field.Range, st tui.Style, tag tui.Color) int {
-	tags := field.ImageTags(text)
+	tags := field.Tags(text)
 	end := put(buf, x, y, maxX, text[r.Start:r.End], st)
 	cx := x
 	for bi, c := range text[r.Start:r.End] {
