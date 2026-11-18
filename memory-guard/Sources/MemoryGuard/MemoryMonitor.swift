@@ -16,6 +16,7 @@ final class MemoryMonitor {
     private(set) var lastAction: String?
 
     var onChange: (() -> Void)?
+    var onChromeRestart: ((UInt64) -> Void)?
 
     var paused: Bool {
         get { preferences.bool(forKey: "paused") }
@@ -156,6 +157,7 @@ final class MemoryMonitor {
             configuration.arguments = ["--restore-last-session"]
             let launched = try await NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
             record("Restarted Chrome", detail: "Restarted Chrome (PID \(process.pid) → \(launched.processIdentifier))")
+            onChromeRestart?(reading.bytes)
         } catch {
             record("Couldn't restart Chrome", detail: "Couldn't restart \(detail): \(error.localizedDescription)")
         }

@@ -21,7 +21,7 @@ bind("ctrl+alt+shift+e", "tab_new_beside", { side = "left" })
 bind("ctrl+alt+x", "client.tab.close")
 bind("ctrl+alt+h", "client.tab.previous")
 bind("ctrl+alt+l", "client.tab.next")
-bind("ctrl+alt+r", "client.tab.rename")
+bind("ctrl+alt+r", "client.tab.rename") -- fn+r
 bind("ctrl+alt+t", "pane.go_to") -- fn+t: Rex's built-in pane picker
 bind("ctrl+alt+shift+t", "jump_to_id") -- fn+shift+t: jump to the copied tab or pane ID
 for i = 1, 8 do

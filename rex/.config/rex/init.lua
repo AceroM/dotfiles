@@ -16,7 +16,7 @@ rex.bind("cmd+shift+z", "pane.send_key", { key = "f20" })
 rex.bind("cmd+h", "client.tab.previous")
 rex.bind("cmd+l", "client.tab.next")
 rex.bind("cmd+;", "client.tab.close")
-rex.bind("cmd+r", "client.tab.rename")
+rex.bind("cmd+r", "agent_reply")
 
 -- Focus history (focus.lua): the panes and tabs I've been in, for cmd+o /
 -- cmd+i and ctrl+alt+a. focus-history.lua (started at the bottom) records the
@@ -775,6 +775,7 @@ rex.bind("cmd+y", "pane.copy_id")
 -- (cwd=DIR), whatever pane it's pressed in.
 -- Try it without opening anything: rex do float_here dry_run=1 --json
 local FLOAT_BOUNDS = { 0.15, 0.15, 0.7, 0.7 } -- x, y, w, h as fractions of the tab
+local O_BOUNDS = { 0.24, 0.32, 0.52, 0.36 }
 local O_BIN = (os.getenv("HOME") or "") .. "/.local/bin/o"
 local O_PANES = (os.getenv("HOME") or "") .. "/.local/state/o/panes/"
 local O_VIEWER = "o images" -- the viewer's title, so its pane label
@@ -823,8 +824,9 @@ rex.action{
       if rec and rec.kind ~= "sent" and program ~= "o" then rec = nil end
     end
 
+    local bounds = args.o and O_BOUNDS or FLOAT_BOUNDS
     local result = {
-      window_id = window_id, cwd = cwd, bounds = FLOAT_BOUNDS,
+      window_id = window_id, cwd = cwd, bounds = bounds,
       shows = viewer and "close_viewer" or rec and "images" or args.o and "o" or "shell",
       images = rec and #rec.images or 0,
     }
@@ -846,7 +848,7 @@ rex.action{
     local created = rex.call("session.new_layer", {
       session_id = ctx.session_id,
       window_id = window_id,
-      bounds = FLOAT_BOUNDS,
+      bounds = bounds,
       focus = true,
       layout = rex.layout.block{
         flavor = TERMINAL .. ".shell", label = rec and O_VIEWER or nil, options = options,
@@ -1081,6 +1083,7 @@ rex.bind("cmd+shift+y", "copy_agent_session_id")
 -- clients call by name too, and keys.lua binds the ctrl+alt chords a Hammerspoon fn
 -- layer sends. Neither rebinds a key set above.
 require("actions")
+require("agent-reply")(O_BIN, REX_BIN:match("^(.+)/[^/]+$"))
 require("keys")
 
 -- cmd+shift+o opens the focused pane's directory on GitHub (github.lua).

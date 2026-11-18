@@ -35,7 +35,8 @@ With `stow hammerspoon` and Hammerspoon running:
 across sessions grouped by activity. Use `j/k` to move, `/` to filter, Enter to
 focus the pane, `y`/`Y` to copy its block or agent session ID, and `;` to close.
 Space marks tabs and `v` selects a range. `jv`'s `;` shortcut opens `rt`.
-**Cmd+R** renames the current tab. See [rt/README.md](rt/README.md).
+**Fn+R** renames the current tab. **Cmd+R** opens a reply composer for the
+focused agent pane. See [rt/README.md](rt/README.md).
 
 Copy a Rex tab or pane ID and press **Fn+Shift+T** to jump to it from any Rex session.
 The shortcut accepts full `window:` or `block:` IDs and unique short IDs such as

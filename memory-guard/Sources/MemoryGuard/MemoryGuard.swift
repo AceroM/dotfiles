@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 @main
 struct MemoryGuard {
@@ -13,7 +14,7 @@ struct MemoryGuard {
 }
 
 @MainActor
-private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
+private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private let monitor = MemoryMonitor()
     private var statusItem: NSStatusItem?
 
@@ -32,8 +33,38 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         status.menu = menu
         statusItem = status
         monitor.onChange = { [weak self] in self?.updateStatus() }
+        monitor.onChromeRestart = { [weak self] bytes in self?.notifyChromeRestart(bytes: bytes) }
+        let notifications = UNUserNotificationCenter.current()
+        notifications.delegate = self
+        notifications.requestAuthorization(options: [.alert]) { @Sendable _, error in
+            if let error {
+                EventLog.append("Couldn't request notification permission: \(error.localizedDescription)")
+            }
+        }
         updateStatus()
         monitor.start()
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter, willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list]
+    }
+
+    private func notifyChromeRestart(bytes: UInt64) {
+        UNUserNotificationCenter.current().getNotificationSettings { @Sendable settings in
+            guard settings.authorizationStatus == .authorized else { return }
+
+            let content = UNMutableNotificationContent()
+            content.title = "Chrome restarted"
+            content.body = "Memory usage reached \(formatGiB(bytes)) before the restart."
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request) { @Sendable error in
+                if let error {
+                    EventLog.append("Couldn't post restart notification: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {

@@ -264,11 +264,18 @@ func pasteEnter(block, prompt string) error {
 	if ses == "" {
 		return errors.New("not in a Rex terminal (no REX_SESSION)")
 	}
-	call, _ := json.Marshal(map[string]any{"session_id": ses, "block_id": block, "event": map[string]any{"type": "paste", "payload": map[string]any{"text": prompt}}})
-	if _, err := Rex("api", "call", "-s", ses, "block.event", string(call)); err != nil {
+	if err := Paste(ses, block, prompt); err != nil {
 		return err
 	}
 	_, err := Rex("send-key", "-s", ses, "-b", block, "enter")
+	return err
+}
+
+// Paste delivers text using the terminal's paste mode. Pass the payload on
+// stdin so long prompts fit and the text stays out of the CLI arguments.
+func Paste(session, block, prompt string) error {
+	call, _ := json.Marshal(map[string]any{"block_id": block, "event": map[string]any{"type": "paste", "payload": map[string]any{"text": prompt}}})
+	_, err := RexWithInput(string(call), "api", "call", "-s", session, "block.event", "-")
 	return err
 }
 
@@ -314,7 +321,15 @@ func Focus(block string) error {
 
 // Rex runs `rex ARGS`: stdout on success, else the error's message.
 func Rex(args ...string) (string, error) {
+	return RexWithInput("", args...)
+}
+
+// RexWithInput runs rex with input on stdin.
+func RexWithInput(input string, args ...string) (string, error) {
 	c := exec.Command("rex", args...)
+	if input != "" {
+		c.Stdin = strings.NewReader(input)
+	}
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {

@@ -237,7 +237,7 @@ func (in *Input) decodeOne() (ev Event, ok bool, wait time.Duration) {
 		in.buf = in.buf[n:]
 		return ev, true, 0
 	}
-	if in.buf[0] != 0x1b || bytes0(in.buf, pasteStart) {
+	if in.buf[0] != 0x1b || (len(in.buf) > 1 && bytes0(in.buf, pasteStart)) {
 		// A paste or a character still arriving: wait for the rest.
 		return nil, false, 0
 	}

@@ -10,3 +10,5 @@ Run `./memory-guard/install.sh` from the dotfiles root. It builds and signs `~/A
 | Chrome | One third of installed RAM per browser instance with its helpers, rounded down, minimum 6 GiB | Ask Chrome to quit, force it to stop after eight seconds if needed, then reopen the same bundle with `--restore-last-session`. Wait at least five minutes before another Chrome restart. |
 
 The monitor samples macOS physical footprint every five seconds and acts on the third consecutive reading at or above a limit. Pausing and changing a limit both reset the current readings above the limit. Events are stored in `~/Library/Logs/Memory Guard/events.log`. Chrome may show its restore prompt after a forced quit.
+
+Allow Memory Guard notifications when macOS prompts you. Each successful Chrome restart sends a notification with the memory usage that triggered it.

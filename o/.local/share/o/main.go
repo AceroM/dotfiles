@@ -21,6 +21,7 @@ import (
 	"o/internal/gfx"
 	"o/internal/panes"
 	"o/internal/probe"
+	"o/internal/reply"
 	"o/internal/spawn"
 	"o/internal/term"
 	"o/internal/theme"
@@ -39,6 +40,7 @@ usage:
   o -d, --drafts       start in the drafts list
   o --config           the configurations and the keys to them
   o --images BLOCK     the images behind Rex pane BLOCK's [Image #N] tags, big (⌥⌘N)
+  o --reply            open a small reply composer over this agent pane (Cmd+R)
   --cwd DIR            where the agents start (default: here)
   -h, --help
 
@@ -237,6 +239,13 @@ func main() { os.Exit(run()) }
 func run() int {
 	if len(os.Args) > 1 && os.Args[1] == spawn.ChildFlag {
 		return spawn.Child(os.Args[2:])
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "--reply" || os.Args[1] == "--reply-compose") {
+		if err := reply.Run(os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "o:", err)
+			return 1
+		}
+		return 0
 	}
 	c, err := parseCLI(os.Args[1:])
 	if err != nil {

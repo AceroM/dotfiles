@@ -3,6 +3,7 @@ package tui
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func all(t *testing.T, s string) []Event {
@@ -55,6 +56,22 @@ func TestWaitsForTheRestOfASequence(t *testing.T) {
 		if _, _, inc := decode([]byte(s)); !inc {
 			t.Errorf("%q should be incomplete", s)
 		}
+	}
+}
+
+func TestInputDistinguishesEscapeFromPartialPaste(t *testing.T) {
+	in := Input{buf: []byte("\x1b"), got: time.Now().Add(-escWait)}
+	if ev, ok, _ := in.decodeOne(); !ok || ev != (Key{Code: KeyEsc}) {
+		t.Fatalf("lone escape: event %v, decoded %v", ev, ok)
+	}
+
+	in.buf = []byte("\x1b[200~first")
+	if ev, ok, wait := in.decodeOne(); ok || wait != 0 {
+		t.Fatalf("partial paste: event %v, decoded %v, timeout %v", ev, ok, wait)
+	}
+	in.add([]byte("\nsecond\x1b[201~"))
+	if ev, ok, _ := in.decodeOne(); !ok || ev != Paste("first\nsecond") {
+		t.Fatalf("complete paste: event %v, decoded %v", ev, ok)
 	}
 }
 

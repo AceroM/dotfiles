@@ -10,6 +10,15 @@ account pairing, or background uploader.
 binary in `$XDG_CACHE_HOME/o-public/o` (default `~/.cache/o-public/o`).
 `o --help` lists the keys; `o --config` shows the agents and local draft path.
 
+## Reply to an agent
+
+With `stow rex o`, press **Cmd+R** in a Claude Code or Codex pane
+to open a compact composer centered over that pane. It opens around 38 columns
+wide and grows to at most 48 columns on wide windows. **Enter** sends to that
+agent and closes the float. **Shift+Enter**, **Option+Enter**, or **Ctrl+J** adds
+a line. **Esc** cancels. Text pastes stay in the composer until you send them.
+**Fn+R** renames the tab with the Hammerspoon Fn layer enabled.
+
 The checked-in config and built-in defaults contain exactly these shortcuts:
 
 | Shortcut | Agent | Reasoning |
