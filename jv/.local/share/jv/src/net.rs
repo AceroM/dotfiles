@@ -153,6 +153,16 @@ pub fn default_branch() -> Result<Base, String> {
     }
 }
 
+pub fn remote_branch(name: &str) -> Result<Base, String> {
+    let reference = format!("refs/heads/{name}");
+    let out = git(&["ls-remote", "--exit-code", "origin", &reference])?;
+    let oid = out.lines().find_map(|line| {
+        let (oid, found) = line.split_once('\t')?;
+        (found == reference).then(|| oid.to_string())
+    }).ok_or_else(|| format!("couldn't read origin/{name}"))?;
+    Ok(Base { name: name.to_string(), oid })
+}
+
 /// Stack bottoms first: a PR whose base branch is another pick's head goes
 /// in after that pick. Otherwise oldest (lowest number) first.
 pub fn order(picks: &[Pick], base: &str) -> Vec<Pick> {
@@ -182,9 +192,35 @@ pub fn compute(base: &Base, picks: &[Pick], go: &dyn Fn(usize) -> bool) -> Resul
     if !go(0) {
         return Ok(None);
     }
-    let picks = order(picks, &base.name);
-    let mut net = Net::default();
+    let missing = ensure_commits(base, picks)?;
+    compute_in_order(base, &order(picks, &base.name), &missing, go)
+}
 
+/// Apply the stack in its registered order. If a later head already contains
+/// an earlier one, merging the earlier head separately can create a conflict
+/// on an edit that the later PR reverted. Apply only the independent heads.
+pub fn compute_stack(base: &Base, picks: &[Pick]) -> Result<Net, String> {
+    let missing = ensure_commits(base, picks)?;
+    if let Some(p) = picks.iter().find(|p| missing.contains(&p.oid)) {
+        return Err(format!("couldn't fetch the head of #{}", p.number));
+    }
+    if picks.is_empty() {
+        return Ok(Net::default());
+    }
+    let mut args = vec!["merge-base", "--independent"];
+    args.extend(picks.iter().map(|p| p.oid.as_str()));
+    let independent = git(&args)?;
+    let mut tips: HashSet<&str> = independent.lines().collect();
+    let mut heads: Vec<Pick> = picks.iter().rev().filter(|p| tips.remove(p.oid.as_str())).cloned().collect();
+    heads.reverse();
+    let net = compute_in_order(base, &heads, &missing, &|_| true)?.expect("stack computation is never cancelled");
+    if let Some((number, reason)) = net.skipped.first() {
+        return Err(format!("couldn't include #{number}: {reason}"));
+    }
+    Ok(net)
+}
+
+fn ensure_commits(base: &Base, picks: &[Pick]) -> Result<HashSet<String>, String> {
     // Every commit has to be here; fetch the ones that aren't, in one go.
     let want: Vec<&str> = std::iter::once(base.oid.as_str()).chain(picks.iter().map(|p| p.oid.as_str())).collect();
     let mut missing = missing_commits(&want)?;
@@ -194,7 +230,7 @@ pub fn compute(base: &Base, picks: &[Pick], go: &dyn Fn(usize) -> bool) -> Resul
             specs.push(format!("refs/heads/{}", base.name));
         }
         specs.extend(picks.iter().filter(|p| missing.contains(&p.oid)).map(|p| format!("refs/pull/{}/head", p.number)));
-        let mut args = vec!["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin"];
+        let mut args = vec!["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin"];
         args.extend(specs.iter().map(String::as_str));
         git(&args)?;
         missing = missing_commits(&want)?;
@@ -202,7 +238,11 @@ pub fn compute(base: &Base, picks: &[Pick], go: &dyn Fn(usize) -> bool) -> Resul
     if missing.contains(&base.oid) {
         return Err(format!("{} ({}) isn't in this checkout and fetching it failed", base.name, short(&base.oid)));
     }
+    Ok(missing)
+}
 
+fn compute_in_order(base: &Base, picks: &[Pick], missing: &HashSet<String>, go: &dyn Fn(usize) -> bool) -> Result<Option<Net>, String> {
+    let mut net = Net::default();
     let mut cur = base.oid.clone();
     let mut labels: Vec<(String, String)> = vec![(base.oid.clone(), base.name.clone())];
     for (k, p) in picks.iter().enumerate() {

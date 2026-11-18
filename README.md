@@ -54,6 +54,11 @@ float, in the directory of the pane you pressed it in: the branch's PR diff, or 
 there's no PR. Press it again inside the float to close it. In `jf`, `t` shows or hides test files
 and `^p` goes to a file.
 
+Run `jf --stack` from any open PR branch in a GitHub stack to see the net patch
+of that stack against its target branch. Press `/` to search the patch, `n` / `N`
+to step through matches, `Ctrl+P` to jump to a file, and `r` to refresh.
+Tests are visible by default in this view.
+
 ## Rex servers (stop them all)
 
 **Option+Cmd+X** (or `servers-down`, from `stow cli rex`) stops every server in the Rex `servers`

@@ -12,6 +12,7 @@ func TestCommandNamesAndPassthrough(t *testing.T) {
 	}{
 		{"jv", "pr", []string{"42", "-R", "org/repo"}, []string{"42", "-R", "org/repo"}},
 		{"jf", "pr", []string{"--", "--help"}, []string{"--help"}},
+		{"jf", "stack", []string{"--stack"}, nil},
 		{"jg", "git", []string{"-s", "--", "name with spaces"}, []string{"-s", "--", "name with spaces"}},
 		{"jg", "git", nil, nil},
 		{"jp", "pr", []string{"-o", "review-requested:@me"}, []string{"-o", "review-requested:@me"}},
@@ -47,7 +48,10 @@ func TestViewerOptions(t *testing.T) {
 	if err != nil || c.action != "help" || !c.view.PRs || c.view.Theme == nil || *c.view.Theme != "GitHub" {
 		t.Fatalf("help or theme override: %+v, %v", c, err)
 	}
-	for _, args := range [][]string{{"-c"}, {"--theme"}, {"--snapshot", "80"}, {"--snapshot", "80x65536"}} {
+	for _, args := range [][]string{
+		{"-c"}, {"--theme"}, {"--snapshot", "80"}, {"--snapshot", "80x65536"},
+		{"--stack", "42"}, {"--stack", "--net"}, {"--stack", "-g", "HEAD"},
+	} {
 		if _, err := parse(args); err == nil {
 			t.Errorf("accepted invalid options %q", args)
 		}

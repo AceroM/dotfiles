@@ -12,6 +12,8 @@ pub enum Source {
     Gh(Vec<String>),
     /// `git diff HEAD`: staged + unstaged changes.
     Local,
+    /// Net patch of the GitHub stack containing this checkout's PR.
+    Stack(Option<String>),
     /// Arguments passed straight to `git diff` (revs, ranges, --staged, -- paths).
     Git(Vec<String>),
     Cmd(String),
@@ -24,6 +26,7 @@ impl Source {
             Source::Gh(a) if a.is_empty() => "gh pr diff".into(),
             Source::Gh(a) => format!("gh pr diff {}", a.join(" ")),
             Source::Local => "local changes (git diff HEAD)".into(),
+            Source::Stack(label) => label.clone().unwrap_or_else(|| "current stack net diff".into()),
             Source::Git(a) if a.is_empty() => "git diff".into(),
             Source::Git(a) => format!("git diff {}", a.join(" ")),
             Source::Cmd(c) => c.clone(),
@@ -33,6 +36,12 @@ impl Source {
 
     pub fn reloadable(&self) -> bool {
         !matches!(self, Source::Stdin)
+    }
+
+    pub fn set_stack_label(&mut self, label: Option<&str>) {
+        if let Source::Stack(current) = self {
+            *current = label.map(str::to_string);
+        }
     }
 
     pub fn fetch(&self) -> Result<String, String> {
@@ -45,6 +54,7 @@ impl Source {
             Source::Gh(args) => ("pr", args),
             Source::Git(args) => ("git", args),
             Source::Local => ("local", &[]),
+            Source::Stack(_) => return crate::stack::diff().map(|(text, label)| (text, Some(label))),
             Source::Cmd(command) => ("cmd", std::slice::from_ref(command)),
             Source::Stdin => {
                 let mut text = String::new();

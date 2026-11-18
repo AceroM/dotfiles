@@ -10,6 +10,7 @@ mod net;
 mod prs;
 mod snapshot;
 mod source;
+mod stack;
 mod rex_theme;
 mod theme;
 mod tree;
@@ -85,6 +86,7 @@ fn main() -> ExitCode {
         "pr" => Source::Gh(args[3..].to_vec()),
         "git" => Source::Git(args[3..].to_vec()),
         "local" => Source::Local,
+        "stack" => Source::Stack(None),
         "cmd" if args.len() == 4 => Source::Cmd(args[3].clone()),
         kind => {
             eprintln!("jv: unknown diff source {kind:?}");
@@ -168,6 +170,7 @@ fn run_viewer(cli: Cli, mut source: Source) -> ExitCode {
         }
     };
     clear(chatty);
+    source.set_stack_label(note.as_deref());
     if text.trim().is_empty() {
         eprintln!("jv: empty diff ({})", source.label());
         // Bare `git diff` is unstaged only; say where staged work went.
@@ -189,7 +192,7 @@ fn run_viewer(cli: Cli, mut source: Source) -> ExitCode {
     let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests, popup: cli.popup, flat: cli.flat };
     let mut app = App::new(source, &text, hl, background(), opts, viewed);
     app.meta_rx = meta_rx;
-    if let Some(n) = note {
+    if let Some(n) = note.filter(|_| !matches!(app.source, Source::Stack(_))) {
         app.flash(n);
     }
 

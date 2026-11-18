@@ -9,6 +9,7 @@ usage:
   git diff | jv                                a diff on stdin
   jv --prs [search terms]                      your recent PRs beside the diff (`jp`; jp -h)
   jv --net [PR… | search terms]                tick open PRs, see their net diff (`jn`; jn -h)
+  jv --stack | jf --stack                      combined net patch of the current GitHub stack
   jv --flat [PR | …]                           the diff alone, no file tree (`jf`)
 
 options:
@@ -26,3 +27,7 @@ options:
 
 Inside jv, press ? for keys. With no PR on the current branch, jv shows
 local changes instead.
+
+With --stack, open PRs in the registered stack are applied to its target
+branch. The combined patch opens with tests visible. In jf, / searches the
+patch, n/N step through hits, and Ctrl+P finds files.

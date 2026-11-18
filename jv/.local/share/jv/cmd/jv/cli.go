@@ -61,6 +61,7 @@ func parse(args []string) (invocation, error) {
 		c.view.Theme = &theme
 	}
 	var command *string
+	var stack bool
 	for len(args) > 0 {
 		arg := args[0]
 		args = args[1:]
@@ -75,6 +76,8 @@ func parse(args []string) (invocation, error) {
 			c.view.PRs = true
 		case "--net":
 			c.view.Net = true
+		case "--stack":
+			stack = true
 		case "--flat", "--no-tree":
 			c.view.Flat = true
 		case "-s", "--split", "-u", "--unified":
@@ -130,6 +133,12 @@ func parse(args []string) (invocation, error) {
 		c.source, c.args = "cmd", []string{*command}
 	} else if c.source == "local" {
 		c.args = nil
+	}
+	if stack {
+		if c.source != "pr" || len(c.args) != 0 || c.view.PRs || c.view.Net {
+			return c, errors.New("--stack shows the current branch's stack and takes no diff source or PR selector")
+		}
+		c.source = "stack"
 	}
 	return c, nil
 }
