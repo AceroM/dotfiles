@@ -27,6 +27,9 @@ Quitting a floating Neovim closes its pane.
 and on a directory opens it in Finder; without --float both go to Neovim like
 any other file, so they stay editable.
 
+A video (.mp4, .mov, .mkv, .webm, ...) opens in IINA with or without --float,
+since Neovim has nothing to show for one.
+
 A location that names no file but reads as a web address without its scheme
 (app.example.site/booking, example.com, localhost:3000/x) opens in the default
 browser, with or without --float.
@@ -58,6 +61,13 @@ SEARCH_PATH = os.pathsep.join([os.environ.get("PATH", ""), str(Path.home() / ".l
 FLOAT_BOUNDS = [0.08, 0.06, 0.84, 0.88]
 # What cmd-click (--float) hands to the browser rather than Neovim.
 WEB_PAGES = {".html", ".htm"}
+# What either click hands to the video player. Not .ts, which is TypeScript far
+# more often than an MPEG transport stream.
+VIDEOS = {
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv", ".flv", ".mpg", ".mpeg",
+    ".m2ts", ".mts", ".3gp", ".ogv", ".vob",
+}
+PLAYER = "com.colliderli.iina"
 # A web address with no scheme: example.com, app.example.site/booking,
 # example.com:8443, localhost:3000/x. Lowercase only, so Foo.app/Contents stays a path.
 WEB_ADDRESS = re.compile(
@@ -397,6 +407,16 @@ def open_in_browser(target):
     return f"{target} in {browser or 'the default app'}"
 
 
+def open_in_player(target):
+    """IINA, else whatever opens the file when IINA isn't installed."""
+    try:
+        run(["/usr/bin/open", "-b", PLAYER, str(target)])
+        return f"{target} in IINA"
+    except subprocess.CalledProcessError:
+        run(["/usr/bin/open", str(target)])
+        return f"{target} in the default app"
+
+
 def open_in_finder(target):
     run(["/usr/bin/open", "-a", "Finder", str(target)])
     return f"{target} in Finder"
@@ -460,6 +480,13 @@ def main():
                               "browser": default_browser() or "default app"}, indent=2))
         else:
             print("Opened " + open_in_browser(url))
+        return
+    if target.is_file() and target.suffix.lower() in VIDEOS:
+        if args.dry_run:
+            print(json.dumps({"target": str(target), "source": source, "directories": directories,
+                              "player": PLAYER}, indent=2))
+        else:
+            print("Opened " + open_in_player(target))
         return
     if args.float and target.is_file() and target.suffix.lower() in WEB_PAGES:
         if args.dry_run:

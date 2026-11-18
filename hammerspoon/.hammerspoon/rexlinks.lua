@@ -4,6 +4,8 @@
 --               .html/.htm open in the default browser instead, directories in Finder
 --   ctrl-click  the Neovim already in the tab, else that floating Neovim
 --
+-- Videos (.mp4, .mov, .mkv, ...) open in IINA with either modifier.
+--
 -- Rex can't bind mouse clicks or hook the links it opens, so this is a mouse
 -- tap (no keys). Each Rex terminal pane is an AXTextArea ("Terminal") that
 -- answers AXRangeForPosition, which gives the line under the pointer and the
