@@ -10,3 +10,4 @@ codex/.codex/config.toml
 .build/
 __pycache__/
 .nvimlog
+rex-web
