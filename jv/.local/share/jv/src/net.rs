@@ -61,11 +61,28 @@ pub struct Pick {
     pub oid: String,
     pub head: String,
     pub base: String,
+    /// This checkout's work (`jf`), not a pushed head. Number 0 when the
+    /// branch has no PR.
+    pub local: bool,
 }
 
 impl Pick {
     pub fn of(pr: &Pr) -> Pick {
-        Pick { number: pr.number, oid: pr.head_oid.clone(), head: pr.head.clone(), base: pr.base.clone() }
+        Pick { number: pr.number, oid: pr.head_oid.clone(), head: pr.head.clone(), base: pr.base.clone(), local: false }
+    }
+
+    /// How a conflict marker names this side.
+    fn label(&self) -> String {
+        match (self.local, self.number) {
+            (true, 0) => format!("local {}", self.head),
+            (true, n) => format!("#{n} {} (local)", self.head),
+            (false, n) => format!("#{n} {}", self.head),
+        }
+    }
+
+    /// How the merge so far names it.
+    fn short(&self) -> String {
+        if self.local { "local".into() } else { format!("#{}", self.number) }
     }
 }
 
@@ -220,8 +237,18 @@ pub fn compute_stack(base: &Base, picks: &[Pick]) -> Result<Net, String> {
     Ok(net)
 }
 
-fn ensure_commits(base: &Base, picks: &[Pick]) -> Result<HashSet<String>, String> {
-    // Every commit has to be here; fetch the ones that aren't, in one go.
+/// Merge `picks` onto `base` in the order given, fetching what's missing.
+pub fn merge(base: &Base, picks: &[Pick]) -> Result<Net, String> {
+    let missing = ensure_commits(base, picks)?;
+    if let Some(p) = picks.iter().find(|p| missing.contains(&p.oid)) {
+        return Err(format!("couldn't fetch the head of #{}", p.number));
+    }
+    Ok(compute_in_order(base, picks, &missing, &|_| true)?.expect("merge is never cancelled"))
+}
+
+/// Every commit has to be here; fetch the ones that aren't, in one go. A
+/// local pick is always here, so only PR heads and the base get fetched.
+pub fn ensure_commits(base: &Base, picks: &[Pick]) -> Result<HashSet<String>, String> {
     let want: Vec<&str> = std::iter::once(base.oid.as_str()).chain(picks.iter().map(|p| p.oid.as_str())).collect();
     let mut missing = missing_commits(&want)?;
     if !missing.is_empty() {
@@ -229,7 +256,9 @@ fn ensure_commits(base: &Base, picks: &[Pick]) -> Result<HashSet<String>, String
         if missing.contains(&base.oid) {
             specs.push(format!("refs/heads/{}", base.name));
         }
-        specs.extend(picks.iter().filter(|p| missing.contains(&p.oid)).map(|p| format!("refs/pull/{}/head", p.number)));
+        specs.extend(
+            picks.iter().filter(|p| !p.local && missing.contains(&p.oid)).map(|p| format!("refs/pull/{}/head", p.number)),
+        );
         let mut args = vec!["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin"];
         args.extend(specs.iter().map(String::as_str));
         git(&args)?;
@@ -245,6 +274,7 @@ fn compute_in_order(base: &Base, picks: &[Pick], missing: &HashSet<String>, go: 
     let mut net = Net::default();
     let mut cur = base.oid.clone();
     let mut labels: Vec<(String, String)> = vec![(base.oid.clone(), base.name.clone())];
+    let mut so_far: Vec<String> = Vec::new();
     for (k, p) in picks.iter().enumerate() {
         if !go(k + 1) {
             return Ok(None);
@@ -268,11 +298,11 @@ fn compute_in_order(base: &Base, picks: &[Pick], missing: &HashSet<String>, go: 
         for path in names.lines().filter(|l| !l.is_empty()) {
             net.touched.entry(path.to_string()).or_default().push(p.number);
         }
-        let msg = format!("jn: merge #{}", p.number);
+        let msg = format!("jn: merge {}", p.short());
         let commit = git_commit(&["commit-tree", "--no-gpg-sign", &tree, "-p", &cur, "-p", &p.oid, "-m", &msg])?;
         net.order.push(p.number);
-        labels.push((p.oid.clone(), format!("#{} {}", p.number, p.head)));
-        let so_far: Vec<String> = net.order.iter().map(|n| format!("#{n}")).collect();
+        labels.push((p.oid.clone(), p.label()));
+        so_far.push(p.short());
         labels.push((commit.clone(), format!("{} + {}", base.name, so_far.join(" "))));
         cur = commit;
     }
@@ -283,7 +313,7 @@ fn compute_in_order(base: &Base, picks: &[Pick], missing: &HashSet<String>, go: 
 
 /// merge-tree names each side of a conflict by the commit it was given; put
 /// the PR (or the merge so far) there instead of a hash.
-fn relabel(text: &str, labels: &[(String, String)]) -> String {
+pub(crate) fn relabel(text: &str, labels: &[(String, String)]) -> String {
     if !text.contains("+<<<<<<< ") {
         return text.to_string();
     }
@@ -312,7 +342,7 @@ fn relabel(text: &str, labels: &[(String, String)]) -> String {
     out
 }
 
-fn short(oid: &str) -> &str {
+pub(crate) fn short(oid: &str) -> &str {
     &oid[..oid.len().min(10)]
 }
 
@@ -342,7 +372,7 @@ fn missing_commits(oids: &[&str]) -> Result<HashSet<String>, String> {
     Ok(oids.iter().filter(|o| !o.is_empty() && !have.contains(**o)).map(|o| o.to_string()).collect())
 }
 
-fn git(args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(args: &[&str]) -> Result<String, String> {
     match git_code(args)? {
         (0, out) => Ok(out),
         (_, err) => Err(err),
@@ -350,12 +380,12 @@ fn git(args: &[&str]) -> Result<String, String> {
 }
 
 /// Exit code and stdout; stderr instead when git failed outright.
-fn git_code(args: &[&str]) -> Result<(i32, String), String> {
+pub(crate) fn git_code(args: &[&str]) -> Result<(i32, String), String> {
     run(Command::new("git").args(args))
 }
 
 /// commit-tree needs a name and email, and a machine may have neither set.
-fn git_commit(args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_commit(args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(args);
     for (k, v) in [
@@ -372,7 +402,7 @@ fn git_commit(args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn run(cmd: &mut Command) -> Result<(i32, String), String> {
+pub(crate) fn run(cmd: &mut Command) -> Result<(i32, String), String> {
     let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
     let code = out.status.code().unwrap_or(-1);
     // 1 with output is merge-tree's "merged, with conflicts"; anything else
@@ -391,7 +421,7 @@ mod tests {
     use super::*;
 
     fn pick(n: u32, head: &str, base: &str) -> Pick {
-        Pick { number: n, oid: String::new(), head: head.into(), base: base.into() }
+        Pick { number: n, oid: String::new(), head: head.into(), base: base.into(), local: false }
     }
 
     #[test]

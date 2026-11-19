@@ -1,5 +1,5 @@
--- fn+d opens jf (jv --flat: the current branch's PR diff, local changes
--- when the branch has no PR) in a floating pane centred over the tab, in the
+-- fn+d opens jf (jv --flat: the net diff of the current branch's PR and its
+-- local work, merged onto the base's tip) in a floating pane centred over the tab, in the
 -- directory of the pane the key was pressed in, and focuses it.
 --
 -- Pressed again inside it, it closes it. Pressed in another pane of a tab that

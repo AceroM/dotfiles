@@ -10,6 +10,9 @@ use std::thread;
 pub enum Source {
     /// Arguments passed straight to `gh pr diff` (PR number, URL, branch, -R).
     Gh(Vec<String>),
+    /// jf: the PR (same arguments) and this checkout's work merged onto the
+    /// base branch's tip, diffed against it. The note says what went in.
+    Net(Vec<String>, Option<String>),
     /// `git diff HEAD`: staged + unstaged changes.
     Local,
     /// Net patch of the GitHub stack containing this checkout's PR.
@@ -25,6 +28,9 @@ impl Source {
         match self {
             Source::Gh(a) if a.is_empty() => "gh pr diff".into(),
             Source::Gh(a) => format!("gh pr diff {}", a.join(" ")),
+            Source::Net(_, Some(note)) => note.clone(),
+            Source::Net(a, None) if a.is_empty() => "net diff: the PR + local work".into(),
+            Source::Net(a, None) => format!("net diff: {}", a.join(" ")),
             Source::Local => "local changes (git diff HEAD)".into(),
             Source::Stack(label) => label.clone().unwrap_or_else(|| "current stack net diff".into()),
             Source::Git(a) if a.is_empty() => "git diff".into(),
@@ -38,9 +44,26 @@ impl Source {
         !matches!(self, Source::Stdin)
     }
 
-    pub fn set_stack_label(&mut self, label: Option<&str>) {
-        if let Source::Stack(current) = self {
+    /// Stack and Net sources keep the fetch's note as their header label.
+    pub fn set_label(&mut self, label: Option<&str>) {
+        if let Source::Stack(current) | Source::Net(_, current) = self {
             *current = label.map(str::to_string);
+        }
+    }
+
+    /// The note a Net source shows beside the PR's title.
+    pub fn badge(&self) -> Option<&str> {
+        match self {
+            Source::Net(_, note) => note.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Whatever the PR selector is, for `gh pr view` (the header's details).
+    pub fn pr_args(&self) -> Option<&[String]> {
+        match self {
+            Source::Gh(a) | Source::Net(a, _) => Some(a),
+            _ => None,
         }
     }
 
@@ -55,6 +78,7 @@ impl Source {
             Source::Git(args) => ("git", args),
             Source::Local => ("local", &[]),
             Source::Stack(_) => return crate::stack::diff().map(|(text, label)| (text, Some(label))),
+            Source::Net(args, _) => return crate::local::fetch(args),
             Source::Cmd(command) => ("cmd", std::slice::from_ref(command)),
             Source::Stdin => {
                 let mut text = String::new();
@@ -62,14 +86,19 @@ impl Source {
                 return Ok((text, None));
             }
         };
-        let out = driver()?.args(["--jv-fetch", kind]).args(args).output()
-            .map_err(|e| format!("running the diff loader: {e}"))?;
-        let message = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if !out.status.success() {
-            return Err(if message.is_empty() { format!("diff loader exited with {}", out.status) } else { message });
-        }
-        Ok((String::from_utf8_lossy(&out.stdout).into_owned(), (!message.is_empty()).then_some(message)))
+        load(kind, args)
     }
+}
+
+/// A diff from the Go loader: `pr` (gh pr diff), `git`, `local` or `cmd`.
+pub fn load(kind: &str, args: &[String]) -> Result<(String, Option<String>), String> {
+    let out = driver()?.args(["--jv-fetch", kind]).args(args).output()
+        .map_err(|e| format!("running the diff loader: {e}"))?;
+    let message = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        return Err(if message.is_empty() { format!("diff loader exited with {}", out.status) } else { message });
+    }
+    Ok((String::from_utf8_lossy(&out.stdout).into_owned(), (!message.is_empty()).then_some(message)))
 }
 
 fn driver() -> Result<Command, String> {

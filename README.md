@@ -50,12 +50,16 @@ The interactive viewer uses Rust. The launchers build each part on demand
 with Go and Cargo.
 
 **Fn+D** (or `rex do jf_float`, from `stow jv rex`) opens `jf` in a large centered
-float, in the directory of the pane you pressed it in: the branch's PR diff, or local changes when
-there's no PR. Press it again inside the float to close it. In `jf`, `t` shows or hides test files
+float, in the directory of the pane you pressed it in. `jf` shows the net diff: the branch's PR
+as pushed plus your unpushed commits and uncommitted edits, merged onto the base branch's current
+tip with `git merge-tree` and diffed against it. Changes the base already has drop out, and
+conflicts keep their markers. The header says what local work went in. With no PR, it's the
+branch's own work merged onto `main`. Press it again inside the float to close it. In `jf`, `t` shows or hides test files
 and `^p` goes to a file.
 
 Run `jf --stack` from any open PR branch in a GitHub stack to see the net patch
-of that stack against its target branch. Press `/` to search the patch, `n` / `N`
+of that stack against its target branch, with your local work in place of the checked-out PR's
+pushed head. Press `/` to search the patch, `n` / `N`
 to step through matches, `Ctrl+P` to jump to a file, and `r` to refresh.
 Tests are visible by default in this view.
 

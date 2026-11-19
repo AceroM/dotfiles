@@ -6,6 +6,7 @@ mod doc;
 mod edit;
 mod fuzzy;
 mod highlight;
+mod local;
 mod net;
 mod prs;
 mod snapshot;
@@ -83,6 +84,8 @@ fn main() -> ExitCode {
         }
     };
     let source = match args[2].as_str() {
+        // jf: the PR and this checkout's work, net against the base's tip.
+        "pr" if cli.flat && !cli.prs && !cli.net => Source::Net(args[3..].to_vec(), None),
         "pr" => Source::Gh(args[3..].to_vec()),
         "git" => Source::Git(args[3..].to_vec()),
         "local" => Source::Local,
@@ -117,7 +120,7 @@ fn run_viewer(cli: Cli, mut source: Source) -> ExitCode {
     // A pipe wins over the current branch's PR, but an empty or closed stdin
     // (cron, editors, agent shells) shouldn't hide it.
     let mut stdin_text = None;
-    if matches!(&source, Source::Gh(a) if a.is_empty()) && !io::stdin().is_terminal() {
+    if matches!(&source, Source::Gh(a) | Source::Net(a, _) if a.is_empty()) && !io::stdin().is_terminal() {
         if let Ok(t) = Source::Stdin.fetch() {
             if !t.trim().is_empty() {
                 source = Source::Stdin;
@@ -170,7 +173,7 @@ fn run_viewer(cli: Cli, mut source: Source) -> ExitCode {
         }
     };
     clear(chatty);
-    source.set_stack_label(note.as_deref());
+    source.set_label(note.as_deref());
     if text.trim().is_empty() {
         eprintln!("jv: empty diff ({})", source.label());
         // Bare `git diff` is unstaged only; say where staged work went.
@@ -183,16 +186,13 @@ fn run_viewer(cli: Cli, mut source: Source) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let show_tests = cli.tests.unwrap_or(!matches!(source, Source::Gh(_)));
-    let meta_rx = match &source {
-        Source::Gh(a) => Some(source::spawn_meta(a.clone())),
-        _ => None,
-    };
+    let show_tests = cli.tests.unwrap_or(!matches!(source, Source::Gh(_) | Source::Net(..)));
+    let meta_rx = source.pr_args().map(|a| source::spawn_meta(a.to_vec()));
     let viewed = if cli.snapshot.is_some() { Viewed::ephemeral() } else { Viewed::load() };
     let opts = Opts { split: cli.split, wrap: cli.wrap, show_tests, popup: cli.popup, flat: cli.flat };
     let mut app = App::new(source, &text, hl, background(), opts, viewed);
     app.meta_rx = meta_rx;
-    if let Some(n) = note.filter(|_| !matches!(app.source, Source::Stack(_))) {
+    if let Some(n) = note.filter(|_| !matches!(app.source, Source::Stack(_) | Source::Net(..))) {
         app.flash(n);
     }
 

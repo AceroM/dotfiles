@@ -11,6 +11,9 @@ const ENTRIES: &str = "pageInfo { hasNextPage endCursor } nodes { position pullR
 
 pub fn diff() -> Result<(String, String), String> {
     let branch = app::current_branch().ok_or("--stack needs a checked-out branch")?;
+    // This checkout's work replaces the branch's pushed head; snapshot it
+    // while GitHub answers.
+    let work = std::thread::spawn(crate::local::snapshot);
     let repo = prs::this_repo().ok_or("--stack needs a GitHub checkout")?;
     let (owner, name) = repo.split_once('/').ok_or("invalid GitHub repo")?;
     let query = format!(
@@ -44,11 +47,22 @@ pub fn diff() -> Result<(String, String), String> {
         .ok_or("GitHub stack has no base branch")?;
     let picks = open_entries(id, &stack["entries"])?;
     let base = net::remote_branch(trunk)?;
-    let net = net::compute_stack(&base, &picks)?;
-
     let count = picks.len();
+    let (picks, local) = match work.join() {
+        Ok(Ok(work)) => crate::local::fold_stack(&base, picks, &work)?,
+        _ => (picks, None),
+    };
+    let mut net = net::compute_stack(&base, &picks)?;
+    if let Some(f) = &local {
+        net.text = net::relabel(&net.text, &f.labels);
+    }
+
     let plural = if count == 1 { "" } else { "s" };
     let mut label = format!("Stack #{number} · {count} PR{plural} → {trunk}");
+    // What this checkout added; a clean one that matches the push says nothing.
+    if let Some(f) = local.filter(|f| f.oid.is_some() || f.replayed) {
+        label.push_str(&format!(" · {}", f.describe()));
+    }
     if !net.conflicts.is_empty() {
         let conflicts = net
             .conflicts
@@ -92,6 +106,7 @@ fn open_entries(id: &str, first: &Value) -> Result<Vec<net::Pick>, String> {
                     oid: field("headRefOid")?,
                     head: field("headRefName")?,
                     base: field("baseRefName")?,
+                    local: false,
                 },
             ));
         }

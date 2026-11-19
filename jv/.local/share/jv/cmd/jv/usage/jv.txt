@@ -10,7 +10,7 @@ usage:
   jv --prs [search terms]                      your recent PRs beside the diff (`jp`; jp -h)
   jv --net [PR… | search terms]                tick open PRs, see their net diff (`jn`; jn -h)
   jv --stack | jf --stack                      combined net patch of the current GitHub stack
-  jv --flat [PR | …]                           the diff alone, no file tree (`jf`)
+  jv --flat [PR | …]                           the net diff alone, no file tree (`jf`; below)
 
 options:
   -s, --split        start in split view (default: split when the pane is wide)
@@ -28,6 +28,15 @@ options:
 Inside jv, press ? for keys. With no PR on the current branch, jv shows
 local changes instead.
 
+jf shows a net diff: the PR as pushed, merged onto its base branch's tip as
+of now, against that tip, so changes the base already has drop out. On the
+PR's own branch, your unpushed commits and uncommitted edits to tracked files
+go in too: on top of the push, or replayed onto it when this checkout is an
+older copy of the branch. The header says what went in and flags conflicts.
+With no PR, it's the branch's commits and edits merged onto origin's default
+branch. gh flags (-R …), closed PRs and other repos' PRs get GitHub's diff.
+
 With --stack, open PRs in the registered stack are applied to its target
-branch. The combined patch opens with tests visible. In jf, / searches the
-patch, n/N step through hits, and Ctrl+P finds files.
+branch, the checked-out PR with your local work folded in the same way. The
+combined patch opens with tests visible. In jf, / searches the patch, n/N
+step through hits, and Ctrl+P finds files.

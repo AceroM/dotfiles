@@ -219,10 +219,23 @@ fn top_bar(app: &App, buf: &mut Buffer) {
         } else {
             None
         };
-        let room = (lmax.saturating_sub(x) as usize).saturating_sub(tail.width() + badge.map_or(0, |b| b.0.len() + 2));
+        // jf: what went into the net diff (local work, conflicts).
+        let net = app.source.badge();
+        let room = (lmax.saturating_sub(x) as usize)
+            .saturating_sub(tail.width() + badge.map_or(0, |b| b.0.len() + 2) + net.map_or(0, |n| n.width() + 2));
         x = put(buf, x, r.y, lmax, &truncate(&m.title, room.max(12)), fg(p.bright).add_modifier(Modifier::BOLD));
         if let Some((b, c)) = badge {
             x = put(buf, x + 2, r.y, lmax, b, fg(c));
+        }
+        if let Some(n) = net {
+            let c = if n.contains('⚠') {
+                p.red
+            } else if n.contains("+ local") {
+                p.yellow
+            } else {
+                p.dim
+            };
+            x = put(buf, x + 2, r.y, lmax, n, fg(c));
         }
         x = put(buf, x + 2, r.y, lmax, &m.head, fg(p.muted));
         x = put(buf, x, r.y, lmax, " → ", fg(p.dim));

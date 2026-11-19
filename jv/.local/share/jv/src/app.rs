@@ -1277,7 +1277,7 @@ impl App {
         let keep = self.cur_file().map(|f| self.files[f].path.clone());
         match self.source.fetch_noted() {
             Ok((text, note)) => {
-                self.source.set_stack_label(note.as_deref());
+                self.source.set_label(note.as_deref());
                 self.pr_reloaded(&text);
                 self.files = diff::parse(&text).files;
                 self.hl_cache.clear();
