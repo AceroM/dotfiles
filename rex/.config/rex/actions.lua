@@ -169,34 +169,97 @@ local function show(ctx, target)
   end
 end
 
+-- Pulls an ID out of text: a full block:/window: ID, a bare UUID (a Claude Code
+-- session), or a short hex ID with or without the block:/window: prefix
+-- (block:a9ce9316, a9ce9316).
+local function parse_rex_id(text)
+  text = (text or ""):lower()
+  local full = text:match("(block:%x+%-[%x%-]+)") or text:match("(window:%x+%-[%x%-]+)")
+  if full then return full end
+  local uuid = text:match("(%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x+)")
+  if uuid then return uuid end
+  local short = text:match("^%s*[`'\"]?(%x+)[`'\"]?%s*$")
+    or text:match("block:(%x+)") or text:match("window:(%x+)")
+  if short and #short >= 4 and #short <= 32 then return short end
+  return nil
+end
+
+-- The Rex block running a live Claude Code session whose ID starts with id:
+-- ~/.claude/sessions/<pid>.json names the session, and the pid's environment
+-- holds the REX_BLOCK it was started in.
+local CLAUDE_BLOCK = [[
+for f in "$HOME"/.claude/sessions/*.json; do
+  grep -q "\"sessionId\":\"$1" "$f" || continue
+  pid=$(basename "$f" .json)
+  kill -0 "$pid" 2>/dev/null || continue
+  ps -E -o command= -p "$pid" | tr ' ' '\n' | sed -n 's/^REX_BLOCK=//p' | head -1
+  exit 0
+done]]
+
+local function claude_session_block(id)
+  if not id:match("^[%x%-]+$") or #id < 6 then return nil end
+  local out = rex.exec({ "/bin/sh", "-c", CLAUDE_BLOCK, "sh", id }, { timeout = 3 })
+  local block = out and out.ok and out.stdout:match("(block:[%x%-]+)")
+  return block
+end
+
+local function clipboard_text()
+  local clipboard = rex.exec({ "/usr/bin/pbpaste" }, { timeout = 2 })
+  return clipboard and clipboard.ok and clipboard.stdout or nil
+end
+
 rex.action{
   name = "jump_to_id",
-  title = "Jump to Copied Tab or Pane ID",
+  title = "Jump to Tab or Pane ID",
   category = "Pane",
-  keywords = "clipboard paste block window suffix focus switch",
+  description = "Focus a block or window by ID, or the pane running a Claude Code session. From a "
+    .. "key or the palette it asks for the ID (block:…, window:…, a short suffix, or a Claude "
+    .. "session ID like a9ce9316), prefilled from the clipboard.",
+  keywords = "clipboard paste block window suffix focus switch goto id enter type",
   args = { id = "string?", dry_run = "boolean?" },
   run = function(ctx, args)
     local id = args.id
     if not id then
-      local clipboard = rex.exec({ "/usr/bin/pbpaste" }, { timeout = 2 })
-      if not (clipboard and clipboard.ok) then error("Couldn't read the clipboard", 0) end
-      id = clipboard.stdout
+      local copied = clipboard_text()
+      if ctx.origin == "key" or ctx.origin == "palette" then
+        local answer = rex.ui.input{
+          title = "Jump to ID",
+          prompt = "Rex block/window ID or Claude session ID",
+          placeholder = "a9ce9316 or block:…",
+          value = parse_rex_id(copied) and copied:match("^%s*(.-)%s*$") or nil,
+        }
+        if type(answer) == "table" then
+          if answer.cancelled then return nil end
+          answer = answer.text
+        end
+        if answer == nil then return nil end
+        id = answer
+      else
+        if not copied then error("Couldn't read the clipboard", 0) end
+        id = copied
+      end
     end
-    id = (id or ""):match("^%s*(.-)%s*$"):lower()
-    local suffix = #id >= 4 and #id <= 32 and id:match("^%x+$")
-    if not (suffix or id:match("^block:[%x%-]+$") or id:match("^window:[%x%-]+$")) then
-      error("Copy a Rex pane ID, tab ID, or short ID first", 0)
-    end
+    id = parse_rex_id(id)
+    if not id then error("That isn't a Rex ID or Claude session ID", 0) end
+    local suffix = id:match("^%x+$")
 
     -- Leaving out context lets Rex resolve IDs across all sessions.
-    local result = check(rex.call("target.resolve", { kinds = { "window", "block" }, queries = { id } })).results[1]
-    if result.status == "ambiguous" then error("That Rex ID is ambiguous. Copy the full ID instead", 0) end
-    local target = result.target
-    if not target then error("No tab or pane matches that Rex ID", 0) end
-    local matched_id = target.block_id or target.window_id
-    if suffix and matched_id:gsub("%-", ""):sub(-#id) ~= id then
-      error("No tab or pane matches that Rex ID", 0)
+    local function resolve(query)
+      local result = check(rex.call("target.resolve", { kinds = { "window", "block" }, queries = { query } })).results[1]
+      return result.target, result.status
     end
+    local target, status = nil, nil
+    if not id:match("^%x+%-") then
+      target, status = resolve(id)
+      local matched_id = target and (target.block_id or target.window_id)
+      if suffix and matched_id and matched_id:gsub("%-", ""):sub(-#id) ~= id then target = nil end
+    end
+    if not target and status ~= "ambiguous" then
+      local block = claude_session_block(id)
+      if block then target = resolve(block) end
+    end
+    if status == "ambiguous" and not target then error("That Rex ID is ambiguous. Copy the full ID instead", 0) end
+    if not target then error("No tab, pane, or live Claude session matches " .. id, 0) end
     if not target.window_id then error("That pane is detached from its tab", 0) end
     if args.dry_run then return target end
 
