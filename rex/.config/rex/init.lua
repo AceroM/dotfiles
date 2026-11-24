@@ -17,6 +17,8 @@ rex.bind("cmd+h", "client.tab.previous")
 rex.bind("cmd+l", "client.tab.next")
 rex.bind("cmd+;", "client.tab.close")
 rex.bind("cmd+r", "agent_reply")
+-- cmd+alt+c: recent Claude sessions (actions.lua); focuses a running one, resumes others in a new tab.
+rex.bind("cmd+alt+c", "claude_recent")
 
 -- Focus history (focus.lua): the panes and tabs I've been in, for cmd+o /
 -- cmd+i and ctrl+alt+a. focus-history.lua (started at the bottom) records the

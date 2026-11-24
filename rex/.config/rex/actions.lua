@@ -483,6 +483,171 @@ rex.action{
   end,
 }
 
+-- Recent Claude Code sessions, newest first, in Rex's picker. A session that's
+-- still running in a Rex pane gets focused; any other is resumed in a new tab in
+-- the folder it ran in. One shell pass gathers four kinds of lines:
+--   live    SESSION_ID  REX_BLOCK  STATUS  PID   (running Claude processes)
+--   file    MTIME  PATH                          (the newest transcripts)
+--   meta    PATH  CWD  CUSTOM_TITLE  AI_TITLE    (one per match, from ripgrep;
+--                                                 BSD grep took 5s for 40 files)
+--   prompt  SESSION_ID  TEXT                     (recent prompts, for untitled ones)
+local CLAUDE_RECENT = [[
+n=$1
+PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
+for f in "$HOME"/.claude/sessions/*.json; do
+  [ -e "$f" ] || continue
+  pid=${f##*/}; pid=${pid%.json}
+  kill -0 "$pid" 2>/dev/null || continue
+  block=$(ps -E -o command= -p "$pid" | tr ' ' '\n' | sed -n 's/^REX_BLOCK=//p' | head -1)
+  jq -r --arg b "$block" --arg pid "$pid" '"live\t\(.sessionId)\t\($b)\t\(.status // "")\t\($pid)"' "$f" 2>/dev/null
+done
+cd "$HOME/.claude/projects" 2>/dev/null || exit 0
+files=$(ls -t ./*/*.jsonl 2>/dev/null | grep -v -E '^\./-+(private-)?tmp-|/agent-[^/]*$' | head -n "$n")
+[ -n "$files" ] || exit 0
+each() { printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 "$@"; }
+each stat -f 'file%t%m%t%N'
+tab=$(printf '\t')
+{
+  each rg --no-config -a -N -o -m1 --with-filename --field-match-separator "$tab" '"cwd":"(\\.|[^"\\])*"'
+  each rg --no-config -a -N -o --with-filename --field-match-separator "$tab" '"(customTitle|aiTitle)":"(\\.|[^"\\])*"'
+} | awk -F '\t' '{ print "{\"path\":\"" $1 "\"," $2 "}" }' |
+  jq -r 'def c: (. // "") | gsub("[\\t\\n\\r]+"; " "); "meta\t\(.path)\t\(.cwd | c)\t\(.customTitle | c)\t\(.aiTitle | c)"' 2>/dev/null
+tail -n 4000 "$HOME/.claude/history.jsonl" 2>/dev/null |
+  jq -r 'select(.sessionId) | "prompt\t\(.sessionId)\t\(.display | gsub("[\\t\\n\\r]+"; " ") | .[0:160])"' 2>/dev/null
+]]
+
+local function ago(seconds)
+  if seconds < 60 then return "now" end
+  if seconds < 3600 then return math.floor(seconds / 60) .. "m" end
+  if seconds < 86400 then return math.floor(seconds / 3600) .. "h" end
+  return math.floor(seconds / 86400) .. "d"
+end
+
+local function split_tabs(line)
+  local fields = {}
+  for field in (line .. "\t"):gmatch("([^\t]*)\t") do fields[#fields + 1] = field end
+  return fields
+end
+
+local function recent_claude_sessions(limit)
+  local out = rex.exec({ "/bin/sh", "-c", CLAUDE_RECENT, "sh", tostring(limit) }, { timeout = 10 })
+  if not (out and out.ok) then error("Couldn't list Claude sessions: " .. tostring(out and out.stderr), 0) end
+  local live, prompts, list, by_path = {}, {}, {}, {}
+  for line in out.stdout:gmatch("[^\n]+") do
+    local f = split_tabs(line)
+    if f[1] == "live" then
+      live[f[2]] = { block_id = f[3] ~= "" and f[3] or nil, status = f[4], pid = f[5] }
+    elseif f[1] == "prompt" then
+      prompts[f[2]] = f[3]
+    elseif f[1] == "file" then
+      local s = { id = f[3]:match("([^/]+)%.jsonl$"), mtime = tonumber(f[2]) or 0, title = "" }
+      list[#list + 1], by_path[f[3]] = s, s
+    elseif f[1] == "meta" and by_path[f[2]] then
+      -- The newest title of each kind wins; a /rename title beats Claude's own.
+      local s = by_path[f[2]]
+      if f[3] ~= "" then s.cwd = s.cwd or f[3] end
+      if f[4] ~= "" then s.custom = f[4] end
+      if f[5] ~= "" then s.ai = f[5] end
+    end
+  end
+  for _, s in ipairs(list) do s.title = s.custom or s.ai or "" end
+  local home = os.getenv("HOME") or ""
+  local now = os.time()
+  local items, by_id = {}, {}
+  for _, s in ipairs(list) do
+    s.prompt = prompts[s.id]
+    s.live = live[s.id]
+    local title = (s.title ~= "" and s.title) or s.prompt
+    if title then
+      local where = s.cwd and (s.cwd:sub(1, #home) == home and "~" .. s.cwd:sub(#home + 1) or s.cwd) or "?"
+      local detail = ago(now - s.mtime)
+      if s.live then
+        detail = (s.live.block_id and "open" or "outside Rex")
+          .. (s.live.status ~= "" and (" · " .. s.live.status) or "") .. " · " .. detail
+      end
+      items[#items + 1] = {
+        id = s.id,
+        title = title,
+        subtitle = where .. "  " .. s.id:sub(1, 8),
+        detail = detail,
+        icon = s.live and "terminal" or "clock",
+      }
+      by_id[s.id] = s
+    end
+  end
+  return items, by_id
+end
+
+rex.action{
+  name = "claude_recent",
+  title = "Recent Claude Sessions…",
+  category = "Agents",
+  description = "Pick one of the most recent Claude Code sessions. One that's running in a Rex pane "
+    .. "is focused; any other is resumed (claude --resume) in a new tab in its folder. "
+    .. "id= skips the picker; dry_run=true returns the list.",
+  keywords = "claude session resume recent history conversation agent open focus transcript",
+  args = { id = "string?", limit = "integer?", dry_run = "boolean?" },
+  run = function(ctx, args)
+    local items, by_id = recent_claude_sessions(args.limit or 40)
+    if args.dry_run then return { items = items } end
+    local id = args.id
+    if id then
+      for full in pairs(by_id) do
+        if full:sub(1, #id) == id then id = full end
+      end
+    else
+      local why
+      id, why = rex.ui.pick{
+        title = "Claude",
+        placeholder = "Recent sessions: filter by title, folder, or ID",
+        confirm = "Open",
+        items = items,
+      }
+      if not id then
+        if why == "cancelled" then return nil end
+        error("claude sessions: " .. tostring(why), 0)
+      end
+    end
+    local s = by_id[id]
+    if not s then error("No recent Claude session " .. id, 0) end
+
+    if s.live then
+      if not s.live.block_id then
+        error("That session is running outside Rex (pid " .. s.live.pid .. ")", 0)
+      end
+      local result = check(rex.call("target.resolve", { kinds = { "block" }, queries = { s.live.block_id } })).results[1]
+      local target = result and result.target
+      if not (target and target.window_id) then error("Couldn't find the pane running that session", 0) end
+      if target.session_id ~= ctx.session_id then
+        check(rex.call("session.attach", { session_id = target.session_id }))
+      end
+      jump(ctx, target)
+      return target
+    end
+
+    local cwd = s.cwd
+    local probe = cwd and io.open(cwd, "r")
+    if probe then probe:close() else
+      error("Its folder is gone: " .. tostring(cwd), 0)
+    end
+    local created = check(rex.session.new_window{
+      window_label = "claude",
+      layout = rex.layout.block{ flavor = SHELL, options = {
+        cwd = cwd,
+        initial_input = AGENT_COMMANDS.claude .. " --resume " .. shell_quote(s.id) .. "\n",
+      } },
+    })
+    local target = { session_id = ctx.session_id, window_id = created.window_id,
+      block_id = created.block_ids and created.block_ids[1] }
+    leave(ctx, target)
+    -- The app tracks its selected tab apart from the server's focus.
+    if ctx.origin == "key" or ctx.origin == "palette" then
+      rex.client.queue("session.select", { session_id = ctx.session_id, window_id = created.window_id })
+    end
+    return target
+  end,
+}
+
 -- The fn+shift+d popup: herdr-diff (git diff HEAD in jv) for this pane's repo, floating.
 -- Only defined where that script is installed.
 local home = os.getenv("HOME") or ""
