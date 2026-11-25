@@ -31,6 +31,7 @@ import {
 import {
   forgetStampTarget,
   stampOne,
+  stampPoster,
   stampTarget,
   stampText,
   type StampTarget,
@@ -4289,7 +4290,9 @@ if (argv.includes("--stamp")) {
     }
     urls.push(r.out.trim());
   }
-  console.log(`#${target.channelName} (${target.channel}) · @${target.botName} (${target.bot})`);
+  console.log(
+    `#${target.channelName} (${target.channel}) · @${target.botName} (${target.bot}) · posting as ${await stampPoster().catch((e) => `?? ${(e as Error).message}`)}`,
+  );
   let failed = 0;
   for (const url of urls) {
     const text = stampText(target, url, note);
