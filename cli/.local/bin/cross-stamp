@@ -1,0 +1,142 @@
+#!/bin/bash
+# cross-stamp — approve a tax-holiday PR from the *other* machine's GitHub
+# account. It's the fallback for when Purple Rhino (#bot-pr-stamper,
+# `stacks --stamp <pr> --send`) is down or doesn't approve.
+#
+#   MacBook  = AceroM                  (rex host "macbook")
+#   Mac mini = numeral-cheesecake-bot  (rex host "mini")
+#
+# The approver is whichever of the two accounts did NOT open the PR. GitHub
+# won't count an author's own approval. If that account is this machine's,
+# the approval runs here. Otherwise it runs on the other machine through a
+# temporary tab in its Rex `code` session. The review is pinned to the PR's
+# current head (commit_id), so a later push needs a new stamp.
+#
+#   cross-stamp <pr-number|url> [--note TEXT]   approve
+#   cross-stamp <pr> --dry-run                  show who/where/what, change nothing
+#   cross-stamp <pr> --check                    run the other side's identity check only
+#
+# Bash 3.2 compatible: the mini's /bin/bash comes first on its PATH.
+set -euo pipefail
+
+REPO=${CROSS_STAMP_REPO:-NumeralHQ/tax-holiday}
+SESSION=${CROSS_STAMP_SESSION:-code}
+
+usage() {
+  echo "usage: cross-stamp <pr-number|url> [--note TEXT] [--dry-run|--check]" >&2
+  exit 2
+}
+
+pr="" note="" mode=approve
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --note) [ $# -ge 2 ] || usage; note="$2"; shift 2 ;;
+    -n|--dry-run) mode=dry; shift ;;
+    --check) mode=check; shift ;;
+    -h|--help) usage ;;
+    *) [ -z "$pr" ] || usage; pr="$1"; shift ;;
+  esac
+done
+[ -n "$pr" ] || usage
+pr="${pr##*/pull/}"
+pr="${pr%%[/#?]*}"
+case "$pr" in '' | *[!0-9]*) echo "cross-stamp: not a PR number: $pr" >&2; exit 2 ;; esac
+
+host_of() {
+  case "$1" in
+    AceroM) echo macbook ;;
+    numeral-cheesecake-bot) echo mini ;;
+    *) echo "" ;;
+  esac
+}
+
+me=$(gh api user --jq .login)
+here=$(host_of "$me")
+[ -n "$here" ] || { echo "cross-stamp: this machine's gh account ($me) is neither AceroM nor numeral-cheesecake-bot" >&2; exit 1; }
+
+read -r author state draft head <<EOF
+$(gh pr view "$pr" --repo "$REPO" --json author,state,isDraft,headRefOid \
+    --jq '[.author.login, .state, (.isDraft|tostring), .headRefOid] | @tsv')
+EOF
+
+case "$author" in
+  AceroM) approver=numeral-cheesecake-bot ;;
+  numeral-cheesecake-bot) approver=AceroM ;;
+  *)
+    echo "cross-stamp: #$pr was opened by $author. Cross-stamps are only for PRs opened by AceroM or numeral-cheesecake-bot." >&2
+    exit 1
+    ;;
+esac
+there=$(host_of "$approver")
+url="https://github.com/$REPO/pull/$pr"
+
+already() {
+  gh api "repos/$REPO/pulls/$pr/reviews" --paginate \
+    --jq ".[] | select(.user.login == \"$approver\" and .state == \"APPROVED\" and .commit_id == \"$head\") | .id" |
+    head -1
+}
+
+echo "#$pr  author $author · head ${head:0:10} · $state$([ "$draft" = true ] && echo ' (draft)')"
+echo "approver $approver on $there$([ "$there" = "$here" ] && echo ' (this machine)')"
+
+if [ "$mode" != check ]; then
+  [ "$state" = OPEN ] || { echo "cross-stamp: #$pr is $state, not open" >&2; exit 1; }
+  [ "$draft" = false ] || { echo "cross-stamp: #$pr is a draft. Promote it first (gh pr ready $pr)." >&2; exit 1; }
+  if [ -n "$(already)" ]; then
+    echo "already approved by $approver on ${head:0:10}. Nothing to do."
+    exit 0
+  fi
+fi
+
+body="Cross-stamp: $approver approves head ${head:0:10} because Purple Rhino didn't stamp it. Requested from $here ($me)."
+[ -z "$note" ] || body="$body $note"
+
+if [ "$mode" = dry ]; then
+  echo "would approve with: $body"
+  exit 0
+fi
+
+if [ "$there" = "$here" ]; then
+  [ "$mode" = check ] && { echo "check ok: approver is this machine ($me)"; exit 0; }
+  gh api -X POST "repos/$REPO/pulls/$pr/reviews" -f event=APPROVE -f commit_id="$head" -f body="$body" --jq .state >/dev/null
+else
+  command -v rex >/dev/null || { echo "cross-stamp: rex is not on PATH; can't reach $there" >&2; exit 1; }
+  win=$(rex -S "$there" window new -s "$SESSION" "cross-stamp-$pr" --focus=false --json)
+  wid=$(printf '%s' "$win" | jq -r .window_id)
+  bid=$(printf '%s' "$win" | jq -r '.block_ids[0]')
+  trap 'rex -S "$there" window close -s "$SESSION" "$wid" >/dev/null 2>&1 || true' EXIT
+
+  b64=$(printf '%s' "$body" | base64 | tr -d '\n')
+  # Everything in single quotes expands on the other machine. Results come back on
+  # lines that start with @@XS. The echoed command line starts with the prompt,
+  # so it never matches ^@@XS.
+  if [ "$mode" = check ]; then
+    remote='clear; u=$(gh api user --jq .login 2>&1); echo "@@XS who $u"'
+  else
+    remote='clear; u=$(gh api user --jq .login 2>&1); if [ "$u" != "'"$approver"'" ]; then echo "@@XS wrong-account $u"; else r=$(gh api -X POST repos/'"$REPO"'/pulls/'"$pr"'/reviews -f event=APPROVE -f commit_id='"$head"' -f body="$(echo '"$b64"' | base64 -d)" --jq .state 2>&1 | tr "\n" " "); echo "@@XS approve $r"; fi'
+  fi
+  rex -S "$there" send -s "$SESSION" -b "$bid" "$remote"$'\n' >/dev/null
+
+  out=""
+  for _ in $(seq 1 30); do
+    sleep 2
+    out=$(rex -S "$there" capture -s "$SESSION" -b "$bid" --trim --unwrap 2>/dev/null | grep '^@@XS ' | tail -1 || true)
+    [ -n "$out" ] && break
+  done
+  [ -n "$out" ] || { echo "cross-stamp: no answer from $there within 60s" >&2; exit 1; }
+  case "$out" in
+    "@@XS who $approver") echo "check ok: $there answers as $approver"; exit 0 ;;
+    "@@XS who "*) echo "cross-stamp: $there answers as ${out#@@XS who }, expected $approver" >&2; exit 1 ;;
+    "@@XS wrong-account "*) echo "cross-stamp: $there's gh is ${out#@@XS wrong-account }, expected $approver" >&2; exit 1 ;;
+    "@@XS approve APPROVED"*) ;;
+    *) echo "cross-stamp: $there said: ${out#@@XS }" >&2; exit 1 ;;
+  esac
+fi
+
+# Trust GitHub, not the command's exit: is there an approval on this head now?
+if [ -n "$(already)" ]; then
+  echo "approved: $approver on ${head:0:10} · $url"
+else
+  echo "cross-stamp: no APPROVED review from $approver on ${head:0:10} after the call" >&2
+  exit 1
+fi
